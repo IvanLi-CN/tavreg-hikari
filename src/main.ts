@@ -1,18 +1,44 @@
 import { config as loadDotenv } from "dotenv";
 import { Camoufox } from "camoufox-js";
 import { Resvg } from "@resvg/resvg-js";
+import { Impit } from "impit";
+import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
 import { randomBytes, randomInt } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
+import { fileURLToPath } from "node:url";
+import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
+import { checkNode, resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
+import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js";
 
 type JsonRecord = Record<string, unknown>;
+type RunMode = "headed" | "headless" | "both";
+type BrowserEngine = "camoufox" | "chrome";
+
+interface CliArgs {
+  proxyNode?: string;
+  mode?: RunMode;
+  browserEngine?: BrowserEngine;
+  skipPrecheck: boolean;
+  inspectSites: boolean;
+}
 
 interface AppConfig {
   openaiBaseUrl: string;
   openaiKey: string;
   preferredModel: string;
-  headless: boolean;
+  runMode: RunMode;
+  browserEngine: BrowserEngine;
+  inspectBrowserEngine: BrowserEngine;
+  chromeExecutablePath?: string;
+  chromeNativeAutomation: boolean;
+  chromeStealthJsEnabled: boolean;
+  chromeProfileDir: string;
+  chromeRemoteDebuggingPort: number;
   slowMoMs: number;
   maxCaptchaRounds: number;
   ocrRetryWindowMs: number;
@@ -30,7 +56,33 @@ interface AppConfig {
   keyLimit: number;
   existingEmail?: string;
   existingPassword?: string;
-  spoofIpHeader?: string;
+  mihomoSubscriptionUrl: string;
+  mihomoApiPort: number;
+  mihomoMixedPort: number;
+  proxyCheckUrl: string;
+  proxyCheckTimeoutMs: number;
+  proxyLatencyMaxMs: number;
+  ipinfoToken?: string;
+  browserPrecheckEnabled: boolean;
+  browserPrecheckStrict: boolean;
+  requireWebrtcVisible: boolean;
+  verifyHostAllowlist: string[];
+  modeRetryMax: number;
+  browserLaunchRetryMax: number;
+  nodeReuseCooldownMs: number;
+  nodeRecentWindow: number;
+  nodeCheckCacheTtlMs: number;
+  nodeScanMaxChecks: number;
+  nodeScanMaxMs: number;
+  nodeDeferLogMax: number;
+  allowSameEgressIpFallback: boolean;
+  cfProbeEnabled: boolean;
+  cfProbeUrl: string;
+  cfProbeTimeoutMs: number;
+  cfProbeCacheTtlMs: number;
+  inspectKeepOpenMs: number;
+  inspectChromeNative: boolean;
+  inspectChromeProfileDir: string;
 }
 
 interface DuckmailSession {
@@ -41,17 +93,46 @@ interface DuckmailSession {
 }
 
 interface ResultPayload {
+  mode: "headed" | "headless";
   email: string;
   password: string;
   verificationLink: string | null;
   apiKey: string | null;
   model: string;
+  precheckPassed: boolean;
+  verifyPassed: boolean;
+  failureStage?: string;
   notes: string[];
+}
+
+interface ProxyNodeUsageEntry {
+  count: number;
+  successCount?: number;
+  failCount?: number;
+  consecutiveFailCount?: number;
+  lastIp?: string;
+  lastGeo?: GeoInfo;
+  lastUsedAt?: string;
+  lastCheckedAt?: string;
+  lastOutcome?: "ok" | "fallback" | "fail";
+  lastLatencyMs?: number | null;
+  lastCfProbeAt?: string;
+  lastCfProbePassed?: boolean;
+  lastCfProbeUrl?: string;
+}
+
+interface ProxyNodeUsageState {
+  version: 1;
+  recentSelected: string[];
+  recentSelectedIps: string[];
+  nodes: Record<string, ProxyNodeUsageEntry>;
 }
 
 loadDotenv({ path: ".env.local", quiet: true });
 
 const OUTPUT_DIR = new URL("../output/", import.meta.url);
+const OUTPUT_PATH = fileURLToPath(OUTPUT_DIR);
+const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
 
 function ts(): string {
   return new Date().toISOString();
@@ -59,6 +140,10 @@ function ts(): string {
 
 function log(message: string): void {
   console.log(`[${ts()}] ${message}`);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mustEnv(name: string): string {
@@ -80,6 +165,751 @@ function toInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function parseRunMode(raw: string | undefined): RunMode | null {
+  if (!raw) return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "headed" || value === "headless" || value === "both") {
+    return value;
+  }
+  return null;
+}
+
+function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
+  if (!raw) return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "camoufox" || value === "chrome") return value;
+  return null;
+}
+
+function parseArgs(argv: string[]): CliArgs {
+  let proxyNode: string | undefined;
+  let mode: RunMode | undefined;
+  let browserEngine: BrowserEngine | undefined;
+  let skipPrecheck = false;
+  let inspectSites = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (arg === "--proxy-node" && argv[i + 1]) {
+      proxyNode = argv[i + 1];
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--proxy-node=")) {
+      proxyNode = arg.slice("--proxy-node=".length);
+      continue;
+    }
+    if (arg === "--mode" && argv[i + 1]) {
+      const parsed = parseRunMode(argv[i + 1]);
+      if (!parsed) {
+        throw new Error(`invalid --mode value: ${argv[i + 1]}`);
+      }
+      mode = parsed;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--mode=")) {
+      const parsed = parseRunMode(arg.slice("--mode=".length));
+      if (!parsed) {
+        throw new Error(`invalid --mode value: ${arg.slice("--mode=".length)}`);
+      }
+      mode = parsed;
+      continue;
+    }
+    if (arg === "--skip-precheck") {
+      skipPrecheck = true;
+      continue;
+    }
+    if (arg === "--browser-engine" && argv[i + 1]) {
+      const parsed = parseBrowserEngine(argv[i + 1]);
+      if (!parsed) {
+        throw new Error(`invalid --browser-engine value: ${argv[i + 1]}`);
+      }
+      browserEngine = parsed;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--browser-engine=")) {
+      const parsed = parseBrowserEngine(arg.slice("--browser-engine=".length));
+      if (!parsed) {
+        throw new Error(`invalid --browser-engine value: ${arg.slice("--browser-engine=".length)}`);
+      }
+      browserEngine = parsed;
+      continue;
+    }
+    if (arg === "--inspect-sites") {
+      inspectSites = true;
+      continue;
+    }
+  }
+  return { proxyNode: proxyNode?.trim() || undefined, mode, browserEngine, skipPrecheck, inspectSites };
+}
+
+function defaultProxyNodeUsageState(): ProxyNodeUsageState {
+  return {
+    version: 1,
+    recentSelected: [],
+    recentSelectedIps: [],
+    nodes: {},
+  };
+}
+
+function normalizeProxyNodeUsageEntry(entry: unknown): ProxyNodeUsageEntry {
+  const record = entry && typeof entry === "object" ? (entry as JsonRecord) : {};
+  const intOrZero = (value: unknown): number => {
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  };
+  const dateOrUndefined = (value: unknown): string | undefined => {
+    if (typeof value !== "string" || !value.trim()) return undefined;
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined;
+  };
+  const outcome =
+    record.lastOutcome === "ok" || record.lastOutcome === "fallback" || record.lastOutcome === "fail"
+      ? record.lastOutcome
+      : undefined;
+  const lastIp = normalizeIp(typeof record.lastIp === "string" ? record.lastIp : "");
+  const geoRaw = record.lastGeo && typeof record.lastGeo === "object" ? (record.lastGeo as JsonRecord) : null;
+  const lat =
+    geoRaw && typeof geoRaw.latitude === "number" && Number.isFinite(geoRaw.latitude) ? geoRaw.latitude : undefined;
+  const lon =
+    geoRaw && typeof geoRaw.longitude === "number" && Number.isFinite(geoRaw.longitude) ? geoRaw.longitude : undefined;
+  const geoIp = normalizeIp(geoRaw && typeof geoRaw.ip === "string" ? geoRaw.ip : "") || lastIp;
+  const lastGeo: GeoInfo | undefined = geoIp
+    ? {
+        ip: geoIp,
+        country: geoRaw && typeof geoRaw.country === "string" ? geoRaw.country : undefined,
+        region: geoRaw && typeof geoRaw.region === "string" ? geoRaw.region : undefined,
+        city: geoRaw && typeof geoRaw.city === "string" ? geoRaw.city : undefined,
+        org: geoRaw && typeof geoRaw.org === "string" ? geoRaw.org : undefined,
+        timezone: geoRaw && typeof geoRaw.timezone === "string" ? geoRaw.timezone : undefined,
+        latitude: lat,
+        longitude: lon,
+      }
+    : undefined;
+  const latency =
+    typeof record.lastLatencyMs === "number" && Number.isFinite(record.lastLatencyMs) && record.lastLatencyMs >= 0
+      ? record.lastLatencyMs
+      : null;
+  const lastCfProbePassed = typeof record.lastCfProbePassed === "boolean" ? record.lastCfProbePassed : undefined;
+  const lastCfProbeUrl = typeof record.lastCfProbeUrl === "string" && record.lastCfProbeUrl.trim() ? record.lastCfProbeUrl : undefined;
+
+  return {
+    count: intOrZero(record.count),
+    successCount: intOrZero(record.successCount),
+    failCount: intOrZero(record.failCount),
+    consecutiveFailCount: intOrZero(record.consecutiveFailCount),
+    lastIp,
+    lastGeo,
+    lastUsedAt: dateOrUndefined(record.lastUsedAt),
+    lastCheckedAt: dateOrUndefined(record.lastCheckedAt),
+    lastOutcome: outcome,
+    lastLatencyMs: latency,
+    lastCfProbeAt: dateOrUndefined(record.lastCfProbeAt),
+    lastCfProbePassed,
+    lastCfProbeUrl,
+  };
+}
+
+async function readProxyNodeUsageState(): Promise<ProxyNodeUsageState> {
+  try {
+    const raw = await readFile(PROXY_NODE_USAGE_PATH, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return defaultProxyNodeUsageState();
+    }
+    const parsedRecord = parsed as JsonRecord;
+    if (parsedRecord.version !== 1) {
+      return defaultProxyNodeUsageState();
+    }
+    const normalizedNodes: Record<string, ProxyNodeUsageEntry> = {};
+    if (parsedRecord.nodes && typeof parsedRecord.nodes === "object") {
+      for (const [name, entry] of Object.entries(parsedRecord.nodes as JsonRecord)) {
+        if (typeof name === "string" && name.trim()) {
+          normalizedNodes[name] = normalizeProxyNodeUsageEntry(entry);
+        }
+      }
+    }
+    return {
+      version: 1,
+      recentSelected: Array.isArray(parsedRecord.recentSelected)
+        ? (parsedRecord.recentSelected as unknown[]).filter((item): item is string => typeof item === "string")
+        : [],
+      recentSelectedIps: Array.isArray(parsedRecord.recentSelectedIps)
+        ? (parsedRecord.recentSelectedIps as unknown[]).filter(
+            (item): item is string => typeof item === "string" && item.trim().length > 0,
+          )
+        : [],
+      nodes: normalizedNodes,
+    };
+  } catch {
+    return defaultProxyNodeUsageState();
+  }
+}
+
+async function writeProxyNodeUsageState(state: ProxyNodeUsageState): Promise<void> {
+  await writeJson(PROXY_NODE_USAGE_PATH, state);
+}
+
+function pushRecentUnique(values: string[], value: string | undefined, limit: number): string[] {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return values.slice(0, limit);
+  return [normalized, ...values.filter((item) => item !== normalized)].slice(0, limit);
+}
+
+function isUsageEntryFresh(entry: ProxyNodeUsageEntry | undefined, nowMs: number, ttlMs: number): boolean {
+  if (!entry?.lastCheckedAt) return false;
+  const checkedAtMs = Date.parse(entry.lastCheckedAt);
+  if (!Number.isFinite(checkedAtMs)) return false;
+  return nowMs - checkedAtMs <= ttlMs;
+}
+
+function isCfProbeFresh(
+  entry: ProxyNodeUsageEntry | undefined,
+  nowMs: number,
+  ttlMs: number,
+  targetUrl: string,
+): boolean {
+  if (!entry?.lastCfProbeAt || !entry.lastCfProbeUrl || !entry.lastCfProbePassed && entry.lastCfProbePassed !== false) {
+    return false;
+  }
+  if (entry.lastCfProbeUrl !== targetUrl) return false;
+  const checkedAtMs = Date.parse(entry.lastCfProbeAt);
+  if (!Number.isFinite(checkedAtMs)) return false;
+  return nowMs - checkedAtMs <= ttlMs;
+}
+
+function compactGeo(geo: GeoInfo | undefined): GeoInfo | undefined {
+  if (!geo?.ip) return undefined;
+  return {
+    ip: normalizeIp(geo.ip) || geo.ip,
+    country: geo.country,
+    region: geo.region,
+    city: geo.city,
+    org: geo.org,
+    timezone: geo.timezone,
+    latitude: typeof geo.latitude === "number" && Number.isFinite(geo.latitude) ? geo.latitude : undefined,
+    longitude: typeof geo.longitude === "number" && Number.isFinite(geo.longitude) ? geo.longitude : undefined,
+  };
+}
+
+function detectCfChallenge(title: string, body: string, url: string): string | null {
+  const haystack = `${title}\n${body}`.toLowerCase();
+  if (haystack.includes("__cf_chl_rt_tk")) return "cf_token";
+  if (/captcha\s*\|\s*sukka/i.test(title) || /captcha\s*\|\s*sukka/i.test(body)) return "sukka_captcha";
+  if (haystack.includes("just a moment")) return "just_a_moment";
+  if (haystack.includes("attention required")) return "attention_required";
+  if (haystack.includes("cloudflare")) {
+    if (haystack.includes("challenge") || haystack.includes("verify")) return "cloudflare_challenge";
+  }
+  if (/\?__cf_chl_rt_tk=/i.test(url)) return "cf_query_token";
+  return null;
+}
+
+async function probeCfViaProxy(
+  proxyUrl: string,
+  targetUrl: string,
+  timeoutMs: number,
+): Promise<{ passed: boolean; reason?: string }> {
+  try {
+    const impit = new Impit({ proxyUrl, timeout: timeoutMs });
+    const resp = await impit.fetch(targetUrl, {
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+    const body = await resp.text();
+    const title = body.match(/<title[^>]*>(.*?)<\/title>/is)?.[1]?.trim() || "";
+    if (!resp.ok) {
+      return { passed: false, reason: `status_${resp.status}` };
+    }
+    const challengeReason = detectCfChallenge(title, body, targetUrl);
+    if (challengeReason) {
+      return { passed: false, reason: `cf_${challengeReason}` };
+    }
+    return { passed: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { passed: false, reason: `probe_error:${message.slice(0, 120)}` };
+  }
+}
+
+async function resolveProxyEgressIp(proxyUrl: string, timeoutMs: number, ipinfoToken?: string): Promise<string | undefined> {
+  try {
+    const url = new URL("https://ipinfo.io/json");
+    if (ipinfoToken && ipinfoToken.trim()) {
+      url.searchParams.set("token", ipinfoToken.trim());
+    }
+    const impit = new Impit({ proxyUrl, timeout: timeoutMs });
+    const resp = await impit.fetch(url.toString());
+    if (!resp.ok) return undefined;
+    const payload = (await resp.json()) as JsonRecord;
+    return normalizeIp(typeof payload.ip === "string" ? payload.ip : undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForProxyEgressIp(
+  proxyUrl: string,
+  expectedIp: string | undefined,
+  timeoutMs: number,
+  ipinfoToken?: string,
+): Promise<void> {
+  const targetIp = normalizeIp(expectedIp);
+  if (!targetIp) return;
+  const deadline = Date.now() + Math.max(timeoutMs * 2, 8_000);
+  let lastObserved: string | undefined;
+  while (Date.now() < deadline) {
+    lastObserved = await resolveProxyEgressIp(proxyUrl, timeoutMs, ipinfoToken);
+    if (lastObserved && sameIp(lastObserved, targetIp)) {
+      return;
+    }
+    await delay(300);
+  }
+  throw new Error(`proxy_egress_not_switched: expected=${targetIp} observed=${lastObserved || "unknown"}`);
+}
+
+function nodeSelectionScore(
+  name: string,
+  usage: ProxyNodeUsageState,
+  nowMs: number,
+  cfg: AppConfig,
+): number {
+  const entry = usage.nodes[name];
+  if (!entry) {
+    return 180 + Math.random() * 16;
+  }
+
+  const countPenalty = 0;
+  const recentPenalty = 0;
+  const hottestPenalty = 0;
+  const recentIpPenalty = entry.lastIp && usage.recentSelectedIps.includes(entry.lastIp) ? 1200 : 0;
+  const hottestIpPenalty = entry.lastIp && usage.recentSelectedIps[0] === entry.lastIp ? 480 : 0;
+  const lastUsedMs = entry.lastUsedAt ? Date.parse(entry.lastUsedAt) : NaN;
+  const cooldownRemaining = Number.isFinite(lastUsedMs) ? cfg.nodeReuseCooldownMs - (nowMs - lastUsedMs) : 0;
+  const cooldownPenalty =
+    cooldownRemaining > 0 ? Math.round((cooldownRemaining / Math.max(1, cfg.nodeReuseCooldownMs)) * 700) : 0;
+  const successCount = entry.successCount || 0;
+  const failCount = entry.failCount || 0;
+  const checkedCount = successCount + failCount;
+  const successRate = checkedCount > 0 ? successCount / checkedCount : null;
+  const reliabilityPenalty = successRate == null ? 0 : Math.round((1 - successRate) * 260);
+  const failPenalty = (entry.lastOutcome === "fail" ? 120 : 0) + (entry.consecutiveFailCount || 0) * 220 + failCount * 18;
+  const latencyPenalty = typeof entry.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 70 : 0;
+  const org = (entry.lastGeo?.org || "").toLowerCase();
+  const hostingPenalty =
+    /colocrossing|colo crossing|hostpapa|zmto|digitalocean|linode|vultr|ovh|hetzner|contabo|amazon|aws|google cloud|azure|oracle cloud|hosting|datacenter|data center|vps|server/i.test(
+      org,
+    )
+      ? 2400
+      : 0;
+  const outcomeBonus = entry.lastOutcome === "ok" ? -140 : entry.lastOutcome === "fallback" ? -40 : 0;
+  return (
+    countPenalty +
+    recentPenalty +
+    hottestPenalty +
+    recentIpPenalty +
+    hottestIpPenalty +
+    cooldownPenalty +
+    reliabilityPenalty +
+    failPenalty +
+    latencyPenalty +
+    hostingPenalty +
+    outcomeBonus +
+    Math.random() * 0.01
+  );
+}
+
+function buildMihomoConfig(cfg: AppConfig): MihomoConfig {
+  return {
+    subscriptionUrl: cfg.mihomoSubscriptionUrl,
+    apiPort: cfg.mihomoApiPort,
+    mixedPort: cfg.mihomoMixedPort,
+    groupName: "CODEX_AUTO",
+    routeGroupName: "CODEX_ROUTE",
+    checkUrl: cfg.proxyCheckUrl,
+    workDir: path.join(OUTPUT_PATH, "mihomo"),
+    downloadDir: path.resolve("downloads", "mihomo"),
+  };
+}
+
+async function selectProxyNode(
+  controller: Awaited<ReturnType<typeof startMihomo>>,
+  cfg: AppConfig,
+  overrideName?: string,
+): Promise<NodeCheckResult> {
+  const options = {
+    checkUrl: cfg.proxyCheckUrl,
+    timeoutMs: cfg.proxyCheckTimeoutMs,
+    maxLatencyMs: cfg.proxyLatencyMaxMs,
+    ipinfoToken: cfg.ipinfoToken,
+  };
+  const usage = await readProxyNodeUsageState();
+  const nowMs = Date.now();
+  const nowIso = new Date().toISOString();
+  const localEgressIp = normalizeIp(await resolveLocalEgressIp(options.timeoutMs));
+  if (localEgressIp) {
+    log(`proxy local direct egress IP: ${localEgressIp}`);
+  }
+  const emptyUsageEntry: ProxyNodeUsageEntry = { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
+  const ensureGroupSelected = async (name: string, expectedIp?: string): Promise<void> => {
+    await controller.setGroupProxy(name);
+    const selected = await controller.getGroupSelection().catch(() => null);
+    if (selected && selected !== name) {
+      throw new Error(`proxy_group_mismatch:${name}->${selected}`);
+    }
+    await waitForProxyEgressIp(controller.proxyServer, expectedIp, options.timeoutMs, options.ipinfoToken);
+  };
+  const runCfProbeForNode = async (name: string): Promise<{ passed: boolean; reason?: string; cached: boolean }> => {
+    if (!cfg.cfProbeEnabled) {
+      return { passed: true, cached: false };
+    }
+    const entry = usage.nodes[name];
+    if (isCfProbeFresh(entry, nowMs, cfg.cfProbeCacheTtlMs, cfg.cfProbeUrl)) {
+      const passed = entry?.lastCfProbePassed !== false;
+      return { passed, reason: passed ? undefined : "cached_cf_probe_failed", cached: true };
+    }
+    await ensureGroupSelected(name);
+    const probe = await probeCfViaProxy(controller.proxyServer, cfg.cfProbeUrl, cfg.cfProbeTimeoutMs);
+    const previous = usage.nodes[name] || emptyUsageEntry;
+    usage.nodes[name] = {
+      ...previous,
+      lastCfProbeAt: nowIso,
+      lastCfProbePassed: probe.passed,
+      lastCfProbeUrl: cfg.cfProbeUrl,
+      lastOutcome: probe.passed ? previous.lastOutcome : "fail",
+      failCount: probe.passed ? previous.failCount : (previous.failCount || 0) + 1,
+      consecutiveFailCount: probe.passed ? previous.consecutiveFailCount : (previous.consecutiveFailCount || 0) + 1,
+    };
+    return { passed: probe.passed, reason: probe.reason, cached: false };
+  };
+
+  if (overrideName) {
+    const result = await checkNode(controller, overrideName, options);
+    const previous = usage.nodes[overrideName] || emptyUsageEntry;
+    if (result.error) {
+      usage.nodes[overrideName] = {
+        ...previous,
+        lastCheckedAt: nowIso,
+        lastOutcome: "fail",
+        lastLatencyMs: result.latencyMs ?? null,
+        lastGeo: compactGeo(result.geo),
+        failCount: (previous.failCount || 0) + 1,
+        consecutiveFailCount: (previous.consecutiveFailCount || 0) + 1,
+      };
+      await writeProxyNodeUsageState(usage);
+      throw new Error(`proxy_node_unavailable:${overrideName}:${result.error}`);
+    }
+    const cfProbe = await runCfProbeForNode(overrideName);
+    if (!cfProbe.passed) {
+      await writeProxyNodeUsageState(usage);
+      throw new Error(`proxy_cf_probe_failed:${overrideName}:${cfProbe.reason || "unknown"}`);
+    }
+    await ensureGroupSelected(overrideName, normalizeIp(result.geo?.ip));
+    usage.nodes[overrideName] = {
+      ...previous,
+      count: (previous.count || 0) + 1,
+      lastUsedAt: nowIso,
+      lastCheckedAt: nowIso,
+      lastOutcome: result.ok ? "ok" : "fallback",
+      lastLatencyMs: result.latencyMs ?? null,
+      successCount: (previous.successCount || 0) + 1,
+      consecutiveFailCount: 0,
+      lastIp: normalizeIp(result.geo?.ip),
+      lastGeo: compactGeo(result.geo),
+    };
+    usage.recentSelected = pushRecentUnique(usage.recentSelected, overrideName, cfg.nodeRecentWindow);
+    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, normalizeIp(result.geo?.ip), cfg.nodeRecentWindow);
+    await writeProxyNodeUsageState(usage);
+    log(
+      `proxy override selected: ${overrideName} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${
+        normalizeIp(result.geo?.ip) || "?"
+      }`,
+    );
+    return result;
+  }
+
+  const nodes = await controller.listGroupNodes();
+  const names = nodes.map((node) => node.name).filter((name) => name.trim().length > 0);
+  let deferredLogTotal = 0;
+  let deferredLogSuppressed = 0;
+  const logDeferred = (
+    prefix: "proxy cached candidate deferred" | "proxy candidate deferred",
+    name: string,
+    latencyMs: number | null | undefined,
+    ip: string | undefined,
+  ): void => {
+    deferredLogTotal += 1;
+    if (deferredLogTotal <= cfg.nodeDeferLogMax) {
+      log(`${prefix} (duplicate egress IP): ${name} latency=${latencyMs ?? "n/a"}ms egress_ip=${ip || "?"}`);
+      return;
+    }
+    deferredLogSuppressed += 1;
+  };
+  const flushDeferredLogSummary = (): void => {
+    if (deferredLogSuppressed > 0) {
+      log(`proxy deferred logs suppressed: ${deferredLogSuppressed} more candidates (NODE_DEFER_LOG_MAX=${cfg.nodeDeferLogMax})`);
+      deferredLogSuppressed = 0;
+    }
+  };
+  const scoreByNode = new Map<string, number>();
+  for (const name of names) {
+    scoreByNode.set(name, nodeSelectionScore(name, usage, nowMs, cfg));
+  }
+  const prioritized = [...names].sort((a, b) => {
+    const diff = (scoreByNode.get(a) || 0) - (scoreByNode.get(b) || 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
+  const orderPreview = prioritized
+    .slice(0, 8)
+    .map((name) => `${name}(${(scoreByNode.get(name) || 0).toFixed(1)})`)
+    .join(", ");
+  log(`proxy node order: ${orderPreview}${prioritized.length > 8 ? " ..." : ""}`);
+  log(`proxy recent egress IPs: ${usage.recentSelectedIps.length > 0 ? usage.recentSelectedIps.join(", ") : "(none)"}`);
+
+  const cachedFreshCandidates = prioritized
+    .map((name) => ({ name, entry: usage.nodes[name] }))
+    .filter((item) => isUsageEntryFresh(item.entry, nowMs, cfg.nodeCheckCacheTtlMs));
+  const cachedFreshNameSet = new Set(cachedFreshCandidates.map((item) => item.name));
+  log(
+    `proxy cache status: fresh=${cachedFreshCandidates.length}/${prioritized.length} ttl=${cfg.nodeCheckCacheTtlMs}ms`,
+  );
+
+  const cachedDeferredSameIp: NodeCheckResult[] = [];
+  for (const cached of cachedFreshCandidates) {
+    const entry = cached.entry;
+    if (!entry) continue;
+    if (entry.lastOutcome === "fail") continue;
+    const cachedGeo = compactGeo(entry.lastGeo);
+    const cachedIp = normalizeIp(cachedGeo?.ip || entry.lastIp);
+    if (!cachedGeo?.ip && !cachedIp) continue;
+    const cachedResult: NodeCheckResult = {
+      name: cached.name,
+      latencyMs: entry.lastLatencyMs ?? null,
+      geo: cachedGeo || (cachedIp ? ({ ip: cachedIp } as GeoInfo) : undefined),
+      ok: true,
+    };
+    const sameAsLocalIp = !!(localEgressIp && cachedIp && sameIp(cachedIp, localEgressIp));
+    if (sameAsLocalIp) {
+      usage.nodes[cached.name] = {
+        ...entry,
+        lastCheckedAt: nowIso,
+        lastOutcome: "fail",
+        lastLatencyMs: entry.lastLatencyMs ?? null,
+        lastIp: cachedIp,
+        lastGeo: compactGeo(cachedResult.geo),
+        failCount: (entry.failCount || 0) + 1,
+        consecutiveFailCount: (entry.consecutiveFailCount || 0) + 1,
+      };
+      log(
+        `proxy cached candidate rejected (same as local egress): ${cached.name} latency=${
+          cachedResult.latencyMs ?? "n/a"
+        }ms egress_ip=${cachedIp || "?"}`,
+      );
+      continue;
+    }
+    const hitsRecentIp = cachedIp ? usage.recentSelectedIps.includes(cachedIp) : false;
+    if (hitsRecentIp) {
+      logDeferred("proxy cached candidate deferred", cached.name, cachedResult.latencyMs, cachedIp);
+      cachedDeferredSameIp.push(cachedResult);
+      continue;
+    }
+    const cfProbe = await runCfProbeForNode(cached.name);
+    if (!cfProbe.passed) {
+      log(`proxy cached candidate rejected (cf probe failed): ${cached.name} reason=${cfProbe.reason || "unknown"}`);
+      continue;
+    }
+    await ensureGroupSelected(cached.name, cachedIp);
+    usage.nodes[cached.name] = {
+      ...entry,
+      count: (entry.count || 0) + 1,
+      lastUsedAt: nowIso,
+      lastCheckedAt: entry.lastCheckedAt,
+      lastOutcome: "ok",
+      lastLatencyMs: entry.lastLatencyMs ?? null,
+      lastIp: cachedIp,
+      lastGeo: compactGeo(cachedResult.geo),
+      consecutiveFailCount: 0,
+    };
+    usage.recentSelected = pushRecentUnique(usage.recentSelected, cached.name, cfg.nodeRecentWindow);
+    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, cachedIp, cfg.nodeRecentWindow);
+    await writeProxyNodeUsageState(usage);
+    flushDeferredLogSummary();
+    log(
+      `proxy selected from cache: ${cached.name} latency=${cachedResult.latencyMs ?? "n/a"}ms egress_ip=${cachedIp || "?"}`,
+    );
+    return cachedResult;
+  }
+
+  const checked: NodeCheckResult[] = [];
+  const sameIpDeferred: NodeCheckResult[] = [];
+  const scanStartedMs = Date.now();
+  for (const name of prioritized) {
+    if (cachedFreshNameSet.has(name)) {
+      continue;
+    }
+    if (checked.length >= cfg.nodeScanMaxChecks) {
+      log(`proxy scan capped by node count: checked=${checked.length} max=${cfg.nodeScanMaxChecks}`);
+      break;
+    }
+    if (Date.now() - scanStartedMs >= cfg.nodeScanMaxMs) {
+      log(`proxy scan capped by elapsed time: elapsed=${Date.now() - scanStartedMs}ms max=${cfg.nodeScanMaxMs}ms`);
+      break;
+    }
+    const result = await checkNode(controller, name, options);
+    checked.push(result);
+    const nodeIp = normalizeIp(result.geo?.ip);
+    const previous = usage.nodes[name] || { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
+    usage.nodes[name] = {
+      ...previous,
+      lastCheckedAt: nowIso,
+      lastOutcome: result.ok ? "ok" : "fail",
+      lastLatencyMs: result.latencyMs ?? null,
+      lastIp: nodeIp,
+      lastGeo: compactGeo(result.geo),
+      successCount: result.ok ? (previous.successCount || 0) + 1 : previous.successCount,
+      failCount: result.ok ? previous.failCount : (previous.failCount || 0) + 1,
+      consecutiveFailCount: result.ok ? 0 : (previous.consecutiveFailCount || 0) + 1,
+    };
+    if (!result.ok) {
+      log(
+        `proxy candidate failed: ${name} latency=${result.latencyMs ?? "n/a"}ms error=${result.error || "threshold_miss"} egress_ip=${
+          nodeIp || "?"
+        }`,
+      );
+    }
+    if (result.ok) {
+      const hitsRecentIp = nodeIp ? usage.recentSelectedIps.includes(nodeIp) : false;
+      const hasUncheckedCandidate = checked.length < prioritized.length;
+      if (hitsRecentIp && hasUncheckedCandidate) {
+        logDeferred("proxy candidate deferred", name, result.latencyMs, nodeIp);
+        sameIpDeferred.push(result);
+        continue;
+      }
+      const cfProbe = await runCfProbeForNode(name);
+      if (!cfProbe.passed) {
+        log(`proxy candidate rejected (cf probe failed): ${name} reason=${cfProbe.reason || "unknown"}`);
+        continue;
+      }
+      await ensureGroupSelected(name, nodeIp);
+      usage.nodes[name] = {
+        ...usage.nodes[name],
+        count: (previous.count || 0) + 1,
+        lastUsedAt: nowIso,
+        lastCheckedAt: nowIso,
+        lastOutcome: "ok",
+        lastIp: nodeIp,
+        lastGeo: compactGeo(result.geo),
+        consecutiveFailCount: 0,
+      };
+      usage.recentSelected = pushRecentUnique(usage.recentSelected, name, cfg.nodeRecentWindow);
+      usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, nodeIp, cfg.nodeRecentWindow);
+      await writeProxyNodeUsageState(usage);
+      flushDeferredLogSummary();
+      log(`proxy selected: ${name} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${nodeIp || "?"}`);
+      return result;
+    }
+  }
+
+  const combinedDeferred = [...cachedDeferredSameIp, ...sameIpDeferred];
+  if (combinedDeferred.length > 0) {
+    if (!cfg.allowSameEgressIpFallback) {
+      const deferredIps = Array.from(
+        new Set(
+          combinedDeferred
+            .map((item) => normalizeIp(item.geo?.ip))
+            .filter((item): item is string => typeof item === "string" && item.length > 0),
+        ),
+      );
+      flushDeferredLogSummary();
+      throw new Error(
+        `proxy_no_distinct_egress_ip: all available candidates share repeated egress IPs (${deferredIps.join(",") || "unknown"})`,
+      );
+    }
+    const sortedDeferred = [...combinedDeferred].sort(
+      (a, b) => (a.latencyMs || Number.MAX_SAFE_INTEGER) - (b.latencyMs || Number.MAX_SAFE_INTEGER),
+    );
+    for (const deferred of sortedDeferred) {
+      const cfProbe = await runCfProbeForNode(deferred.name);
+      if (!cfProbe.passed) {
+        log(`proxy deferred candidate rejected (cf probe failed): ${deferred.name} reason=${cfProbe.reason || "unknown"}`);
+        continue;
+      }
+      const previous = usage.nodes[deferred.name] || emptyUsageEntry;
+      const deferredIp = normalizeIp(deferred.geo?.ip);
+      await ensureGroupSelected(deferred.name, deferredIp);
+      usage.nodes[deferred.name] = {
+        ...previous,
+        count: (previous.count || 0) + 1,
+        successCount: previous.successCount || 0,
+        failCount: previous.failCount || 0,
+        lastUsedAt: nowIso,
+        lastCheckedAt: nowIso,
+        lastOutcome: "ok",
+        lastLatencyMs: deferred.latencyMs ?? null,
+        lastIp: deferredIp,
+        lastGeo: compactGeo(deferred.geo),
+        consecutiveFailCount: 0,
+      };
+      usage.recentSelected = pushRecentUnique(usage.recentSelected, deferred.name, cfg.nodeRecentWindow);
+      usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, deferredIp, cfg.nodeRecentWindow);
+      await writeProxyNodeUsageState(usage);
+      flushDeferredLogSummary();
+      log(
+        `proxy selected from deferred same-ip pool: ${deferred.name} latency=${deferred.latencyMs}ms ip=${
+          deferredIp || "?"
+        }`,
+      );
+      return deferred;
+    }
+  }
+
+  const fallbackPool = checked.filter(
+    (item) => !item.error && item.geo?.ip && typeof item.latencyMs === "number",
+  );
+  const fallbackFreshIpPool = fallbackPool.filter((item) => {
+    const ip = normalizeIp(item.geo?.ip);
+    return ip ? !usage.recentSelectedIps.includes(ip) : false;
+  });
+  const fallbackCandidates = (fallbackFreshIpPool.length > 0 ? fallbackFreshIpPool : fallbackPool).sort(
+    (a, b) => (a.latencyMs || Number.MAX_SAFE_INTEGER) - (b.latencyMs || Number.MAX_SAFE_INTEGER),
+  );
+  for (const fallback of fallbackCandidates) {
+    const cfProbe = await runCfProbeForNode(fallback.name);
+    if (!cfProbe.passed) {
+      log(`proxy fallback candidate rejected (cf probe failed): ${fallback.name} reason=${cfProbe.reason || "unknown"}`);
+      continue;
+    }
+    const previous = usage.nodes[fallback.name] || emptyUsageEntry;
+    const fallbackIp = normalizeIp(fallback.geo?.ip);
+    await ensureGroupSelected(fallback.name, fallbackIp);
+    usage.nodes[fallback.name] = {
+      ...previous,
+      count: (previous.count || 0) + 1,
+      lastUsedAt: nowIso,
+      lastCheckedAt: nowIso,
+      lastOutcome: "fallback",
+      lastLatencyMs: fallback.latencyMs ?? null,
+      successCount: (previous.successCount || 0) + 1,
+      lastIp: fallbackIp,
+      lastGeo: compactGeo(fallback.geo),
+      consecutiveFailCount: 0,
+    };
+    usage.recentSelected = pushRecentUnique(usage.recentSelected, fallback.name, cfg.nodeRecentWindow);
+    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, fallbackIp, cfg.nodeRecentWindow);
+    await writeProxyNodeUsageState(usage);
+    flushDeferredLogSummary();
+    log(
+      `proxy fallback selected due to threshold miss: ${fallback.name} latency=${fallback.latencyMs}ms ip=${fallback.geo?.ip || "?"}`,
+    );
+    return fallback;
+  }
+
+  await writeProxyNodeUsageState(usage);
+  flushDeferredLogSummary();
+  throw new Error(`proxy_node_unavailable:all checked=${checked.length}`);
+}
+
 function randomPassword(): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
   let seed = "";
@@ -87,15 +917,6 @@ function randomPassword(): string {
   for (const b of buf) seed += alphabet[b % alphabet.length];
   const tail = String(Date.now()).slice(-4);
   return `Aa!${seed}${tail}`;
-}
-
-function randomPublicIpv4(): string {
-  const firstOctetPool = [13, 23, 36, 45, 52, 61, 73, 84, 96, 103, 114, 121, 131, 142, 153, 166, 175, 183, 196, 203];
-  const a = firstOctetPool[randomInt(0, firstOctetPool.length)]!;
-  const b = randomInt(1, 255);
-  const c = randomInt(1, 255);
-  const d = randomInt(1, 255);
-  return `${a}.${b}.${c}.${d}`;
 }
 
 function sanitizeCaptchaText(value: string): string {
@@ -135,6 +956,476 @@ function extractTavilyKeyDeep(node: unknown): string | null {
 async function writeJson(path: URL, payload: unknown): Promise<void> {
   await mkdir(OUTPUT_DIR, { recursive: true });
   await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+}
+
+type IpProbeScope = "domestic" | "global";
+
+interface IpProbeSnapshot {
+  name: string;
+  scope: IpProbeScope;
+  url: string;
+  ip?: string;
+  ipCandidates: string[];
+  loaded: boolean;
+  error?: string;
+}
+
+interface IpProbeTarget {
+  name: string;
+  scope: IpProbeScope;
+  url: string;
+}
+
+interface GoldenSnapshot {
+  url: string;
+  rawText?: string;
+  ipAddress?: string;
+  location?: string;
+  timezone?: string;
+  isp?: string;
+  connection?: string;
+  botDetection?: string;
+  webRtc?: string;
+  navigatorLanguage?: string;
+  navigatorLanguages?: string[];
+  navigatorUserAgent?: string;
+  navigatorPlatform?: string;
+  browserTimeZone?: string;
+  webdriver?: boolean;
+}
+
+interface WebRtcProbeSnapshot {
+  candidateCount: number;
+  publicIps: string[];
+  rawCandidates: string[];
+}
+
+interface BrowserPrecheckReport {
+  mode: "headed" | "headless";
+  checkedAt: string;
+  expected: {
+    ip?: string;
+    locale: string;
+    timezone?: string;
+    country?: string;
+    city?: string;
+    proxyNode: string;
+  };
+  domesticIps: IpProbeSnapshot[];
+  globalIps: IpProbeSnapshot[];
+  golden: GoldenSnapshot;
+  webRtcProbe: WebRtcProbeSnapshot;
+  issues: string[];
+  passed: boolean;
+}
+
+const DOMESTIC_IP_PROBE_TARGETS: IpProbeTarget[] = [
+  { name: "ipip", scope: "domestic", url: "https://myip.ipip.net" },
+  { name: "cip", scope: "domestic", url: "https://cip.cc" },
+  { name: "3322", scope: "domestic", url: "https://ip.3322.net" },
+];
+
+const GLOBAL_IP_PROBE_TARGETS: IpProbeTarget[] = [
+  { name: "ip_sb", scope: "global", url: "https://api.ip.sb/geoip" },
+  { name: "ipinfo", scope: "global", url: "https://ipinfo.io/json" },
+];
+
+function parseCsvList(raw: string | undefined): string[] {
+  if (!raw || !raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function normalizeIp(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const cleaned = value.trim().replace(/^\[|\]$/g, "");
+  if (!cleaned) return undefined;
+  const matchedV4 = cleaned.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  if (matchedV4?.[0]) return matchedV4[0];
+  const matchedV6 = cleaned.match(/\b[0-9a-fA-F:]{2,}\b/);
+  if (matchedV6?.[0]) return matchedV6[0];
+  return cleaned;
+}
+
+function sameIp(a: string | undefined, b: string | undefined): boolean {
+  return !!a && !!b && a.trim() === b.trim();
+}
+
+function isPublicIpv4(ip: string): boolean {
+  const parts = ip.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part) || part < 0 || part > 255)) return false;
+  const a = parts[0] ?? -1;
+  const b = parts[1] ?? -1;
+  if (a === 10 || a === 127 || a === 0) return false;
+  if (a === 100 && b >= 64 && b <= 127) return false;
+  if (a === 169 && b === 254) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a >= 224) return false;
+  return true;
+}
+
+function extractPublicIpv4List(text: string): string[] {
+  const found = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+  const unique: string[] = [];
+  for (const raw of found) {
+    const normalized = normalizeIp(raw);
+    if (!normalized || !isPublicIpv4(normalized)) continue;
+    if (!unique.includes(normalized)) {
+      unique.push(normalized);
+    }
+  }
+  return unique;
+}
+
+async function collectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
+  const expectedHost = new URL(target.url).hostname.toLowerCase();
+  await safeGoto(page, target.url);
+  await page.waitForLoadState("domcontentloaded", { timeout: 60000 });
+  await page.waitForTimeout(waitMs);
+
+  const payload = await page.evaluate(() => {
+    const text = document.body?.innerText || "";
+    return {
+      text,
+      url: window.location.href,
+    };
+  });
+  const text = typeof payload.text === "string" ? payload.text : "";
+  const ipCandidates = extractPublicIpv4List(text);
+  const observedUrl = typeof payload.url === "string" ? payload.url : target.url;
+  let observedHost = "";
+  try {
+    observedHost = new URL(observedUrl).hostname.toLowerCase();
+  } catch {
+    observedHost = "";
+  }
+  const onExpectedHost =
+    !!observedHost && (observedHost === expectedHost || observedHost.endsWith(`.${expectedHost}`) || expectedHost.endsWith(`.${observedHost}`));
+
+  return {
+    name: target.name,
+    scope: target.scope,
+    url: observedUrl,
+    ip: ipCandidates[0],
+    ipCandidates: ipCandidates.slice(0, 8),
+    loaded: onExpectedHost && (ipCandidates.length > 0 || text.trim().length > 20),
+  };
+}
+
+async function safeCollectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
+  try {
+    return await collectIpProbeSnapshot(page, target, waitMs);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      name: target.name,
+      scope: target.scope,
+      url: target.url,
+      ipCandidates: [],
+      loaded: false,
+      error: message,
+    };
+  }
+}
+
+async function collectIpProbeSnapshotInContext(context: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
+  const probePage = await context.newPage();
+  try {
+    return await safeCollectIpProbeSnapshot(probePage, target, waitMs);
+  } finally {
+    await probePage.close().catch(() => {});
+  }
+}
+
+async function collectGoldenSnapshot(page: any): Promise<GoldenSnapshot> {
+  await safeGoto(page, "https://fingerprint.goldenowl.ai/");
+  await page.waitForLoadState("domcontentloaded", { timeout: 60000 });
+  await page.waitForTimeout(9000);
+
+  const payload = await page.evaluate(() => {
+    const text = document.body?.innerText || "";
+    const lines = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const normalize = (line: string) => line.toLowerCase().replace(/[:\s]+$/g, "");
+    const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const findAfter = (label: string): string => {
+      const target = normalize(label);
+      for (let i = 0; i < lines.length - 1; i += 1) {
+        if (normalize(lines[i] || "") === target) {
+          return lines[i + 1] || "";
+        }
+      }
+      return "";
+    };
+    const findInline = (label: string): string => {
+      const escaped = escapeRegex(label);
+      const patterns = [
+        new RegExp(`${escaped}\\s*[:：]\\s*([^\\n]+)`, "i"),
+        new RegExp(`${escaped}\\s+([^\\n]+)`, "i"),
+      ];
+      for (const pattern of patterns) {
+        const matched = text.match(pattern);
+        if (matched?.[1]) {
+          return matched[1].trim();
+        }
+      }
+      return "";
+    };
+    const pick = (label: string): string => findAfter(label) || findInline(label);
+
+    return {
+      url: window.location.href,
+      text,
+      ipAddress: pick("IP Address"),
+      location: pick("Location"),
+      timezone: pick("Timezone"),
+      isp: pick("ISP"),
+      connection: pick("Connection"),
+      botDetection: pick("Bot Detection"),
+      webRtc: pick("WebRTC"),
+      navigatorLanguage: navigator.language,
+      navigatorLanguages: Array.isArray(navigator.languages) ? navigator.languages : [],
+      navigatorUserAgent: navigator.userAgent,
+      navigatorPlatform: navigator.platform,
+      browserTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      webdriver: Boolean((navigator as Navigator & { webdriver?: boolean }).webdriver),
+    };
+  });
+  const text = typeof payload.text === "string" ? payload.text : "";
+  const ipCandidates = extractPublicIpv4List(text);
+  const labeledIp = normalizeIp(typeof payload.ipAddress === "string" ? payload.ipAddress : "");
+  const ipAddress = labeledIp && isPublicIpv4(labeledIp) ? labeledIp : ipCandidates[0];
+
+  return {
+    url: typeof payload.url === "string" ? payload.url : "https://fingerprint.goldenowl.ai/",
+    rawText: text,
+    ipAddress,
+    location: typeof payload.location === "string" ? payload.location : undefined,
+    timezone: typeof payload.timezone === "string" ? payload.timezone : undefined,
+    isp: typeof payload.isp === "string" ? payload.isp : undefined,
+    connection: typeof payload.connection === "string" ? payload.connection : undefined,
+    botDetection: typeof payload.botDetection === "string" ? payload.botDetection : undefined,
+    webRtc: typeof payload.webRtc === "string" ? payload.webRtc : undefined,
+    navigatorLanguage: typeof payload.navigatorLanguage === "string" ? payload.navigatorLanguage : undefined,
+    navigatorLanguages: Array.isArray(payload.navigatorLanguages)
+      ? (payload.navigatorLanguages as unknown[]).filter((item: unknown): item is string => typeof item === "string")
+      : undefined,
+    navigatorUserAgent: typeof payload.navigatorUserAgent === "string" ? payload.navigatorUserAgent : undefined,
+    navigatorPlatform: typeof payload.navigatorPlatform === "string" ? payload.navigatorPlatform : undefined,
+    browserTimeZone: typeof payload.browserTimeZone === "string" ? payload.browserTimeZone : undefined,
+    webdriver: typeof payload.webdriver === "boolean" ? payload.webdriver : undefined,
+  };
+}
+
+async function collectGoldenAndWebRtc(page: any): Promise<{ golden: GoldenSnapshot; webRtcProbe: WebRtcProbeSnapshot }> {
+  const golden = await collectGoldenSnapshot(page);
+  const webRtcProbe = await probeWebRtc(page);
+  return { golden, webRtcProbe };
+}
+
+async function probeWebRtc(page: any): Promise<WebRtcProbeSnapshot> {
+  const payload = await page.evaluate(async () => {
+    const RTCPeer =
+      (window as Window & { RTCPeerConnection?: any }).RTCPeerConnection ||
+      (window as Window & { webkitRTCPeerConnection?: any }).webkitRTCPeerConnection;
+    if (!RTCPeer) {
+      return { rawCandidates: [] as string[] };
+    }
+
+    const pc = new RTCPeer({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+    const candidates: string[] = [];
+
+    pc.onicecandidate = (event: any) => {
+      const candidate = event?.candidate?.candidate;
+      if (typeof candidate === "string" && candidate.trim()) {
+        candidates.push(candidate.trim());
+      }
+    };
+
+    pc.createDataChannel("probe");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+    pc.close();
+
+    return { rawCandidates: candidates };
+  });
+
+  const rawCandidates =
+    payload && typeof payload === "object" && Array.isArray((payload as JsonRecord).rawCandidates)
+      ? ((payload as JsonRecord).rawCandidates as unknown[]).filter((item): item is string => typeof item === "string")
+      : [];
+
+  const publicIps = new Set<string>();
+  for (const candidate of rawCandidates) {
+    const v4 = candidate.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+    for (const ip of v4) {
+      const normalized = normalizeIp(ip);
+      if (normalized) publicIps.add(normalized);
+    }
+  }
+
+  return {
+    candidateCount: rawCandidates.length,
+    publicIps: Array.from(publicIps),
+    rawCandidates: rawCandidates.slice(0, 8),
+  };
+}
+
+async function runBrowserPrecheck(
+  page: any,
+  cfg: AppConfig,
+  mode: "headed" | "headless",
+  selectedProxy: NodeCheckResult,
+  locale: string,
+): Promise<BrowserPrecheckReport> {
+  const expectedGeo: GeoInfo | undefined = selectedProxy.geo;
+  const expectedIp = normalizeIp(expectedGeo?.ip);
+  const expectedTimezone = expectedGeo?.timezone;
+  const expectedLangPrefix = locale.split("-")[0]?.toLowerCase() || "en";
+  const context = typeof page?.context === "function" ? page.context() : null;
+  const allProbeTargets = [...DOMESTIC_IP_PROBE_TARGETS, ...GLOBAL_IP_PROBE_TARGETS];
+
+  const collectProbeSnapshots = async (): Promise<IpProbeSnapshot[]> => {
+    if (context && typeof context.newPage === "function") {
+      return await Promise.all(allProbeTargets.map((target) => collectIpProbeSnapshotInContext(context, target, 5500)));
+    }
+    const snapshots: IpProbeSnapshot[] = [];
+    for (const target of allProbeTargets) {
+      snapshots.push(await safeCollectIpProbeSnapshot(page, target, 5500));
+    }
+    return snapshots;
+  };
+
+  const collectGoldenBundle = async (): Promise<{ golden: GoldenSnapshot; webRtcProbe: WebRtcProbeSnapshot }> => {
+    if (context && typeof context.newPage === "function") {
+      const goldenPage = await context.newPage();
+      try {
+        return await collectGoldenAndWebRtc(goldenPage);
+      } finally {
+        await goldenPage.close().catch(() => {});
+      }
+    }
+    return await collectGoldenAndWebRtc(page);
+  };
+
+  const [probeSnapshots, goldenBundle] = await Promise.all([collectProbeSnapshots(), collectGoldenBundle()]);
+  const domesticIps = probeSnapshots.filter((item) => item.scope === "domestic");
+  const globalIps = probeSnapshots.filter((item) => item.scope === "global");
+  const { golden, webRtcProbe } = goldenBundle;
+
+  const issues: string[] = [];
+  const probeIps = [...domesticIps, ...globalIps]
+    .map((probe) => probe.ip)
+    .filter((ip): ip is string => typeof ip === "string" && ip.length > 0);
+  const observedIps = [...probeIps, golden.ipAddress].filter((ip): ip is string => typeof ip === "string" && ip.length > 0);
+
+  for (const probe of [...domesticIps, ...globalIps]) {
+    if (!probe.loaded) {
+      issues.push(
+        `${probe.scope} ip site(${probe.name}) content not loaded${probe.error ? `: ${probe.error}` : ""}`,
+      );
+    }
+    if (!probe.ip) {
+      issues.push(`${probe.scope} ip site(${probe.name}) did not expose an IP address`);
+    }
+  }
+
+  if (!/:\/\/(?:www\.)?fingerprint\.goldenowl\.ai(?:\/|$)/i.test(golden.url)) {
+    issues.push(`golden unexpected URL: ${golden.url}`);
+  }
+
+  if (probeIps.length > 0) {
+    const uniqueObservedProbeIps = Array.from(new Set(probeIps));
+    if (uniqueObservedProbeIps.length !== 1) {
+      issues.push(`probe IP mismatch across 3 domestic + 2 global sites: ${uniqueObservedProbeIps.join(",")}`);
+    }
+  }
+
+  if (observedIps.length === 0 && cfg.browserPrecheckStrict) {
+    issues.push("precheck could not extract any public IP");
+  }
+  if (expectedIp) {
+    for (const probe of [...domesticIps, ...globalIps]) {
+      if (probe.ip && !sameIp(probe.ip, expectedIp)) {
+        issues.push(`${probe.scope} ip mismatch(${probe.name}): expected=${expectedIp} got=${probe.ip}`);
+      }
+    }
+    if (golden.ipAddress && !sameIp(golden.ipAddress, expectedIp)) {
+      issues.push(`golden ip mismatch: expected=${expectedIp} got=${golden.ipAddress}`);
+    }
+    if (!observedIps.every((ip) => sameIp(ip, expectedIp))) {
+      issues.push(`expected proxy IP not observed in browser precheck: ${expectedIp}`);
+    }
+  }
+  const uniqueObservedIps = Array.from(new Set(observedIps));
+  if (uniqueObservedIps.length > 1) {
+    issues.push(`cross-site IP mismatch: ${uniqueObservedIps.join(",")}`);
+  }
+
+  if (golden.navigatorLanguage && !golden.navigatorLanguage.toLowerCase().startsWith(expectedLangPrefix)) {
+    issues.push(`navigator.language mismatch: expected-prefix=${expectedLangPrefix} got=${golden.navigatorLanguage}`);
+  }
+  if (cfg.browserPrecheckStrict) {
+    const firstLang = golden.navigatorLanguages?.[0];
+    if (firstLang && !firstLang.toLowerCase().startsWith(expectedLangPrefix)) {
+      issues.push(`navigator.languages[0] mismatch: expected-prefix=${expectedLangPrefix} got=${firstLang}`);
+    }
+  }
+
+  if (golden.botDetection && !/clean/i.test(golden.botDetection)) {
+    issues.push(`bot detection is not clean: ${golden.botDetection}`);
+  } else if (!golden.botDetection && cfg.browserPrecheckStrict) {
+    issues.push("bot detection field missing on goldenowl");
+  }
+  if (cfg.browserPrecheckStrict && /hosting provider detected/i.test(golden.rawText || "")) {
+    issues.push("hosting provider detected on goldenowl");
+  }
+
+  if (cfg.requireWebrtcVisible) {
+    const webRtc = (golden.webRtc || "").trim();
+    if (!webRtc) {
+      issues.push("webrtc field missing on goldenowl");
+    } else {
+      const webRtcDisabled = /disabled|blocked|unavailable/i.test(webRtc);
+      if (expectedIp && webRtcProbe.candidateCount > 0 && !webRtcProbe.publicIps.some((ip) => sameIp(ip, expectedIp))) {
+        issues.push(
+          `webrtc probe candidates do not include expected proxy IP: expected=${expectedIp} probe=${webRtcProbe.publicIps.join(",") || "none"}`,
+        );
+      }
+      if (!webRtcDisabled && cfg.browserPrecheckStrict && webRtcProbe.candidateCount <= 0) {
+        issues.push(`webrtc appears enabled but ICE candidates are empty: ${webRtc}`);
+      }
+    }
+  }
+
+  if (golden.webdriver) {
+    issues.push("navigator.webdriver is true");
+  }
+
+  return {
+    mode,
+    checkedAt: new Date().toISOString(),
+    expected: {
+      ip: expectedIp,
+      locale,
+      timezone: expectedTimezone,
+      country: expectedGeo?.country,
+      city: expectedGeo?.city,
+      proxyNode: selectedProxy.name,
+    },
+    domesticIps,
+    globalIps,
+    golden,
+    webRtcProbe,
+    issues,
+    passed: issues.length === 0,
+  };
 }
 
 function parseBody(text: string): unknown {
@@ -215,7 +1506,20 @@ function collectStrings(value: unknown, bucket: string[], depth = 0): void {
   }
 }
 
-function extractVerificationLinkFromPayload(payload: unknown): string | null {
+function isAllowedVerificationUrl(candidate: string, allowlist: string[]): boolean {
+  try {
+    const parsed = new URL(candidate);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!allowlist.some((allowed) => hostname === allowed || hostname.endsWith(`.${allowed}`))) {
+      return false;
+    }
+    return /(verify|verification|email|callback|auth|confirm)/i.test(candidate);
+  } catch {
+    return false;
+  }
+}
+
+function extractVerificationLinkFromPayload(payload: unknown, allowlist: string[]): string | null {
   const texts: string[] = [];
   collectStrings(payload, texts);
 
@@ -229,7 +1533,16 @@ function extractVerificationLinkFromPayload(payload: unknown): string | null {
     const matches = normalized.match(/https?:\/\/[^\s"'<>`\\)]+/gi) || [];
     for (const raw of matches) {
       const candidate = raw.replace(/[),.;\s]+$/, "");
-      if (/tavily\.com/i.test(candidate) && /(verify|email|callback|auth)/i.test(candidate)) {
+      if (isAllowedVerificationUrl(candidate, allowlist)) {
+        return candidate;
+      }
+    }
+
+    const hrefMatches = normalized.match(/href=['"]([^'"]+)['"]/gi) || [];
+    for (const rawHref of hrefMatches) {
+      const match = rawHref.match(/href=['"]([^'"]+)['"]/i);
+      const candidate = (match?.[1] || "").trim();
+      if (candidate.startsWith("http") && isAllowedVerificationUrl(candidate, allowlist)) {
         return candidate;
       }
     }
@@ -588,7 +1901,12 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
   };
 }
 
-async function waitForVerificationLink(mailbox: DuckmailSession, timeoutMs: number, pollMs: number): Promise<string | null> {
+async function waitForVerificationLink(
+  mailbox: DuckmailSession,
+  timeoutMs: number,
+  pollMs: number,
+  allowlist: string[],
+): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   const seen = new Set<string>();
 
@@ -600,7 +1918,7 @@ async function waitForVerificationLink(mailbox: DuckmailSession, timeoutMs: numb
     const items = (messages["hydra:member"] as unknown[]) || [];
 
     for (const item of items) {
-      const fromSummary = extractVerificationLinkFromPayload(item);
+      const fromSummary = extractVerificationLinkFromPayload(item, allowlist);
       if (fromSummary) return fromSummary;
 
       if (!item || typeof item !== "object") continue;
@@ -612,7 +1930,7 @@ async function waitForVerificationLink(mailbox: DuckmailSession, timeoutMs: numb
         headers: { Authorization: `Bearer ${mailbox.token}` },
       });
 
-      const fromDetail = extractVerificationLinkFromPayload(detail);
+      const fromDetail = extractVerificationLinkFromPayload(detail, allowlist);
       if (fromDetail) return fromDetail;
     }
 
@@ -622,11 +1940,22 @@ async function waitForVerificationLink(mailbox: DuckmailSession, timeoutMs: numb
   return null;
 }
 
+async function verifyVerificationLanding(page: any): Promise<boolean> {
+  await page.waitForTimeout(2200);
+  const url = page.url();
+  if (/auth\.tavily\.com|app\.tavily\.com/i.test(url) && !/\/u\/signup\/identifier/i.test(url)) {
+    return true;
+  }
+
+  const text = await page.evaluate(() => (document.body?.innerText || "").slice(0, 5000));
+  return /(email|account).{0,30}(verified|confirmed|activated)|verification.{0,20}(complete|success)/i.test(text);
+}
+
 async function fillInput(page: any, selector: string, value: string): Promise<void> {
   await page.waitForSelector(selector, { timeout: 30000 });
   const input = page.locator(selector).first();
   await input.fill("");
-  await input.type(value);
+  await input.type(value, { delay: randomInt(55, 135) });
 }
 
 async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> {
@@ -634,7 +1963,7 @@ async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> 
     await page.goto(url, { waitUntil: "domcontentloaded", timeout });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (/NS_BINDING_ABORTED|interrupted by another navigation|frame was detached|Navigation/i.test(message)) {
+    if (/NS_BINDING_ABORTED|interrupted by another navigation|frame was detached/i.test(message)) {
       log(`safeGoto transient (${url}): ${message.split("\n")[0]}`);
       await page.waitForTimeout(900);
       return;
@@ -679,6 +2008,7 @@ async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
 }
 
 async function clickSubmit(page: any): Promise<void> {
+  await page.waitForTimeout(randomInt(220, 780));
   const btn = page.locator('button[type="submit"], input[type="submit"]').first();
   try {
     await btn.click({ timeout: 10000 });
@@ -835,7 +2165,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         for (let i = 0; i < pwdCount; i += 1) {
           const input = passwordInputs.nth(i);
           await input.fill("");
-          await input.type(password);
+          await input.type(password, { delay: randomInt(55, 135) });
         }
       }
 
@@ -870,7 +2200,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         return;
       }
 
-      const formErrors = await page.evaluate(() => {
+      const formErrors: string[] = await page.evaluate(() => {
         const visible = (el: Element): boolean => {
           const style = window.getComputedStyle(el as HTMLElement);
           return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
@@ -888,6 +2218,9 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         return texts;
       });
       log(`signup password step still present after submit (attempt=${attempt}) errors=${formErrors.join(" | ") || "n/a"}`);
+      if (formErrors.some((text) => /Suspicious activity detected/i.test(text))) {
+        throw new Error("risk_control_suspicious_activity");
+      }
     }
     throw new Error(`signup password step failed after ${cfg.maxCaptchaRounds} attempts`);
   }
@@ -1117,19 +2450,43 @@ async function confirmHumanControl(cfg: AppConfig, email: string, stage: string)
   }
 }
 
+function resolveChromeExecutablePath(raw: string | undefined): string | undefined {
+  const trimmed = (raw || "").trim();
+  if (trimmed) return trimmed;
+  if (process.platform === "darwin") {
+    return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  }
+  return undefined;
+}
+
 function loadConfig(): AppConfig {
+  const envRunMode = parseRunMode(process.env.RUN_MODE);
+  const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "camoufox";
+  const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
+  const fallbackRunMode: RunMode = toBool(process.env.HEADLESS, false) ? "headless" : "headed";
+  const verifyHostAllowlist = parseCsvList(process.env.VERIFY_HOST_ALLOWLIST).map((host) => host.toLowerCase());
+  const defaultApiPort = 39090 + randomInt(0, 2000);
+  const defaultMixedPort = 49090 + randomInt(0, 2000);
+
   return {
     openaiBaseUrl: mustEnv("OPENAI_BASE_URL"),
     openaiKey: mustEnv("OPENAI_KEY"),
     preferredModel: mustEnv("MODEL_NAME"),
-    headless: toBool(process.env.HEADLESS, false),
+    runMode: envRunMode || fallbackRunMode,
+    browserEngine: envBrowserEngine,
+    inspectBrowserEngine: envInspectBrowserEngine,
+    chromeExecutablePath: resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
+    chromeNativeAutomation: toBool(process.env.CHROME_NATIVE_AUTOMATION, true),
+    chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, false),
+    chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
+    chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
     maxCaptchaRounds: toInt(process.env.MAX_CAPTCHA_ROUNDS, 30),
     ocrRetryWindowMs: toInt(process.env.OCR_RETRY_WINDOW_MS, 300_000),
     ocrInitialCooldownMs: toInt(process.env.OCR_INITIAL_COOLDOWN_MS, 12_000),
     ocrMaxCooldownMs: toInt(process.env.OCR_MAX_COOLDOWN_MS, 120_000),
     ocrRequestTimeoutMs: toInt(process.env.OCR_REQUEST_TIMEOUT_MS, 25_000),
-    humanConfirmBeforeSignup: toBool(process.env.HUMAN_CONFIRM_BEFORE_SIGNUP, true),
+    humanConfirmBeforeSignup: toBool(process.env.HUMAN_CONFIRM_BEFORE_SIGNUP, false),
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
     duckmailBaseUrl: (process.env.DUCKMAIL_BASE_URL || "https://mail-api.example.invalid").trim(),
     duckmailApiKey: (process.env.DUCKMAIL_API_KEY || "").trim() || undefined,
@@ -1140,54 +2497,470 @@ function loadConfig(): AppConfig {
     keyLimit: toInt(process.env.KEY_LIMIT, 1000),
     existingEmail: (process.env.EXISTING_EMAIL || "").trim() || undefined,
     existingPassword: (process.env.EXISTING_PASSWORD || "").trim() || undefined,
-    spoofIpHeader: (process.env.SPOOF_IP || "").trim() || undefined,
+    mihomoSubscriptionUrl: mustEnv("MIHOMO_SUBSCRIPTION_URL"),
+    mihomoApiPort: toInt(process.env.MIHOMO_API_PORT, defaultApiPort),
+    mihomoMixedPort: toInt(process.env.MIHOMO_MIXED_PORT, defaultMixedPort),
+    proxyCheckUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
+    proxyCheckTimeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, 8000),
+    proxyLatencyMaxMs: toInt(process.env.PROXY_LATENCY_MAX_MS, 3000),
+    ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
+    browserPrecheckEnabled: toBool(process.env.BROWSER_PRECHECK_ENABLED, true),
+    browserPrecheckStrict: toBool(process.env.BROWSER_PRECHECK_STRICT, true),
+    requireWebrtcVisible: toBool(process.env.REQUIRE_WEBRTC_VISIBLE, true),
+    verifyHostAllowlist:
+      verifyHostAllowlist.length > 0
+        ? verifyHostAllowlist
+        : ["tavily.com", "auth.tavily.com", "app.tavily.com"],
+    modeRetryMax: Math.max(1, toInt(process.env.MODE_RETRY_MAX, 3)),
+    browserLaunchRetryMax: Math.max(1, toInt(process.env.BROWSER_LAUNCH_RETRY_MAX, 3)),
+    nodeReuseCooldownMs: Math.max(60_000, toInt(process.env.NODE_REUSE_COOLDOWN_MS, 30 * 60_000)),
+    nodeRecentWindow: Math.max(1, toInt(process.env.NODE_RECENT_WINDOW, 4)),
+    nodeCheckCacheTtlMs: Math.max(30_000, toInt(process.env.NODE_CHECK_CACHE_TTL_MS, 10 * 60_000)),
+    nodeScanMaxChecks: Math.max(5, toInt(process.env.NODE_SCAN_MAX_CHECKS, 40)),
+    nodeScanMaxMs: Math.max(15_000, toInt(process.env.NODE_SCAN_MAX_MS, 180_000)),
+    nodeDeferLogMax: Math.max(1, toInt(process.env.NODE_DEFER_LOG_MAX, 12)),
+    allowSameEgressIpFallback: toBool(process.env.ALLOW_SAME_EGRESS_IP_FALLBACK, false),
+    cfProbeEnabled: toBool(process.env.CF_PROBE_ENABLED, false),
+    cfProbeUrl: (process.env.CF_PROBE_URL || "https://ip.skk.moe/").trim(),
+    cfProbeTimeoutMs: Math.max(3000, toInt(process.env.CF_PROBE_TIMEOUT_MS, 12000)),
+    cfProbeCacheTtlMs: Math.max(60_000, toInt(process.env.CF_PROBE_CACHE_TTL_MS, 30 * 60_000)),
+    inspectKeepOpenMs: Math.max(30_000, toInt(process.env.INSPECT_KEEP_OPEN_MS, 15 * 60_000)),
+    inspectChromeNative: toBool(process.env.INSPECT_CHROME_NATIVE, true),
+    inspectChromeProfileDir: path.resolve(process.env.INSPECT_CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-inspect-profile")),
   };
 }
 
-async function run(): Promise<void> {
-  const cfg = loadConfig();
+function isRecoverableBrowserError(reason: string): boolean {
+  return /Execution context was destroyed|Target closed|Navigation|Cannot find context|page has been closed|context has been closed/i.test(
+    reason,
+  );
+}
 
-  log(`start (headless=${cfg.headless})`);
+function resolveModeList(mode: RunMode): Array<"headed" | "headless"> {
+  if (mode === "both") return ["headed", "headless"];
+  return [mode];
+}
 
-  const allModels = await listModels(cfg);
-  const resolvedModel = resolveModelName(cfg.preferredModel, allModels);
-  log(`captcha model selected: ${resolvedModel}`);
+function shouldRetryModeFailure(message: string): boolean {
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+    message,
+  );
+}
 
-  const solver = new CaptchaSolver(cfg, resolvedModel);
+function getChromeWebRtcPolicyArgs(): string[] {
+  return [
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--enforce-webrtc-ip-permission-check",
+  ];
+}
+
+function getChromeVisualArgs(): string[] {
+  return [
+    "--window-size=1512,982",
+    "--force-device-scale-factor=2",
+  ];
+}
+
+async function launchBrowserWithEngine(
+  engine: BrowserEngine,
+  cfg: AppConfig,
+  mode: "headed" | "headless",
+  proxyServer: string,
+  locale: string,
+  geoIp: string,
+): Promise<Browser> {
+  if (engine === "chrome") {
+    const options: LaunchOptions = {
+      headless: mode === "headless",
+      proxy: { server: proxyServer },
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        `--lang=${locale}`,
+        ...getChromeVisualArgs(),
+        ...getChromeWebRtcPolicyArgs(),
+      ],
+      timeout: 180_000,
+    };
+    if (cfg.chromeExecutablePath) {
+      options.executablePath = cfg.chromeExecutablePath;
+    }
+    return await chromium.launch(options);
+  }
+
+  return (await Camoufox({
+    headless: mode === "headless",
+    humanize: 1.2,
+    debug: false,
+    proxy: { server: proxyServer },
+    locale,
+    geoip: geoIp,
+    block_webrtc: false,
+    enable_cache: true,
+  })) as Browser;
+}
+
+function createChildProcessStopper(child: ReturnType<typeof spawn>): () => Promise<void> {
+  let stopping = false;
+  return async () => {
+    if (stopping) return;
+    stopping = true;
+    if (child.exitCode != null) return;
+    child.kill("SIGTERM");
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (child.exitCode != null) return;
+      await delay(150);
+    }
+    child.kill("SIGKILL");
+  };
+}
+
+async function resolveDebuggingPort(preferredPort: number): Promise<number> {
+  if (preferredPort > 0) return preferredPort;
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (!port || port <= 0) {
+          reject(new Error("failed to reserve chrome debugging port"));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+async function waitForChromeWsEndpoint(port: number, timeoutMs = 20_000): Promise<string> {
+  const endpoint = `http://127.0.0.1:${port}/json/version`;
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const resp = await fetch(endpoint);
+      if (resp.ok) {
+        const payload = (await resp.json()) as JsonRecord;
+        const ws = typeof payload.webSocketDebuggerUrl === "string" ? payload.webSocketDebuggerUrl.trim() : "";
+        if (ws) return ws;
+      }
+    } catch {
+      // retry until timeout
+    }
+    await delay(250);
+  }
+  throw new Error(`native chrome debugger endpoint timeout on port ${port}`);
+}
+
+async function launchNativeChromeCdp(
+  cfg: AppConfig,
+  proxyServer: string,
+  locale: string,
+): Promise<{
+  browser: Browser;
+  context: any;
+  stop: () => Promise<void>;
+  details: { executablePath: string; profileDir: string; debugPort: number };
+}> {
+  if (!cfg.chromeExecutablePath) {
+    throw new Error("chrome executable path is not configured");
+  }
+
+  const fallbackProfileDir = path.join(
+    cfg.chromeProfileDir,
+    `run-${Date.now()}-${randomInt(1000, 9999)}`,
+  );
+  const profileCandidates = [cfg.chromeProfileDir, fallbackProfileDir];
+  let lastError: Error | null = null;
+
+  for (let i = 0; i < profileCandidates.length; i += 1) {
+    const profileDir = profileCandidates[i]!;
+    const useFallbackProfile = i > 0;
+    await mkdir(profileDir, { recursive: true });
+    const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
+    const args = [
+      `--remote-debugging-port=${debugPort}`,
+      "--remote-debugging-address=127.0.0.1",
+      "--remote-allow-origins=*",
+      `--user-data-dir=${profileDir}`,
+      `--proxy-server=${proxyServer}`,
+      `--lang=${locale}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      ...getChromeVisualArgs(),
+      ...getChromeWebRtcPolicyArgs(),
+      "--new-window",
+      "about:blank",
+    ];
+
+    const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore" });
+    const stop = createChildProcessStopper(child);
+    await delay(1000);
+    if (child.exitCode != null) {
+      lastError = new Error(
+        `native chrome exited early: ${child.exitCode}${useFallbackProfile ? " (fallback profile)" : ""}`,
+      );
+      continue;
+    }
+
+    try {
+      const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
+      const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 25_000 });
+      const context = browser.contexts()[0];
+      if (!context) {
+        await browser.close().catch(() => {});
+        throw new Error("native chrome did not expose a default browser context");
+      }
+
+      return {
+        browser,
+        context,
+        stop,
+        details: {
+          executablePath: cfg.chromeExecutablePath,
+          profileDir,
+          debugPort,
+        },
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      await stop().catch(() => {});
+    }
+  }
+
+  throw lastError || new Error("failed to start native chrome cdp session");
+}
+
+async function launchChromePersistent(
+  cfg: AppConfig,
+  mode: "headed" | "headless",
+  proxyServer: string,
+  locale: string,
+  contextOptions: BrowserContextOptions,
+): Promise<{
+  browser: Browser;
+  context: any;
+  details: { executablePath: string; profileDir: string };
+}> {
+  const fallbackProfileDir = path.join(
+    cfg.chromeProfileDir,
+    `run-${Date.now()}-${randomInt(1000, 9999)}`,
+  );
+  const profileCandidates = [cfg.chromeProfileDir, fallbackProfileDir];
+  let lastError: Error | null = null;
+
+  for (const profileDir of profileCandidates) {
+    try {
+      await mkdir(profileDir, { recursive: true });
+      const launchOptions: any = {
+        headless: mode === "headless",
+        proxy: { server: proxyServer },
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--no-first-run",
+          "--no-default-browser-check",
+          `--lang=${locale}`,
+          ...getChromeVisualArgs(),
+          ...getChromeWebRtcPolicyArgs(),
+        ],
+        locale: contextOptions.locale,
+        timezoneId: contextOptions.timezoneId,
+        viewport: contextOptions.viewport,
+        screen: contextOptions.screen,
+        deviceScaleFactor: contextOptions.deviceScaleFactor,
+        geolocation: contextOptions.geolocation,
+        permissions: contextOptions.permissions,
+        extraHTTPHeaders: contextOptions.extraHTTPHeaders,
+        timeout: 180_000,
+      };
+      if (cfg.chromeExecutablePath) {
+        launchOptions.executablePath = cfg.chromeExecutablePath;
+      }
+      const context = await chromium.launchPersistentContext(profileDir, launchOptions);
+      const browser = context.browser();
+      if (!browser) {
+        await context.close().catch(() => {});
+        throw new Error("persistent chrome context has no browser handle");
+      }
+      return {
+        browser,
+        context,
+        details: {
+          executablePath: cfg.chromeExecutablePath || "playwright chromium",
+          profileDir,
+        },
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+
+  throw lastError || new Error("failed to launch chrome persistent context");
+}
+
+async function configureNativeChromePage(
+  context: any,
+  page: any,
+  acceptLanguage: string,
+  timezoneId?: string,
+): Promise<void> {
+  await context
+    .setExtraHTTPHeaders({
+      "Accept-Language": acceptLanguage,
+    })
+    .catch(() => {});
+
+  let cdp: any = null;
+  try {
+    cdp = await context.newCDPSession(page);
+  } catch {
+    cdp = null;
+  }
+  if (!cdp) return;
+
+  await cdp.send("Network.enable").catch(() => {});
+  await cdp
+    .send("Network.setExtraHTTPHeaders", {
+      headers: {
+        "Accept-Language": acceptLanguage,
+      },
+    })
+    .catch(() => {});
+  await cdp
+    .send("Emulation.setDeviceMetricsOverride", {
+      width: 1512,
+      height: 982,
+      deviceScaleFactor: 2,
+      mobile: false,
+      screenWidth: 1512,
+      screenHeight: 982,
+    })
+    .catch(() => {});
+
+  if (timezoneId) {
+    await cdp.send("Emulation.setTimezoneOverride", { timezoneId }).catch(() => {});
+  }
+}
+
+async function launchNativeChromeInspect(
+  cfg: AppConfig,
+  proxyServer: string,
+  locale: string,
+): Promise<{
+  stop: () => Promise<void>;
+  details: { executablePath: string; profileDir: string; targets: string[] };
+}> {
+  if (!cfg.chromeExecutablePath) {
+    throw new Error("chrome executable path is not configured");
+  }
+  const targets = ["https://fingerprint.goldenowl.ai/", "https://ip.skk.moe/"];
+  await mkdir(cfg.inspectChromeProfileDir, { recursive: true });
+
+  const args = [
+    `--user-data-dir=${cfg.inspectChromeProfileDir}`,
+    `--proxy-server=${proxyServer}`,
+    `--lang=${locale}`,
+    ...getChromeVisualArgs(),
+    ...getChromeWebRtcPolicyArgs(),
+    "--new-window",
+    ...targets,
+  ];
+  const child = spawn(cfg.chromeExecutablePath, args, {
+    stdio: "ignore",
+  });
+  const stop = createChildProcessStopper(child);
+  await delay(1200);
+  if (child.exitCode != null) {
+    throw new Error(`native chrome exited early: ${child.exitCode}`);
+  }
+  return {
+    stop,
+    details: {
+      executablePath: cfg.chromeExecutablePath,
+      profileDir: cfg.inspectChromeProfileDir,
+      targets,
+    },
+  };
+}
+
+async function applyEngineStealth(
+  context: any,
+  engine: BrowserEngine,
+  locale: string,
+  enabled: boolean,
+): Promise<void> {
+  if (engine !== "chrome" || !enabled) return;
+  const lang = locale || "en-US";
+  await context.addInitScript((preferredLang: string) => {
+    const langPrefix = preferredLang.split("-")[0] || "en";
+    const languages = [preferredLang, langPrefix];
+    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    Object.defineProperty(navigator, "languages", { get: () => languages });
+    (window as any).chrome = (window as any).chrome || { runtime: {} };
+    const permissions = navigator.permissions as any;
+    if (permissions && typeof permissions.query === "function") {
+      const originalQuery = permissions.query.bind(permissions);
+      permissions.query = (parameters: any) => {
+        if (parameters && parameters.name === "notifications") {
+          return Promise.resolve({ state: Notification.permission });
+        }
+        return originalQuery(parameters);
+      };
+    }
+  }, lang);
+}
+
+async function runSingleMode(
+  cfg: AppConfig,
+  args: CliArgs,
+  solver: CaptchaSolver,
+  resolvedModel: string,
+  mode: "headed" | "headless",
+): Promise<ResultPayload> {
   const notes: string[] = [];
+  let failureStage = "init";
 
   let mailbox: DuckmailSession | null = null;
   let email = cfg.existingEmail || "";
   let password = cfg.existingPassword || "";
+  let verificationLink: string | null = null;
+  let apiKey: string | null = null;
+  let verifyPassed = false;
+  let precheckPassed = !cfg.browserPrecheckEnabled || args.skipPrecheck;
 
   if (email && password) {
-    log(`existing account mode: ${email}`);
+    log(`[${mode}] existing account mode: ${email}`);
     notes.push("existing account mode enabled");
   } else {
     mailbox = await createDuckmailSession(cfg);
     email = mailbox.address;
     password = randomPassword();
-
-    log(`duckmail mailbox: ${email}`);
-    log(`generated password: ${password}`);
+    log(`[${mode}] duckmail mailbox: ${email}`);
     notes.push(`duckmail mailbox created (${mailbox.accountId})`);
   }
 
-  let verificationLink: string | null = null;
-  let apiKey: string | null = null;
+  const mihomoController = await startMihomo(buildMihomoConfig(cfg));
+  const browserEngine = args.browserEngine || cfg.browserEngine;
+  const useNativeChrome = browserEngine === "chrome" && mode === "headed" && cfg.chromeNativeAutomation;
+  let browser: Browser | null = null;
+  let context: any = null;
+  let page: any = null;
+  let nativeChromeStop: (() => Promise<void>) | null = null;
+  let nativeChromeContext: any = null;
+  let nativeChromeMode: "cdp" | "persistent" | null = null;
+  const observedApiKeys = new Set<string>();
+  const networkLog: Array<{ url: string; status: number; contentType: string; bodyPreview?: string }> = [];
 
-  const browser = await Camoufox({
-    headless: cfg.headless,
-    humanize: true,
-    debug: false,
-  });
-
-  try {
-    const page = await browser.newPage();
-    const observedApiKeys = new Set<string>();
-    const networkLog: Array<{ url: string; status: number; contentType: string; bodyPreview?: string }> = [];
-
-    page.on("response", async (resp: any) => {
+  const bindPageEvents = (targetPage: any): void => {
+    targetPage.on("response", async (resp: any) => {
       try {
         const url = String(resp.url?.() || "");
         if (!/https?:\/\/(app|auth)\.tavily\.com/i.test(url)) return;
@@ -1202,53 +2975,229 @@ async function run(): Promise<void> {
           bodyText = await resp.text();
         }
 
-        const bodyPreview = bodyText ? bodyText.slice(0, 600) : undefined;
-        networkLog.push({ url, status, contentType, bodyPreview });
+        networkLog.push({
+          url,
+          status,
+          contentType,
+          bodyPreview: bodyText ? bodyText.slice(0, 600) : undefined,
+        });
         if (networkLog.length > 240) networkLog.shift();
 
         if (status >= 400 && !/\/api\//i.test(url)) return;
         if (!shouldSampleBody) return;
-
         const matches = bodyText.match(/tvly-[A-Za-z0-9_-]{8,}/g) || [];
-        for (const m of matches) observedApiKeys.add(m);
+        for (const matched of matches) observedApiKeys.add(matched);
       } catch {
         // ignore response sampling errors
       }
     });
+  };
 
-    const headers: Record<string, string> = {
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-    };
-    if (!cfg.existingEmail || !cfg.existingPassword) {
-      const spoofIp = cfg.spoofIpHeader || randomPublicIpv4();
-      log(`using spoof ip headers: ${spoofIp}`);
-      headers["X-Forwarded-For"] = spoofIp;
-      headers["X-Real-IP"] = spoofIp;
-      headers["CF-Connecting-IP"] = spoofIp;
+  try {
+    failureStage = "proxy_select";
+    const selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode);
+    const geo = selectedProxy.geo;
+    if (!geo || !geo.ip) {
+      throw new Error("proxy_geo_missing");
     }
-    await page.setExtraHTTPHeaders(headers);
+
+    const locale = deriveLocale(geo.country);
+    const acceptLanguage = buildAcceptLanguage(locale);
+    notes.push(`proxy node: ${selectedProxy.name}`);
+    notes.push(`proxy ip: ${geo.ip}`);
+    notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
+
+    const contextOptions: BrowserContextOptions = {
+      locale,
+      viewport: { width: 1512, height: 982 },
+      screen: { width: 1512, height: 982 },
+      deviceScaleFactor: 2,
+      extraHTTPHeaders: {
+        "Accept-Language": acceptLanguage,
+      },
+    };
+    if (geo.timezone) {
+      contextOptions.timezoneId = geo.timezone;
+    }
+
+    failureStage = "browser_launch";
+    const launchBrowser = async (): Promise<Browser> => {
+      if (useNativeChrome) {
+        try {
+          const launched = await launchNativeChromeCdp(cfg, mihomoController.proxyServer, locale);
+          nativeChromeMode = "cdp";
+          nativeChromeStop = launched.stop;
+          nativeChromeContext = launched.context;
+          notes.push(`native chrome executable: ${launched.details.executablePath}`);
+          notes.push(`native chrome profile: ${launched.details.profileDir}`);
+          notes.push(`native chrome debug port: ${launched.details.debugPort}`);
+          return launched.browser;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          notes.push(`native chrome cdp fallback: ${message.split("\n")[0]}`);
+          const persistent = await launchChromePersistent(
+            cfg,
+            mode,
+            mihomoController.proxyServer,
+            locale,
+            contextOptions,
+          );
+          nativeChromeMode = "persistent";
+          nativeChromeStop = null;
+          nativeChromeContext = persistent.context;
+          notes.push(`persistent chrome executable: ${persistent.details.executablePath}`);
+          notes.push(`persistent chrome profile: ${persistent.details.profileDir}`);
+          return persistent.browser;
+        }
+      }
+      return await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip);
+    };
+
+    const rebuildPage = async (): Promise<void> => {
+      if (context && !useNativeChrome) {
+        await context.close().catch(() => {});
+      }
+      if (useNativeChrome) {
+        context = nativeChromeContext;
+        if (!context) {
+          throw new Error("native chrome context missing");
+        }
+        const pages = typeof context.pages === "function" ? context.pages() : [];
+        for (const existing of pages) {
+          await existing.close().catch(() => {});
+        }
+        page = await context.newPage();
+        if (nativeChromeMode === "cdp") {
+          await configureNativeChromePage(
+            context,
+            page,
+            acceptLanguage,
+            geo.timezone,
+          );
+        }
+      } else {
+        context = await browser!.newContext(contextOptions);
+        await applyEngineStealth(context, browserEngine, locale, cfg.chromeStealthJsEnabled);
+        page = await context.newPage();
+      }
+      bindPageEvents(page);
+    };
+
+    let browserReady = false;
+    let launchErr: Error | null = null;
+    for (let launchAttempt = 1; launchAttempt <= cfg.browserLaunchRetryMax; launchAttempt += 1) {
+      try {
+        const existingBrowser = browser;
+        if (existingBrowser) {
+          await existingBrowser.close().catch(() => {});
+          browser = null;
+        }
+        browser = await launchBrowser();
+        await rebuildPage();
+        browserReady = true;
+        if (launchAttempt > 1) {
+          notes.push(`browser launch recovered on attempt ${launchAttempt}`);
+        }
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        launchErr = error instanceof Error ? error : new Error(message);
+        log(`[${mode}] browser launch/context attempt ${launchAttempt} failed: ${message}`);
+        if (context) {
+          if (!useNativeChrome) {
+            await context.close().catch(() => {});
+          }
+          context = null;
+        }
+        const launchedBrowser = browser;
+        if (launchedBrowser) {
+          await launchedBrowser.close().catch(() => {});
+          browser = null;
+        }
+        if (nativeChromeStop != null) {
+          await (nativeChromeStop as () => Promise<void>)().catch(() => {});
+          nativeChromeStop = null;
+        }
+        nativeChromeContext = null;
+        nativeChromeMode = null;
+        if (launchAttempt >= cfg.browserLaunchRetryMax) {
+          break;
+        }
+        await delay(Math.min(3000, 700 * launchAttempt));
+      }
+    }
+    if (!browserReady) {
+      throw launchErr || new Error("browser launch failed without details");
+    }
+
+    if (cfg.browserPrecheckEnabled && !args.skipPrecheck) {
+      failureStage = "browser_precheck";
+      const precheck = await runBrowserPrecheck(page, cfg, mode, selectedProxy, locale);
+      precheckPassed = precheck.passed;
+      await writeJson(new URL(`browser_precheck_${mode}.json`, OUTPUT_DIR), precheck);
+      await writeJson(new URL("browser_precheck.json", OUTPUT_DIR), precheck);
+      if (!precheck.passed) {
+        throw new Error(`browser precheck failed: ${precheck.issues.join(" | ")}`);
+      }
+      notes.push("browser precheck passed");
+    }
 
     if (cfg.existingEmail && cfg.existingPassword) {
       notes.push("skip signup (existing account)");
     } else {
-      await completeSignup(page, solver, email, password, cfg);
-      notes.push("signup flow submitted");
+      failureStage = "signup";
+      if (cfg.humanConfirmBeforeSignup) {
+        await confirmHumanControl(cfg, email, "before signup");
+        notes.push("human confirmation accepted before signup");
+      }
 
-      verificationLink = await waitForVerificationLink(mailbox!, cfg.emailWaitMs, cfg.duckmailPollMs);
-      if (verificationLink) {
-        log("verification link found");
-        await safeGoto(page, verificationLink, 120000);
-        await page.waitForTimeout(2000);
-        notes.push("email verification link opened");
-      } else {
-        notes.push("verification email not found within timeout");
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+          await completeSignup(page, solver, email, password, cfg);
+          notes.push("signup flow submitted");
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!isRecoverableBrowserError(message) || attempt === 2) {
+            throw error;
+          }
+          log(`[${mode}] signup retry after browser reset (attempt=${attempt})`);
+          await rebuildPage();
+        }
+      }
+
+      failureStage = "email_verify_wait";
+      verificationLink = await waitForVerificationLink(mailbox!, cfg.emailWaitMs, cfg.duckmailPollMs, cfg.verifyHostAllowlist);
+      if (!verificationLink) {
+        throw new Error("verification email not found within timeout");
+      }
+
+      failureStage = "email_verify_open";
+      await safeGoto(page, verificationLink, 120000);
+      verifyPassed = await verifyVerificationLanding(page);
+      if (!verifyPassed) {
+        throw new Error(`verification link opened but success signal missing, current=${page.url()}`);
+      }
+      notes.push("email verification confirmed");
+    }
+
+    failureStage = "login_home";
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await loginAndReachHome(page, solver, email, password, cfg);
+        notes.push("reached app home");
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRecoverableBrowserError(message) || attempt === 2) {
+          throw error;
+        }
+        log(`[${mode}] login retry after browser reset (attempt=${attempt})`);
+        await rebuildPage();
       }
     }
 
-    await loginAndReachHome(page, solver, email, password, cfg);
-    notes.push("reached app home");
-    log(`current page before api key: ${page.url()}`);
-
+    failureStage = "api_key";
     let lastKeyError: Error | null = null;
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       try {
@@ -1261,8 +3210,8 @@ async function run(): Promise<void> {
         await loginAndReachHome(page, solver, email, password, cfg);
         await page.waitForTimeout(1500);
         if (attempt === 1) {
-          await writeFile(new URL("home.html", OUTPUT_DIR), await page.content(), "utf8");
-          await writeJson(new URL("network.json", OUTPUT_DIR), networkLog.slice(-120));
+          await writeFile(new URL(`home_${mode}.html`, OUTPUT_DIR), await page.content(), "utf8");
+          await writeJson(new URL(`network_${mode}.json`, OUTPUT_DIR), networkLog.slice(-120));
         }
 
         apiKey = await getDefaultApiKey(page, cfg);
@@ -1274,16 +3223,12 @@ async function run(): Promise<void> {
           break;
         }
 
-        log(`api key not found on attempt ${attempt}`);
+        log(`[${mode}] api key not found on attempt ${attempt}`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (
-          /Execution context was destroyed|Target closed|Navigation|Cannot find context/i.test(message) &&
-          attempt < 5
-        ) {
-          log(`api key fetch retry after navigation/context reset (attempt=${attempt})`);
-          await loginAndReachHome(page, solver, email, password, cfg);
-          await page.waitForTimeout(1200);
+        if (isRecoverableBrowserError(message) && attempt < 5) {
+          log(`[${mode}] api-key retry after browser reset (attempt=${attempt})`);
+          await rebuildPage();
           continue;
         }
         lastKeyError = error instanceof Error ? error : new Error(message);
@@ -1294,31 +3239,240 @@ async function run(): Promise<void> {
     if (lastKeyError) {
       throw lastKeyError;
     }
-    if (apiKey) {
-      log("default api key fetched");
-      notes.push("default api key fetched");
-    } else {
+    if (!apiKey) {
       throw new Error("default api key missing from app responses");
     }
+    notes.push("default api key fetched");
+
+    return {
+      mode,
+      email,
+      password,
+      verificationLink,
+      apiKey,
+      model: resolvedModel,
+      precheckPassed,
+      verifyPassed: verifyPassed || !!cfg.existingEmail,
+      notes,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`mode=${mode} stage=${failureStage}: ${message}`);
   } finally {
-    await browser.close();
+    if (context && !useNativeChrome) {
+      await context.close().catch(() => {});
+    }
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    if (nativeChromeStop != null) {
+      await (nativeChromeStop as () => Promise<void>)().catch(() => {});
+    }
+    await mihomoController.stop();
+  }
+}
+
+async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
+  const mode: "headed" = "headed";
+  const notes: string[] = [];
+  const mihomoController = await startMihomo(buildMihomoConfig(cfg));
+  const browserEngine = args.browserEngine || cfg.inspectBrowserEngine;
+  const useNativeChrome = browserEngine === "chrome" && cfg.inspectChromeNative;
+  let browser: Browser | null = null;
+  let context: any = null;
+  let nativeChromeStop: (() => Promise<void>) | null = null;
+
+  try {
+    const selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode);
+    const geo = selectedProxy.geo;
+    if (!geo || !geo.ip) {
+      throw new Error("proxy_geo_missing");
+    }
+
+    const locale = deriveLocale(geo.country);
+    const acceptLanguage = buildAcceptLanguage(locale);
+    notes.push(`proxy node: ${selectedProxy.name}`);
+    notes.push(`proxy ip: ${geo.ip}`);
+    notes.push(`browser engine: ${browserEngine}`);
+
+    if (useNativeChrome) {
+      const nativeChrome = await launchNativeChromeInspect(cfg, mihomoController.proxyServer, locale);
+      nativeChromeStop = nativeChrome.stop;
+      notes.push(`native chrome executable: ${nativeChrome.details.executablePath}`);
+      notes.push(`native chrome profile: ${nativeChrome.details.profileDir}`);
+      notes.push("opened fingerprint.goldenowl.ai");
+      notes.push("opened ip.skk.moe");
+
+      await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
+        mode: "inspect-sites-native-chrome",
+        openedAt: new Date().toISOString(),
+        proxy: {
+          node: selectedProxy.name,
+          ip: geo.ip,
+          country: geo.country,
+          city: geo.city,
+          timezone: geo.timezone,
+        },
+        pages: nativeChrome.details.targets.map((url) => ({ url })),
+        notes,
+      });
+    } else {
+      browser = await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip);
+
+      const contextOptions: BrowserContextOptions = {
+        locale,
+        viewport: { width: 1512, height: 982 },
+        screen: { width: 1512, height: 982 },
+        deviceScaleFactor: 2,
+        extraHTTPHeaders: {
+          "Accept-Language": acceptLanguage,
+        },
+      };
+      if (geo.timezone) {
+        contextOptions.timezoneId = geo.timezone;
+      }
+
+      context = await browser.newContext(contextOptions);
+      await applyEngineStealth(context, browserEngine, locale, cfg.chromeStealthJsEnabled);
+
+      const fingerprintPage = await context.newPage();
+      await safeGoto(fingerprintPage, "https://fingerprint.goldenowl.ai/", 120000);
+      await fingerprintPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
+      await writeFile(new URL("inspect_fingerprint.png", OUTPUT_DIR), await fingerprintPage.screenshot({ fullPage: true }));
+      notes.push("opened fingerprint.goldenowl.ai");
+
+      const ipSkkPage = await context.newPage();
+      await safeGoto(ipSkkPage, "https://ip.skk.moe/", 120000);
+      await ipSkkPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
+      await writeFile(new URL("inspect_ip_skk.png", OUTPUT_DIR), await ipSkkPage.screenshot({ fullPage: true }));
+      await ipSkkPage.bringToFront();
+      notes.push("opened ip.skk.moe");
+
+      await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
+        mode: "inspect-sites",
+        openedAt: new Date().toISOString(),
+        proxy: {
+          node: selectedProxy.name,
+          ip: geo.ip,
+          country: geo.country,
+          city: geo.city,
+          timezone: geo.timezone,
+        },
+        pages: [
+          { url: await fingerprintPage.url(), title: await fingerprintPage.title().catch(() => "") },
+          { url: await ipSkkPage.url(), title: await ipSkkPage.title().catch(() => "") },
+        ],
+        notes,
+      });
+    }
+
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        await rl.question(
+          `Inspect mode ready. Browser opened with proxy node ${selectedProxy.name} (${geo.ip}) using ${
+            useNativeChrome ? "native chrome" : browserEngine
+          }. Press Enter to close: `,
+        );
+      } finally {
+        rl.close();
+      }
+    } else {
+      log(`inspect mode no TTY, keep browser open for ${cfg.inspectKeepOpenMs}ms`);
+      await delay(cfg.inspectKeepOpenMs);
+    }
+  } finally {
+    if (context) {
+      await context.close().catch(() => {});
+    }
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+    if (nativeChromeStop) {
+      await nativeChromeStop().catch(() => {});
+    }
+    await mihomoController.stop();
+  }
+}
+
+async function run(): Promise<void> {
+  const cfg = loadConfig();
+  const args = parseArgs(process.argv.slice(2));
+  if (args.inspectSites) {
+    log("start inspect-sites mode (headed)");
+    await runInspectSites(cfg, args);
+    await writeJson(new URL("result.json", OUTPUT_DIR), {
+      mode: "inspect-sites",
+      completedAt: new Date().toISOString(),
+      ok: true,
+    });
+    log("inspect-sites mode completed");
+    return;
+  }
+  const requestedMode = args.mode || cfg.runMode;
+  const modes = resolveModeList(requestedMode);
+  log(`start modes=${modes.join(",")} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
+
+  const allModels = await listModels(cfg);
+  const resolvedModel = resolveModelName(cfg.preferredModel, allModels);
+  log(`captcha model selected: ${resolvedModel}`);
+  const solver = new CaptchaSolver(cfg, resolvedModel);
+
+  const results: ResultPayload[] = [];
+  for (const mode of modes) {
+    let result: ResultPayload | null = null;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
+      try {
+        result = await runSingleMode(cfg, args, solver, resolvedModel, mode);
+        if (attempt > 1) {
+          result.notes.push(`mode retry succeeded on attempt ${attempt}`);
+        }
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error : new Error(message);
+        if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
+          log(`[${mode}] run attempt ${attempt} failed, retrying: ${message}`);
+          continue;
+        }
+        break;
+      }
+    }
+
+    if (!result) {
+      throw lastError || new Error(`[${mode}] run failed without result`);
+    }
+
+    results.push(result);
+    log(`[${mode}] finished account=${result.email}`);
   }
 
-  const result: ResultPayload = {
-    email,
-    password,
-    verificationLink,
-    apiKey,
+  const summaryPayload = {
+    requestedMode,
+    completedAt: new Date().toISOString(),
     model: resolvedModel,
-    notes,
+    results,
   };
+  await writeJson(new URL("run_summary.json", OUTPUT_DIR), summaryPayload);
 
-  await writeJson(new URL("result.json", OUTPUT_DIR), result);
+  const resultOutput: unknown = results.length === 1 ? results[0] : summaryPayload;
+  await writeJson(new URL("result.json", OUTPUT_DIR), resultOutput);
   log("saved output/result.json");
 
-  console.log(`ACCOUNT=${email}`);
-  console.log(`PASSWORD=${password}`);
-  console.log(`DEFAULT_API_KEY=${apiKey}`);
+  if (results.length === 1) {
+    const only = results[0]!;
+    console.log(`ACCOUNT=${only.email}`);
+    console.log(`PASSWORD=${only.password}`);
+    console.log(`DEFAULT_API_KEY=${only.apiKey}`);
+  } else {
+    for (const item of results) {
+      console.log(`[${item.mode}] ACCOUNT=${item.email}`);
+      console.log(`[${item.mode}] PASSWORD=${item.password}`);
+      console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
+    }
+  }
 }
 
 async function main(): Promise<void> {

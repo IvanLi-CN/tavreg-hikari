@@ -5,13 +5,18 @@
   "private": true,
   "scripts": {
     "start": "bun run src/main.ts",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "proxy:check-all": "bun run src/proxy-cli.ts check-all",
+    "proxy:check": "bun run src/proxy-cli.ts check",
+    "proxy:set": "bun run src/proxy-cli.ts set"
   },
   "dependencies": {
     "@resvg/resvg-js": "^2.6.2",
     "camoufox-js": "^0.9.1",
     "dotenv": "^17.3.1",
-    "playwright-core": "^1.58.2"
+    "impit": "^0.9.2",
+    "playwright-core": "^1.58.2",
+    "yaml": "^2.8.0"
   },
   "devDependencies": {
     "@types/bun": "latest"
