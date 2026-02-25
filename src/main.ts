@@ -65,6 +65,7 @@ interface AppConfig {
   ipinfoToken?: string;
   browserPrecheckEnabled: boolean;
   browserPrecheckStrict: boolean;
+  browserPrecheckCheckHostingProvider: boolean;
   requireWebrtcVisible: boolean;
   verifyHostAllowlist: string[];
   modeRetryMax: number;
@@ -103,6 +104,14 @@ interface ResultPayload {
   verifyPassed: boolean;
   failureStage?: string;
   notes: string[];
+}
+
+interface BrowserIdentityProfile {
+  userAgent: string;
+  navigatorPlatform: string;
+  cdpPlatform: string;
+  acceptLanguage: string;
+  languages: string[];
 }
 
 interface ProxyNodeUsageEntry {
@@ -910,13 +919,82 @@ async function selectProxyNode(
   throw new Error(`proxy_node_unavailable:all checked=${checked.length}`);
 }
 
+function shuffleChars(values: string[]): string[] {
+  const items = [...values];
+  for (let i = items.length - 1; i > 0; i -= 1) {
+    const j = randomInt(0, i + 1);
+    [items[i], items[j]] = [items[j]!, items[i]!];
+  }
+  return items;
+}
+
+function pickChar(alphabet: string): string {
+  return alphabet[randomInt(0, alphabet.length)] || alphabet[0] || "a";
+}
+
 function randomPassword(): string {
-  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let seed = "";
-  const buf = randomBytes(8);
-  for (const b of buf) seed += alphabet[b % alphabet.length];
-  const tail = String(Date.now()).slice(-4);
-  return `Aa!${seed}${tail}`;
+  const lowers = "abcdefghijklmnopqrstuvwxyz";
+  const uppers = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const digits = "0123456789";
+  const specials = "!@#$%^&*_-+=";
+  const all = `${lowers}${uppers}${digits}${specials}`;
+  const length = randomInt(14, 19);
+  const chars = [
+    pickChar(lowers),
+    pickChar(uppers),
+    pickChar(digits),
+    pickChar(specials),
+  ];
+  while (chars.length < length) {
+    chars.push(pickChar(all));
+  }
+  return shuffleChars(chars).join("");
+}
+
+function pickRandom<T>(values: T[]): T {
+  return values[randomInt(0, values.length)]!;
+}
+
+const MAILBOX_NAME_PREFIXES = [
+  "alex",
+  "sam",
+  "jordan",
+  "taylor",
+  "kai",
+  "mika",
+  "ren",
+  "haru",
+  "noa",
+  "niko",
+  "rei",
+  "yuna",
+  "mina",
+  "leo",
+  "luna",
+];
+
+const MAILBOX_NAME_SUFFIXES = [
+  "lin",
+  "park",
+  "chen",
+  "wong",
+  "tan",
+  "mori",
+  "sato",
+  "kato",
+  "ito",
+  "kim",
+  "li",
+  "ng",
+  "choi",
+  "song",
+];
+
+function randomMailboxLocalPart(): string {
+  const sep = pickRandom(["", "", ".", "_"]);
+  const digits = String(randomInt(10, 9999));
+  const raw = `${pickRandom(MAILBOX_NAME_PREFIXES)}${sep}${pickRandom(MAILBOX_NAME_SUFFIXES)}${digits}`;
+  return raw.replace(/[^a-z0-9._-]/gi, "").toLowerCase();
 }
 
 function sanitizeCaptchaText(value: string): string {
@@ -1383,7 +1461,7 @@ async function runBrowserPrecheck(
   } else if (!golden.botDetection && cfg.browserPrecheckStrict) {
     issues.push("bot detection field missing on goldenowl");
   }
-  if (cfg.browserPrecheckStrict && /hosting provider detected/i.test(golden.rawText || "")) {
+  if (cfg.browserPrecheckCheckHostingProvider && /hosting provider detected/i.test(golden.rawText || "")) {
     issues.push("hosting provider detected on goldenowl");
   }
 
@@ -1866,10 +1944,10 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
     }
     pickedDomain = matched;
   } else {
-    pickedDomain = domains[0];
+    pickedDomain = pickRandom(domains);
   }
 
-  const localPart = `legacy${Date.now()}${randomInt(1000, 10000)}`;
+  const localPart = randomMailboxLocalPart();
   const address = `${localPart}@${pickedDomain}`;
   const mailboxPassword = randomPassword();
 
@@ -2506,6 +2584,7 @@ function loadConfig(): AppConfig {
     ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
     browserPrecheckEnabled: toBool(process.env.BROWSER_PRECHECK_ENABLED, true),
     browserPrecheckStrict: toBool(process.env.BROWSER_PRECHECK_STRICT, true),
+    browserPrecheckCheckHostingProvider: toBool(process.env.BROWSER_PRECHECK_CHECK_HOSTING_PROVIDER, false),
     requireWebrtcVisible: toBool(process.env.REQUIRE_WEBRTC_VISIBLE, true),
     verifyHostAllowlist:
       verifyHostAllowlist.length > 0
@@ -2562,6 +2641,120 @@ function getChromeVisualArgs(): string[] {
   ];
 }
 
+function normalizeChromeVersion(raw: string): string {
+  const trimmed = (raw || "").trim();
+  const full = trimmed.match(/\d+\.\d+\.\d+\.\d+/)?.[0];
+  if (full) return full;
+  const major = trimmed.match(/\d+/)?.[0];
+  if (major) return `${major}.0.0.0`;
+  return "145.0.0.0";
+}
+
+function buildBrowserIdentityProfile(locale: string, browserVersion: string): BrowserIdentityProfile {
+  const normalizedLocale = locale || "en-US";
+  const langPrefix = (normalizedLocale.split("-")[0] || "en").toLowerCase();
+  const languages = [normalizedLocale, `${langPrefix}-${normalizedLocale.split("-")[1] || "US"}`, langPrefix]
+    .map((item) => item.trim())
+    .filter((item, index, all) => item.length > 0 && all.indexOf(item) === index)
+    .slice(0, 3);
+  const acceptLanguage = `${languages[0]},${langPrefix};q=0.9,en;q=0.8`;
+  const chromeVersion = normalizeChromeVersion(browserVersion);
+  const userAgent =
+    `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ` +
+    `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  return {
+    userAgent,
+    navigatorPlatform: "MacIntel",
+    cdpPlatform: "macOS",
+    acceptLanguage,
+    languages,
+  };
+}
+
+const IDENTITY_BOUND_CONTEXTS = new WeakSet<object>();
+
+async function applyPageIdentityOverrides(
+  context: any,
+  page: any,
+  identity: BrowserIdentityProfile,
+  timezoneId?: string,
+): Promise<void> {
+  let cdp: any = null;
+  try {
+    cdp = await context.newCDPSession(page);
+  } catch {
+    cdp = null;
+  }
+  if (!cdp) return;
+
+  await cdp.send("Network.enable").catch(() => {});
+  await cdp
+    .send("Network.setExtraHTTPHeaders", {
+      headers: {
+        "Accept-Language": identity.acceptLanguage,
+        "User-Agent": identity.userAgent,
+      },
+    })
+    .catch(() => {});
+  await cdp
+    .send("Emulation.setUserAgentOverride", {
+      userAgent: identity.userAgent,
+      acceptLanguage: identity.languages[0] || "en-US",
+      platform: identity.cdpPlatform,
+    })
+    .catch(() => {});
+  if (timezoneId) {
+    await cdp.send("Emulation.setTimezoneOverride", { timezoneId }).catch(() => {});
+  }
+}
+
+async function applyBrowserIdentityToContext(
+  context: any,
+  identity: BrowserIdentityProfile,
+  timezoneId?: string,
+): Promise<void> {
+  await context
+    .setExtraHTTPHeaders({
+      "Accept-Language": identity.acceptLanguage,
+      "User-Agent": identity.userAgent,
+    })
+    .catch(() => {});
+  await context
+    .addInitScript((profile: BrowserIdentityProfile) => {
+      const defineReadonly = (target: any, key: string, value: unknown): void => {
+        try {
+          Object.defineProperty(target, key, { get: () => value });
+        } catch {
+          // ignore sealed properties
+        }
+      };
+      const firstLanguage = profile.languages[0] || "en-US";
+      defineReadonly(navigator, "userAgent", profile.userAgent);
+      defineReadonly(navigator, "appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
+      defineReadonly(navigator, "platform", profile.navigatorPlatform);
+      defineReadonly(navigator, "language", firstLanguage);
+      defineReadonly(navigator, "languages", profile.languages);
+    }, identity)
+    .catch(() => {});
+
+  const applyToPage = async (page: any): Promise<void> => {
+    await applyPageIdentityOverrides(context, page, identity, timezoneId);
+  };
+
+  const pages = typeof context.pages === "function" ? context.pages() : [];
+  for (const page of pages) {
+    await applyToPage(page);
+  }
+
+  const contextObj = context as object;
+  if (!IDENTITY_BOUND_CONTEXTS.has(contextObj) && typeof context.on === "function") {
+    context.on("page", (newPage: any) => {
+      void applyToPage(newPage);
+    });
+    IDENTITY_BOUND_CONTEXTS.add(contextObj);
+  }
+}
+
 async function launchBrowserWithEngine(
   engine: BrowserEngine,
   cfg: AppConfig,
@@ -2615,6 +2808,11 @@ function createChildProcessStopper(child: ReturnType<typeof spawn>): () => Promi
     }
     child.kill("SIGKILL");
   };
+}
+
+function buildChromeProfileCandidates(baseDir: string): string[] {
+  const runProfile = path.join(baseDir, `run-${Date.now()}-${randomInt(1000, 9999)}`);
+  return [runProfile, baseDir];
 }
 
 async function resolveDebuggingPort(preferredPort: number): Promise<number> {
@@ -2673,16 +2871,12 @@ async function launchNativeChromeCdp(
     throw new Error("chrome executable path is not configured");
   }
 
-  const fallbackProfileDir = path.join(
-    cfg.chromeProfileDir,
-    `run-${Date.now()}-${randomInt(1000, 9999)}`,
-  );
-  const profileCandidates = [cfg.chromeProfileDir, fallbackProfileDir];
+  const profileCandidates = buildChromeProfileCandidates(cfg.chromeProfileDir);
   let lastError: Error | null = null;
 
   for (let i = 0; i < profileCandidates.length; i += 1) {
     const profileDir = profileCandidates[i]!;
-    const useFallbackProfile = i > 0;
+    const usingBaseProfile = i > 0;
     await mkdir(profileDir, { recursive: true });
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
     const args = [
@@ -2705,7 +2899,7 @@ async function launchNativeChromeCdp(
     await delay(1000);
     if (child.exitCode != null) {
       lastError = new Error(
-        `native chrome exited early: ${child.exitCode}${useFallbackProfile ? " (fallback profile)" : ""}`,
+        `native chrome exited early: ${child.exitCode}${usingBaseProfile ? " (base profile fallback)" : ""}`,
       );
       continue;
     }
@@ -2749,11 +2943,7 @@ async function launchChromePersistent(
   context: any;
   details: { executablePath: string; profileDir: string };
 }> {
-  const fallbackProfileDir = path.join(
-    cfg.chromeProfileDir,
-    `run-${Date.now()}-${randomInt(1000, 9999)}`,
-  );
-  const profileCandidates = [cfg.chromeProfileDir, fallbackProfileDir];
+  const profileCandidates = buildChromeProfileCandidates(cfg.chromeProfileDir);
   let lastError: Error | null = null;
 
   for (const profileDir of profileCandidates) {
@@ -2809,12 +2999,15 @@ async function launchChromePersistent(
 async function configureNativeChromePage(
   context: any,
   page: any,
-  acceptLanguage: string,
+  identity: BrowserIdentityProfile,
   timezoneId?: string,
 ): Promise<void> {
+  await applyPageIdentityOverrides(context, page, identity, timezoneId);
+
   await context
     .setExtraHTTPHeaders({
-      "Accept-Language": acceptLanguage,
+      "Accept-Language": identity.acceptLanguage,
+      "User-Agent": identity.userAgent,
     })
     .catch(() => {});
 
@@ -2830,7 +3023,8 @@ async function configureNativeChromePage(
   await cdp
     .send("Network.setExtraHTTPHeaders", {
       headers: {
-        "Accept-Language": acceptLanguage,
+        "Accept-Language": identity.acceptLanguage,
+        "User-Agent": identity.userAgent,
       },
     })
     .catch(() => {});
@@ -2958,6 +3152,7 @@ async function runSingleMode(
   let nativeChromeMode: "cdp" | "persistent" | null = null;
   const observedApiKeys = new Set<string>();
   const networkLog: Array<{ url: string; status: number; contentType: string; bodyPreview?: string }> = [];
+  let identity: BrowserIdentityProfile | null = null;
 
   const bindPageEvents = (targetPage: any): void => {
     targetPage.on("response", async (resp: any) => {
@@ -3066,17 +3261,23 @@ async function runSingleMode(
         for (const existing of pages) {
           await existing.close().catch(() => {});
         }
+        if (identity) {
+          await applyBrowserIdentityToContext(context, identity, geo.timezone);
+        }
         page = await context.newPage();
-        if (nativeChromeMode === "cdp") {
+        if (nativeChromeMode === "cdp" && identity) {
           await configureNativeChromePage(
             context,
             page,
-            acceptLanguage,
+            identity,
             geo.timezone,
           );
         }
       } else {
         context = await browser!.newContext(contextOptions);
+        if (identity) {
+          await applyBrowserIdentityToContext(context, identity, geo.timezone);
+        }
         await applyEngineStealth(context, browserEngine, locale, cfg.chromeStealthJsEnabled);
         page = await context.newPage();
       }
@@ -3093,6 +3294,12 @@ async function runSingleMode(
           browser = null;
         }
         browser = await launchBrowser();
+        if (browserEngine === "chrome") {
+          identity = buildBrowserIdentityProfile(locale, browser.version?.() || "");
+          notes.push(`browser ua profile: ${identity.userAgent}`);
+        } else {
+          identity = null;
+        }
         await rebuildPage();
         browserReady = true;
         if (launchAttempt > 1) {
@@ -3257,6 +3464,22 @@ async function runSingleMode(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    try {
+      await writeJson(new URL(`network_fail_${mode}.json`, OUTPUT_DIR), networkLog.slice(-180));
+      await writeJson(new URL(`failure_context_${mode}.json`, OUTPUT_DIR), {
+        failedAt: new Date().toISOString(),
+        stage: failureStage,
+        url: page ? page.url() : null,
+        email,
+        browserEngine,
+        notes,
+      });
+      if (page) {
+        await writeFile(new URL(`failure_page_${mode}.html`, OUTPUT_DIR), await page.content(), "utf8");
+      }
+    } catch {
+      // best effort diagnostics only
+    }
     throw new Error(`mode=${mode} stage=${failureStage}: ${message}`);
   } finally {
     if (context && !useNativeChrome) {
