@@ -156,6 +156,7 @@ Additional artifacts:
 - `output/browser_precheck_headless.json`: headless precheck report
 - `output/run_summary.json`: summary for single or multiple run modes
 - `output/proxy/node-usage.json`: proxy node usage history and recent selection window
+- `output/registry/signup-tasks.sqlite`: SQLite task ledger (run status, risk signals, proxy IP history)
 
 ## Notes
 
@@ -166,6 +167,14 @@ Additional artifacts:
 - Signup requires email verification success; missing verification link is treated as failure.
 - Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.
 - Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
+- SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent `Too many signups from the same IP` history is used to avoid risky egress IP reuse.
+
+Quick query example (requires `sqlite3` CLI):
+
+```bash
+sqlite3 output/registry/signup-tasks.sqlite \
+  "select started_at,status,proxy_ip,error_code,has_ip_rate_limit from signup_tasks order by id desc limit 20;"
+```
 
 ## Proxy Tools
 

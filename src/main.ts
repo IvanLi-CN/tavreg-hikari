@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { checkNode, resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js";
+import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless" | "both";
@@ -85,6 +86,7 @@ interface AppConfig {
   inspectKeepOpenMs: number;
   inspectChromeNative: boolean;
   inspectChromeProfileDir: string;
+  taskLedger: TaskLedgerConfig;
 }
 
 interface DuckmailSession {
@@ -130,6 +132,24 @@ interface NetworkDiagRecord {
   bodyPreview?: string;
   responseErrorCodes?: string[];
   suspiciousSnippet?: string;
+}
+
+interface RiskSignalSummary {
+  hasIpRateLimit: boolean;
+  hasSuspiciousActivity: boolean;
+  hasExtensibilityError: boolean;
+  hasInvalidCaptcha: boolean;
+  requestCount: number;
+  suspiciousHitCount: number;
+  captchaSubmitCount: number;
+  maxCaptchaLength?: number;
+  snippets: string[];
+}
+
+interface ModeRunContext {
+  batchId: string;
+  modeAttempt: number;
+  taskLedger: TaskLedger | null;
 }
 
 interface BrowserIdentityProfile {
@@ -572,6 +592,7 @@ async function selectProxyNode(
   controller: Awaited<ReturnType<typeof startMihomo>>,
   cfg: AppConfig,
   overrideName?: string,
+  blockedEgressIps: Set<string> = new Set(),
 ): Promise<NodeCheckResult> {
   const options = {
     checkUrl: cfg.proxyCheckUrl,
@@ -582,9 +603,24 @@ async function selectProxyNode(
   const usage = await readProxyNodeUsageState();
   const nowMs = Date.now();
   const nowIso = new Date().toISOString();
+  const blockedIps = new Set(
+    Array.from(blockedEgressIps)
+      .map((item) => normalizeIp(item))
+      .filter((item): item is string => typeof item === "string" && item.length > 0),
+  );
+  const isBlockedByRisk = (ip: string | undefined): boolean => {
+    const normalized = normalizeIp(ip);
+    if (!normalized) return false;
+    if (cfg.taskLedger.allowRateLimitedIpFallback) return false;
+    return blockedIps.has(normalized);
+  };
   const localEgressIp = normalizeIp(await resolveLocalEgressIp(options.timeoutMs));
   if (localEgressIp) {
     log(`proxy local direct egress IP: ${localEgressIp}`);
+  }
+  if (blockedIps.size > 0) {
+    const preview = Array.from(blockedIps).slice(0, 8).join(", ");
+    log(`proxy ip blocked by recent rate-limit events: ${preview}${blockedIps.size > 8 ? " ..." : ""}`);
   }
   const emptyUsageEntry: ProxyNodeUsageEntry = { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
   const ensureGroupSelected = async (name: string, expectedIp?: string): Promise<void> => {
@@ -711,6 +747,7 @@ async function selectProxyNode(
   );
 
   const cachedDeferredSameIp: NodeCheckResult[] = [];
+  const blockedByRiskDeferred: NodeCheckResult[] = [];
   for (const cached of cachedFreshCandidates) {
     const entry = cached.entry;
     if (!entry) continue;
@@ -741,6 +778,11 @@ async function selectProxyNode(
           cachedResult.latencyMs ?? "n/a"
         }ms egress_ip=${cachedIp || "?"}`,
       );
+      continue;
+    }
+    if (isBlockedByRisk(cachedIp)) {
+      blockedByRiskDeferred.push(cachedResult);
+      log(`proxy cached candidate deferred (recent ip rate-limit): ${cached.name} egress_ip=${cachedIp || "?"}`);
       continue;
     }
     const hitsRecentIp = cachedIp ? usage.recentSelectedIps.includes(cachedIp) : false;
@@ -814,6 +856,11 @@ async function selectProxyNode(
       );
     }
     if (result.ok) {
+      if (isBlockedByRisk(nodeIp)) {
+        blockedByRiskDeferred.push(result);
+        log(`proxy candidate deferred (recent ip rate-limit): ${name} latency=${result.latencyMs ?? "n/a"}ms ip=${nodeIp || "?"}`);
+        continue;
+      }
       const hitsRecentIp = nodeIp ? usage.recentSelectedIps.includes(nodeIp) : false;
       const hasUncheckedCandidate = checked.length < prioritized.length;
       if (hitsRecentIp && hasUncheckedCandidate) {
@@ -902,11 +949,30 @@ async function selectProxyNode(
   const fallbackPool = checked.filter(
     (item) => !item.error && item.geo?.ip && typeof item.latencyMs === "number",
   );
+  const fallbackNoRiskPool = fallbackPool.filter((item) => !isBlockedByRisk(item.geo?.ip));
+  if (fallbackNoRiskPool.length === 0 && blockedByRiskDeferred.length > 0 && !cfg.taskLedger.allowRateLimitedIpFallback) {
+    await writeProxyNodeUsageState(usage);
+    flushDeferredLogSummary();
+    const blockedPreview = Array.from(
+      new Set(
+        blockedByRiskDeferred
+          .map((item) => normalizeIp(item.geo?.ip))
+          .filter((item): item is string => typeof item === "string" && item.length > 0),
+      ),
+    )
+      .slice(0, 10)
+      .join(",");
+    throw new Error(`proxy_node_blocked_by_recent_ip_rate_limit:${blockedPreview || "unknown"}`);
+  }
   const fallbackFreshIpPool = fallbackPool.filter((item) => {
     const ip = normalizeIp(item.geo?.ip);
     return ip ? !usage.recentSelectedIps.includes(ip) : false;
   });
-  const fallbackCandidates = (fallbackFreshIpPool.length > 0 ? fallbackFreshIpPool : fallbackPool).sort(
+  const fallbackCandidates = (
+    fallbackFreshIpPool.length > 0
+      ? fallbackFreshIpPool.filter((item) => !isBlockedByRisk(item.geo?.ip))
+      : fallbackNoRiskPool
+  ).sort(
     (a, b) => (a.latencyMs || Number.MAX_SAFE_INTEGER) - (b.latencyMs || Number.MAX_SAFE_INTEGER),
   );
   for (const fallback of fallbackCandidates) {
@@ -1091,6 +1157,102 @@ function maskEmailHint(value: string | undefined): string | undefined {
   const domain = trimmed.slice(at + 1);
   const visible = local.slice(0, Math.min(2, local.length));
   return `${visible}***@${domain} (localLen=${local.length})`;
+}
+
+function splitEmail(email: string): { domain?: string; localLen?: number } {
+  const trimmed = (email || "").trim();
+  const at = trimmed.indexOf("@");
+  if (at <= 0 || at >= trimmed.length - 1) return {};
+  return {
+    domain: trimmed.slice(at + 1).toLowerCase(),
+    localLen: at,
+  };
+}
+
+function summarizeRiskSignals(requestLog: RequestDiagRecord[], networkLog: NetworkDiagRecord[]): RiskSignalSummary {
+  let hasIpRateLimit = false;
+  let hasSuspiciousActivity = false;
+  let hasExtensibilityError = false;
+  let hasInvalidCaptcha = false;
+  let suspiciousHitCount = 0;
+  let captchaSubmitCount = 0;
+  let maxCaptchaLength = 0;
+  const snippets = new Set<string>();
+
+  const inspectText = (value: string | undefined): void => {
+    const text = (value || "").trim();
+    if (!text) return;
+    if (/too many signups from the same ip/i.test(text)) hasIpRateLimit = true;
+    if (/suspicious activity detected/i.test(text)) hasSuspiciousActivity = true;
+    if (/(suspicious activity detected|too many signups from the same ip)/i.test(text)) {
+      suspiciousHitCount += 1;
+      snippets.add(text.slice(0, 220));
+    }
+  };
+
+  for (const item of requestLog) {
+    if (item.captchaLength != null) {
+      captchaSubmitCount += 1;
+      maxCaptchaLength = Math.max(maxCaptchaLength, item.captchaLength);
+    }
+    for (const code of item.responseErrorCodes || []) {
+      if (/custom-script-error-code_extensibility_error/i.test(code)) hasExtensibilityError = true;
+      if (/invalid-captcha/i.test(code)) hasInvalidCaptcha = true;
+    }
+    inspectText(item.suspiciousSnippet);
+  }
+
+  for (const item of networkLog) {
+    for (const code of item.responseErrorCodes || []) {
+      if (/custom-script-error-code_extensibility_error/i.test(code)) hasExtensibilityError = true;
+      if (/invalid-captcha/i.test(code)) hasInvalidCaptcha = true;
+    }
+    inspectText(item.suspiciousSnippet);
+  }
+
+  return {
+    hasIpRateLimit,
+    hasSuspiciousActivity,
+    hasExtensibilityError,
+    hasInvalidCaptcha,
+    requestCount: requestLog.length,
+    suspiciousHitCount,
+    captchaSubmitCount,
+    maxCaptchaLength: maxCaptchaLength > 0 ? maxCaptchaLength : undefined,
+    snippets: Array.from(snippets).slice(0, 6),
+  };
+}
+
+function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary): string {
+  const normalized = (message || "").toLowerCase();
+  if (risk.hasIpRateLimit) return "too_many_signups_same_ip";
+  if (/risk_control_suspicious_activity/i.test(message) || risk.hasSuspiciousActivity) {
+    return "risk_control_suspicious_activity";
+  }
+  if (risk.hasExtensibilityError || /extensibility_error|custom-script-error-code_extensibility_error/i.test(message)) {
+    return "auth0_extensibility_error";
+  }
+  if (risk.hasInvalidCaptcha || /invalid-captcha|captcha failed/i.test(message)) {
+    return "invalid_captcha";
+  }
+  if (/proxy_node_blocked_by_recent_ip_rate_limit/i.test(message)) {
+    return "proxy_ip_rate_limit_block";
+  }
+  if (/timeout/i.test(normalized)) return "timeout";
+  if (/network/i.test(normalized)) return "network";
+  if (/browser precheck failed/i.test(normalized)) return "browser_precheck_failed";
+  if (/verification email not found/i.test(normalized)) return "verification_email_missing";
+  if (/signup password step failed/i.test(normalized)) return "signup_password_step_failed";
+  if (stage) return `stage_${stage}`;
+  return "unknown";
+}
+
+function safeJsonStringify(payload: unknown): string {
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return "";
+  }
 }
 
 function isLikelyTavilyKey(value: string): boolean {
@@ -2744,6 +2906,17 @@ function loadConfig(): AppConfig {
     inspectKeepOpenMs: Math.max(30_000, toInt(process.env.INSPECT_KEEP_OPEN_MS, 15 * 60_000)),
     inspectChromeNative: toBool(process.env.INSPECT_CHROME_NATIVE, true),
     inspectChromeProfileDir: path.resolve(process.env.INSPECT_CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-inspect-profile")),
+    taskLedger: {
+      enabled: toBool(process.env.TASK_LEDGER_ENABLED, true),
+      dbPath: path.resolve(process.env.TASK_LEDGER_DB_PATH || path.join(OUTPUT_PATH, "registry", "signup-tasks.sqlite")),
+      busyTimeoutMs: Math.max(500, toInt(process.env.TASK_LEDGER_BUSY_TIMEOUT_MS, 5000)),
+      ipRateLimitCooldownMs: Math.max(
+        60_000,
+        toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_COOLDOWN_MS, 12 * 60 * 60 * 1000),
+      ),
+      ipRateLimitMax: Math.max(1, toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_MAX, 64)),
+      allowRateLimitedIpFallback: toBool(process.env.ALLOW_RATE_LIMITED_IP_FALLBACK, false),
+    },
   };
 }
 
@@ -3259,9 +3432,13 @@ async function runSingleMode(
   solver: CaptchaSolver,
   resolvedModel: string,
   mode: "headed" | "headless",
+  ctx: ModeRunContext,
 ): Promise<ResultPayload> {
   const notes: string[] = [];
   let failureStage = "init";
+  const runId = `signup-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const startedAt = new Date().toISOString();
+  const ledger = ctx.taskLedger;
 
   let mailbox: DuckmailSession | null = null;
   let email = cfg.existingEmail || "";
@@ -3295,6 +3472,37 @@ async function runSingleMode(
   const networkLog: NetworkDiagRecord[] = [];
   const requestLog: RequestDiagRecord[] = [];
   let identity: BrowserIdentityProfile | null = null;
+  let selectedProxy: NodeCheckResult | null = null;
+  let selectedGeo: GeoInfo | undefined;
+  let localErrorCode = "";
+  let localErrorMessage = "";
+
+  const { domain: initialEmailDomain, localLen: initialEmailLocalLen } = splitEmail(email);
+  const ledgerRecord: SignupTaskRecord = {
+    runId,
+    batchId: ctx.batchId,
+    mode,
+    attemptIndex: ctx.modeAttempt,
+    modeRetryMax: cfg.modeRetryMax,
+    status: "running",
+    startedAt,
+    modelName: resolvedModel,
+    browserEngine,
+    browserMode: useNativeChrome ? "chrome-native" : browserEngine,
+    emailAddress: email || undefined,
+    emailDomain: initialEmailDomain,
+    emailLocalLen: initialEmailLocalLen,
+    notesJson: safeJsonStringify(notes),
+  };
+  const persistLedgerRecord = (reason: string): void => {
+    if (!ledger) return;
+    try {
+      ledger.upsertTask(ledgerRecord);
+    } catch (error) {
+      log(`task ledger write skipped (${reason}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  persistLedgerRecord("start");
 
   const bindPageEvents = (targetPage: any): void => {
     targetPage.on("request", (req: any) => {
@@ -3402,8 +3610,19 @@ async function runSingleMode(
 
   try {
     failureStage = "proxy_select";
-    const selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode);
+    const blockedIpsFromLedger = new Set<string>();
+    if (ledger) {
+      try {
+        for (const ip of ledger.listRecentRateLimitedIps()) {
+          blockedIpsFromLedger.add(ip);
+        }
+      } catch (error) {
+        log(`task ledger read skipped (recent blocked ips): ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode, blockedIpsFromLedger);
     const geo = selectedProxy.geo;
+    selectedGeo = geo;
     if (!geo || !geo.ip) {
       throw new Error("proxy_geo_missing");
     }
@@ -3413,6 +3632,17 @@ async function runSingleMode(
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip}`);
     notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
+    ledgerRecord.proxyNode = selectedProxy.name;
+    ledgerRecord.proxyIp = normalizeIp(geo.ip);
+    ledgerRecord.proxyCountry = geo.country;
+    ledgerRecord.proxyCity = geo.city;
+    ledgerRecord.proxyTimezone = geo.timezone;
+    ledgerRecord.emailAddress = email;
+    const split = splitEmail(email);
+    ledgerRecord.emailDomain = split.domain;
+    ledgerRecord.emailLocalLen = split.localLen;
+    ledgerRecord.notesJson = safeJsonStringify(notes);
+    persistLedgerRecord("after-proxy-select");
 
     const contextOptions: BrowserContextOptions = {
       locale,
@@ -3549,6 +3779,12 @@ async function runSingleMode(
     if (!browserReady) {
       throw launchErr || new Error("browser launch failed without details");
     }
+    ledgerRecord.browserMode = useNativeChrome ? nativeChromeMode || "persistent" : browserEngine;
+    ledgerRecord.browserUserAgent = identity?.userAgent;
+    ledgerRecord.browserLocale = locale;
+    ledgerRecord.browserTimezone = geo.timezone;
+    ledgerRecord.notesJson = safeJsonStringify(notes);
+    persistLedgerRecord("after-browser-launch");
 
     if (cfg.browserPrecheckEnabled && !args.skipPrecheck) {
       failureStage = "browser_precheck";
@@ -3560,6 +3796,12 @@ async function runSingleMode(
         throw new Error(`browser precheck failed: ${precheck.issues.join(" | ")}`);
       }
       notes.push("browser precheck passed");
+      ledgerRecord.precheckPassed = true;
+      ledgerRecord.notesJson = safeJsonStringify(notes);
+      ledgerRecord.detailsJson = safeJsonStringify({
+        precheck,
+      });
+      persistLedgerRecord("after-precheck");
     }
 
     if (cfg.existingEmail && cfg.existingPassword) {
@@ -3575,6 +3817,9 @@ async function runSingleMode(
         try {
           await completeSignup(page, solver, email, password, cfg);
           notes.push("signup flow submitted");
+          ledgerRecord.signupSubmitted = true;
+          ledgerRecord.notesJson = safeJsonStringify(notes);
+          persistLedgerRecord("after-signup-submit");
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
@@ -3664,6 +3909,44 @@ async function runSingleMode(
     }
     notes.push("default api key fetched");
 
+    const successRisk = summarizeRiskSignals(requestLog, networkLog);
+    ledgerRecord.status = "succeeded";
+    ledgerRecord.completedAt = new Date().toISOString();
+    ledgerRecord.durationMs = Date.parse(ledgerRecord.completedAt) - Date.parse(ledgerRecord.startedAt);
+    ledgerRecord.failureStage = undefined;
+    ledgerRecord.errorCode = undefined;
+    ledgerRecord.errorMessage = undefined;
+    ledgerRecord.verifyPassed = verifyPassed || !!cfg.existingEmail;
+    ledgerRecord.precheckPassed = precheckPassed;
+    ledgerRecord.hasIpRateLimit = successRisk.hasIpRateLimit;
+    ledgerRecord.hasSuspiciousActivity = successRisk.hasSuspiciousActivity;
+    ledgerRecord.hasExtensibilityError = successRisk.hasExtensibilityError;
+    ledgerRecord.hasInvalidCaptcha = successRisk.hasInvalidCaptcha;
+    ledgerRecord.requestCount = successRisk.requestCount;
+    ledgerRecord.suspiciousHitCount = successRisk.suspiciousHitCount;
+    ledgerRecord.captchaSubmitCount = successRisk.captchaSubmitCount;
+    ledgerRecord.maxCaptchaLength = successRisk.maxCaptchaLength;
+    ledgerRecord.apiKeyPrefix = apiKey.slice(0, Math.min(apiKey.length, 12));
+    ledgerRecord.notesJson = safeJsonStringify(notes);
+    ledgerRecord.detailsJson = safeJsonStringify({
+      risk: successRisk,
+      snippets: successRisk.snippets,
+      verificationLink,
+      selectedProxy: selectedProxy
+        ? {
+            name: selectedProxy.name,
+            ip: normalizeIp(selectedProxy.geo?.ip),
+            country: selectedGeo?.country,
+            city: selectedGeo?.city,
+            timezone: selectedGeo?.timezone,
+          }
+        : null,
+      requestLog: requestLog.slice(-80),
+      networkLog: networkLog.slice(-80),
+      notes,
+    });
+    persistLedgerRecord("success");
+
     return {
       mode,
       email,
@@ -3677,6 +3960,9 @@ async function runSingleMode(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const risk = summarizeRiskSignals(requestLog, networkLog);
+    localErrorCode = deriveErrorCode(message, failureStage, risk);
+    localErrorMessage = message;
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, OUTPUT_DIR), networkLog.slice(-180));
       await writeJson(new URL(`request_fail_${mode}.json`, OUTPUT_DIR), requestLog.slice(-180));
@@ -3694,6 +3980,42 @@ async function runSingleMode(
     } catch {
       // best effort diagnostics only
     }
+    ledgerRecord.status = "failed";
+    ledgerRecord.completedAt = new Date().toISOString();
+    ledgerRecord.durationMs = Date.parse(ledgerRecord.completedAt) - Date.parse(ledgerRecord.startedAt);
+    ledgerRecord.failureStage = failureStage;
+    ledgerRecord.errorCode = localErrorCode;
+    ledgerRecord.errorMessage = message;
+    ledgerRecord.verifyPassed = verifyPassed;
+    ledgerRecord.precheckPassed = precheckPassed;
+    ledgerRecord.hasIpRateLimit = risk.hasIpRateLimit;
+    ledgerRecord.hasSuspiciousActivity = risk.hasSuspiciousActivity;
+    ledgerRecord.hasExtensibilityError = risk.hasExtensibilityError;
+    ledgerRecord.hasInvalidCaptcha = risk.hasInvalidCaptcha;
+    ledgerRecord.requestCount = risk.requestCount;
+    ledgerRecord.suspiciousHitCount = risk.suspiciousHitCount;
+    ledgerRecord.captchaSubmitCount = risk.captchaSubmitCount;
+    ledgerRecord.maxCaptchaLength = risk.maxCaptchaLength;
+    ledgerRecord.notesJson = safeJsonStringify(notes);
+    ledgerRecord.detailsJson = safeJsonStringify({
+      failureStage,
+      errorCode: localErrorCode,
+      errorMessage: message,
+      snippets: risk.snippets,
+      selectedProxy: selectedProxy
+        ? {
+            name: selectedProxy.name,
+            ip: normalizeIp(selectedProxy.geo?.ip),
+            country: selectedGeo?.country,
+            city: selectedGeo?.city,
+            timezone: selectedGeo?.timezone,
+          }
+        : null,
+      requestLog: requestLog.slice(-120),
+      networkLog: networkLog.slice(-120),
+      notes,
+    });
+    persistLedgerRecord("failure");
     throw new Error(`mode=${mode} stage=${failureStage}: ${message}`);
   } finally {
     if (context && !useNativeChrome) {
@@ -3846,69 +4168,86 @@ async function run(): Promise<void> {
     log("inspect-sites mode completed");
     return;
   }
-  const requestedMode = args.mode || cfg.runMode;
-  const modes = resolveModeList(requestedMode);
-  log(`start modes=${modes.join(",")} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
-
-  const allModels = await listModels(cfg);
-  const resolvedModel = resolveModelName(cfg.preferredModel, allModels);
-  log(`captcha model selected: ${resolvedModel}`);
-  const solver = new CaptchaSolver(cfg, resolvedModel);
-
-  const results: ResultPayload[] = [];
-  for (const mode of modes) {
-    let result: ResultPayload | null = null;
-    let lastError: Error | null = null;
-
-    for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
-      try {
-        result = await runSingleMode(cfg, args, solver, resolvedModel, mode);
-        if (attempt > 1) {
-          result.notes.push(`mode retry succeeded on attempt ${attempt}`);
-        }
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        lastError = error instanceof Error ? error : new Error(message);
-        if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
-          log(`[${mode}] run attempt ${attempt} failed, retrying: ${message}`);
-          continue;
-        }
-        break;
-      }
-    }
-
-    if (!result) {
-      throw lastError || new Error(`[${mode}] run failed without result`);
-    }
-
-    results.push(result);
-    log(`[${mode}] finished account=${result.email}`);
+  const batchId = `batch-${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const taskLedger = await TaskLedger.open(cfg.taskLedger);
+  if (taskLedger) {
+    log(`task ledger enabled: ${taskLedger.dbPath()}`);
+  } else {
+    log("task ledger disabled");
   }
 
-  const summaryPayload = {
-    requestedMode,
-    completedAt: new Date().toISOString(),
-    model: resolvedModel,
-    results,
-  };
-  await writeJson(new URL("run_summary.json", OUTPUT_DIR), summaryPayload);
+  try {
+    const requestedMode = args.mode || cfg.runMode;
+    const modes = resolveModeList(requestedMode);
+    log(`start modes=${modes.join(",")} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
 
-  const resultOutput: unknown = results.length === 1 ? results[0] : summaryPayload;
-  await writeJson(new URL("result.json", OUTPUT_DIR), resultOutput);
-  log("saved output/result.json");
+    const allModels = await listModels(cfg);
+    const resolvedModel = resolveModelName(cfg.preferredModel, allModels);
+    log(`captcha model selected: ${resolvedModel}`);
+    const solver = new CaptchaSolver(cfg, resolvedModel);
 
-  if (results.length === 1) {
-    const only = results[0]!;
-    console.log(`ACCOUNT=${only.email}`);
-    console.log(`PASSWORD=${only.password}`);
-    console.log(`DEFAULT_API_KEY=${only.apiKey}`);
-  } else {
-    for (const item of results) {
-      console.log(`[${item.mode}] ACCOUNT=${item.email}`);
-      console.log(`[${item.mode}] PASSWORD=${item.password}`);
-      console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
+    const results: ResultPayload[] = [];
+    for (const mode of modes) {
+      let result: ResultPayload | null = null;
+      let lastError: Error | null = null;
+
+      for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
+        try {
+          result = await runSingleMode(cfg, args, solver, resolvedModel, mode, {
+            batchId,
+            modeAttempt: attempt,
+            taskLedger,
+          });
+          if (attempt > 1) {
+            result.notes.push(`mode retry succeeded on attempt ${attempt}`);
+          }
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          lastError = error instanceof Error ? error : new Error(message);
+          if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
+            log(`[${mode}] run attempt ${attempt} failed, retrying: ${message}`);
+            continue;
+          }
+          break;
+        }
+      }
+
+      if (!result) {
+        throw lastError || new Error(`[${mode}] run failed without result`);
+      }
+
+      results.push(result);
+      log(`[${mode}] finished account=${result.email}`);
     }
+
+    const summaryPayload = {
+      batchId,
+      requestedMode,
+      completedAt: new Date().toISOString(),
+      model: resolvedModel,
+      results,
+    };
+    await writeJson(new URL("run_summary.json", OUTPUT_DIR), summaryPayload);
+
+    const resultOutput: unknown = results.length === 1 ? results[0] : summaryPayload;
+    await writeJson(new URL("result.json", OUTPUT_DIR), resultOutput);
+    log("saved output/result.json");
+
+    if (results.length === 1) {
+      const only = results[0]!;
+      console.log(`ACCOUNT=${only.email}`);
+      console.log(`PASSWORD=${only.password}`);
+      console.log(`DEFAULT_API_KEY=${only.apiKey}`);
+    } else {
+      for (const item of results) {
+        console.log(`[${item.mode}] ACCOUNT=${item.email}`);
+        console.log(`[${item.mode}] PASSWORD=${item.password}`);
+        console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
+      }
+    }
+  } finally {
+    taskLedger?.close();
   }
 }
 
