@@ -94,6 +94,12 @@ BROWSER_ENGINE=chrome CHROME_NATIVE_AUTOMATION=true bun run start -- --mode head
 
 `CHROME_NATIVE_AUTOMATION=true` first tries native Chrome CDP attach; if CDP handshake is unavailable in your environment, it automatically falls back to a persistent Chrome profile launched by Playwright.
 
+If you explicitly need UA/platform overrides (disabled by default for lower detection risk), set:
+
+```bash
+CHROME_IDENTITY_OVERRIDE=true bun run start -- --mode headed
+```
+
 If your Python binary is not `python3`, set:
 
 ```bash
@@ -162,12 +168,13 @@ Additional artifacts:
 
 - Registration flow includes image captcha; OCR is done via OpenAI-compatible API in `.env.local`.
 - OCR retries now use a long backoff window, so short-term `429/503` bursts do not fail immediately.
+- Captcha OCR now uses multi-model fallback/consensus (`/models`-driven) when `MODEL_NAME` is unavailable or unstable.
 - Temporary email and verification polling use DuckMail API (`/domains`, `/accounts`, `/token`, `/messages`).
 - Browser automation is executed by Python Camoufox (`camoufox.sync_api.Camoufox`) launched from Bun/TypeScript.
 - Signup requires email verification success; missing verification link is treated as failure.
 - Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.
 - Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
-- SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent `Too many signups from the same IP` history is used to avoid risky egress IP reuse.
+- SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent rate-limit/suspicious history is used to avoid risky egress IP reuse.
 
 Quick query examples (built-in CLI):
 

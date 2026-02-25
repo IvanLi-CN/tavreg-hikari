@@ -37,6 +37,7 @@ interface AppConfig {
   inspectBrowserEngine: BrowserEngine;
   chromeExecutablePath?: string;
   chromeNativeAutomation: boolean;
+  chromeIdentityOverride: boolean;
   chromeStealthJsEnabled: boolean;
   chromeWebrtcHardened: boolean;
   chromeProfileDir: string;
@@ -1030,7 +1031,8 @@ function randomPassword(): string {
   const digits = "0123456789";
   const specials = "!@#$%^&*_-+=";
   const all = `${lowers}${uppers}${digits}${specials}`;
-  const length = randomInt(14, 19);
+  // Keep passwords moderately short to avoid providers that enforce strict max length constraints.
+  const length = randomInt(10, 13);
   const chars = [
     pickChar(lowers),
     pickChar(uppers),
@@ -1093,10 +1095,10 @@ function sanitizeCaptchaText(value: string): string {
   return (value || "").replace(/[^A-Za-z0-9]/g, "").trim();
 }
 
-function normalizeCaptchaForSubmit(raw: string, expectedLength = 6): string {
+function normalizeCaptchaForSubmit(raw: string, maxLength = 10): string {
   const cleaned = sanitizeCaptchaText(raw);
-  if (cleaned.length <= expectedLength) return cleaned;
-  return cleaned.slice(0, expectedLength);
+  if (cleaned.length <= maxLength) return cleaned;
+  return cleaned.slice(0, maxLength);
 }
 
 function parseFormEncoded(raw: string): Record<string, string> {
@@ -1657,15 +1659,18 @@ async function runBrowserPrecheck(
     .filter((ip): ip is string => typeof ip === "string" && ip.length > 0);
   const observedIps = [...probeIps, golden.ipAddress].filter((ip): ip is string => typeof ip === "string" && ip.length > 0);
 
-  for (const probe of [...domesticIps, ...globalIps]) {
-    if (!probe.loaded) {
-      issues.push(
-        `${probe.scope} ip site(${probe.name}) content not loaded${probe.error ? `: ${probe.error}` : ""}`,
-      );
-    }
-    if (!probe.ip) {
-      issues.push(`${probe.scope} ip site(${probe.name}) did not expose an IP address`);
-    }
+  const domesticWithIp = domesticIps.filter((probe) => !!probe.ip);
+  const globalWithIp = globalIps.filter((probe) => !!probe.ip);
+  if (domesticWithIp.length === 0) {
+    issues.push("domestic ip probes did not expose any IP address");
+  }
+  if (globalWithIp.length === 0) {
+    issues.push("global ip probes did not expose any IP address");
+  }
+  if (cfg.browserPrecheckStrict && domesticWithIp.length + globalWithIp.length < 3) {
+    issues.push(
+      `insufficient ip probe coverage: domestic=${domesticWithIp.length}/${domesticIps.length} global=${globalWithIp.length}/${globalIps.length}`,
+    );
   }
 
   if (!/:\/\/(?:www\.)?fingerprint\.goldenowl\.ai(?:\/|$)/i.test(golden.url)) {
@@ -1712,8 +1717,6 @@ async function runBrowserPrecheck(
 
   if (golden.botDetection && !/clean/i.test(golden.botDetection)) {
     issues.push(`bot detection is not clean: ${golden.botDetection}`);
-  } else if (!golden.botDetection && cfg.browserPrecheckStrict) {
-    issues.push("bot detection field missing on goldenowl");
   }
   if (cfg.browserPrecheckCheckHostingProvider && /hosting provider detected/i.test(golden.rawText || "")) {
     issues.push("hosting provider detected on goldenowl");
@@ -1891,6 +1894,21 @@ function isVisionLikeModel(name: string): boolean {
   return /(vl|vision|ocr)/i.test(name);
 }
 
+function rankVisionModel(name: string): number {
+  const lower = name.toLowerCase();
+  let score = 0;
+  if (/qwen3-vl-32b-instruct/.test(lower)) score += 130;
+  if (/qwen2\.5-vl-72b-instruct/.test(lower)) score += 120;
+  if (/qwen.*instruct/.test(lower)) score += 100;
+  if (/deepseek-ocr|ocr/.test(lower)) score += 85;
+  if (/vl/.test(lower)) score += 55;
+  if (/thinking/.test(lower)) score -= 30;
+  if (/30b|32b|34b/.test(lower)) score += 8;
+  if (/70b|72b/.test(lower)) score += 6;
+  if (/235b|a22b/.test(lower)) score += 3;
+  return score;
+}
+
 function levenshtein(a: string, b: string): number {
   const m = a.length;
   const n = b.length;
@@ -1981,19 +1999,44 @@ function resolveModelName(preferred: string, allModels: string[]): string {
     return best.name;
   }
 
-  throw new Error(
-    `MODEL_NAME not found in related vision/OCR models: requested=${preferred}, candidates=${visionModels.join(", ")}`,
-  );
+  const fallback = [...visionModels].sort((a, b) => rankVisionModel(b) - rankVisionModel(a) || a.localeCompare(b))[0];
+  if (fallback) {
+    log(
+      `MODEL_NAME fallback: requested=${preferred} unavailable, use vision model ${fallback} (candidates=${visionModels.length})`,
+    );
+    return fallback;
+  }
+
+  throw new Error(`no usable vision/OCR model found (requested=${preferred})`);
+}
+
+function resolveCaptchaModelCandidates(preferred: string, allModels: string[], maxCount = 4): string[] {
+  const selected = resolveModelName(preferred, allModels);
+  const visionModels = allModels.filter(isVisionLikeModel);
+  const others = visionModels
+    .filter((name) => name !== selected)
+    .sort((a, b) => rankVisionModel(b) - rankVisionModel(a) || a.localeCompare(b));
+  return [selected, ...others].slice(0, Math.max(1, maxCount));
 }
 
 class CaptchaSolver {
   private readonly cfg: AppConfig;
 
-  private readonly model: string;
+  private readonly models: string[];
 
-  constructor(cfg: AppConfig, model: string) {
+  private readonly blockedModels = new Set<string>();
+
+  constructor(cfg: AppConfig, models: string[]) {
     this.cfg = cfg;
-    this.model = model;
+    const deduped = Array.from(new Set(models.map((item) => item.trim()).filter((item) => item.length > 0)));
+    if (deduped.length === 0) {
+      throw new Error("captcha solver requires at least one model");
+    }
+    this.models = deduped;
+  }
+
+  modelList(): string[] {
+    return [...this.models];
   }
 
   private readonly promptVariants = [
@@ -2037,28 +2080,26 @@ class CaptchaSolver {
     const inRange = cleaned.filter((v) => v.length >= 4 && v.length <= 10);
     if (inRange.length === 0) return "";
 
-    const exactSix = inRange.filter((v) => v.length === 6);
-    const pool = exactSix.length > 0 ? exactSix : inRange;
-
     const counts = new Map<string, number>();
-    for (const item of pool) counts.set(item, (counts.get(item) || 0) + 1);
+    for (const item of inRange) counts.set(item, (counts.get(item) || 0) + 1);
 
-    let best = pool[0]!;
-    let bestCount = counts.get(best) || 0;
-    for (const item of pool) {
-      const current = counts.get(item) || 0;
-      if (current > bestCount) {
-        best = item;
-        bestCount = current;
-      }
-    }
-    return best;
+    const ranked = [...counts.entries()].sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      const lenA = a[0].length;
+      const lenB = b[0].length;
+      const typicalA = lenA >= 5 && lenA <= 7 ? 1 : 0;
+      const typicalB = lenB >= 5 && lenB <= 7 ? 1 : 0;
+      if (typicalB !== typicalA) return typicalB - typicalA;
+      if (lenA !== lenB) return Math.abs(6 - lenA) - Math.abs(6 - lenB);
+      return a[0].localeCompare(b[0]);
+    });
+    return ranked[0]?.[0] || "";
   }
 
-  private async callResponsesWithPrompt(pngData: Buffer, prompt: string): Promise<string> {
+  private async callResponsesWithPrompt(model: string, pngData: Buffer, prompt: string): Promise<string> {
     const dataUrl = `data:image/png;base64,${pngData.toString("base64")}`;
     const payload = {
-      model: this.model,
+      model,
       temperature: 0,
       input: [
         {
@@ -2083,13 +2124,13 @@ class CaptchaSolver {
     return sanitizeCaptchaText(this.extractTextFromResponses(response));
   }
 
-  private async callResponses(pngData: Buffer): Promise<string> {
+  private async callResponses(model: string, pngData: Buffer): Promise<string> {
     const results: string[] = [];
     let lastError: Error | null = null;
 
     for (const prompt of this.promptVariants) {
       try {
-        const text = await this.callResponsesWithPrompt(pngData, prompt);
+        const text = await this.callResponsesWithPrompt(model, pngData, prompt);
         if (text) results.push(text);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
@@ -2099,7 +2140,7 @@ class CaptchaSolver {
 
     const picked = this.pickBestCandidate(results);
     if (picked) {
-      log(`captcha OCR candidates (${this.model}): ${results.join(", ")} -> ${picked}`);
+      log(`captcha OCR candidates (${model}): ${results.join(", ")} -> ${picked}`);
       return picked;
     }
 
@@ -2127,33 +2168,52 @@ class CaptchaSolver {
     const deadline = Date.now() + this.cfg.ocrRetryWindowMs;
     let cooldownMs = this.cfg.ocrInitialCooldownMs;
     const errors: string[] = [];
-    let blocked = false;
     let round = 0;
 
     while (Date.now() < deadline) {
       round += 1;
       let transientSeen = false;
+      const roundCandidates: string[] = [];
+      const activeModels = this.models.filter((model) => !this.blockedModels.has(model)).slice(0, 2);
+      if (activeModels.length === 0) break;
 
-      try {
-        const solved = await this.callResponses(pngData);
-        if (solved.length >= 4 && solved.length <= 10) {
-          log(`captcha solved by ${this.model}: ${solved}`);
-          return solved;
-        }
-        errors.push(`${this.model}:invalid_result:${solved}`);
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        errors.push(`${this.model}:${reason}`);
+      for (const model of activeModels) {
+        if (this.blockedModels.has(model)) continue;
 
-        if (this.isPermanentModelError(reason)) {
-          blocked = true;
-        }
-        if (this.isTransient(reason)) {
-          transientSeen = true;
+        try {
+          const solved = await this.callResponses(model, pngData);
+          if (solved.length >= 4 && solved.length <= 10) {
+            roundCandidates.push(solved);
+            const sameCount = roundCandidates.filter((item) => item === solved).length;
+            if (sameCount >= 2) {
+              log(`captcha solved by consensus (${activeModels.join(", ")}): ${solved}`);
+              return solved;
+            }
+          }
+          errors.push(`${model}:invalid_result:${solved}`);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          errors.push(`${model}:${reason}`);
+
+          if (this.isPermanentModelError(reason)) {
+            this.blockedModels.add(model);
+            log(`captcha model blocked by permanent error: ${model}`);
+          }
+          if (this.isTransient(reason)) {
+            transientSeen = true;
+          }
         }
       }
 
-      if (blocked) break;
+      const picked = this.pickBestCandidate(roundCandidates);
+      if (picked) {
+        if (roundCandidates.length > 1) {
+          log(`captcha solved by multi-model vote: ${roundCandidates.join(", ")} -> ${picked}`);
+        } else {
+          log(`captcha solved by single-model fallback: ${picked}`);
+        }
+        return picked;
+      }
       if (!transientSeen) break;
 
       const waitMs = Math.min(cooldownMs, Math.max(0, deadline - Date.now()));
@@ -2164,7 +2224,7 @@ class CaptchaSolver {
     }
 
     throw new Error(
-      `captcha OCR failed within retry window. models=1 blocked=${blocked ? 1 : 0} last_errors=${errors
+      `captcha OCR failed within retry window. models=${this.models.length} blocked=${this.blockedModels.size} last_errors=${errors
         .slice(-8)
         .join(" | ")}`,
     );
@@ -2177,6 +2237,16 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
   if (cfg.duckmailApiKey) {
     headers.Authorization = `Bearer ${cfg.duckmailApiKey}`;
   }
+  const isTransient = (reason: string): boolean => {
+    const lower = reason.toLowerCase();
+    return [":429:", ":500:", ":502:", ":503:", ":504:", "timeout", "network", "temporarily unavailable"].some((k) =>
+      lower.includes(k),
+    );
+  };
+  const isAddressConflict = (reason: string): boolean => {
+    const lower = reason.toLowerCase();
+    return [":409:", "already exists", "already used", "duplicate", "taken"].some((k) => lower.includes(k));
+  };
 
   const domainsResp = await httpJson<{ "hydra:member"?: Array<{ domain?: string }> }>("GET", `${baseUrl}/domains`, {
     headers,
@@ -2201,21 +2271,58 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
     pickedDomain = pickRandom(domains);
   }
 
-  const localPart = randomMailboxLocalPart();
-  const address = `${localPart}@${pickedDomain}`;
   const mailboxPassword = randomPassword();
+  let address = "";
+  let accountId = "";
+  let createdOk = false;
+  const createAttempts = 5;
+  for (let attempt = 1; attempt <= createAttempts; attempt += 1) {
+    address = `${randomMailboxLocalPart()}@${pickedDomain}`;
+    try {
+      const created = await httpJson<JsonRecord>("POST", `${baseUrl}/accounts`, {
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: { address, password: mailboxPassword },
+      });
+      accountId = typeof created.id === "string" ? created.id : "";
+      createdOk = true;
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const retryable = isTransient(message) || isAddressConflict(message);
+      if (!retryable || attempt === createAttempts) {
+        throw error;
+      }
+      const waitMs = 700 * attempt;
+      log(`duckmail account create retry ${attempt}/${createAttempts} after ${waitMs}ms: ${message.split("\n")[0]}`);
+      await delay(waitMs);
+    }
+  }
+  if (!createdOk || !address) {
+    throw new Error("duckmail account create failed");
+  }
 
-  const created = await httpJson<JsonRecord>("POST", `${baseUrl}/accounts`, {
-    headers: { ...headers, "Content-Type": "application/json" },
-    body: { address, password: mailboxPassword },
-  });
-
-  let accountId = typeof created.id === "string" ? created.id : "";
-
-  const tokenResp = await httpJson<JsonRecord>("POST", `${baseUrl}/token`, {
-    headers: { "Content-Type": "application/json" },
-    body: { address, password: mailboxPassword },
-  });
+  let tokenResp: JsonRecord | null = null;
+  const tokenAttempts = 5;
+  for (let attempt = 1; attempt <= tokenAttempts; attempt += 1) {
+    try {
+      tokenResp = await httpJson<JsonRecord>("POST", `${baseUrl}/token`, {
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: { address, password: mailboxPassword },
+      });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isTransient(message) || attempt === tokenAttempts) {
+        throw error;
+      }
+      const waitMs = 700 * attempt;
+      log(`duckmail token retry ${attempt}/${tokenAttempts} after ${waitMs}ms: ${message.split("\n")[0]}`);
+      await delay(waitMs);
+    }
+  }
+  if (!tokenResp) {
+    throw new Error("duckmail token request failed");
+  }
 
   const token = typeof tokenResp.token === "string" ? tokenResp.token : "";
   if (!accountId && typeof tokenResp.id === "string") {
@@ -2416,8 +2523,13 @@ async function solveCaptchaForm(
       if (solved.length !== captchaCode.length) {
         log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
       }
-      if ((await page.locator('input[name="captcha"]').count()) > 0) {
+      const captchaInputCount = await page.locator('input[name="captcha"]').count();
+      if (captchaInputCount > 0) {
         await fillInput(page, 'input[name="captcha"]', captchaCode);
+      } else {
+        log(`${formKind} captcha input missing after image load, retrying without submit`);
+        await page.waitForTimeout(900);
+        continue;
       }
     }
 
@@ -2507,6 +2619,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       }
 
       let hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+      const hasCaptchaImage = (await page.locator('img[alt="captcha"]').count()) > 0;
       if (!hasCaptchaInput) {
         const waitTimeout = attempt === 1 ? 4200 : 1600;
         await page.waitForSelector('input[name="captcha"]', { timeout: waitTimeout }).catch(() => {});
@@ -2524,11 +2637,23 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
           log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
         }
         await fillInput(page, 'input[name="captcha"]', code);
-      } else if (attempt === 1) {
-        // Avoid a blind first submit before captcha widget hydration has settled.
-        log("signup password captcha input missing on first attempt, retrying after wait");
-        await page.waitForTimeout(1200);
-        continue;
+      } else {
+        const challengeHint = await page.evaluate(() => {
+          const text = document.body?.innerText || "";
+          return /challenge question|not a robot|captcha/i.test(text);
+        });
+        const warmupRounds = Math.min(3, cfg.maxCaptchaRounds);
+        if (attempt < warmupRounds) {
+          // Give the challenge widget time to hydrate before trying a no-captcha submit.
+          log(
+            `signup password captcha input missing (image=${hasCaptchaImage ? 1 : 0} challenge_hint=${challengeHint ? 1 : 0}), retrying`,
+          );
+          await page.waitForTimeout(1200);
+          continue;
+        }
+        log(
+          `signup password captcha input still missing after ${attempt} attempts; submitting without captcha once`,
+        );
       }
 
       const passwordDiag = await page.evaluate(() => {
@@ -2588,7 +2713,9 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         if (attempt >= cfg.maxCaptchaRounds) {
           throw new Error("risk_control_suspicious_activity");
         }
-        log(`signup suspicious marker observed on attempt ${attempt}, retrying`);
+        const coolDownMs = Math.min(45_000, 8_000 * attempt);
+        log(`signup suspicious marker observed on attempt ${attempt}, cool down ${coolDownMs}ms before retry`);
+        await page.waitForTimeout(coolDownMs);
         continue;
       }
       if (captchaRefreshed) {
@@ -2838,7 +2965,7 @@ function resolveChromeExecutablePath(raw: string | undefined): string | undefine
 
 function loadConfig(): AppConfig {
   const envRunMode = parseRunMode(process.env.RUN_MODE);
-  const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "camoufox";
+  const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
   const fallbackRunMode: RunMode = toBool(process.env.HEADLESS, false) ? "headless" : "headed";
   const verifyHostAllowlist = parseCsvList(process.env.VERIFY_HOST_ALLOWLIST).map((host) => host.toLowerCase());
@@ -2854,6 +2981,7 @@ function loadConfig(): AppConfig {
     inspectBrowserEngine: envInspectBrowserEngine,
     chromeExecutablePath: resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
     chromeNativeAutomation: toBool(process.env.CHROME_NATIVE_AUTOMATION, true),
+    chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, false),
     chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, false),
     chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
@@ -2885,7 +3013,7 @@ function loadConfig(): AppConfig {
     browserPrecheckEnabled: toBool(process.env.BROWSER_PRECHECK_ENABLED, true),
     browserPrecheckStrict: toBool(process.env.BROWSER_PRECHECK_STRICT, true),
     browserPrecheckCheckHostingProvider: toBool(process.env.BROWSER_PRECHECK_CHECK_HOSTING_PROVIDER, false),
-    requireWebrtcVisible: toBool(process.env.REQUIRE_WEBRTC_VISIBLE, true),
+    requireWebrtcVisible: toBool(process.env.REQUIRE_WEBRTC_VISIBLE, false),
     verifyHostAllowlist:
       verifyHostAllowlist.length > 0
         ? verifyHostAllowlist
@@ -2915,6 +3043,11 @@ function loadConfig(): AppConfig {
         toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_COOLDOWN_MS, 12 * 60 * 60 * 1000),
       ),
       ipRateLimitMax: Math.max(1, toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_MAX, 64)),
+      suspiciousCooldownMs: Math.max(
+        60_000,
+        toInt(process.env.TASK_LEDGER_SUSPICIOUS_COOLDOWN_MS, 24 * 60 * 60 * 1000),
+      ),
+      suspiciousMax: Math.max(1, toInt(process.env.TASK_LEDGER_SUSPICIOUS_MAX, 128)),
       allowRateLimitedIpFallback: toBool(process.env.ALLOW_RATE_LIMITED_IP_FALLBACK, false),
     },
   };
@@ -3616,6 +3749,9 @@ async function runSingleMode(
         for (const ip of ledger.listRecentRateLimitedIps()) {
           blockedIpsFromLedger.add(ip);
         }
+        for (const ip of ledger.listRecentSuspiciousIps()) {
+          blockedIpsFromLedger.add(ip);
+        }
       } catch (error) {
         log(`task ledger read skipped (recent blocked ips): ${error instanceof Error ? error.message : String(error)}`);
       }
@@ -3737,9 +3873,12 @@ async function runSingleMode(
           browser = null;
         }
         browser = await launchBrowser();
-        if (browserEngine === "chrome") {
+        if (browserEngine === "chrome" && cfg.chromeIdentityOverride) {
           identity = buildBrowserIdentityProfile(locale, browser.version?.() || "");
           notes.push(`browser ua profile: ${identity.userAgent}`);
+        } else if (browserEngine === "chrome") {
+          identity = null;
+          notes.push("browser ua profile: native");
         } else {
           identity = null;
         }
@@ -4183,9 +4322,10 @@ async function run(): Promise<void> {
     log(`start modes=${modes.join(",")} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
 
     const allModels = await listModels(cfg);
-    const resolvedModel = resolveModelName(cfg.preferredModel, allModels);
-    log(`captcha model selected: ${resolvedModel}`);
-    const solver = new CaptchaSolver(cfg, resolvedModel);
+    const modelCandidates = resolveCaptchaModelCandidates(cfg.preferredModel, allModels, 5);
+    const resolvedModel = modelCandidates[0]!;
+    log(`captcha model candidates: ${modelCandidates.join(", ")}`);
+    const solver = new CaptchaSolver(cfg, modelCandidates);
 
     const results: ResultPayload[] = [];
     for (const mode of modes) {

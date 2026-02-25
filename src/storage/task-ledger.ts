@@ -8,6 +8,8 @@ export interface TaskLedgerConfig {
   busyTimeoutMs: number;
   ipRateLimitCooldownMs: number;
   ipRateLimitMax: number;
+  suspiciousCooldownMs: number;
+  suspiciousMax: number;
   allowRateLimitedIpFallback: boolean;
 }
 
@@ -334,6 +336,37 @@ export class TaskLedger {
       `,
       )
       .all(sinceIso, Math.max(1, this.cfg.ipRateLimitMax)) as Array<{ proxyIp?: string }>;
+
+    const result: string[] = [];
+    for (const row of rows) {
+      const ip = (row.proxyIp || "").trim();
+      if (!ip) continue;
+      result.push(ip);
+    }
+    return result;
+  }
+
+  listRecentSuspiciousIps(): string[] {
+    const sinceIso = new Date(Date.now() - Math.max(60_000, this.cfg.suspiciousCooldownMs)).toISOString();
+    const rows = this.db
+      .prepare(
+        `
+        SELECT proxy_ip AS proxyIp
+        FROM signup_tasks
+        WHERE status = 'failed'
+          AND proxy_ip IS NOT NULL
+          AND proxy_ip <> ''
+          AND started_at >= ?
+          AND (
+            has_suspicious_activity = 1
+            OR has_extensibility_error = 1
+          )
+        GROUP BY proxy_ip
+        ORDER BY MAX(started_at) DESC
+        LIMIT ?
+      `,
+      )
+      .all(sinceIso, Math.max(1, this.cfg.suspiciousMax)) as Array<{ proxyIp?: string }>;
 
     const result: string[] = [];
     for (const row of rows) {
