@@ -135,6 +135,50 @@ interface NetworkDiagRecord {
   suspiciousSnippet?: string;
 }
 
+interface ResourceDiagRecord {
+  phase: "request" | "response" | "requestfailed";
+  url: string;
+  method?: string;
+  resourceType?: string;
+  status?: number;
+  contentType?: string;
+  bodyPreview?: string;
+  failureText?: string;
+  startedAt: string;
+}
+
+interface PasswordStepSnapshot {
+  collectedAt: string;
+  url: string;
+  hasCaptchaInput: boolean;
+  hasCaptchaImage: boolean;
+  hasCaptchaContainer: boolean;
+  captchaProvider?: string;
+  captchaSiteKeyHint?: string;
+  hasTurnstileResponseInput: boolean;
+  hasRecaptchaResponseInput: boolean;
+  hasHcaptchaResponseInput: boolean;
+  challengeHint: boolean;
+  formInputNames: string[];
+  visibleErrors: string[];
+}
+
+interface BrowserFingerprintSnapshot {
+  collectedAt: string;
+  url: string;
+  navigatorUserAgent?: string;
+  navigatorPlatform?: string;
+  navigatorLanguage?: string;
+  navigatorLanguages?: string[];
+  timezone?: string;
+  webdriver?: boolean;
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  pluginsLength?: number;
+  permissionNotification?: string;
+  permissionNotificationViaQuery?: string;
+}
+
 interface RiskSignalSummary {
   hasIpRateLimit: boolean;
   hasSuspiciousActivity: boolean;
@@ -189,6 +233,8 @@ loadDotenv({ path: ".env.local", quiet: true });
 const OUTPUT_DIR = new URL("../output/", import.meta.url);
 const OUTPUT_PATH = fileURLToPath(OUTPUT_DIR);
 const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
+const AUTH_CHALLENGE_RESOURCE_RE =
+  /(?:challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha|hcaptcha\.com|recaptcha(?:\.net|\.com)|friendly-challenge|cdn\.auth0\.com\/ulp)/i;
 
 function ts(): string {
   return new Date().toISOString();
@@ -1227,6 +1273,7 @@ function summarizeRiskSignals(requestLog: RequestDiagRecord[], networkLog: Netwo
 
 function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary): string {
   const normalized = (message || "").toLowerCase();
+  if (/risk_control_ip_rate_limit/i.test(message)) return "too_many_signups_same_ip";
   if (risk.hasIpRateLimit) return "too_many_signups_same_ip";
   if (/signup_password_captcha_missing/i.test(message)) return "signup_password_captcha_missing";
   if (/risk_control_suspicious_activity/i.test(message) || risk.hasSuspiciousActivity) {
@@ -1386,6 +1433,10 @@ function normalizeIp(value: string | undefined): string | undefined {
 
 function sameIp(a: string | undefined, b: string | undefined): boolean {
   return !!a && !!b && a.trim() === b.trim();
+}
+
+function isChallengeResourceUrl(url: string): boolean {
+  return AUTH_CHALLENGE_RESOURCE_RE.test(url);
 }
 
 function isPublicIpv4(ip: string): boolean {
@@ -2408,6 +2459,127 @@ async function refreshCaptchaImage(page: any, previousSrc: string): Promise<bool
   return false;
 }
 
+async function collectVisibleFormErrors(page: any): Promise<string[]> {
+  return await page.evaluate(() => {
+    const visible = (el: Element): boolean => {
+      const style = window.getComputedStyle(el as HTMLElement);
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    };
+    const nodes = Array.from(
+      document.querySelectorAll('.ulp-error-info,[data-error-code],#error-element-captcha,[role="alert"],.error,[class*="error"]'),
+    );
+    return nodes
+      .filter(visible)
+      .map((el) => (el.textContent || "").trim())
+      .filter((text) => text.length > 0)
+      .slice(0, 10);
+  });
+}
+
+async function collectPasswordStepSnapshot(page: any): Promise<PasswordStepSnapshot> {
+  const payload = await page.evaluate(() => {
+    const captchaContainer = document.querySelector("div[data-captcha-sitekey]");
+    const form = document.querySelector('form[data-form-primary="true"], form');
+    const formInputNames = form
+      ? Array.from(form.querySelectorAll("input[name]"))
+          .map((el) => (el.getAttribute("name") || "").trim())
+          .filter((name) => name.length > 0)
+          .slice(0, 20)
+      : [];
+    const sitekey = (captchaContainer?.getAttribute("data-captcha-sitekey") || "").trim();
+    const bodyText = document.body?.innerText || "";
+    return {
+      url: window.location.href,
+      hasCaptchaInput: !!document.querySelector('input[name="captcha"]'),
+      hasCaptchaImage: !!document.querySelector('img[alt="captcha"]'),
+      hasCaptchaContainer: !!captchaContainer,
+      captchaProvider: (captchaContainer?.getAttribute("data-captcha-provider") || "").trim(),
+      captchaSiteKeyHint:
+        sitekey.length >= 10 ? `${sitekey.slice(0, 8)}...${sitekey.slice(-4)}` : sitekey || undefined,
+      hasTurnstileResponseInput: !!document.querySelector('input[name="cf-turnstile-response"]'),
+      hasRecaptchaResponseInput: !!document.querySelector('input[name="g-recaptcha-response"]'),
+      hasHcaptchaResponseInput: !!document.querySelector('input[name="h-captcha-response"]'),
+      challengeHint: /challenge|captcha|robot|verify/i.test(bodyText),
+      formInputNames,
+    };
+  });
+
+  const visibleErrors = await collectVisibleFormErrors(page).catch(() => []);
+  return {
+    collectedAt: new Date().toISOString(),
+    url: typeof payload.url === "string" ? payload.url : page.url(),
+    hasCaptchaInput: Boolean(payload.hasCaptchaInput),
+    hasCaptchaImage: Boolean(payload.hasCaptchaImage),
+    hasCaptchaContainer: Boolean(payload.hasCaptchaContainer),
+    captchaProvider: typeof payload.captchaProvider === "string" && payload.captchaProvider ? payload.captchaProvider : undefined,
+    captchaSiteKeyHint:
+      typeof payload.captchaSiteKeyHint === "string" && payload.captchaSiteKeyHint ? payload.captchaSiteKeyHint : undefined,
+    hasTurnstileResponseInput: Boolean(payload.hasTurnstileResponseInput),
+    hasRecaptchaResponseInput: Boolean(payload.hasRecaptchaResponseInput),
+    hasHcaptchaResponseInput: Boolean(payload.hasHcaptchaResponseInput),
+    challengeHint: Boolean(payload.challengeHint),
+    formInputNames: Array.isArray(payload.formInputNames)
+      ? (payload.formInputNames as unknown[]).filter((item): item is string => typeof item === "string").slice(0, 20)
+      : [],
+    visibleErrors,
+  };
+}
+
+async function collectBrowserFingerprintSnapshot(page: any): Promise<BrowserFingerprintSnapshot> {
+  const payload = await page.evaluate(async () => {
+    const nav = navigator as Navigator & { webdriver?: boolean; deviceMemory?: number };
+    let permissionNotificationViaQuery: string | undefined;
+    try {
+      if (nav.permissions && typeof nav.permissions.query === "function") {
+        const status = await nav.permissions.query({ name: "notifications" as PermissionName });
+        permissionNotificationViaQuery = status.state;
+      }
+    } catch {
+      permissionNotificationViaQuery = undefined;
+    }
+    return {
+      url: window.location.href,
+      navigatorUserAgent: nav.userAgent,
+      navigatorPlatform: nav.platform,
+      navigatorLanguage: nav.language,
+      navigatorLanguages: Array.isArray(nav.languages) ? nav.languages : [],
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      webdriver: typeof nav.webdriver === "boolean" ? nav.webdriver : undefined,
+      hardwareConcurrency: Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : undefined,
+      deviceMemory: typeof nav.deviceMemory === "number" ? nav.deviceMemory : undefined,
+      pluginsLength: typeof nav.plugins?.length === "number" ? nav.plugins.length : undefined,
+      permissionNotification:
+        typeof window !== "undefined" && "Notification" in window ? Notification.permission : undefined,
+      permissionNotificationViaQuery,
+    };
+  });
+
+  return {
+    collectedAt: new Date().toISOString(),
+    url: typeof payload.url === "string" ? payload.url : page.url(),
+    navigatorUserAgent: typeof payload.navigatorUserAgent === "string" ? payload.navigatorUserAgent : undefined,
+    navigatorPlatform: typeof payload.navigatorPlatform === "string" ? payload.navigatorPlatform : undefined,
+    navigatorLanguage: typeof payload.navigatorLanguage === "string" ? payload.navigatorLanguage : undefined,
+    navigatorLanguages: Array.isArray(payload.navigatorLanguages)
+      ? (payload.navigatorLanguages as unknown[]).filter((item): item is string => typeof item === "string").slice(0, 10)
+      : undefined,
+    timezone: typeof payload.timezone === "string" ? payload.timezone : undefined,
+    webdriver: typeof payload.webdriver === "boolean" ? payload.webdriver : undefined,
+    hardwareConcurrency:
+      typeof payload.hardwareConcurrency === "number" && Number.isFinite(payload.hardwareConcurrency)
+        ? payload.hardwareConcurrency
+        : undefined,
+    deviceMemory:
+      typeof payload.deviceMemory === "number" && Number.isFinite(payload.deviceMemory) ? payload.deviceMemory : undefined,
+    pluginsLength:
+      typeof payload.pluginsLength === "number" && Number.isFinite(payload.pluginsLength) ? payload.pluginsLength : undefined,
+    permissionNotification:
+      typeof payload.permissionNotification === "string" ? payload.permissionNotification : undefined,
+    permissionNotificationViaQuery:
+      typeof payload.permissionNotificationViaQuery === "string" ? payload.permissionNotificationViaQuery : undefined,
+  };
+}
+
 async function clickSubmit(page: any): Promise<void> {
   await page.waitForTimeout(randomInt(220, 780));
   const btn = page.locator('button[type="submit"], input[type="submit"]').first();
@@ -2486,6 +2658,14 @@ async function solveCaptchaForm(
       if (solved.length !== captchaCode.length) {
         log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
       }
+      if (captchaCode.length !== 6) {
+        log(`${formKind} captcha OCR len=${captchaCode.length} (expect=6), refresh and retry`);
+        if (previousCaptchaSrc) {
+          await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
+        }
+        await page.waitForTimeout(700);
+        continue;
+      }
       const captchaInputCount = await page.locator('input[name="captcha"]').count();
       if (captchaInputCount > 0) {
         await fillInput(page, 'input[name="captcha"]', captchaCode);
@@ -2543,7 +2723,19 @@ async function solveCaptchaForm(
   throw new Error(`${formKind} captcha failed after ${maxRounds} rounds`);
 }
 
-async function completeSignup(page: any, solver: CaptchaSolver, email: string, password: string, cfg: AppConfig): Promise<void> {
+interface SignupDiagHooks {
+  onPasswordSnapshot?: (snapshot: PasswordStepSnapshot) => void;
+  onFingerprintSnapshot?: (snapshot: BrowserFingerprintSnapshot) => void;
+}
+
+async function completeSignup(
+  page: any,
+  solver: CaptchaSolver,
+  email: string,
+  password: string,
+  cfg: AppConfig,
+  hooks?: SignupDiagHooks,
+): Promise<void> {
   await safeGoto(page, "https://app.tavily.com/api/auth/login");
   await page.waitForURL(/auth\.tavily\.com/i, { timeout: 90000 });
 
@@ -2574,6 +2766,10 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
     for (let attempt = 1; attempt <= cfg.maxCaptchaRounds; attempt += 1) {
       let previousCaptchaSrc = "";
       if (attempt === 1) {
+        const fingerprintSnapshot = await collectBrowserFingerprintSnapshot(page).catch(() => null);
+        if (fingerprintSnapshot) {
+          hooks?.onFingerprintSnapshot?.(fingerprintSnapshot);
+        }
         await writeFile(new URL("signup_password_before.html", OUTPUT_DIR), await page.content(), "utf8");
         const snap = await page.screenshot({ fullPage: true });
         await writeFile(new URL("signup_password_before.png", OUTPUT_DIR), snap);
@@ -2592,12 +2788,18 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       }
 
       let hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
-      const hasCaptchaImage = (await page.locator('img[alt="captcha"]').count()) > 0;
       if (!hasCaptchaInput) {
         const waitTimeout = attempt === 1 ? 9000 : 3200;
         await page.waitForSelector('input[name="captcha"]', { timeout: waitTimeout }).catch(() => {});
         hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
       }
+
+      const preSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
+      if (preSubmitSnapshot) {
+        hooks?.onPasswordSnapshot?.(preSubmitSnapshot);
+        hasCaptchaInput = hasCaptchaInput || preSubmitSnapshot.hasCaptchaInput;
+      }
+      const hasCaptchaImage = preSubmitSnapshot?.hasCaptchaImage ?? (await page.locator('img[alt="captcha"]').count()) > 0;
 
       if (hasCaptchaInput) {
         previousCaptchaSrc = await page
@@ -2609,25 +2811,34 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         if (solved.length !== code.length) {
           log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
         }
+        if (code.length !== 6) {
+          log(`signup password captcha OCR len=${code.length} (expect=6), refresh and retry`);
+          if (previousCaptchaSrc) {
+            await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
+          }
+          await page.waitForTimeout(700);
+          continue;
+        }
         await fillInput(page, 'input[name="captcha"]', code);
       } else {
-        const challengeHint = await page.evaluate(() => {
-          const text = document.body?.innerText || "";
-          return /challenge question|not a robot|captcha/i.test(text);
-        });
-        const warmupRounds = Math.min(5, cfg.maxCaptchaRounds);
-        if (attempt < warmupRounds) {
-          // Give the challenge widget time to hydrate.
+        const challengeHint = preSubmitSnapshot?.challengeHint || false;
+        const hasCaptchaSignal =
+          challengeHint ||
+          hasCaptchaImage ||
+          Boolean(preSubmitSnapshot?.hasCaptchaContainer) ||
+          Boolean(preSubmitSnapshot?.hasTurnstileResponseInput) ||
+          Boolean(preSubmitSnapshot?.hasRecaptchaResponseInput) ||
+          Boolean(preSubmitSnapshot?.hasHcaptchaResponseInput);
+        const warmupRounds = Math.min(4, cfg.maxCaptchaRounds);
+        if (attempt < warmupRounds && hasCaptchaSignal) {
+          // Give the challenge widget time to hydrate before fallback submit.
           log(
             `signup password captcha input missing (image=${hasCaptchaImage ? 1 : 0} challenge_hint=${challengeHint ? 1 : 0}), retrying`,
           );
           await page.waitForTimeout(2500);
           continue;
         }
-        log(
-          `signup password captcha input still missing after ${attempt} attempts; restart this mode attempt`,
-        );
-        throw new Error("signup_password_captcha_missing");
+        log(`signup password captcha input missing (attempt=${attempt}), continue submit without captcha`);
       }
 
       const passwordDiag = await page.evaluate(() => {
@@ -2664,28 +2875,46 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         log(`signup password captcha refreshed after attempt ${attempt}, retrying`);
       }
 
-      const formErrors: string[] = await page.evaluate(() => {
-        const visible = (el: Element): boolean => {
-          const style = window.getComputedStyle(el as HTMLElement);
-          return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
-        };
-        const nodes = Array.from(
-          document.querySelectorAll(
-            '.ulp-error-info,[data-error-code],#error-element-captcha,[role="alert"],.error,[class*="error"]',
-          ),
-        );
-        const texts = nodes
-          .filter(visible)
-          .map((el) => (el.textContent || "").trim())
-          .filter((t) => t.length > 0)
-          .slice(0, 6);
-        return texts;
-      });
-      log(`signup password step still present after submit (attempt=${attempt}) errors=${formErrors.join(" | ") || "n/a"}`);
+      const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+      const compactErrors = formErrors
+        .map((text) => text.replace(/\s+/g, " ").trim())
+        .filter((text) => text.length > 0)
+        .map((text) => (text.length > 180 ? `${text.slice(0, 180)}...` : text));
+      log(`signup password step still present after submit (attempt=${attempt}) errors=${compactErrors.join(" | ") || "n/a"}`);
+      const hasIpRateLimitMarker = formErrors.some((text) => /Too many signups from the same IP/i.test(text));
+      if (hasIpRateLimitMarker) {
+        throw new Error("risk_control_ip_rate_limit");
+      }
       const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
+      const postSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
+      if (postSubmitSnapshot) {
+        hooks?.onPasswordSnapshot?.(postSubmitSnapshot);
+      }
       if (hasSuspiciousMarker) {
-        // Do not keep hammering the same risked state; let mode-level retry rotate identity/proxy.
+        const challengeEscalated =
+          Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
+          Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
+          Boolean(postSubmitSnapshot?.hasCaptchaContainer);
+        if (challengeEscalated && attempt < cfg.maxCaptchaRounds) {
+          log(`signup password suspicious marker with captcha challenge present (attempt=${attempt}), retrying`);
+          await page.waitForTimeout(1800);
+          continue;
+        }
+        // Let mode-level retry rotate identity/proxy after hard suspicious block.
         throw new Error("risk_control_suspicious_activity");
+      }
+      const hasCaptchaErrorMarker = formErrors.some((text) => /captcha|challenge|robot|verification/i.test(text));
+      if (!hasCaptchaInput) {
+        if (hasCaptchaErrorMarker && attempt < cfg.maxCaptchaRounds) {
+          log(`signup password missing captcha input but server still asks challenge (attempt=${attempt}), retrying`);
+          await page.waitForTimeout(1500);
+          continue;
+        }
+        if (attempt < cfg.maxCaptchaRounds) {
+          log(`signup password submit without captcha not accepted (attempt=${attempt}), retrying`);
+          await page.waitForTimeout(1200);
+          continue;
+        }
       }
       if (captchaRefreshed) {
         continue;
@@ -2701,6 +2930,22 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         log(`signup password submission not accepted on attempt ${attempt}, retrying`);
         continue;
       }
+    }
+    const terminalSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
+    if (terminalSnapshot) {
+      hooks?.onPasswordSnapshot?.(terminalSnapshot);
+    }
+    if (
+      terminalSnapshot &&
+      !terminalSnapshot.hasCaptchaInput &&
+      (terminalSnapshot.hasCaptchaImage ||
+        terminalSnapshot.hasCaptchaContainer ||
+        terminalSnapshot.hasTurnstileResponseInput ||
+        terminalSnapshot.hasRecaptchaResponseInput ||
+        terminalSnapshot.hasHcaptchaResponseInput ||
+        terminalSnapshot.challengeHint)
+    ) {
+      throw new Error("signup_password_captcha_missing");
     }
     throw new Error(`signup password step failed after ${cfg.maxCaptchaRounds} attempts`);
   }
@@ -2957,8 +3202,8 @@ function loadConfig(): AppConfig {
     inspectBrowserEngine: envInspectBrowserEngine,
     chromeExecutablePath: resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
     chromeNativeAutomation: toBool(process.env.CHROME_NATIVE_AUTOMATION, true),
-    chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, false),
-    chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, false),
+    chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, true),
+    chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, true),
     chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
@@ -3041,7 +3286,7 @@ function resolveModeList(mode: RunMode): Array<"headed" | "headless"> {
 }
 
 function shouldRetryModeFailure(message: string): boolean {
-  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|auth0_extensibility_error|invalid_captcha|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|invalid_captcha|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
     message,
   );
 }
@@ -3260,7 +3505,7 @@ async function resolveDebuggingPort(preferredPort: number): Promise<number> {
   });
 }
 
-async function waitForChromeWsEndpoint(port: number, timeoutMs = 20_000): Promise<string> {
+async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promise<string> {
   const endpoint = `http://127.0.0.1:${port}/json/version`;
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -3328,7 +3573,7 @@ async function launchNativeChromeCdp(
 
     try {
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
-      const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 25_000 });
+      const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 45_000 });
       const context = browser.contexts()[0];
       if (!context) {
         await browser.close().catch(() => {});
@@ -3580,6 +3825,9 @@ async function runSingleMode(
   const observedApiKeys = new Set<string>();
   const networkLog: NetworkDiagRecord[] = [];
   const requestLog: RequestDiagRecord[] = [];
+  const resourceLog: ResourceDiagRecord[] = [];
+  const passwordStepSnapshots: PasswordStepSnapshot[] = [];
+  const browserFingerprintSnapshots: BrowserFingerprintSnapshot[] = [];
   let identity: BrowserIdentityProfile | null = null;
   let selectedProxy: NodeCheckResult | null = null;
   let selectedGeo: GeoInfo | undefined;
@@ -3614,10 +3862,25 @@ async function runSingleMode(
   persistLedgerRecord("start");
 
   const bindPageEvents = (targetPage: any): void => {
+    const pushResourceLog = (entry: ResourceDiagRecord): void => {
+      resourceLog.push(entry);
+      if (resourceLog.length > 320) resourceLog.shift();
+    };
+
     targetPage.on("request", (req: any) => {
       try {
         const url = String(req.url?.() || "");
         const method = String(req.method?.() || "GET").toUpperCase();
+        const resourceType = String(req.resourceType?.() || "");
+        if (isChallengeResourceUrl(url)) {
+          pushResourceLog({
+            phase: "request",
+            url,
+            method,
+            resourceType: resourceType || undefined,
+            startedAt: new Date().toISOString(),
+          });
+        }
         if (method !== "POST") return;
         if (!/https?:\/\/auth\.tavily\.com\/u\/(signup|login)\//i.test(url)) return;
 
@@ -3645,15 +3908,60 @@ async function runSingleMode(
       }
     });
 
+    targetPage.on("requestfailed", (req: any) => {
+      try {
+        const url = String(req.url?.() || "");
+        if (!isChallengeResourceUrl(url) && !/https?:\/\/(app|auth)\.tavily\.com/i.test(url)) return;
+        const method = String(req.method?.() || "GET").toUpperCase();
+        const resourceType = String(req.resourceType?.() || "");
+        const failure = req.failure?.();
+        pushResourceLog({
+          phase: "requestfailed",
+          url,
+          method,
+          resourceType: resourceType || undefined,
+          failureText:
+            failure && typeof failure.errorText === "string" && failure.errorText
+              ? failure.errorText
+              : JSON.stringify(failure || {}).slice(0, 160),
+          startedAt: new Date().toISOString(),
+        });
+      } catch {
+        // ignore request-failed diagnostics errors
+      }
+    });
+
     targetPage.on("response", async (resp: any) => {
       try {
         const url = String(resp.url?.() || "");
+        const status = Number(resp.status?.() || 0);
+        const req = typeof resp.request === "function" ? resp.request() : null;
+        const method = String(req?.method?.() || "GET").toUpperCase();
+        const resourceType = String(req?.resourceType?.() || "");
+        const headers = resp.headers?.() || {};
+        const contentType = String(headers["content-type"] || "");
+        const isChallengeResource = isChallengeResourceUrl(url);
+
+        if (isChallengeResource) {
+          let challengeBodyPreview: string | undefined;
+          if (status >= 400 && /(json|text\/|javascript|html)/i.test(contentType)) {
+            challengeBodyPreview = (await resp.text().catch(() => "")).slice(0, 320) || undefined;
+          }
+          pushResourceLog({
+            phase: "response",
+            url,
+            method,
+            resourceType: resourceType || undefined,
+            status,
+            contentType: contentType || undefined,
+            bodyPreview: challengeBodyPreview,
+            startedAt: new Date().toISOString(),
+          });
+        }
+
         if (!/https?:\/\/(app|auth)\.tavily\.com/i.test(url)) return;
         if (/\.(?:css|js|png|jpg|jpeg|webp|gif|svg|woff2?|ttf|ico)(?:\?|$)/i.test(url)) return;
 
-        const status = Number(resp.status?.() || 0);
-        const headers = resp.headers?.() || {};
-        const contentType = String(headers["content-type"] || "");
         const shouldSampleBody = /\/api\/|json|text\//i.test(`${url} ${contentType}`);
         let bodyText = "";
         if (shouldSampleBody) {
@@ -3935,7 +4243,16 @@ async function runSingleMode(
 
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
-          await completeSignup(page, solver, email, password, cfg);
+          await completeSignup(page, solver, email, password, cfg, {
+            onPasswordSnapshot: (snapshot) => {
+              passwordStepSnapshots.push(snapshot);
+              if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
+            },
+            onFingerprintSnapshot: (snapshot) => {
+              browserFingerprintSnapshots.push(snapshot);
+              if (browserFingerprintSnapshots.length > 20) browserFingerprintSnapshots.shift();
+            },
+          });
           notes.push("signup flow submitted");
           ledgerRecord.signupSubmitted = true;
           ledgerRecord.notesJson = safeJsonStringify(notes);
@@ -4063,6 +4380,9 @@ async function runSingleMode(
         : null,
       requestLog: requestLog.slice(-80),
       networkLog: networkLog.slice(-80),
+      resourceLog: resourceLog.slice(-120),
+      passwordStepSnapshots: passwordStepSnapshots.slice(-80),
+      browserFingerprintSnapshots: browserFingerprintSnapshots.slice(-12),
       notes,
     });
     persistLedgerRecord("success");
@@ -4086,6 +4406,7 @@ async function runSingleMode(
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, OUTPUT_DIR), networkLog.slice(-180));
       await writeJson(new URL(`request_fail_${mode}.json`, OUTPUT_DIR), requestLog.slice(-180));
+      await writeJson(new URL(`resource_fail_${mode}.json`, OUTPUT_DIR), resourceLog.slice(-220));
       await writeJson(new URL(`failure_context_${mode}.json`, OUTPUT_DIR), {
         failedAt: new Date().toISOString(),
         stage: failureStage,
@@ -4134,6 +4455,9 @@ async function runSingleMode(
         : null,
       requestLog: requestLog.slice(-120),
       networkLog: networkLog.slice(-120),
+      resourceLog: resourceLog.slice(-200),
+      passwordStepSnapshots: passwordStepSnapshots.slice(-120),
+      browserFingerprintSnapshots: browserFingerprintSnapshots.slice(-20),
       notes,
     });
     persistLedgerRecord("failure");
