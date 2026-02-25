@@ -6,7 +6,13 @@ Workflow document: `docs/WORKFLOW.md`
 
 ## Prerequisites
 
-1. Keep `.env.local` in project root (already ignored by git):
+1. Copy `.env.example` to `.env.local` in project root (already ignored by git), then fill required values:
+
+```bash
+cp .env.example .env.local
+```
+
+Template preview:
 
 ```env
 OPENAI_KEY=...
