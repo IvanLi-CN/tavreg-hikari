@@ -107,6 +107,31 @@ interface ResultPayload {
   notes: string[];
 }
 
+interface RequestDiagRecord {
+  url: string;
+  method: string;
+  contentType?: string;
+  bodyLength?: number;
+  postKeys?: string[];
+  captchaLength?: number;
+  captchaTokenLength?: number;
+  stateLength?: number;
+  passwordLength?: number;
+  emailHint?: string;
+  responseStatus?: number;
+  responseErrorCodes?: string[];
+  suspiciousSnippet?: string;
+}
+
+interface NetworkDiagRecord {
+  url: string;
+  status: number;
+  contentType: string;
+  bodyPreview?: string;
+  responseErrorCodes?: string[];
+  suspiciousSnippet?: string;
+}
+
 interface BrowserIdentityProfile {
   userAgent: string;
   navigatorPlatform: string;
@@ -1000,6 +1025,66 @@ function randomMailboxLocalPart(): string {
 
 function sanitizeCaptchaText(value: string): string {
   return (value || "").replace(/[^A-Za-z0-9]/g, "").trim();
+}
+
+function parseFormEncoded(raw: string): Record<string, string> {
+  const parsed: Record<string, string> = {};
+  const params = new URLSearchParams(raw);
+  for (const [key, value] of params.entries()) {
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function flattenJsonForLengths(value: unknown, prefix = "", out: Record<string, string> = {}): Record<string, string> {
+  if (value == null) return out;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    out[prefix || "value"] = String(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => {
+      flattenJsonForLengths(item, prefix ? `${prefix}.${index}` : String(index), out);
+    });
+    return out;
+  }
+  if (typeof value === "object") {
+    for (const [key, nested] of Object.entries(value as JsonRecord)) {
+      flattenJsonForLengths(nested, prefix ? `${prefix}.${key}` : key, out);
+    }
+  }
+  return out;
+}
+
+function parseRequestPayload(raw: string, contentType: string): Record<string, string> {
+  const normalizedType = contentType.toLowerCase();
+  if (!raw) return {};
+  if (normalizedType.includes("application/json")) {
+    try {
+      return flattenJsonForLengths(JSON.parse(raw));
+    } catch {
+      return {};
+    }
+  }
+  if (normalizedType.includes("application/x-www-form-urlencoded")) {
+    return parseFormEncoded(raw);
+  }
+  // Auth0 form submissions can occasionally omit the content-type header in intercepted requests.
+  if (raw.includes("=") && raw.includes("&")) {
+    return parseFormEncoded(raw);
+  }
+  return {};
+}
+
+function maskEmailHint(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  const at = trimmed.indexOf("@");
+  if (at <= 0) return undefined;
+  const local = trimmed.slice(0, at);
+  const domain = trimmed.slice(at + 1);
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}***@${domain} (localLen=${local.length})`;
 }
 
 function isLikelyTavilyKey(value: string): boolean {
@@ -3181,10 +3266,42 @@ async function runSingleMode(
   let nativeChromeContext: any = null;
   let nativeChromeMode: "cdp" | "persistent" | null = null;
   const observedApiKeys = new Set<string>();
-  const networkLog: Array<{ url: string; status: number; contentType: string; bodyPreview?: string }> = [];
+  const networkLog: NetworkDiagRecord[] = [];
+  const requestLog: RequestDiagRecord[] = [];
   let identity: BrowserIdentityProfile | null = null;
 
   const bindPageEvents = (targetPage: any): void => {
+    targetPage.on("request", (req: any) => {
+      try {
+        const url = String(req.url?.() || "");
+        const method = String(req.method?.() || "GET").toUpperCase();
+        if (method !== "POST") return;
+        if (!/https?:\/\/auth\.tavily\.com\/u\/(signup|login)\//i.test(url)) return;
+
+        const headers = (req.headers?.() || {}) as Record<string, string>;
+        const contentType = String(headers["content-type"] || "");
+        const postData = String(req.postData?.() || "");
+        const payload = parseRequestPayload(postData, contentType);
+        const postKeys = Object.keys(payload).slice(0, 18);
+
+        requestLog.push({
+          url,
+          method,
+          contentType: contentType || undefined,
+          bodyLength: postData.length || undefined,
+          postKeys: postKeys.length ? postKeys : undefined,
+          captchaLength: payload["captcha"]?.length,
+          captchaTokenLength: payload["cf-turnstile-response"]?.length || payload["g-recaptcha-response"]?.length,
+          stateLength: payload["state"]?.length,
+          passwordLength: payload["password"]?.length,
+          emailHint: maskEmailHint(payload["email"]),
+        });
+        if (requestLog.length > 200) requestLog.shift();
+      } catch {
+        // ignore request sampling errors
+      }
+    });
+
     targetPage.on("response", async (resp: any) => {
       try {
         const url = String(resp.url?.() || "");
@@ -3200,13 +3317,52 @@ async function runSingleMode(
           bodyText = await resp.text();
         }
 
+        let responseErrorCodes: string[] | undefined;
+        let suspiciousSnippet: string | undefined;
+        if (bodyText) {
+          const matchedCodes = Array.from(bodyText.matchAll(/data-error-code=\"([^\"]+)\"/g))
+            .map((entry) => entry[1])
+            .filter((entry): entry is string => typeof entry === "string" && /^[a-z0-9_-]{3,80}$/i.test(entry));
+          if (matchedCodes.length > 0) {
+            responseErrorCodes = Array.from(new Set(matchedCodes)).slice(0, 10);
+          }
+
+          const riskPatterns: RegExp[] = [
+            /Suspicious activity detected[\s\S]{0,180}/i,
+            /Too many signups from the same IP[\s\S]{0,180}/i,
+          ];
+          for (const pattern of riskPatterns) {
+            const match = bodyText.match(pattern);
+            if (match?.[0]) {
+              suspiciousSnippet = match[0].replace(/\s+/g, " ").trim();
+              break;
+            }
+          }
+        }
+
         networkLog.push({
           url,
           status,
           contentType,
           bodyPreview: bodyText ? bodyText.slice(0, 600) : undefined,
+          responseErrorCodes,
+          suspiciousSnippet,
         });
         if (networkLog.length > 240) networkLog.shift();
+
+        if (responseErrorCodes || suspiciousSnippet) {
+          const normalizedUrl = url.toLowerCase();
+          for (let idx = requestLog.length - 1; idx >= 0; idx -= 1) {
+            const reqEntry = requestLog[idx];
+            if (!reqEntry) continue;
+            if (reqEntry.responseStatus != null) continue;
+            if (!normalizedUrl.startsWith(reqEntry.url.toLowerCase())) continue;
+            reqEntry.responseStatus = status;
+            reqEntry.responseErrorCodes = responseErrorCodes;
+            reqEntry.suspiciousSnippet = suspiciousSnippet;
+            break;
+          }
+        }
 
         if (status >= 400 && !/\/api\//i.test(url)) return;
         if (!shouldSampleBody) return;
@@ -3497,6 +3653,7 @@ async function runSingleMode(
     const message = error instanceof Error ? error.message : String(error);
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, OUTPUT_DIR), networkLog.slice(-180));
+      await writeJson(new URL(`request_fail_${mode}.json`, OUTPUT_DIR), requestLog.slice(-180));
       await writeJson(new URL(`failure_context_${mode}.json`, OUTPUT_DIR), {
         failedAt: new Date().toISOString(),
         stage: failureStage,
