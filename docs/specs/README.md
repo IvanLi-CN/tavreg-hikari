@@ -6,4 +6,4 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
-| 2njxq | 增加 env 模板并提供本地初始化指引 | 已完成 | `2njxq-env-example-bootstrap/SPEC.md` | 2026-02-25 | - |
+| 2njxq | 增加 env 模板并提供本地初始化指引 | 已完成 | `2njxq-env-example-bootstrap/SPEC.md` | 2026-02-25 | PR #1 |
