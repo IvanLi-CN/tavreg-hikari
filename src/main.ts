@@ -1027,6 +1027,12 @@ function sanitizeCaptchaText(value: string): string {
   return (value || "").replace(/[^A-Za-z0-9]/g, "").trim();
 }
 
+function normalizeCaptchaForSubmit(raw: string, expectedLength = 6): string {
+  const cleaned = sanitizeCaptchaText(raw);
+  if (cleaned.length <= expectedLength) return cleaned;
+  return cleaned.slice(0, expectedLength);
+}
+
 function parseFormEncoded(raw: string): Record<string, string> {
   const parsed: Record<string, string> = {};
   const params = new URLSearchParams(raw);
@@ -2243,7 +2249,11 @@ async function solveCaptchaForm(
     if (hasCaptcha) {
       previousCaptchaSrc = await page.$eval('img[alt="captcha"]', (el: any) => String(el.src || ""));
       const pngData = await getProcessedCaptchaPng(page);
-      const captchaCode = await solver.solve(pngData);
+      const solved = await solver.solve(pngData);
+      const captchaCode = normalizeCaptchaForSubmit(solved);
+      if (solved.length !== captchaCode.length) {
+        log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
+      }
       if ((await page.locator('input[name="captcha"]').count()) > 0) {
         await fillInput(page, 'input[name="captcha"]', captchaCode);
       }
@@ -2334,13 +2344,29 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         }
       }
 
-      if ((await page.locator('input[name="captcha"]').count()) > 0) {
+      let hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+      if (!hasCaptchaInput) {
+        const waitTimeout = attempt === 1 ? 4200 : 1600;
+        await page.waitForSelector('input[name="captcha"]', { timeout: waitTimeout }).catch(() => {});
+        hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+      }
+
+      if (hasCaptchaInput) {
         previousCaptchaSrc = await page
           .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
           .catch(() => "");
         const pngData = await getProcessedCaptchaPng(page);
-        const code = await solver.solve(pngData);
+        const solved = await solver.solve(pngData);
+        const code = normalizeCaptchaForSubmit(solved);
+        if (solved.length !== code.length) {
+          log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
+        }
         await fillInput(page, 'input[name="captcha"]', code);
+      } else if (attempt === 1) {
+        // Avoid a blind first submit before captcha widget hydration has settled.
+        log("signup password captcha input missing on first attempt, retrying after wait");
+        await page.waitForTimeout(1200);
+        continue;
       }
 
       const passwordDiag = await page.evaluate(() => {
