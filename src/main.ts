@@ -2669,7 +2669,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       let hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
       const hasCaptchaImage = (await page.locator('img[alt="captcha"]').count()) > 0;
       if (!hasCaptchaInput) {
-        const waitTimeout = attempt === 1 ? 4200 : 1600;
+        const waitTimeout = attempt === 1 ? 9000 : 3200;
         await page.waitForSelector('input[name="captcha"]', { timeout: waitTimeout }).catch(() => {});
         hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
       }
@@ -2690,13 +2690,13 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
           const text = document.body?.innerText || "";
           return /challenge question|not a robot|captcha/i.test(text);
         });
-        const warmupRounds = Math.min(3, cfg.maxCaptchaRounds);
+        const warmupRounds = Math.min(5, cfg.maxCaptchaRounds);
         if (attempt < warmupRounds) {
           // Give the challenge widget time to hydrate.
           log(
             `signup password captcha input missing (image=${hasCaptchaImage ? 1 : 0} challenge_hint=${challengeHint ? 1 : 0}), retrying`,
           );
-          await page.waitForTimeout(1200);
+          await page.waitForTimeout(2500);
           continue;
         }
         log(
