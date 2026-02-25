@@ -1095,7 +1095,7 @@ function sanitizeCaptchaText(value: string): string {
   return (value || "").replace(/[^A-Za-z0-9]/g, "").trim();
 }
 
-function normalizeCaptchaForSubmit(raw: string, maxLength = 10): string {
+function normalizeCaptchaForSubmit(raw: string, maxLength = 6): string {
   const cleaned = sanitizeCaptchaText(raw);
   if (cleaned.length <= maxLength) return cleaned;
   return cleaned.slice(0, maxLength);
@@ -1228,6 +1228,7 @@ function summarizeRiskSignals(requestLog: RequestDiagRecord[], networkLog: Netwo
 function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary): string {
   const normalized = (message || "").toLowerCase();
   if (risk.hasIpRateLimit) return "too_many_signups_same_ip";
+  if (/signup_password_captcha_missing/i.test(message)) return "signup_password_captcha_missing";
   if (/risk_control_suspicious_activity/i.test(message) || risk.hasSuspiciousActivity) {
     return "risk_control_suspicious_activity";
   }
@@ -1897,10 +1898,12 @@ function isVisionLikeModel(name: string): boolean {
 function rankVisionModel(name: string): number {
   const lower = name.toLowerCase();
   let score = 0;
-  if (/qwen3-vl-32b-instruct/.test(lower)) score += 130;
-  if (/qwen2\.5-vl-72b-instruct/.test(lower)) score += 120;
+  // Empirically the 72B VL model is more stable on Tavily's SVG captcha set.
+  if (/qwen2\.5-vl-72b-instruct/.test(lower)) score += 150;
+  if (/qwen3-vl-32b-instruct/.test(lower)) score += 135;
+  if (/deepseek-ocr/.test(lower)) score += 145;
   if (/qwen.*instruct/.test(lower)) score += 100;
-  if (/deepseek-ocr|ocr/.test(lower)) score += 85;
+  if (/ocr/.test(lower)) score += 95;
   if (/vl/.test(lower)) score += 55;
   if (/thinking/.test(lower)) score -= 30;
   if (/30b|32b|34b/.test(lower)) score += 8;
@@ -2040,6 +2043,7 @@ class CaptchaSolver {
   }
 
   private readonly promptVariants = [
+    "Read this captcha exactly. Return exactly 6 letters/digits, keep case, no spaces, no punctuation.",
     "OCR captcha text from this image. Return only visible letters and digits, no explanation.",
     "Read this captcha exactly (case-sensitive). Reply with only the letters and numbers.",
     "Return only the captcha code from this image, no spaces, no punctuation.",
@@ -2077,7 +2081,7 @@ class CaptchaSolver {
     const cleaned = candidates.map((v) => sanitizeCaptchaText(v)).filter((v) => v.length > 0);
     if (cleaned.length === 0) return "";
 
-    const inRange = cleaned.filter((v) => v.length >= 4 && v.length <= 10);
+    const inRange = cleaned.filter((v) => v.length >= 5 && v.length <= 7);
     if (inRange.length === 0) return "";
 
     const counts = new Map<string, number>();
@@ -2085,6 +2089,38 @@ class CaptchaSolver {
 
     const ranked = [...counts.entries()].sort((a, b) => {
       if (b[1] !== a[1]) return b[1] - a[1];
+      const lenA = a[0].length;
+      const lenB = b[0].length;
+      const typicalA = lenA >= 5 && lenA <= 7 ? 1 : 0;
+      const typicalB = lenB >= 5 && lenB <= 7 ? 1 : 0;
+      if (typicalB !== typicalA) return typicalB - typicalA;
+      if (lenA !== lenB) return Math.abs(6 - lenA) - Math.abs(6 - lenB);
+      return a[0].localeCompare(b[0]);
+    });
+    return ranked[0]?.[0] || "";
+  }
+
+  private pickBestModelCandidate(candidates: Array<{ text: string; model: string }>): string {
+    const records = candidates
+      .map((item) => ({
+        text: sanitizeCaptchaText(item.text),
+        model: item.model,
+      }))
+      .filter((item) => item.text.length >= 5 && item.text.length <= 7);
+    if (records.length === 0) return "";
+
+    const scores = new Map<string, { count: number; modelScore: number }>();
+    for (const item of records) {
+      const prev = scores.get(item.text) || { count: 0, modelScore: 0 };
+      scores.set(item.text, {
+        count: prev.count + 1,
+        modelScore: prev.modelScore + Math.max(1, rankVisionModel(item.model)),
+      });
+    }
+
+    const ranked = [...scores.entries()].sort((a, b) => {
+      if (b[1].count !== a[1].count) return b[1].count - a[1].count;
+      if (b[1].modelScore !== a[1].modelScore) return b[1].modelScore - a[1].modelScore;
       const lenA = a[0].length;
       const lenB = b[0].length;
       const typicalA = lenA >= 5 && lenA <= 7 ? 1 : 0;
@@ -2173,8 +2209,16 @@ class CaptchaSolver {
     while (Date.now() < deadline) {
       round += 1;
       let transientSeen = false;
-      const roundCandidates: string[] = [];
-      const activeModels = this.models.filter((model) => !this.blockedModels.has(model)).slice(0, 2);
+      const roundCandidates: Array<{ text: string; model: string }> = [];
+      const available = this.models.filter((model) => !this.blockedModels.has(model));
+      const maxActive = Math.min(2, available.length);
+      const offset = available.length > 0 ? ((round - 1) * maxActive) % available.length : 0;
+      const activeModels: string[] = [];
+      for (let i = 0; i < maxActive; i += 1) {
+        const candidate = available[(offset + i) % available.length];
+        if (!candidate || activeModels.includes(candidate)) continue;
+        activeModels.push(candidate);
+      }
       if (activeModels.length === 0) break;
 
       for (const model of activeModels) {
@@ -2182,9 +2226,9 @@ class CaptchaSolver {
 
         try {
           const solved = await this.callResponses(model, pngData);
-          if (solved.length >= 4 && solved.length <= 10) {
-            roundCandidates.push(solved);
-            const sameCount = roundCandidates.filter((item) => item === solved).length;
+          if (solved.length >= 5 && solved.length <= 7) {
+            roundCandidates.push({ text: solved, model });
+            const sameCount = roundCandidates.filter((item) => item.text === solved).length;
             if (sameCount >= 2) {
               log(`captcha solved by consensus (${activeModels.join(", ")}): ${solved}`);
               return solved;
@@ -2205,10 +2249,11 @@ class CaptchaSolver {
         }
       }
 
-      const picked = this.pickBestCandidate(roundCandidates);
+      const picked = this.pickBestModelCandidate(roundCandidates);
       if (picked) {
         if (roundCandidates.length > 1) {
-          log(`captcha solved by multi-model vote: ${roundCandidates.join(", ")} -> ${picked}`);
+          const explain = roundCandidates.map((item) => `${item.model}:${item.text}`).join(", ");
+          log(`captcha solved by multi-model vote: ${explain} -> ${picked}`);
         } else {
           log(`captcha solved by single-model fallback: ${picked}`);
         }
@@ -2497,6 +2542,7 @@ async function solveCaptchaForm(
   email: string,
   maxRounds: number,
 ): Promise<void> {
+  await page.waitForTimeout(randomInt(900, 2600));
   const emailSelector = formKind === "signup" ? 'input[name="email"]' : 'input[name="username"]';
   const successUrlPattern =
     formKind === "signup"
@@ -2598,6 +2644,8 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
   }
 
   if (/\/u\/signup\/password/i.test(page.url())) {
+    // Slow down on password step to reduce bot-like burst behavior.
+    await page.waitForTimeout(randomInt(3000, 8500));
     for (let attempt = 1; attempt <= cfg.maxCaptchaRounds; attempt += 1) {
       let previousCaptchaSrc = "";
       if (attempt === 1) {
@@ -2644,7 +2692,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         });
         const warmupRounds = Math.min(3, cfg.maxCaptchaRounds);
         if (attempt < warmupRounds) {
-          // Give the challenge widget time to hydrate before trying a no-captcha submit.
+          // Give the challenge widget time to hydrate.
           log(
             `signup password captcha input missing (image=${hasCaptchaImage ? 1 : 0} challenge_hint=${challengeHint ? 1 : 0}), retrying`,
           );
@@ -2652,8 +2700,9 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
           continue;
         }
         log(
-          `signup password captcha input still missing after ${attempt} attempts; submitting without captcha once`,
+          `signup password captcha input still missing after ${attempt} attempts; restart this mode attempt`,
         );
+        throw new Error("signup_password_captcha_missing");
       }
 
       const passwordDiag = await page.evaluate(() => {
@@ -2710,13 +2759,8 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       log(`signup password step still present after submit (attempt=${attempt}) errors=${formErrors.join(" | ") || "n/a"}`);
       const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
       if (hasSuspiciousMarker) {
-        if (attempt >= cfg.maxCaptchaRounds) {
-          throw new Error("risk_control_suspicious_activity");
-        }
-        const coolDownMs = Math.min(45_000, 8_000 * attempt);
-        log(`signup suspicious marker observed on attempt ${attempt}, cool down ${coolDownMs}ms before retry`);
-        await page.waitForTimeout(coolDownMs);
-        continue;
+        // Do not keep hammering the same risked state; let mode-level retry rotate identity/proxy.
+        throw new Error("risk_control_suspicious_activity");
       }
       if (captchaRefreshed) {
         continue;
@@ -3065,7 +3109,7 @@ function resolveModeList(mode: RunMode): Array<"headed" | "headless"> {
 }
 
 function shouldRetryModeFailure(message: string): boolean {
-  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|auth0_extensibility_error|invalid_captcha|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
     message,
   );
 }
@@ -3686,10 +3730,15 @@ async function runSingleMode(
 
         let responseErrorCodes: string[] | undefined;
         let suspiciousSnippet: string | undefined;
-        if (bodyText) {
+        if (bodyText && status >= 400) {
           const matchedCodes = Array.from(bodyText.matchAll(/data-error-code=\"([^\"]+)\"/g))
             .map((entry) => entry[1])
-            .filter((entry): entry is string => typeof entry === "string" && /^[a-z0-9_-]{3,80}$/i.test(entry));
+            .filter(
+              (entry): entry is string =>
+                typeof entry === "string" &&
+                /^[a-z0-9_-]{3,80}$/i.test(entry) &&
+                !/^password-policy-/i.test(entry),
+            );
           if (matchedCodes.length > 0) {
             responseErrorCodes = Array.from(new Set(matchedCodes)).slice(0, 10);
           }
