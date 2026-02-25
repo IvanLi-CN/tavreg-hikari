@@ -37,6 +37,7 @@ interface AppConfig {
   chromeExecutablePath?: string;
   chromeNativeAutomation: boolean;
   chromeStealthJsEnabled: boolean;
+  chromeWebrtcHardened: boolean;
   chromeProfileDir: string;
   chromeRemoteDebuggingPort: number;
   slowMoMs: number;
@@ -2229,6 +2230,7 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
 
   if (/\/u\/signup\/password/i.test(page.url())) {
     for (let attempt = 1; attempt <= cfg.maxCaptchaRounds; attempt += 1) {
+      let previousCaptchaSrc = "";
       if (attempt === 1) {
         await writeFile(new URL("signup_password_before.html", OUTPUT_DIR), await page.content(), "utf8");
         const snap = await page.screenshot({ fullPage: true });
@@ -2248,6 +2250,9 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       }
 
       if ((await page.locator('input[name="captcha"]').count()) > 0) {
+        previousCaptchaSrc = await page
+          .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
+          .catch(() => "");
         const pngData = await getProcessedCaptchaPng(page);
         const code = await solver.solve(pngData);
         await fillInput(page, 'input[name="captcha"]', code);
@@ -2278,6 +2283,15 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         return;
       }
 
+      const currentCaptchaSrc =
+        (await page
+          .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
+          .catch(() => "")) || "";
+      const captchaRefreshed = !!previousCaptchaSrc && !!currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc;
+      if (captchaRefreshed) {
+        log(`signup password captcha refreshed after attempt ${attempt}, retrying`);
+      }
+
       const formErrors: string[] = await page.evaluate(() => {
         const visible = (el: Element): boolean => {
           const style = window.getComputedStyle(el as HTMLElement);
@@ -2296,8 +2310,20 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
         return texts;
       });
       log(`signup password step still present after submit (attempt=${attempt}) errors=${formErrors.join(" | ") || "n/a"}`);
-      if (formErrors.some((text) => /Suspicious activity detected/i.test(text))) {
-        throw new Error("risk_control_suspicious_activity");
+      const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
+      if (hasSuspiciousMarker) {
+        if (attempt >= cfg.maxCaptchaRounds) {
+          throw new Error("risk_control_suspicious_activity");
+        }
+        log(`signup suspicious marker observed on attempt ${attempt}, retrying`);
+        continue;
+      }
+      if (captchaRefreshed) {
+        continue;
+      }
+      if (attempt < cfg.maxCaptchaRounds) {
+        log(`signup password submission not accepted on attempt ${attempt}, retrying`);
+        continue;
       }
     }
     throw new Error(`signup password step failed after ${cfg.maxCaptchaRounds} attempts`);
@@ -2556,6 +2582,7 @@ function loadConfig(): AppConfig {
     chromeExecutablePath: resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
     chromeNativeAutomation: toBool(process.env.CHROME_NATIVE_AUTOMATION, true),
     chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, false),
+    chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
@@ -2626,7 +2653,8 @@ function shouldRetryModeFailure(message: string): boolean {
   );
 }
 
-function getChromeWebRtcPolicyArgs(): string[] {
+function getChromeWebRtcPolicyArgs(cfg: AppConfig): string[] {
+  if (!cfg.chromeWebrtcHardened) return [];
   return [
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
@@ -2766,13 +2794,14 @@ async function launchBrowserWithEngine(
   if (engine === "chrome") {
     const options: LaunchOptions = {
       headless: mode === "headless",
+      slowMo: Math.max(0, cfg.slowMoMs),
       proxy: { server: proxyServer },
       ignoreDefaultArgs: ["--enable-automation"],
       args: [
         "--disable-blink-features=AutomationControlled",
         `--lang=${locale}`,
         ...getChromeVisualArgs(),
-        ...getChromeWebRtcPolicyArgs(),
+        ...getChromeWebRtcPolicyArgs(cfg),
       ],
       timeout: 180_000,
     };
@@ -2889,7 +2918,7 @@ async function launchNativeChromeCdp(
       "--no-first-run",
       "--no-default-browser-check",
       ...getChromeVisualArgs(),
-      ...getChromeWebRtcPolicyArgs(),
+      ...getChromeWebRtcPolicyArgs(cfg),
       "--new-window",
       "about:blank",
     ];
@@ -2951,6 +2980,7 @@ async function launchChromePersistent(
       await mkdir(profileDir, { recursive: true });
       const launchOptions: any = {
         headless: mode === "headless",
+        slowMo: Math.max(0, cfg.slowMoMs),
         proxy: { server: proxyServer },
         ignoreDefaultArgs: ["--enable-automation"],
         args: [
@@ -2959,7 +2989,7 @@ async function launchChromePersistent(
           "--no-default-browser-check",
           `--lang=${locale}`,
           ...getChromeVisualArgs(),
-          ...getChromeWebRtcPolicyArgs(),
+          ...getChromeWebRtcPolicyArgs(cfg),
         ],
         locale: contextOptions.locale,
         timezoneId: contextOptions.timezoneId,
@@ -3063,7 +3093,7 @@ async function launchNativeChromeInspect(
     `--proxy-server=${proxyServer}`,
     `--lang=${locale}`,
     ...getChromeVisualArgs(),
-    ...getChromeWebRtcPolicyArgs(),
+    ...getChromeWebRtcPolicyArgs(cfg),
     "--new-window",
     ...targets,
   ];
@@ -3264,6 +3294,7 @@ async function runSingleMode(
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, geo.timezone);
         }
+        await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled);
         page = await context.newPage();
         if (nativeChromeMode === "cdp" && identity) {
           await configureNativeChromePage(
