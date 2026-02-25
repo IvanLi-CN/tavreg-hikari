@@ -125,6 +125,7 @@ None
 - 2026-02-25: 初始化规格，冻结本次目标与验收标准。
 - 2026-02-25: 完成 `.env.example`、README 指引与 `.env.local` 初始化，`bun run typecheck` 通过。
 - 2026-02-25: 创建 PR #1（`th/env-example-local-bootstrap`）进入合并检查。
+- 2026-02-25: 根据 review 反馈收敛 README，移除重复模板并明确 `.env.example` 为可选项真源。
 
 ## 参考（References）
 
