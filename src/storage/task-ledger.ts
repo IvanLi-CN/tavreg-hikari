@@ -253,6 +253,58 @@ export class TaskLedger {
     return this.cfg.dbPath;
   }
 
+  markStaleRunningAsFailed(staleMs = 10 * 60_000): number {
+    const cutoffIso = new Date(Date.now() - Math.max(60_000, staleMs)).toISOString();
+    const rows = this.db
+      .prepare(
+        `
+        SELECT run_id AS runId, started_at AS startedAt
+        FROM signup_tasks
+        WHERE status = 'running'
+          AND started_at <= ?
+      `,
+      )
+      .all(cutoffIso) as Array<{ runId?: string; startedAt?: string }>;
+    if (!rows.length) return 0;
+
+    const now = new Date();
+    const nowIsoText = now.toISOString();
+    const stmt = this.db.prepare(
+      `
+      UPDATE signup_tasks
+      SET status = 'failed',
+          completed_at = ?,
+          duration_ms = ?,
+          failure_stage = COALESCE(failure_stage, 'process_exit'),
+          error_code = COALESCE(error_code, 'runner_interrupted'),
+          error_message = COALESCE(error_message, 'run interrupted before completion'),
+          updated_at = ?
+      WHERE run_id = ?
+        AND status = 'running'
+    `,
+    );
+
+    let updated = 0;
+    const tx = this.db.transaction((items: Array<{ runId: string; durationMs: number }>) => {
+      for (const item of items) {
+        (stmt as any).run(nowIsoText, item.durationMs, nowIsoText, item.runId);
+      }
+    });
+
+    const payload: Array<{ runId: string; durationMs: number }> = [];
+    for (const row of rows) {
+      const runId = (row.runId || "").trim();
+      if (!runId) continue;
+      const startedMs = Date.parse((row.startedAt || "").trim());
+      const durationMs = Number.isFinite(startedMs) ? Math.max(0, now.getTime() - startedMs) : 0;
+      payload.push({ runId, durationMs });
+    }
+    if (payload.length === 0) return 0;
+    tx(payload);
+    updated = payload.length;
+    return updated;
+  }
+
   upsertTask(record: SignupTaskRecord): void {
     const row = toRecordRow(record);
     const stmt = this.db.prepare(

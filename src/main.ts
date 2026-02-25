@@ -4361,6 +4361,10 @@ async function run(): Promise<void> {
   const taskLedger = await TaskLedger.open(cfg.taskLedger);
   if (taskLedger) {
     log(`task ledger enabled: ${taskLedger.dbPath()}`);
+    const recovered = taskLedger.markStaleRunningAsFailed();
+    if (recovered > 0) {
+      log(`task ledger recovered interrupted running rows: ${recovered}`);
+    }
   } else {
     log("task ledger disabled");
   }
