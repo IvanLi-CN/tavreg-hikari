@@ -169,11 +169,18 @@ Additional artifacts:
 - Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
 - SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent `Too many signups from the same IP` history is used to avoid risky egress IP reuse.
 
-Quick query example (requires `sqlite3` CLI):
+Quick query examples (built-in CLI):
 
 ```bash
-sqlite3 output/registry/signup-tasks.sqlite \
-  "select started_at,status,proxy_ip,error_code,has_ip_rate_limit from signup_tasks order by id desc limit 20;"
+bun run ledger:query
+```
+
+```bash
+bun run ledger:query -- --status failed --limit 20
+```
+
+```bash
+bun run ledger:query -- --json --include-json-fields --has-ip-rate-limit true --limit 5
 ```
 
 ## Proxy Tools

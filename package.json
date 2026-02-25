@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun run src/main.ts",
     "typecheck": "bunx tsc --noEmit",
+    "ledger:query": "bun run src/ledger-cli.ts query",
     "proxy:check-all": "bun run src/proxy-cli.ts check-all",
     "proxy:check": "bun run src/proxy-cli.ts check",
     "proxy:set": "bun run src/proxy-cli.ts set"
