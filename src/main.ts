@@ -4001,6 +4001,7 @@ async function runSingleMode(
       failureStage,
       errorCode: localErrorCode,
       errorMessage: message,
+      risk,
       snippets: risk.snippets,
       selectedProxy: selectedProxy
         ? {
