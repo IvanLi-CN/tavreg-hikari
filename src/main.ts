@@ -2015,19 +2015,15 @@ function resolveModelName(preferred: string, allModels: string[]): string {
 
 function resolveCaptchaModelCandidates(preferred: string, allModels: string[], maxCount = 4): string[] {
   const selected = resolveModelName(preferred, allModels);
-  const visionModels = allModels.filter(isVisionLikeModel);
-  const others = visionModels
-    .filter((name) => name !== selected)
-    .sort((a, b) => rankVisionModel(b) - rankVisionModel(a) || a.localeCompare(b));
-  return [selected, ...others].slice(0, Math.max(1, maxCount));
+  void allModels;
+  void maxCount;
+  return [selected];
 }
 
 class CaptchaSolver {
   private readonly cfg: AppConfig;
 
-  private readonly models: string[];
-
-  private readonly blockedModels = new Set<string>();
+  private readonly model: string;
 
   constructor(cfg: AppConfig, models: string[]) {
     this.cfg = cfg;
@@ -2035,18 +2031,15 @@ class CaptchaSolver {
     if (deduped.length === 0) {
       throw new Error("captcha solver requires at least one model");
     }
-    this.models = deduped;
+    this.model = deduped[0]!;
   }
 
   modelList(): string[] {
-    return [...this.models];
+    return [this.model];
   }
 
   private readonly promptVariants = [
     "Read this captcha exactly. Return exactly 6 letters/digits, keep case, no spaces, no punctuation.",
-    "OCR captcha text from this image. Return only visible letters and digits, no explanation.",
-    "Read this captcha exactly (case-sensitive). Reply with only the letters and numbers.",
-    "Return only the captcha code from this image, no spaces, no punctuation.",
   ];
 
   private extractTextFromResponses(payload: unknown): string {
@@ -2075,61 +2068,6 @@ class CaptchaSolver {
     }
 
     return "";
-  }
-
-  private pickBestCandidate(candidates: string[]): string {
-    const cleaned = candidates.map((v) => sanitizeCaptchaText(v)).filter((v) => v.length > 0);
-    if (cleaned.length === 0) return "";
-
-    const inRange = cleaned.filter((v) => v.length >= 5 && v.length <= 7);
-    if (inRange.length === 0) return "";
-
-    const counts = new Map<string, number>();
-    for (const item of inRange) counts.set(item, (counts.get(item) || 0) + 1);
-
-    const ranked = [...counts.entries()].sort((a, b) => {
-      if (b[1] !== a[1]) return b[1] - a[1];
-      const lenA = a[0].length;
-      const lenB = b[0].length;
-      const typicalA = lenA >= 5 && lenA <= 7 ? 1 : 0;
-      const typicalB = lenB >= 5 && lenB <= 7 ? 1 : 0;
-      if (typicalB !== typicalA) return typicalB - typicalA;
-      if (lenA !== lenB) return Math.abs(6 - lenA) - Math.abs(6 - lenB);
-      return a[0].localeCompare(b[0]);
-    });
-    return ranked[0]?.[0] || "";
-  }
-
-  private pickBestModelCandidate(candidates: Array<{ text: string; model: string }>): string {
-    const records = candidates
-      .map((item) => ({
-        text: sanitizeCaptchaText(item.text),
-        model: item.model,
-      }))
-      .filter((item) => item.text.length >= 5 && item.text.length <= 7);
-    if (records.length === 0) return "";
-
-    const scores = new Map<string, { count: number; modelScore: number }>();
-    for (const item of records) {
-      const prev = scores.get(item.text) || { count: 0, modelScore: 0 };
-      scores.set(item.text, {
-        count: prev.count + 1,
-        modelScore: prev.modelScore + Math.max(1, rankVisionModel(item.model)),
-      });
-    }
-
-    const ranked = [...scores.entries()].sort((a, b) => {
-      if (b[1].count !== a[1].count) return b[1].count - a[1].count;
-      if (b[1].modelScore !== a[1].modelScore) return b[1].modelScore - a[1].modelScore;
-      const lenA = a[0].length;
-      const lenB = b[0].length;
-      const typicalA = lenA >= 5 && lenA <= 7 ? 1 : 0;
-      const typicalB = lenB >= 5 && lenB <= 7 ? 1 : 0;
-      if (typicalB !== typicalA) return typicalB - typicalA;
-      if (lenA !== lenB) return Math.abs(6 - lenA) - Math.abs(6 - lenB);
-      return a[0].localeCompare(b[0]);
-    });
-    return ranked[0]?.[0] || "";
   }
 
   private async callResponsesWithPrompt(model: string, pngData: Buffer, prompt: string): Promise<string> {
@@ -2167,36 +2105,31 @@ class CaptchaSolver {
     for (const prompt of this.promptVariants) {
       try {
         const text = await this.callResponsesWithPrompt(model, pngData, prompt);
-        if (text) results.push(text);
+        if (!text) continue;
+        results.push(text);
+        if (text.length >= 5 && text.length <= 7) {
+          log(`captcha OCR result (${model}): ${text}`);
+          return text;
+        }
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
       }
       await new Promise((resolve) => setTimeout(resolve, 120));
     }
 
-    const picked = this.pickBestCandidate(results);
-    if (picked) {
-      log(`captcha OCR candidates (${model}): ${results.join(", ")} -> ${picked}`);
-      return picked;
+    if (results.length > 0) {
+      log(`captcha OCR raw results (${model}): ${results.join(", ")}`);
     }
-
     if (lastError) {
       throw lastError;
     }
-    return "";
+    throw new Error(`invalid_result:${results.join(",") || "empty"}`);
   }
 
   private isTransient(reason: string): boolean {
     const lower = reason.toLowerCase();
     return [":429:", ":500:", ":502:", ":503:", ":504:", ":520:", ":521:", ":522:", "timeout", "network", "temporarily unavailable", "rate limit"].some((k) =>
       lower.includes(k),
-    );
-  }
-
-  private isPermanentModelError(reason: string): boolean {
-    const lower = reason.toLowerCase();
-    return [":400:", ":401:", ":403:", ":422:", "model_not_found", "invalid_model_error", "forbidden", "bad request"].some(
-      (k) => lower.includes(k),
     );
   }
 
@@ -2208,58 +2141,19 @@ class CaptchaSolver {
 
     while (Date.now() < deadline) {
       round += 1;
-      let transientSeen = false;
-      const roundCandidates: Array<{ text: string; model: string }> = [];
-      const available = this.models.filter((model) => !this.blockedModels.has(model));
-      const maxActive = Math.min(2, available.length);
-      const offset = available.length > 0 ? ((round - 1) * maxActive) % available.length : 0;
-      const activeModels: string[] = [];
-      for (let i = 0; i < maxActive; i += 1) {
-        const candidate = available[(offset + i) % available.length];
-        if (!candidate || activeModels.includes(candidate)) continue;
-        activeModels.push(candidate);
-      }
-      if (activeModels.length === 0) break;
-
-      for (const model of activeModels) {
-        if (this.blockedModels.has(model)) continue;
-
-        try {
-          const solved = await this.callResponses(model, pngData);
-          if (solved.length >= 5 && solved.length <= 7) {
-            roundCandidates.push({ text: solved, model });
-            const sameCount = roundCandidates.filter((item) => item.text === solved).length;
-            if (sameCount >= 2) {
-              log(`captcha solved by consensus (${activeModels.join(", ")}): ${solved}`);
-              return solved;
-            }
-          }
-          errors.push(`${model}:invalid_result:${solved}`);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          errors.push(`${model}:${reason}`);
-
-          if (this.isPermanentModelError(reason)) {
-            this.blockedModels.add(model);
-            log(`captcha model blocked by permanent error: ${model}`);
-          }
-          if (this.isTransient(reason)) {
-            transientSeen = true;
-          }
+      try {
+        const solved = await this.callResponses(this.model, pngData);
+        if (solved.length >= 5 && solved.length <= 7) {
+          return solved;
+        }
+        errors.push(`round${round}:invalid_length:${solved}`);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        errors.push(`round${round}:${reason}`);
+        if (!this.isTransient(reason)) {
+          break;
         }
       }
-
-      const picked = this.pickBestModelCandidate(roundCandidates);
-      if (picked) {
-        if (roundCandidates.length > 1) {
-          const explain = roundCandidates.map((item) => `${item.model}:${item.text}`).join(", ");
-          log(`captcha solved by multi-model vote: ${explain} -> ${picked}`);
-        } else {
-          log(`captcha solved by single-model fallback: ${picked}`);
-        }
-        return picked;
-      }
-      if (!transientSeen) break;
 
       const waitMs = Math.min(cooldownMs, Math.max(0, deadline - Date.now()));
       if (waitMs <= 0) break;
@@ -2269,7 +2163,7 @@ class CaptchaSolver {
     }
 
     throw new Error(
-      `captcha OCR failed within retry window. models=${this.models.length} blocked=${this.blockedModels.size} last_errors=${errors
+      `captcha OCR failed within retry window. model=${this.model} last_errors=${errors
         .slice(-8)
         .join(" | ")}`,
     );
@@ -2491,6 +2385,29 @@ async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
   return Buffer.from(screenshot);
 }
 
+async function refreshCaptchaImage(page: any, previousSrc: string): Promise<boolean> {
+  const image = page.locator('img[alt="captcha"]').first();
+  if ((await image.count()) <= 0) return false;
+
+  try {
+    await image.click({ timeout: 1200 });
+  } catch {
+    return false;
+  }
+
+  const deadline = Date.now() + 4200;
+  while (Date.now() < deadline) {
+    const current = await page
+      .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
+      .catch(() => "");
+    if (current && current !== previousSrc) {
+      return true;
+    }
+    await page.waitForTimeout(220);
+  }
+  return false;
+}
+
 async function clickSubmit(page: any): Promise<void> {
   await page.waitForTimeout(randomInt(220, 780));
   const btn = page.locator('button[type="submit"], input[type="submit"]').first();
@@ -2610,6 +2527,14 @@ async function solveCaptchaForm(
     if (hasCaptcha && currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc) {
       log(`${formKind} captcha refreshed after attempt ${attempt}, retrying`);
       continue;
+    }
+
+    if (hasCaptcha && previousCaptchaSrc) {
+      const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
+      if (forcedRefresh) {
+        log(`${formKind} captcha force-refreshed after attempt ${attempt}, retrying`);
+        continue;
+      }
     }
 
     log(`${formKind} captcha rejected on attempt ${attempt}, retrying`);
@@ -2764,6 +2689,13 @@ async function completeSignup(page: any, solver: CaptchaSolver, email: string, p
       }
       if (captchaRefreshed) {
         continue;
+      }
+      if (hasCaptchaInput && previousCaptchaSrc) {
+        const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
+        if (forcedRefresh) {
+          log(`signup password captcha force-refreshed after attempt ${attempt}, retrying`);
+          continue;
+        }
       }
       if (attempt < cfg.maxCaptchaRounds) {
         log(`signup password submission not accepted on attempt ${attempt}, retrying`);
