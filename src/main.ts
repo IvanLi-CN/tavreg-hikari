@@ -3582,6 +3582,7 @@ async function applyBrowserIdentityToContext(
   context: any,
   identity: BrowserIdentityProfile,
   timezoneId?: string,
+  injectNavigatorOverrides = true,
 ): Promise<void> {
   await context
     .setExtraHTTPHeaders({
@@ -3589,23 +3590,25 @@ async function applyBrowserIdentityToContext(
       "User-Agent": identity.userAgent,
     })
     .catch(() => {});
-  await context
-    .addInitScript((profile: BrowserIdentityProfile) => {
-      const defineReadonly = (target: any, key: string, value: unknown): void => {
-        try {
-          Object.defineProperty(target, key, { get: () => value });
-        } catch {
-          // ignore sealed properties
-        }
-      };
-      const firstLanguage = profile.languages[0] || "en-US";
-      defineReadonly(navigator, "userAgent", profile.userAgent);
-      defineReadonly(navigator, "appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
-      defineReadonly(navigator, "platform", profile.navigatorPlatform);
-      defineReadonly(navigator, "language", firstLanguage);
-      defineReadonly(navigator, "languages", profile.languages);
-    }, identity)
-    .catch(() => {});
+  if (injectNavigatorOverrides) {
+    await context
+      .addInitScript((profile: BrowserIdentityProfile) => {
+        const defineReadonly = (target: any, key: string, value: unknown): void => {
+          try {
+            Object.defineProperty(target, key, { get: () => value });
+          } catch {
+            // ignore sealed properties
+          }
+        };
+        const firstLanguage = profile.languages[0] || "en-US";
+        defineReadonly(navigator, "userAgent", profile.userAgent);
+        defineReadonly(navigator, "appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
+        defineReadonly(navigator, "platform", profile.navigatorPlatform);
+        defineReadonly(navigator, "language", firstLanguage);
+        defineReadonly(navigator, "languages", profile.languages);
+      }, identity)
+      .catch(() => {});
+  }
 
   const applyToPage = async (page: any): Promise<void> => {
     await applyPageIdentityOverrides(context, page, identity, timezoneId);
@@ -4344,9 +4347,9 @@ async function runSingleMode(
           await existing.close().catch(() => {});
         }
         if (identity) {
-          await applyBrowserIdentityToContext(context, identity, geo.timezone);
+          await applyBrowserIdentityToContext(context, identity, geo.timezone, false);
         }
-        await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled);
+        await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled && !useNativeChrome);
         page = await context.newPage();
         if (nativeChromeMode === "cdp" && identity) {
           await configureNativeChromePage(
