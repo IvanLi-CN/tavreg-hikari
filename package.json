@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "start": "bun run src/main.ts",
+    "start": "node --import tsx src/main.ts",
     "typecheck": "bunx tsc --noEmit",
     "ledger:query": "bun run src/ledger-cli.ts query",
     "proxy:check-all": "bun run src/proxy-cli.ts check-all",
@@ -20,6 +20,7 @@
     "yaml": "^2.8.0"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "tsx": "^4.20.6"
   }
 }

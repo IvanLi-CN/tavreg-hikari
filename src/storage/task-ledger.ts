@@ -1,6 +1,58 @@
-import { Database } from "bun:sqlite";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+
+type SqliteBindValue = string | number | boolean | null | undefined;
+type SqliteNamedParams = Record<string, SqliteBindValue>;
+type SqliteStmtParams = [] | [SqliteNamedParams] | SqliteBindValue[];
+
+interface SqliteStatement {
+  run: (...args: SqliteStmtParams) => unknown;
+  get: (...args: SqliteStmtParams) => unknown;
+  all: (...args: SqliteStmtParams) => unknown[];
+}
+
+interface SqliteDatabase {
+  exec: (sql: string) => void;
+  prepare: (sql: string) => SqliteStatement;
+  close: () => void;
+}
+
+async function openSqliteDatabase(dbPath: string, create: boolean): Promise<SqliteDatabase> {
+  if (typeof Bun !== "undefined") {
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(dbPath, { create, strict: true });
+    return {
+      exec: (sql: string) => db.exec(sql),
+      prepare: (sql: string) => {
+        const stmt = db.prepare(sql) as any;
+        return {
+          run: (...args: any[]) => stmt.run(...args),
+          get: (...args: any[]) => stmt.get(...args),
+          all: (...args: any[]) => stmt.all(...args),
+        };
+      },
+      close: () => db.close(false),
+    };
+  }
+
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(dbPath, {
+    open: true,
+    readOnly: !create,
+  });
+  return {
+    exec: (sql: string) => db.exec(sql),
+    prepare: (sql: string) => {
+      const stmt = db.prepare(sql) as any;
+      return {
+        run: (...args: any[]) => stmt.run(...args),
+        get: (...args: any[]) => stmt.get(...args),
+        all: (...args: any[]) => stmt.all(...args),
+      };
+    },
+    close: () => db.close(),
+  };
+}
 
 export interface TaskLedgerConfig {
   enabled: boolean;
@@ -166,11 +218,11 @@ function toRecordRow(input: SignupTaskRecord): SignupTaskRecordRow {
 }
 
 export class TaskLedger {
-  private readonly db: Database;
+  private readonly db: SqliteDatabase;
 
   private readonly cfg: TaskLedgerConfig;
 
-  constructor(db: Database, cfg: TaskLedgerConfig) {
+  constructor(db: SqliteDatabase, cfg: TaskLedgerConfig) {
     this.db = db;
     this.cfg = cfg;
   }
@@ -179,7 +231,7 @@ export class TaskLedger {
     if (!cfg.enabled) return null;
     await mkdir(path.dirname(cfg.dbPath), { recursive: true });
 
-    const db = new Database(cfg.dbPath, { create: true, strict: true });
+    const db = await openSqliteDatabase(cfg.dbPath, true);
     db.exec("PRAGMA journal_mode=WAL;");
     db.exec("PRAGMA synchronous=NORMAL;");
     db.exec("PRAGMA temp_store=MEMORY;");
@@ -246,7 +298,7 @@ export class TaskLedger {
   }
 
   close(): void {
-    this.db.close(false);
+    this.db.close();
   }
 
   dbPath(): string {
@@ -284,13 +336,6 @@ export class TaskLedger {
     `,
     );
 
-    let updated = 0;
-    const tx = this.db.transaction((items: Array<{ runId: string; durationMs: number }>) => {
-      for (const item of items) {
-        (stmt as any).run(nowIsoText, item.durationMs, nowIsoText, item.runId);
-      }
-    });
-
     const payload: Array<{ runId: string; durationMs: number }> = [];
     for (const row of rows) {
       const runId = (row.runId || "").trim();
@@ -300,9 +345,18 @@ export class TaskLedger {
       payload.push({ runId, durationMs });
     }
     if (payload.length === 0) return 0;
-    tx(payload);
-    updated = payload.length;
-    return updated;
+
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      for (const item of payload) {
+        (stmt as any).run(nowIsoText, item.durationMs, nowIsoText, item.runId);
+      }
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+    return payload.length;
   }
 
   upsertTask(record: SignupTaskRecord): void {
