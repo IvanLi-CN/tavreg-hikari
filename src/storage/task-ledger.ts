@@ -109,6 +109,8 @@ export interface SignupTaskRecord {
   emailAddress?: string;
   emailDomain?: string;
   emailLocalLen?: number;
+  password?: string;
+  apiKey?: string;
   apiKeyPrefix?: string;
   notesJson?: string;
   detailsJson?: string;
@@ -152,6 +154,8 @@ interface SignupTaskRecordRow {
   emailAddress: string | null;
   emailDomain: string | null;
   emailLocalLen: number | null;
+  password: string | null;
+  apiKey: string | null;
   apiKeyPrefix: string | null;
   notesJson: string | null;
   detailsJson: string | null;
@@ -216,6 +220,8 @@ function toRecordRow(input: SignupTaskRecord): SignupTaskRecordRow {
     emailAddress: toNullableString(input.emailAddress),
     emailDomain: toNullableString(input.emailDomain),
     emailLocalLen: toNullableNumber(input.emailLocalLen),
+    password: toNullableString(input.password),
+    apiKey: toNullableString(input.apiKey),
     apiKeyPrefix: toNullableString(input.apiKeyPrefix),
     notesJson: toNullableString(input.notesJson),
     detailsJson: toNullableString(input.detailsJson),
@@ -285,6 +291,8 @@ export class TaskLedger {
         email_address TEXT,
         email_domain TEXT,
         email_local_len INTEGER,
+        password TEXT,
+        api_key TEXT,
         api_key_prefix TEXT,
         notes_json TEXT,
         details_json TEXT,
@@ -292,6 +300,15 @@ export class TaskLedger {
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
     `);
+
+    const tableInfo = db.prepare("PRAGMA table_info(signup_tasks);").all() as Array<{ name?: string }>;
+    const existingColumns = new Set(tableInfo.map((item) => String(item.name || "").toLowerCase()).filter(Boolean));
+    if (!existingColumns.has("password")) {
+      db.exec("ALTER TABLE signup_tasks ADD COLUMN password TEXT;");
+    }
+    if (!existingColumns.has("api_key")) {
+      db.exec("ALTER TABLE signup_tasks ADD COLUMN api_key TEXT;");
+    }
 
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_started_at ON signup_tasks(started_at DESC);");
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_status_started ON signup_tasks(status, started_at DESC);");
@@ -375,14 +392,14 @@ export class TaskLedger {
           browser_engine, browser_mode, browser_user_agent, browser_locale, browser_timezone, model_name,
           precheck_passed, verify_passed, signup_submitted, request_count, suspicious_hit_count, captcha_submit_count, max_captcha_length,
           has_ip_rate_limit, has_suspicious_activity, has_extensibility_error, has_invalid_captcha,
-          email_address, email_domain, email_local_len, api_key_prefix, notes_json, details_json, updated_at
+          email_address, email_domain, email_local_len, password, api_key, api_key_prefix, notes_json, details_json, updated_at
         ) VALUES (
           $runId, $batchId, $mode, $attemptIndex, $modeRetryMax, $status, $startedAt, $completedAt, $durationMs,
           $failureStage, $errorCode, $errorMessage, $proxyNode, $proxyIp, $proxyCountry, $proxyCity, $proxyTimezone,
           $browserEngine, $browserMode, $browserUserAgent, $browserLocale, $browserTimezone, $modelName,
           $precheckPassed, $verifyPassed, $signupSubmitted, $requestCount, $suspiciousHitCount, $captchaSubmitCount, $maxCaptchaLength,
           $hasIpRateLimit, $hasSuspiciousActivity, $hasExtensibilityError, $hasInvalidCaptcha,
-          $emailAddress, $emailDomain, $emailLocalLen, $apiKeyPrefix, $notesJson, $detailsJson, $updatedAt
+          $emailAddress, $emailDomain, $emailLocalLen, $password, $apiKey, $apiKeyPrefix, $notesJson, $detailsJson, $updatedAt
         )
         ON CONFLICT(run_id) DO UPDATE SET
           batch_id = excluded.batch_id,
@@ -421,6 +438,8 @@ export class TaskLedger {
           email_address = excluded.email_address,
           email_domain = excluded.email_domain,
           email_local_len = excluded.email_local_len,
+          password = excluded.password,
+          api_key = excluded.api_key,
           api_key_prefix = excluded.api_key_prefix,
           notes_json = excluded.notes_json,
           details_json = excluded.details_json,

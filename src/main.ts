@@ -19,6 +19,7 @@ import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./stor
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless" | "both";
 type BrowserEngine = "camoufox" | "chrome";
+type MailProvider = "duckmail" | "vmail";
 
 interface CliArgs {
   proxyNode?: string;
@@ -40,6 +41,7 @@ interface AppConfig {
   chromeIdentityOverride: boolean;
   chromeStealthJsEnabled: boolean;
   chromeWebrtcHardened: boolean;
+  camoufoxGeoipEnabled: boolean;
   chromeProfileDir: string;
   chromeRemoteDebuggingPort: number;
   slowMoMs: number;
@@ -48,12 +50,17 @@ interface AppConfig {
   ocrInitialCooldownMs: number;
   ocrMaxCooldownMs: number;
   ocrRequestTimeoutMs: number;
+  allowPasswordSubmitWithoutCaptcha: boolean;
   humanConfirmBeforeSignup: boolean;
   humanConfirmText: string;
+  mailProvider: MailProvider;
+  mailPollMs: number;
+  vmailBaseUrl: string;
+  vmailApiKey?: string;
+  vmailDomain?: string;
   duckmailBaseUrl: string;
   duckmailApiKey?: string;
   duckmailDomain?: string;
-  duckmailPollMs: number;
   emailWaitMs: number;
   keyName: string;
   keyLimit: number;
@@ -90,11 +97,12 @@ interface AppConfig {
   taskLedger: TaskLedgerConfig;
 }
 
-interface DuckmailSession {
+interface MailboxSession {
+  provider: MailProvider;
   baseUrl: string;
   address: string;
   accountId: string;
-  token: string;
+  headers: Record<string, string>;
 }
 
 interface ResultPayload {
@@ -303,6 +311,13 @@ function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
   if (value === "camoufox" || value === "chrome") return value;
+  return null;
+}
+
+function parseMailProvider(raw: string | undefined): MailProvider | null {
+  if (!raw) return null;
+  const value = raw.trim().toLowerCase();
+  if (value === "duckmail" || value === "vmail") return value;
   return null;
 }
 
@@ -1555,15 +1570,25 @@ async function collectGoldenSnapshot(page: any): Promise<GoldenSnapshot> {
   await page.waitForLoadState("domcontentloaded", { timeout: 60000 });
   await page.waitForTimeout(9000);
 
-  const payload = await page.evaluate(() => {
-    const text = document.body?.innerText || "";
+  const payload = await page.evaluate(`(() => {
+    const text = document.body ? document.body.innerText : "";
     const lines = text
-      .split(/\r?\n/)
+      .split(/\\r?\\n/)
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
-    const normalize = (line: string) => line.toLowerCase().replace(/[:\s]+$/g, "");
-    const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const findAfter = (label: string): string => {
+    const normalize = (line) => line.toLowerCase().replace(/[:\\s]+$/g, "");
+    const escapeRegex = (value) => {
+      const specials = "\\\\^$.*+?()[]{}|";
+      let out = "";
+      for (const ch of value) {
+        if (specials.indexOf(ch) >= 0) {
+          out += "\\\\";
+        }
+        out += ch;
+      }
+      return out;
+    };
+    const findAfter = (label) => {
       const target = normalize(label);
       for (let i = 0; i < lines.length - 1; i += 1) {
         if (normalize(lines[i] || "") === target) {
@@ -1572,21 +1597,21 @@ async function collectGoldenSnapshot(page: any): Promise<GoldenSnapshot> {
       }
       return "";
     };
-    const findInline = (label: string): string => {
+    const findInline = (label) => {
       const escaped = escapeRegex(label);
       const patterns = [
-        new RegExp(`${escaped}\\s*[:：]\\s*([^\\n]+)`, "i"),
-        new RegExp(`${escaped}\\s+([^\\n]+)`, "i"),
+        new RegExp(escaped + "\\\\s*[:：]\\\\s*([^\\\\n]+)", "i"),
+        new RegExp(escaped + "\\\\s+([^\\\\n]+)", "i"),
       ];
       for (const pattern of patterns) {
         const matched = text.match(pattern);
-        if (matched?.[1]) {
+        if (matched && matched[1]) {
           return matched[1].trim();
         }
       }
       return "";
     };
-    const pick = (label: string): string => findAfter(label) || findInline(label);
+    const pick = (label) => findAfter(label) || findInline(label);
 
     return {
       url: window.location.href,
@@ -1603,9 +1628,9 @@ async function collectGoldenSnapshot(page: any): Promise<GoldenSnapshot> {
       navigatorUserAgent: navigator.userAgent,
       navigatorPlatform: navigator.platform,
       browserTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      webdriver: Boolean((navigator as Navigator & { webdriver?: boolean }).webdriver),
+      webdriver: Boolean(navigator.webdriver),
     };
-  });
+  })()`);
   const text = typeof payload.text === "string" ? payload.text : "";
   const ipCandidates = extractPublicIpv4List(text);
   const labeledIp = normalizeIp(typeof payload.ipAddress === "string" ? payload.ipAddress : "");
@@ -2297,18 +2322,49 @@ class CaptchaSolver {
   }
 }
 
-async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
+function isMailboxTransientError(reason: string): boolean {
+  const lower = reason.toLowerCase();
+  return [
+    ":429:",
+    ":500:",
+    ":502:",
+    ":503:",
+    ":504:",
+    "timeout",
+    "network",
+    "temporarily unavailable",
+    "connection reset",
+    "socket hang up",
+    "econnreset",
+    "fetch failed",
+    "eai_again",
+    "ecconn",
+  ].some((needle) => lower.includes(needle));
+}
+
+function normalizeVmailBaseUrl(raw: string): string {
+  const trimmed = raw.replace(/\/+$/, "");
+  if (/\/api\/v1$/i.test(trimmed)) {
+    return trimmed;
+  }
+  return `${trimmed}/api/v1`;
+}
+
+function buildVmailAuthHeaders(apiKey: string): Record<string, string> {
+  const key = apiKey.trim();
+  return {
+    "X-API-Key": key,
+    Authorization: `Bearer ${key}`,
+  };
+}
+
+async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
   const baseUrl = cfg.duckmailBaseUrl.replace(/\/+$/, "");
   const headers: Record<string, string> = {};
   if (cfg.duckmailApiKey) {
     headers.Authorization = `Bearer ${cfg.duckmailApiKey}`;
   }
-  const isTransient = (reason: string): boolean => {
-    const lower = reason.toLowerCase();
-    return [":429:", ":500:", ":502:", ":503:", ":504:", "timeout", "network", "temporarily unavailable"].some((k) =>
-      lower.includes(k),
-    );
-  };
+  const isTransient = (reason: string): boolean => isMailboxTransientError(reason);
   const isAddressConflict = (reason: string): boolean => {
     const lower = reason.toLowerCase();
     return [":409:", "already exists", "already used", "duplicate", "taken"].some((k) => lower.includes(k));
@@ -2407,15 +2463,100 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
   if (!accountId) throw new Error("duckmail account id missing");
 
   return {
+    provider: "duckmail",
     baseUrl,
     address,
     accountId,
-    token,
+    headers: { Authorization: `Bearer ${token}` },
   };
 }
 
+function parseVmailAllowedDomains(message: string): string[] {
+  const matched = message.match(/available domains:\s*([^"}\n]+)/i);
+  if (!matched?.[1]) return [];
+  return matched[1]
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter((item) => /^[a-z0-9.-]+$/i.test(item));
+}
+
+async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
+  if (!cfg.vmailApiKey) {
+    throw new Error("vmail api key missing (set VMAIL_API_KEY)");
+  }
+  const baseUrl = normalizeVmailBaseUrl(cfg.vmailBaseUrl);
+  const authHeaders = buildVmailAuthHeaders(cfg.vmailApiKey);
+
+  const configuredDomain = (cfg.vmailDomain || "").trim().toLowerCase() || null;
+  let domainCandidates = [configuredDomain, "mailbox.example.invalid", "mailbox.example.invalid"]
+    .filter((item): item is string => !!item)
+    .filter((item, index, arr) => arr.indexOf(item) === index);
+  let lastError: Error | null = null;
+
+  const createAttempts = 8;
+  for (let attempt = 1; attempt <= createAttempts; attempt += 1) {
+    const domain = domainCandidates[(attempt - 1) % domainCandidates.length];
+    try {
+      const created = await httpJson<JsonRecord>("POST", `${baseUrl}/mailboxes`, {
+        headers: {
+          ...authHeaders,
+          "Content-Type": "application/json",
+        },
+        body: { domain },
+      });
+
+      const data = (created.data && typeof created.data === "object" ? (created.data as JsonRecord) : created) as JsonRecord;
+      const accountId = String(data.id || "").trim();
+      const address = String(data.address || "").trim();
+      if (!accountId) {
+        throw new Error("vmail mailbox create response missing id");
+      }
+      if (!address) {
+        throw new Error("vmail mailbox create response missing address");
+      }
+      return {
+        provider: "vmail",
+        baseUrl,
+        address,
+        accountId,
+        headers: authHeaders,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const allowedDomains = parseVmailAllowedDomains(message);
+      if (allowedDomains.length > 0) {
+        domainCandidates = allowedDomains.filter((item, index, arr) => arr.indexOf(item) === index);
+      }
+
+      const isValidationError = /validation_error/i.test(message);
+      const retryable =
+        isMailboxTransientError(message) ||
+        isValidationError ||
+        /service unavailable|internal server error|bad gateway/i.test(message);
+
+      if (!retryable || attempt === createAttempts) {
+        lastError = error instanceof Error ? error : new Error(message);
+        break;
+      }
+
+      const waitMs = Math.min(1200 * attempt, 6000);
+      log(`vmail mailbox create retry ${attempt}/${createAttempts} after ${waitMs}ms: ${message.split("\n")[0]}`);
+      await delay(waitMs);
+    }
+  }
+
+  throw lastError || new Error("vmail mailbox create failed");
+}
+
+async function createMailboxSession(cfg: AppConfig): Promise<MailboxSession> {
+  if (cfg.mailProvider === "duckmail") {
+    return await createDuckmailSession(cfg);
+  }
+  return await createVmailSession(cfg);
+}
+
 async function waitForVerificationLink(
-  mailbox: DuckmailSession,
+  mailbox: MailboxSession,
   timeoutMs: number,
   pollMs: number,
   allowlist: string[],
@@ -2424,27 +2565,73 @@ async function waitForVerificationLink(
   const seen = new Set<string>();
 
   while (Date.now() < deadline) {
-    const messages = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/messages`, {
-      headers: { Authorization: `Bearer ${mailbox.token}` },
-    });
-
-    const items = (messages["hydra:member"] as unknown[]) || [];
+    let items: unknown[] = [];
+    try {
+      if (mailbox.provider === "duckmail") {
+        const messages = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/messages`, {
+          headers: mailbox.headers,
+        });
+        items = ((messages["hydra:member"] as unknown[]) || []).slice(0, 50);
+      } else {
+        const messages = await httpJson<unknown>(
+          "GET",
+          `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages?limit=20`,
+          {
+            headers: mailbox.headers,
+          },
+        );
+        if (messages && typeof messages === "object" && !Array.isArray(messages)) {
+          const data = (messages as JsonRecord)["data"];
+          if (Array.isArray(data)) {
+            items = data.slice(0, 50);
+          }
+        } else if (Array.isArray(messages)) {
+          items = messages.slice(0, 50);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isMailboxTransientError(message)) {
+        throw error;
+      }
+      log(`mailbox poll transient, retry after ${Math.max(400, pollMs)}ms: ${message.split("\n")[0]}`);
+      await delay(Math.max(400, pollMs));
+      continue;
+    }
 
     for (const item of items) {
       const fromSummary = extractVerificationLinkFromPayload(item, allowlist);
       if (fromSummary) return fromSummary;
 
       if (!item || typeof item !== "object") continue;
-      const messageId = String((item as JsonRecord).id || "").trim();
+      const record = item as JsonRecord;
+      const messageId = String(record.id || record.messageId || "").trim();
       if (!messageId || seen.has(messageId)) continue;
       seen.add(messageId);
 
-      const detail = await httpJson("GET", `${mailbox.baseUrl}/messages/${encodeURIComponent(messageId)}`, {
-        headers: { Authorization: `Bearer ${mailbox.token}` },
-      });
+      try {
+        const detailUrl =
+          mailbox.provider === "duckmail"
+            ? `${mailbox.baseUrl}/messages/${encodeURIComponent(messageId)}`
+            : `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages/${encodeURIComponent(
+                messageId,
+              )}`;
+        const detail = await httpJson<JsonRecord>("GET", detailUrl, {
+          headers: mailbox.headers,
+        });
 
-      const fromDetail = extractVerificationLinkFromPayload(detail, allowlist);
-      if (fromDetail) return fromDetail;
+        const payload =
+          mailbox.provider === "vmail" && detail.data && typeof detail.data === "object"
+            ? (detail.data as JsonRecord)
+            : detail;
+        const fromDetail = extractVerificationLinkFromPayload(payload, allowlist);
+        if (fromDetail) return fromDetail;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isMailboxTransientError(message)) {
+          throw error;
+        }
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, Math.max(200, pollMs)));
@@ -2970,11 +3157,26 @@ async function completeSignup(
         if (!hasCaptchaSignal) {
           captchaMissingStreak += 1;
           const directSubmitDwellMs = attempt === 1 ? randomInt(1200, 2600) : randomInt(900, 1800);
-          log(
-            `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), submit without captcha after dwell=${directSubmitDwellMs}ms`,
-          );
-          await page.waitForTimeout(directSubmitDwellMs);
-          allowSubmitWithoutCaptcha = true;
+          const shouldSubmitWithoutCaptcha =
+            cfg.allowPasswordSubmitWithoutCaptcha || captchaMissingStreak >= 3;
+          if (shouldSubmitWithoutCaptcha) {
+            log(
+              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), warmup submit without captcha after dwell=${directSubmitDwellMs}ms`,
+            );
+            await page.waitForTimeout(directSubmitDwellMs);
+            allowSubmitWithoutCaptcha = true;
+          } else {
+            log(
+              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), reload for challenge hydration after dwell=${directSubmitDwellMs}ms`,
+            );
+            await page.waitForTimeout(directSubmitDwellMs);
+            if (attempt >= passwordAttemptMax) {
+              throw new Error("signup_password_captcha_missing");
+            }
+            await safeGoto(page, page.url());
+            await page.waitForTimeout(randomInt(1200, 2600));
+            continue;
+          }
         } else {
           captchaMissingStreak += 1;
           const dwellMs = randomInt(2400, 4200);
@@ -3380,6 +3582,7 @@ function loadConfig(): AppConfig {
   const envRunMode = parseRunMode(process.env.RUN_MODE);
   const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
+  const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "vmail";
   const fallbackRunMode: RunMode = toBool(process.env.HEADLESS, false) ? "headless" : "headed";
   const verifyHostAllowlist = parseCsvList(process.env.VERIFY_HOST_ALLOWLIST).map((host) => host.toLowerCase());
   const defaultApiPort = 39090 + randomInt(0, 2000);
@@ -3397,6 +3600,7 @@ function loadConfig(): AppConfig {
     chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, true),
     chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, true),
     chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
+    camoufoxGeoipEnabled: toBool(process.env.CAMOUFOX_GEOIP_ENABLED, process.platform !== "darwin"),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
@@ -3405,12 +3609,17 @@ function loadConfig(): AppConfig {
     ocrInitialCooldownMs: toInt(process.env.OCR_INITIAL_COOLDOWN_MS, 12_000),
     ocrMaxCooldownMs: toInt(process.env.OCR_MAX_COOLDOWN_MS, 120_000),
     ocrRequestTimeoutMs: toInt(process.env.OCR_REQUEST_TIMEOUT_MS, 25_000),
+    allowPasswordSubmitWithoutCaptcha: toBool(process.env.ALLOW_PASSWORD_SUBMIT_WITHOUT_CAPTCHA, false),
     humanConfirmBeforeSignup: toBool(process.env.HUMAN_CONFIRM_BEFORE_SIGNUP, false),
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
+    mailProvider: envMailProvider,
+    mailPollMs: toInt(process.env.MAIL_POLL_MS || process.env.DUCKMAIL_POLL_MS, 2500),
+    vmailBaseUrl: (process.env.VMAIL_BASE_URL || "https://mail-api.example.invalid/api/v1").trim(),
+    vmailApiKey: (process.env.VMAIL_API_KEY || "").trim() || undefined,
+    vmailDomain: (process.env.VMAIL_DOMAIN || "mailbox.example.invalid").trim() || undefined,
     duckmailBaseUrl: (process.env.DUCKMAIL_BASE_URL || "https://mail-api.example.invalid").trim(),
     duckmailApiKey: (process.env.DUCKMAIL_API_KEY || "").trim() || undefined,
     duckmailDomain: (process.env.DUCKMAIL_DOMAIN || "").trim() || undefined,
-    duckmailPollMs: toInt(process.env.DUCKMAIL_POLL_MS, 2500),
     emailWaitMs: toInt(process.env.EMAIL_WAIT_MS, 180_000),
     keyName: (process.env.KEY_NAME || "").trim() || `reg-key-${String(Date.now()).slice(-6)}`,
     keyLimit: toInt(process.env.KEY_LIMIT, 1000),
@@ -3479,7 +3688,7 @@ function loadConfig(): AppConfig {
 }
 
 function isRecoverableBrowserError(reason: string): boolean {
-  return /Execution context was destroyed|Target closed|Navigation|Cannot find context|page has been closed|context has been closed/i.test(
+  return /Execution context was destroyed|Target closed|Navigation|Cannot find context|page has been closed|context has been closed|browser has been closed|Target page, context or browser has been closed/i.test(
     reason,
   );
 }
@@ -3656,13 +3865,14 @@ async function launchBrowserWithEngine(
     return await chromium.launch(options);
   }
 
+  const camoufoxGeoip = cfg.camoufoxGeoipEnabled && geoIp.trim().length > 0 ? geoIp : false;
   return (await Camoufox({
     headless: mode === "headless",
     humanize: 1.2,
     debug: false,
     proxy: { server: proxyServer },
     locale,
-    geoip: geoIp,
+    geoip: camoufoxGeoip,
     block_webrtc: false,
     enable_cache: true,
   })) as Browser;
@@ -4017,7 +4227,7 @@ async function runSingleMode(
   const startedAt = new Date().toISOString();
   const ledger = ctx.taskLedger;
 
-  let mailbox: DuckmailSession | null = null;
+  let mailbox: MailboxSession | null = null;
   let email = cfg.existingEmail || "";
   let password = cfg.existingPassword || "";
   let verificationLink: string | null = null;
@@ -4029,11 +4239,11 @@ async function runSingleMode(
     log(`[${mode}] existing account mode: ${email}`);
     notes.push("existing account mode enabled");
   } else {
-    mailbox = await createDuckmailSession(cfg);
+    mailbox = await createMailboxSession(cfg);
     email = mailbox.address;
     password = randomPassword();
-    log(`[${mode}] duckmail mailbox: ${email}`);
-    notes.push(`duckmail mailbox created (${mailbox.accountId})`);
+    log(`[${mode}] ${mailbox.provider} mailbox: ${email}`);
+    notes.push(`${mailbox.provider} mailbox created (${mailbox.accountId})`);
   }
 
   const mihomoController = await startMihomo(buildMihomoConfig(cfg));
@@ -4072,6 +4282,7 @@ async function runSingleMode(
     emailAddress: email || undefined,
     emailDomain: initialEmailDomain,
     emailLocalLen: initialEmailLocalLen,
+    password: password || undefined,
     notesJson: safeJsonStringify(notes),
   };
   const persistLedgerRecord = (reason: string): void => {
@@ -4286,6 +4497,9 @@ async function runSingleMode(
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip}`);
     notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
+    if (!useNativeChrome && browserEngine === "camoufox") {
+      notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
+    }
     ledgerRecord.proxyNode = selectedProxy.name;
     ledgerRecord.proxyIp = normalizeIp(geo.ip);
     ledgerRecord.proxyCountry = geo.country;
@@ -4333,6 +4547,41 @@ async function runSingleMode(
       return await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip);
     };
 
+    const closeBrowserSession = async (): Promise<void> => {
+      if (context) {
+        if (!useNativeChrome) {
+          await context.close().catch(() => {});
+        }
+        context = null;
+      }
+      page = null;
+      const launchedBrowser = browser;
+      if (launchedBrowser) {
+        await launchedBrowser.close().catch(() => {});
+        browser = null;
+      }
+      if (nativeChromeStop != null) {
+        await (nativeChromeStop as () => Promise<void>)().catch(() => {});
+        nativeChromeStop = null;
+      }
+      nativeChromeContext = null;
+      nativeChromeMode = null;
+    };
+
+    const syncBrowserIdentityProfile = (recordNote: boolean): void => {
+      if (browserEngine === "chrome" && cfg.chromeIdentityOverride) {
+        identity = buildBrowserIdentityProfile(locale, browser?.version?.() || "");
+        if (recordNote) notes.push(`browser ua profile: ${identity.userAgent}`);
+        return;
+      }
+      if (browserEngine === "chrome") {
+        identity = null;
+        if (recordNote) notes.push("browser ua profile: native");
+        return;
+      }
+      identity = null;
+    };
+
     const rebuildPage = async (): Promise<void> => {
       if (context && !useNativeChrome) {
         await context.close().catch(() => {});
@@ -4370,26 +4619,32 @@ async function runSingleMode(
       bindPageEvents(page);
     };
 
+    const launchAndPreparePage = async (recordIdentityNote: boolean): Promise<void> => {
+      await closeBrowserSession();
+      browser = await launchBrowser();
+      syncBrowserIdentityProfile(recordIdentityNote);
+      await rebuildPage();
+    };
+
+    const rebuildPageWithRecovery = async (reason: string): Promise<void> => {
+      try {
+        await rebuildPage();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!isRecoverableBrowserError(message)) {
+          throw error;
+        }
+        log(`[${mode}] ${reason}: page rebuild failed, relaunching browser session (${message})`);
+        await launchAndPreparePage(false);
+        notes.push(`browser session relaunched after ${reason}`);
+      }
+    };
+
     let browserReady = false;
     let launchErr: Error | null = null;
     for (let launchAttempt = 1; launchAttempt <= cfg.browserLaunchRetryMax; launchAttempt += 1) {
       try {
-        const existingBrowser = browser;
-        if (existingBrowser) {
-          await existingBrowser.close().catch(() => {});
-          browser = null;
-        }
-        browser = await launchBrowser();
-        if (browserEngine === "chrome" && cfg.chromeIdentityOverride) {
-          identity = buildBrowserIdentityProfile(locale, browser.version?.() || "");
-          notes.push(`browser ua profile: ${identity.userAgent}`);
-        } else if (browserEngine === "chrome") {
-          identity = null;
-          notes.push("browser ua profile: native");
-        } else {
-          identity = null;
-        }
-        await rebuildPage();
+        await launchAndPreparePage(true);
         browserReady = true;
         if (launchAttempt > 1) {
           notes.push(`browser launch recovered on attempt ${launchAttempt}`);
@@ -4399,23 +4654,7 @@ async function runSingleMode(
         const message = error instanceof Error ? error.message : String(error);
         launchErr = error instanceof Error ? error : new Error(message);
         log(`[${mode}] browser launch/context attempt ${launchAttempt} failed: ${message}`);
-        if (context) {
-          if (!useNativeChrome) {
-            await context.close().catch(() => {});
-          }
-          context = null;
-        }
-        const launchedBrowser = browser;
-        if (launchedBrowser) {
-          await launchedBrowser.close().catch(() => {});
-          browser = null;
-        }
-        if (nativeChromeStop != null) {
-          await (nativeChromeStop as () => Promise<void>)().catch(() => {});
-          nativeChromeStop = null;
-        }
-        nativeChromeContext = null;
-        nativeChromeMode = null;
+        await closeBrowserSession();
         if (launchAttempt >= cfg.browserLaunchRetryMax) {
           break;
         }
@@ -4426,7 +4665,7 @@ async function runSingleMode(
       throw launchErr || new Error("browser launch failed without details");
     }
     ledgerRecord.browserMode = useNativeChrome ? nativeChromeMode || "cdp" : browserEngine;
-    ledgerRecord.browserUserAgent = identity?.userAgent;
+    ledgerRecord.browserUserAgent = (identity as BrowserIdentityProfile | null)?.userAgent;
     ledgerRecord.browserLocale = locale;
     ledgerRecord.browserTimezone = geo.timezone;
     ledgerRecord.notesJson = safeJsonStringify(notes);
@@ -4482,12 +4721,12 @@ async function runSingleMode(
             throw error;
           }
           log(`[${mode}] signup retry after browser reset (attempt=${attempt})`);
-          await rebuildPage();
+          await rebuildPageWithRecovery("signup retry");
         }
       }
 
       failureStage = "email_verify_wait";
-      verificationLink = await waitForVerificationLink(mailbox!, cfg.emailWaitMs, cfg.duckmailPollMs, cfg.verifyHostAllowlist);
+      verificationLink = await waitForVerificationLink(mailbox!, cfg.emailWaitMs, cfg.mailPollMs, cfg.verifyHostAllowlist);
       if (!verificationLink) {
         throw new Error("verification email not found within timeout");
       }
@@ -4513,7 +4752,7 @@ async function runSingleMode(
           throw error;
         }
         log(`[${mode}] login retry after browser reset (attempt=${attempt})`);
-        await rebuildPage();
+        await rebuildPageWithRecovery("login retry");
       }
     }
 
@@ -4548,7 +4787,7 @@ async function runSingleMode(
         const message = error instanceof Error ? error.message : String(error);
         if (isRecoverableBrowserError(message) && attempt < 5) {
           log(`[${mode}] api-key retry after browser reset (attempt=${attempt})`);
-          await rebuildPage();
+          await rebuildPageWithRecovery("api-key retry");
           continue;
         }
         lastKeyError = error instanceof Error ? error : new Error(message);
@@ -4581,6 +4820,8 @@ async function runSingleMode(
     ledgerRecord.suspiciousHitCount = successRisk.suspiciousHitCount;
     ledgerRecord.captchaSubmitCount = successRisk.captchaSubmitCount;
     ledgerRecord.maxCaptchaLength = successRisk.maxCaptchaLength;
+    ledgerRecord.password = password;
+    ledgerRecord.apiKey = apiKey;
     ledgerRecord.apiKeyPrefix = apiKey.slice(0, Math.min(apiKey.length, 12));
     ledgerRecord.notesJson = safeJsonStringify(notes);
     ledgerRecord.detailsJson = safeJsonStringify({
@@ -4716,6 +4957,9 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip}`);
     notes.push(`browser engine: ${browserEngine}`);
+    if (browserEngine === "camoufox") {
+      notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
+    }
 
     if (useNativeChrome) {
       const nativeChrome = await launchNativeChromeInspect(cfg, mihomoController.proxyServer, locale);

@@ -47,7 +47,7 @@ bun run start
 Optional env flags:
 
 ```bash
-RUN_MODE=headed SLOWMO_MS=50 MAX_CAPTCHA_ROUNDS=6 EMAIL_WAIT_MS=180000 DUCKMAIL_POLL_MS=2500 bun run start
+RUN_MODE=headed SLOWMO_MS=50 MAX_CAPTCHA_ROUNDS=6 EMAIL_WAIT_MS=180000 MAIL_POLL_MS=2500 bun run start
 ```
 
 Select a specific proxy node by name:
@@ -104,6 +104,12 @@ If your Python binary is not `python3`, set:
 
 ```bash
 CAMOUFOX_PYTHON=python bun run start
+```
+
+On macOS, Camoufox `geoip` is disabled by default to avoid known browser crashes; re-enable only if you need it:
+
+```bash
+CAMOUFOX_GEOIP_ENABLED=true bun run start -- --browser-engine camoufox
 ```
 
 OCR retry tuning (useful when gateway is throttling):
@@ -169,12 +175,13 @@ Additional artifacts:
 - Registration flow includes image captcha; OCR is done via OpenAI-compatible API in `.env.local`.
 - OCR retries now use a long backoff window, so short-term `429/503` bursts do not fail immediately.
 - Captcha OCR uses `/models`-driven fallback candidates (no voting), and rotates model preference when upstream errors or repeated captcha rejections are observed.
-- Temporary email and verification polling use DuckMail API (`/domains`, `/accounts`, `/token`, `/messages`).
+- Temporary email defaults to VMAIL API (`/api/v1/mailboxes`, `/api/v1/mailboxes/:id/messages`); DuckMail remains available via `MAIL_PROVIDER=duckmail`.
 - Browser automation is executed by Python Camoufox (`camoufox.sync_api.Camoufox`) launched from Bun/TypeScript.
 - Signup requires email verification success; missing verification link is treated as failure.
 - Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.
 - Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
 - SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent rate-limit/suspicious/captcha-anomaly history is used to avoid risky egress IP reuse.
+- Successful runs are persisted with `password`, `api_key_prefix`, and full `api_key` in SQLite ledger (treat ledger file as sensitive data).
 
 Quick query examples (built-in CLI):
 
@@ -188,6 +195,10 @@ bun run ledger:query -- --status failed --limit 20
 
 ```bash
 bun run ledger:query -- --json --include-json-fields --has-ip-rate-limit true --limit 5
+```
+
+```bash
+bun run ledger:query -- --status succeeded --include-api-key --limit 10
 ```
 
 ## Proxy Tools

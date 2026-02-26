@@ -27,6 +27,7 @@ interface QueryOptions {
   limit: number;
   json: boolean;
   includeJsonFields: boolean;
+  includeApiKey: boolean;
 }
 
 interface RowRecord {
@@ -48,6 +49,9 @@ interface RowRecord {
   captcha_submit_count: number;
   max_captcha_length?: number;
   email_domain?: string;
+  email_address?: string;
+  password?: string;
+  api_key?: string;
   model_name?: string;
   notes_json?: string;
   details_json?: string;
@@ -72,6 +76,7 @@ function usage(): void {
   console.log("  --limit <n>                          Max rows (default 30)");
   console.log("  --json                               Output rows as JSON");
   console.log("  --include-json-fields                Include notes_json/details_json in output");
+  console.log("  --include-api-key                    Include email_address/password/api_key in query output");
   console.log("  -h, --help                           Show help");
 }
 
@@ -127,6 +132,7 @@ function parseArgs(argv: string[]): QueryOptions {
     limit: 30,
     json: false,
     includeJsonFields: false,
+    includeApiKey: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -148,6 +154,10 @@ function parseArgs(argv: string[]): QueryOptions {
     }
     if (arg === "--include-json-fields") {
       options.includeJsonFields = true;
+      continue;
+    }
+    if (arg === "--include-api-key") {
+      options.includeApiKey = true;
       continue;
     }
     if (arg === "--db") {
@@ -311,6 +321,9 @@ function buildQuery(options: QueryOptions): { sql: string; params: Array<string 
   if (options.includeJsonFields) {
     columns.push("notes_json", "details_json");
   }
+  if (options.includeApiKey) {
+    columns.push("email_address", "password", "api_key");
+  }
   const { whereSql, params } = buildWhere(options);
   const sql = `SELECT ${columns.join(", ")} FROM signup_tasks${whereSql} ORDER BY id DESC LIMIT ?`;
   params.push(options.limit);
@@ -323,7 +336,7 @@ function toCell(value: unknown): string {
   return String(value);
 }
 
-function renderTable(rows: RowRecord[]): void {
+function renderTable(rows: RowRecord[], options: QueryOptions): void {
   if (rows.length === 0) {
     console.log("No rows matched.");
     return;
@@ -344,23 +357,32 @@ function renderTable(rows: RowRecord[]): void {
     "captcha_req",
     "email_domain",
   ];
+  if (options.includeApiKey) {
+    headers.push("email_address", "password", "api_key");
+  }
 
-  const dataRows = rows.map((row) => [
-    toCell(row.id),
-    toCell(row.started_at),
-    toCell(row.status),
-    toCell(row.mode),
-    toCell(row.attempt_index),
-    toCell(row.proxy_ip),
-    toCell(row.error_code),
-    toCell(row.has_ip_rate_limit),
-    toCell(row.has_suspicious_activity),
-    toCell(row.has_extensibility_error),
-    toCell(row.has_invalid_captcha),
-    toCell(row.request_count),
-    toCell(row.captcha_submit_count),
-    toCell(row.email_domain),
-  ]);
+  const dataRows = rows.map((row) => {
+    const cells = [
+      toCell(row.id),
+      toCell(row.started_at),
+      toCell(row.status),
+      toCell(row.mode),
+      toCell(row.attempt_index),
+      toCell(row.proxy_ip),
+      toCell(row.error_code),
+      toCell(row.has_ip_rate_limit),
+      toCell(row.has_suspicious_activity),
+      toCell(row.has_extensibility_error),
+      toCell(row.has_invalid_captcha),
+      toCell(row.request_count),
+      toCell(row.captcha_submit_count),
+      toCell(row.email_domain),
+    ];
+    if (options.includeApiKey) {
+      cells.push(toCell(row.email_address), toCell(row.password), toCell(row.api_key));
+    }
+    return cells;
+  });
 
   const widths = headers.map((header, idx) => {
     let maxLen = header.length;
@@ -420,7 +442,7 @@ function runQuery(options: QueryOptions): void {
       console.log(JSON.stringify(rows, null, 2));
       return;
     }
-    renderTable(rows);
+    renderTable(rows, options);
   } finally {
     db.close(false);
   }
