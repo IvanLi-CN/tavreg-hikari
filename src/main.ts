@@ -2689,7 +2689,6 @@ async function solveCaptchaForm(
     formKind === "signup"
       ? /\/u\/signup\/password|app\.tavily\.com\/home/i
       : /\/u\/login\/password|app\.tavily\.com\/home/i;
-  let malformedCaptchaCount = 0;
 
   for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
     let hasCaptcha = (await page.locator('img[alt="captcha"]').count()) > 0;
@@ -2712,18 +2711,18 @@ async function solveCaptchaForm(
         log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
       }
       if (captchaCode.length !== 6) {
-        malformedCaptchaCount += 1;
         log(`${formKind} captcha OCR len=${captchaCode.length} (expect=6), refresh and retry`);
+        let refreshed = false;
         if (previousCaptchaSrc) {
-          await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
+          refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
         }
-        if (malformedCaptchaCount >= 2) {
-          throw new Error(`${formKind}_captcha_ocr_unstable`);
+        if (!refreshed && attempt < maxRounds) {
+          await safeGoto(page, page.url());
+          await page.waitForTimeout(randomInt(900, 1800));
         }
         await page.waitForTimeout(700);
         continue;
       }
-      malformedCaptchaCount = 0;
       const captchaInputCount = await page.locator('input[name="captcha"]').count();
       if (captchaInputCount > 0) {
         await fillInput(page, 'input[name="captcha"]', captchaCode);
@@ -2824,7 +2823,6 @@ async function completeSignup(
     const passwordAttemptMax = Math.min(cfg.maxCaptchaRounds, 8);
     let suspiciousSeenCount = 0;
     let invalidCaptchaSeenCount = 0;
-    let malformedCaptchaCount = 0;
     let captchaMissingStreak = 0;
     for (let attempt = 1; attempt <= passwordAttemptMax; attempt += 1) {
       let previousCaptchaSrc = "";
@@ -2892,18 +2890,18 @@ async function completeSignup(
           log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
         }
         if (code.length !== 6) {
-          malformedCaptchaCount += 1;
           log(`signup password captcha OCR len=${code.length} (expect=6), refresh and retry`);
+          let refreshed = false;
           if (previousCaptchaSrc) {
-            await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
+            refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
           }
-          if (malformedCaptchaCount >= 2) {
-            throw new Error("invalid_captcha");
+          if (!refreshed && attempt < passwordAttemptMax) {
+            await safeGoto(page, page.url());
+            await page.waitForTimeout(randomInt(900, 1800));
           }
           await page.waitForTimeout(700);
           continue;
         }
-        malformedCaptchaCount = 0;
         await fillInput(page, 'input[name="captcha"]', code);
         solvedCaptchaCode = code;
         challengeReadyForSubmit = true;
