@@ -27,6 +27,7 @@ interface CliArgs {
   browserEngine?: BrowserEngine;
   skipPrecheck: boolean;
   inspectSites: boolean;
+  printSecrets: boolean;
 }
 
 interface AppConfig {
@@ -327,6 +328,7 @@ function parseArgs(argv: string[]): CliArgs {
   let browserEngine: BrowserEngine | undefined;
   let skipPrecheck = false;
   let inspectSites = false;
+  let printSecrets = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === "--proxy-node" && argv[i + 1]) {
@@ -380,8 +382,12 @@ function parseArgs(argv: string[]): CliArgs {
       inspectSites = true;
       continue;
     }
+    if (arg === "--print-secrets") {
+      printSecrets = true;
+      continue;
+    }
   }
-  return { proxyNode: proxyNode?.trim() || undefined, mode, browserEngine, skipPrecheck, inspectSites };
+  return { proxyNode: proxyNode?.trim() || undefined, mode, browserEngine, skipPrecheck, inspectSites, printSecrets };
 }
 
 function defaultProxyNodeUsageState(): ProxyNodeUsageState {
@@ -2390,15 +2396,8 @@ async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
     }
     pickedDomain = matched;
   } else {
-    const preferredOrder = ["mailbox.example.invalid", "mailbox.example.invalid", "mailbox.example.invalid"];
-    const preferred = preferredOrder
-      .map((target) => domains.find((item) => item.toLowerCase() === target))
-      .find((item): item is string => typeof item === "string");
-    if (preferred) {
-      pickedDomain = preferred;
-    } else {
-      pickedDomain = pickRandom(domains);
-    }
+    const sorted = [...domains].sort((a, b) => a.localeCompare(b));
+    pickedDomain = sorted[0]!;
   }
 
   const mailboxPassword = randomPassword();
@@ -2488,21 +2487,26 @@ async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
   const authHeaders = buildVmailAuthHeaders(cfg.vmailApiKey);
 
   const configuredDomain = (cfg.vmailDomain || "").trim().toLowerCase() || null;
-  let domainCandidates = [configuredDomain, "mailbox.example.invalid", "mailbox.example.invalid"]
-    .filter((item): item is string => !!item)
-    .filter((item, index, arr) => arr.indexOf(item) === index);
+  let domainCandidates: Array<string | null> = [configuredDomain];
+  if (domainCandidates.length === 0) {
+    domainCandidates = [null];
+  }
   let lastError: Error | null = null;
 
   const createAttempts = 8;
   for (let attempt = 1; attempt <= createAttempts; attempt += 1) {
-    const domain = domainCandidates[(attempt - 1) % domainCandidates.length];
+    const domain = domainCandidates[(attempt - 1) % domainCandidates.length] || null;
     try {
+      const body: Record<string, string> = {};
+      if (domain) {
+        body.domain = domain;
+      }
       const created = await httpJson<JsonRecord>("POST", `${baseUrl}/mailboxes`, {
         headers: {
           ...authHeaders,
           "Content-Type": "application/json",
         },
-        body: { domain },
+        body,
       });
 
       const data = (created.data && typeof created.data === "object" ? (created.data as JsonRecord) : created) as JsonRecord;
@@ -3583,6 +3587,14 @@ function loadConfig(): AppConfig {
   const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
   const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "vmail";
+  const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
+  const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
+  if (envMailProvider === "vmail" && !vmailBaseUrl) {
+    throw new Error("Missing env: VMAIL_BASE_URL (required when MAIL_PROVIDER=vmail)");
+  }
+  if (envMailProvider === "duckmail" && !duckmailBaseUrl) {
+    throw new Error("Missing env: DUCKMAIL_BASE_URL (required when MAIL_PROVIDER=duckmail)");
+  }
   const fallbackRunMode: RunMode = toBool(process.env.HEADLESS, false) ? "headless" : "headed";
   const verifyHostAllowlist = parseCsvList(process.env.VERIFY_HOST_ALLOWLIST).map((host) => host.toLowerCase());
   const defaultApiPort = 39090 + randomInt(0, 2000);
@@ -3614,10 +3626,10 @@ function loadConfig(): AppConfig {
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
     mailProvider: envMailProvider,
     mailPollMs: toInt(process.env.MAIL_POLL_MS || process.env.DUCKMAIL_POLL_MS, 2500),
-    vmailBaseUrl: (process.env.VMAIL_BASE_URL || "https://mail-api.example.invalid/api/v1").trim(),
+    vmailBaseUrl,
     vmailApiKey: (process.env.VMAIL_API_KEY || "").trim() || undefined,
-    vmailDomain: (process.env.VMAIL_DOMAIN || "mailbox.example.invalid").trim() || undefined,
-    duckmailBaseUrl: (process.env.DUCKMAIL_BASE_URL || "https://mail-api.example.invalid").trim(),
+    vmailDomain: (process.env.VMAIL_DOMAIN || "").trim() || undefined,
+    duckmailBaseUrl,
     duckmailApiKey: (process.env.DUCKMAIL_API_KEY || "").trim() || undefined,
     duckmailDomain: (process.env.DUCKMAIL_DOMAIN || "").trim() || undefined,
     emailWaitMs: toInt(process.env.EMAIL_WAIT_MS, 180_000),
@@ -5149,13 +5161,21 @@ async function run(): Promise<void> {
     if (results.length === 1) {
       const only = results[0]!;
       console.log(`ACCOUNT=${only.email}`);
-      console.log(`PASSWORD=${only.password}`);
-      console.log(`DEFAULT_API_KEY=${only.apiKey}`);
+      if (args.printSecrets) {
+        console.log(`PASSWORD=${only.password}`);
+        console.log(`DEFAULT_API_KEY=${only.apiKey}`);
+      } else {
+        console.log("SECRETS=hidden (pass --print-secrets to show)");
+      }
     } else {
       for (const item of results) {
         console.log(`[${item.mode}] ACCOUNT=${item.email}`);
-        console.log(`[${item.mode}] PASSWORD=${item.password}`);
-        console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
+        if (args.printSecrets) {
+          console.log(`[${item.mode}] PASSWORD=${item.password}`);
+          console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
+        } else {
+          console.log(`[${item.mode}] SECRETS=hidden (pass --print-secrets to show)`);
+        }
       }
     }
   } finally {

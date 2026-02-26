@@ -1,6 +1,6 @@
 # tavreg-hikari
 
-Legacy local practice: automate Tavily registration + email verification + API key generation with Bun and TypeScript.
+Automate Tavily registration + email verification + API key generation with Bun and TypeScript.
 
 Workflow document: `docs/WORKFLOW.md`
 
@@ -19,6 +19,8 @@ OPENAI_KEY=...
 OPENAI_BASE_URL=...
 MODEL_NAME=...
 MIHOMO_SUBSCRIPTION_URL=...
+VMAIL_BASE_URL=...
+VMAIL_API_KEY=...
 ```
 
 Optional settings (browser/proxy/retry/inspect) are maintained in `.env.example`.
@@ -66,6 +68,12 @@ Run both headed and headless in one command:
 
 ```bash
 bun run start -- --mode both
+```
+
+Print secrets to terminal summary (disabled by default):
+
+```bash
+bun run start -- --print-secrets
 ```
 
 Skip browser precheck temporarily (debug only):
@@ -175,13 +183,14 @@ Additional artifacts:
 - Registration flow includes image captcha; OCR is done via OpenAI-compatible API in `.env.local`.
 - OCR retries now use a long backoff window, so short-term `429/503` bursts do not fail immediately.
 - Captcha OCR uses `/models`-driven fallback candidates (no voting), and rotates model preference when upstream errors or repeated captcha rejections are observed.
-- Temporary email defaults to VMAIL API (`/api/v1/mailboxes`, `/api/v1/mailboxes/:id/messages`); DuckMail remains available via `MAIL_PROVIDER=duckmail`.
+- Mailbox provider defaults to `vmail`; set `MAIL_PROVIDER=duckmail` to switch provider.
 - Browser automation is executed by Python Camoufox (`camoufox.sync_api.Camoufox`) launched from Bun/TypeScript.
 - Signup requires email verification success; missing verification link is treated as failure.
 - Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.
 - Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
 - SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent rate-limit/suspicious/captcha-anomaly history is used to avoid risky egress IP reuse.
 - Successful runs are persisted with `password`, `api_key_prefix`, and full `api_key` in SQLite ledger (treat ledger file as sensitive data).
+- Terminal summary hides password and API key by default; pass `--print-secrets` only when you explicitly need them.
 
 Quick query examples (built-in CLI):
 
@@ -220,7 +229,3 @@ Switch active node:
 ```bash
 bun run proxy:set --node "US-1"
 ```
-
-## Security Findings
-
-See `docs/SECURITY_FINDINGS.md`.

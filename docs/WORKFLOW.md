@@ -27,11 +27,11 @@
    - `fingerprint.goldenowl.ai` + WebRTC 探测。
    - 校验跨站 IP 一致性以及与预期代理出口一致。
 5. 注册：
-   - 创建 DuckMail 邮箱。
+   - 创建邮箱会话（由 `MAIL_PROVIDER` 决定具体服务）。
    - 识别验证码。
    - 提交注册表单。
 6. 邮箱验证：
-   - 轮询 DuckMail 获取验证链接。
+   - 轮询邮箱服务获取验证链接。
    - 打开链接并确认验证成功信号。
 7. 登录并提取 API Key。
 8. 持久化输出：
@@ -55,7 +55,7 @@
    - 检查 OCR 模型是否可用（`/models`）。
 3. 验证邮件超时：
    - 提高 `EMAIL_WAIT_MS`。
-   - 检查 DuckMail API 可用性。
+   - 检查当前邮箱服务 API 可用性。
 4. API Key 未提取到：
    - 查看 `output/network_headed.json` 与 `output/home_headed.html`。
 
