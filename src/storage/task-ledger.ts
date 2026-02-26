@@ -62,6 +62,12 @@ export interface TaskLedgerConfig {
   ipRateLimitMax: number;
   suspiciousCooldownMs: number;
   suspiciousMax: number;
+  captchaMissingCooldownMs: number;
+  captchaMissingMax: number;
+  captchaMissingThreshold: number;
+  invalidCaptchaCooldownMs: number;
+  invalidCaptchaMax: number;
+  invalidCaptchaThreshold: number;
   allowRateLimitedIpFallback: boolean;
 }
 
@@ -473,6 +479,69 @@ export class TaskLedger {
       `,
       )
       .all(sinceIso, Math.max(1, this.cfg.suspiciousMax)) as Array<{ proxyIp?: string }>;
+
+    const result: string[] = [];
+    for (const row of rows) {
+      const ip = (row.proxyIp || "").trim();
+      if (!ip) continue;
+      result.push(ip);
+    }
+    return result;
+  }
+
+  listRecentCaptchaMissingIps(): string[] {
+    const sinceIso = new Date(Date.now() - Math.max(60_000, this.cfg.captchaMissingCooldownMs)).toISOString();
+    const threshold = Math.max(1, this.cfg.captchaMissingThreshold);
+    const rows = this.db
+      .prepare(
+        `
+        SELECT proxy_ip AS proxyIp
+        FROM signup_tasks
+        WHERE status = 'failed'
+          AND proxy_ip IS NOT NULL
+          AND proxy_ip <> ''
+          AND started_at >= ?
+          AND error_code = 'signup_password_captcha_missing'
+        GROUP BY proxy_ip
+        HAVING COUNT(*) >= ?
+        ORDER BY MAX(started_at) DESC
+        LIMIT ?
+      `,
+      )
+      .all(sinceIso, threshold, Math.max(1, this.cfg.captchaMissingMax)) as Array<{ proxyIp?: string }>;
+
+    const result: string[] = [];
+    for (const row of rows) {
+      const ip = (row.proxyIp || "").trim();
+      if (!ip) continue;
+      result.push(ip);
+    }
+    return result;
+  }
+
+  listRecentInvalidCaptchaIps(): string[] {
+    const sinceIso = new Date(Date.now() - Math.max(60_000, this.cfg.invalidCaptchaCooldownMs)).toISOString();
+    const threshold = Math.max(1, this.cfg.invalidCaptchaThreshold);
+    const rows = this.db
+      .prepare(
+        `
+        SELECT proxy_ip AS proxyIp
+        FROM signup_tasks
+        WHERE status = 'failed'
+          AND proxy_ip IS NOT NULL
+          AND proxy_ip <> ''
+          AND started_at >= ?
+          AND (
+            error_code = 'invalid_captcha'
+            OR has_invalid_captcha = 1
+          )
+        GROUP BY proxy_ip
+        HAVING COUNT(*) >= ?
+        ORDER BY MAX(started_at) DESC
+        LIMIT ?
+      `,
+      )
+      .all(sinceIso, threshold, Math.max(1, this.cfg.invalidCaptchaMax)) as Array<{ proxyIp?: string }>;
 
     const result: string[] = [];
     for (const row of rows) {

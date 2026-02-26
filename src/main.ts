@@ -2090,15 +2090,40 @@ function resolveModelName(preferred: string, allModels: string[]): string {
 
 function resolveCaptchaModelCandidates(preferred: string, allModels: string[], maxCount = 4): string[] {
   const selected = resolveModelName(preferred, allModels);
-  void allModels;
-  void maxCount;
-  return [selected];
+  const limit = Math.max(1, maxCount);
+  const normalizedSelected = normalizeModelName(selected);
+  const visionModels = allModels.filter(isVisionLikeModel);
+  const rankedVision = [...visionModels].sort((a, b) => {
+    const scoreGap = rankVisionModel(b) - rankVisionModel(a);
+    if (scoreGap !== 0) return scoreGap;
+    const distGap =
+      levenshtein(normalizedSelected, normalizeModelName(a)) - levenshtein(normalizedSelected, normalizeModelName(b));
+    if (distGap !== 0) return distGap;
+    return a.localeCompare(b);
+  });
+
+  const candidates = [selected];
+  for (const model of rankedVision) {
+    if (candidates.includes(model)) continue;
+    candidates.push(model);
+    if (candidates.length >= limit) break;
+  }
+
+  if (candidates.length < limit) {
+    for (const model of allModels) {
+      if (candidates.includes(model)) continue;
+      candidates.push(model);
+      if (candidates.length >= limit) break;
+    }
+  }
+  return candidates.slice(0, limit);
 }
 
 class CaptchaSolver {
   private readonly cfg: AppConfig;
 
-  private readonly model: string;
+  private readonly models: string[];
+  private preferredModelIndex = 0;
 
   constructor(cfg: AppConfig, models: string[]) {
     this.cfg = cfg;
@@ -2106,11 +2131,27 @@ class CaptchaSolver {
     if (deduped.length === 0) {
       throw new Error("captcha solver requires at least one model");
     }
-    this.model = deduped[0]!;
+    this.models = deduped;
   }
 
   modelList(): string[] {
-    return [this.model];
+    return [...this.models];
+  }
+
+  rotatePreferredModel(reason: string): void {
+    if (this.models.length <= 1) return;
+    this.preferredModelIndex = (this.preferredModelIndex + 1) % this.models.length;
+    const next = this.models[this.preferredModelIndex]!;
+    log(`captcha solver switched model => ${next} (${reason})`);
+  }
+
+  private orderedModels(): string[] {
+    if (this.models.length <= 1) return [...this.models];
+    const ordered: string[] = [];
+    for (let i = 0; i < this.models.length; i += 1) {
+      ordered.push(this.models[(this.preferredModelIndex + i) % this.models.length]!);
+    }
+    return ordered;
   }
 
   private readonly promptVariants = [
@@ -2210,36 +2251,47 @@ class CaptchaSolver {
 
   async solve(pngData: Buffer): Promise<string> {
     const deadline = Date.now() + this.cfg.ocrRetryWindowMs;
-    let cooldownMs = this.cfg.ocrInitialCooldownMs;
+    let cooldownMs = Math.max(500, this.cfg.ocrInitialCooldownMs);
     const errors: string[] = [];
     let round = 0;
 
     while (Date.now() < deadline) {
       round += 1;
-      try {
-        const solved = await this.callResponses(this.model, pngData);
-        if (solved.length >= 5 && solved.length <= 7) {
-          return solved;
+      let hasTransient = false;
+      const modelOrder = this.orderedModels();
+      for (const model of modelOrder) {
+        try {
+          const solved = await this.callResponses(model, pngData);
+          if (solved.length >= 5 && solved.length <= 7) {
+            return solved;
+          }
+          errors.push(`round${round}:${model}:invalid_length:${solved}`);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          errors.push(`round${round}:${model}:${reason}`);
+          if (this.isTransient(reason)) {
+            hasTransient = true;
+            continue;
+          }
         }
-        errors.push(`round${round}:invalid_length:${solved}`);
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        errors.push(`round${round}:${reason}`);
-        if (!this.isTransient(reason)) {
-          break;
-        }
+        await delay(100);
       }
 
-      const waitMs = Math.min(cooldownMs, Math.max(0, deadline - Date.now()));
+      if (!hasTransient) {
+        break;
+      }
+
+      const adaptiveCooldownMs = Math.min(cooldownMs, 3200);
+      const waitMs = Math.min(adaptiveCooldownMs, Math.max(0, deadline - Date.now()));
       if (waitMs <= 0) break;
-      log(`captcha OCR throttled/upstream unstable (round=${round}), wait ${waitMs}ms`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-      cooldownMs = Math.min(Math.floor(cooldownMs * 1.7), this.cfg.ocrMaxCooldownMs);
+      log(`captcha OCR upstream transient (round=${round}, models=${this.models.length}), wait ${waitMs}ms`);
+      await delay(waitMs);
+      cooldownMs = Math.min(Math.floor(cooldownMs * 1.45), Math.max(3200, this.cfg.ocrMaxCooldownMs));
     }
 
     throw new Error(
-      `captcha OCR failed within retry window. model=${this.model} last_errors=${errors
-        .slice(-8)
+      `captcha OCR failed within retry window. models=${this.models.join(",")} last_errors=${errors
+        .slice(-10)
         .join(" | ")}`,
     );
   }
@@ -2515,13 +2567,8 @@ async function collectVisibleFormErrors(page: any): Promise<string[]> {
 
 async function collectVisibleErrorCodes(page: any): Promise<string[]> {
   return await page.evaluate(() => {
-    const visible = (el: Element): boolean => {
-      const style = window.getComputedStyle(el as HTMLElement);
-      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
-    };
     const nodes = Array.from(document.querySelectorAll("[data-error-code]"));
     const codes = nodes
-      .filter(visible)
       .map((el) => (el.getAttribute("data-error-code") || "").trim())
       .filter((code) => /^[a-z0-9_-]{3,120}$/i.test(code));
     return Array.from(new Set(codes)).slice(0, 12);
@@ -2712,6 +2759,7 @@ async function solveCaptchaForm(
       }
       if (captchaCode.length !== 6) {
         log(`${formKind} captcha OCR len=${captchaCode.length} (expect=6), refresh and retry`);
+        solver.rotatePreferredModel(`${formKind}_ocr_len_${captchaCode.length}`);
         let refreshed = false;
         if (previousCaptchaSrc) {
           refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
@@ -2762,6 +2810,7 @@ async function solveCaptchaForm(
       : "";
 
     if (hasCaptcha && currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc) {
+      solver.rotatePreferredModel(`${formKind}_captcha_rejected`);
       log(`${formKind} captcha refreshed after attempt ${attempt}, retrying`);
       continue;
     }
@@ -2769,11 +2818,13 @@ async function solveCaptchaForm(
     if (hasCaptcha && previousCaptchaSrc) {
       const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
       if (forcedRefresh) {
+        solver.rotatePreferredModel(`${formKind}_captcha_force_refresh`);
         log(`${formKind} captcha force-refreshed after attempt ${attempt}, retrying`);
         continue;
       }
     }
 
+    solver.rotatePreferredModel(`${formKind}_captcha_retry`);
     log(`${formKind} captcha rejected on attempt ${attempt}, retrying`);
   }
 
@@ -2863,6 +2914,7 @@ async function completeSignup(
       let hasCaptchaImage = preSubmitSnapshot?.hasCaptchaImage ?? (await page.locator('img[alt="captcha"]').count()) > 0;
       let challengeReadyForSubmit = false;
       let solvedCaptchaCode = "";
+      let allowSubmitWithoutCaptcha = false;
 
       if (hasCaptchaInput) {
         if (!hasCaptchaImage) {
@@ -2891,6 +2943,7 @@ async function completeSignup(
         }
         if (code.length !== 6) {
           log(`signup password captcha OCR len=${code.length} (expect=6), refresh and retry`);
+          solver.rotatePreferredModel(`signup_password_ocr_len_${code.length}`);
           let refreshed = false;
           if (previousCaptchaSrc) {
             refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
@@ -2914,32 +2967,38 @@ async function completeSignup(
           Boolean(preSubmitSnapshot?.hasTurnstileResponseInput) ||
           Boolean(preSubmitSnapshot?.hasRecaptchaResponseInput) ||
           Boolean(preSubmitSnapshot?.hasHcaptchaResponseInput);
-        captchaMissingStreak += 1;
-        const dwellMs = hasCaptchaSignal
-          ? randomInt(2400, 4200)
-          : attempt === 1
-            ? randomInt(11000, 21000)
-            : randomInt(7000, 15000);
-        log(
-          `signup password captcha input missing (attempt=${attempt}, streak=${captchaMissingStreak}, signal=${hasCaptchaSignal ? 1 : 0}, image=${hasCaptchaImage ? 1 : 0}, hint=${challengeHint ? 1 : 0}), dwell=${dwellMs}ms`,
-        );
-        await page.waitForTimeout(dwellMs);
-        await page.waitForSelector('input[name="captcha"]', { timeout: hasCaptchaSignal ? 2600 : 2200 }).catch(() => {});
-        const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
-        if (lateCaptchaInput) {
-          log(`signup password captcha input appeared after dwell (attempt=${attempt}), retrying with OCR`);
+        if (!hasCaptchaSignal) {
+          captchaMissingStreak += 1;
+          const directSubmitDwellMs = attempt === 1 ? randomInt(1200, 2600) : randomInt(900, 1800);
+          log(
+            `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), submit without captcha after dwell=${directSubmitDwellMs}ms`,
+          );
+          await page.waitForTimeout(directSubmitDwellMs);
+          allowSubmitWithoutCaptcha = true;
+        } else {
+          captchaMissingStreak += 1;
+          const dwellMs = randomInt(2400, 4200);
+          log(
+            `signup password captcha input missing (attempt=${attempt}, streak=${captchaMissingStreak}, signal=${hasCaptchaSignal ? 1 : 0}, image=${hasCaptchaImage ? 1 : 0}, hint=${challengeHint ? 1 : 0}), dwell=${dwellMs}ms`,
+          );
+          await page.waitForTimeout(dwellMs);
+          await page.waitForSelector('input[name="captcha"]', { timeout: 2600 }).catch(() => {});
+          const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+          if (lateCaptchaInput) {
+            log(`signup password captcha input appeared after dwell (attempt=${attempt}), retrying with OCR`);
+            continue;
+          }
+          if (attempt >= passwordAttemptMax) {
+            throw new Error("signup_password_captcha_missing");
+          }
+          log(`signup password captcha input still missing, reloading for challenge hydration (attempt=${attempt})`);
+          await safeGoto(page, page.url());
+          await page.waitForTimeout(randomInt(1200, 2600));
           continue;
         }
-        if (attempt >= passwordAttemptMax) {
-          throw new Error("signup_password_captcha_missing");
-        }
-        log(`signup password captcha input still missing, reloading for challenge hydration (attempt=${attempt})`);
-        await safeGoto(page, page.url());
-        await page.waitForTimeout(randomInt(1200, 2600));
-        continue;
       }
 
-      if (!challengeReadyForSubmit || solvedCaptchaCode.length !== 6) {
+      if ((!challengeReadyForSubmit || solvedCaptchaCode.length !== 6) && !allowSubmitWithoutCaptcha) {
         if (attempt >= passwordAttemptMax) {
           throw new Error("signup_password_captcha_missing");
         }
@@ -2961,6 +3020,9 @@ async function completeSignup(
       log(`signup password diag attempt=${attempt} ${JSON.stringify(passwordDiag)}`);
 
       await page.waitForTimeout(randomInt(900, 2600));
+      if (allowSubmitWithoutCaptcha) {
+        log(`signup password submit without captcha challenge (attempt=${attempt})`);
+      }
       await clickSubmit(page);
       await page.waitForTimeout(2200);
 
@@ -2995,6 +3057,9 @@ async function completeSignup(
         hooks?.onPasswordSnapshot?.(postSubmitSnapshot);
       }
       const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+      if (postSubmitErrorCodes.length > 0) {
+        log(`signup password error codes (attempt=${attempt}): ${postSubmitErrorCodes.join(", ")}`);
+      }
       const hasIpBlockedCode = postSubmitErrorCodes.some((code) => /ip-signup-blocked/i.test(code));
       if (hasIpRateLimitMarker || hasIpBlockedCode) {
         throw new Error("risk_control_ip_rate_limit");
@@ -3028,6 +3093,7 @@ async function completeSignup(
       );
       if (hasInvalidCaptchaCode) {
         invalidCaptchaSeenCount += 1;
+        solver.rotatePreferredModel("signup_password_invalid_captcha");
         if (previousCaptchaSrc) {
           await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
         }
@@ -3041,11 +3107,13 @@ async function completeSignup(
       }
       invalidCaptchaSeenCount = 0;
       if (captchaRefreshed) {
+        solver.rotatePreferredModel("signup_password_captcha_refreshed");
         continue;
       }
       if (previousCaptchaSrc) {
         const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
         if (forcedRefresh) {
+          solver.rotatePreferredModel("signup_password_captcha_force_refresh");
           log(`signup password captcha force-refreshed after attempt ${attempt}, retrying`);
           continue;
         }
@@ -3393,6 +3461,18 @@ function loadConfig(): AppConfig {
         toInt(process.env.TASK_LEDGER_SUSPICIOUS_COOLDOWN_MS, 24 * 60 * 60 * 1000),
       ),
       suspiciousMax: Math.max(1, toInt(process.env.TASK_LEDGER_SUSPICIOUS_MAX, 128)),
+      captchaMissingCooldownMs: Math.max(
+        60_000,
+        toInt(process.env.TASK_LEDGER_CAPTCHA_MISSING_COOLDOWN_MS, 12 * 60 * 60 * 1000),
+      ),
+      captchaMissingMax: Math.max(1, toInt(process.env.TASK_LEDGER_CAPTCHA_MISSING_MAX, 64)),
+      captchaMissingThreshold: Math.max(1, toInt(process.env.TASK_LEDGER_CAPTCHA_MISSING_THRESHOLD, 2)),
+      invalidCaptchaCooldownMs: Math.max(
+        60_000,
+        toInt(process.env.TASK_LEDGER_INVALID_CAPTCHA_COOLDOWN_MS, 8 * 60 * 60 * 1000),
+      ),
+      invalidCaptchaMax: Math.max(1, toInt(process.env.TASK_LEDGER_INVALID_CAPTCHA_MAX, 64)),
+      invalidCaptchaThreshold: Math.max(1, toInt(process.env.TASK_LEDGER_INVALID_CAPTCHA_THRESHOLD, 3)),
       allowRateLimitedIpFallback: toBool(process.env.ALLOW_RATE_LIMITED_IP_FALLBACK, false),
     },
   };
@@ -4179,6 +4259,12 @@ async function runSingleMode(
           blockedIpsFromLedger.add(ip);
         }
         for (const ip of ledger.listRecentSuspiciousIps()) {
+          blockedIpsFromLedger.add(ip);
+        }
+        for (const ip of ledger.listRecentCaptchaMissingIps()) {
+          blockedIpsFromLedger.add(ip);
+        }
+        for (const ip of ledger.listRecentInvalidCaptchaIps()) {
           blockedIpsFromLedger.add(ip);
         }
       } catch (error) {
