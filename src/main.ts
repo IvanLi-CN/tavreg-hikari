@@ -248,6 +248,29 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(100, timeoutMs));
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function connectOverCdpWithTimeout(endpoint: string, timeoutMs: number): Promise<Browser> {
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`overCDP: Timeout ${timeoutMs}ms exceeded.`));
+    }, Math.max(1000, timeoutMs));
+    // Avoid holding the Node.js event loop if the caller already completed.
+    if (typeof (timer as any).unref === "function") {
+      (timer as any).unref();
+    }
+  });
+  return (await Promise.race([chromium.connectOverCDP(endpoint, { timeout: timeoutMs }), timeoutPromise])) as Browser;
+}
+
 function mustEnv(name: string): string {
   const value = (process.env[name] || "").trim();
   if (!value) {
@@ -1282,7 +1305,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (risk.hasExtensibilityError || /extensibility_error|custom-script-error-code_extensibility_error/i.test(message)) {
     return "auth0_extensibility_error";
   }
-  if (risk.hasInvalidCaptcha || /invalid-captcha|captcha failed/i.test(message)) {
+  if (risk.hasInvalidCaptcha || /invalid-captcha|captcha failed|captcha_ocr_unstable/i.test(message)) {
     return "invalid_captcha";
   }
   if (/proxy_node_blocked_by_recent_ip_rate_limit/i.test(message)) {
@@ -2258,7 +2281,15 @@ async function createDuckmailSession(cfg: AppConfig): Promise<DuckmailSession> {
     }
     pickedDomain = matched;
   } else {
-    pickedDomain = pickRandom(domains);
+    const preferredOrder = ["mailbox.example.invalid", "mailbox.example.invalid", "mailbox.example.invalid"];
+    const preferred = preferredOrder
+      .map((target) => domains.find((item) => item.toLowerCase() === target))
+      .find((item): item is string => typeof item === "string");
+    if (preferred) {
+      pickedDomain = preferred;
+    } else {
+      pickedDomain = pickRandom(domains);
+    }
   }
 
   const mailboxPassword = randomPassword();
@@ -2388,16 +2419,21 @@ async function fillInput(page: any, selector: string, value: string): Promise<vo
 }
 
 async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> {
-  try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/NS_BINDING_ABORTED|interrupted by another navigation|frame was detached/i.test(message)) {
-      log(`safeGoto transient (${url}): ${message.split("\n")[0]}`);
-      await page.waitForTimeout(900);
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout });
       return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const transient = /NS_BINDING_ABORTED|ERR_ABORTED|interrupted by another navigation|frame was detached/i.test(
+        message,
+      );
+      if (!transient || attempt >= 3) {
+        throw error;
+      }
+      log(`safeGoto transient (${url}) attempt=${attempt}: ${message.split("\n")[0]}`);
+      await page.waitForTimeout(700 * attempt);
     }
-    throw error;
   }
 }
 
@@ -2473,6 +2509,21 @@ async function collectVisibleFormErrors(page: any): Promise<string[]> {
       .map((el) => (el.textContent || "").trim())
       .filter((text) => text.length > 0)
       .slice(0, 10);
+  });
+}
+
+async function collectVisibleErrorCodes(page: any): Promise<string[]> {
+  return await page.evaluate(() => {
+    const visible = (el: Element): boolean => {
+      const style = window.getComputedStyle(el as HTMLElement);
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    };
+    const nodes = Array.from(document.querySelectorAll("[data-error-code]"));
+    const codes = nodes
+      .filter(visible)
+      .map((el) => (el.getAttribute("data-error-code") || "").trim())
+      .filter((code) => /^[a-z0-9_-]{3,120}$/i.test(code));
+    return Array.from(new Set(codes)).slice(0, 12);
   });
 }
 
@@ -2637,6 +2688,7 @@ async function solveCaptchaForm(
     formKind === "signup"
       ? /\/u\/signup\/password|app\.tavily\.com\/home/i
       : /\/u\/login\/password|app\.tavily\.com\/home/i;
+  let malformedCaptchaCount = 0;
 
   for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
     let hasCaptcha = (await page.locator('img[alt="captcha"]').count()) > 0;
@@ -2659,13 +2711,18 @@ async function solveCaptchaForm(
         log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
       }
       if (captchaCode.length !== 6) {
+        malformedCaptchaCount += 1;
         log(`${formKind} captcha OCR len=${captchaCode.length} (expect=6), refresh and retry`);
         if (previousCaptchaSrc) {
           await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
         }
+        if (malformedCaptchaCount >= 2) {
+          throw new Error(`${formKind}_captcha_ocr_unstable`);
+        }
         await page.waitForTimeout(700);
         continue;
       }
+      malformedCaptchaCount = 0;
       const captchaInputCount = await page.locator('input[name="captcha"]').count();
       if (captchaInputCount > 0) {
         await fillInput(page, 'input[name="captcha"]', captchaCode);
@@ -2763,7 +2820,13 @@ async function completeSignup(
   if (/\/u\/signup\/password/i.test(page.url())) {
     // Slow down on password step to reduce bot-like burst behavior.
     await page.waitForTimeout(randomInt(3000, 8500));
-    for (let attempt = 1; attempt <= cfg.maxCaptchaRounds; attempt += 1) {
+    const passwordAttemptMax = Math.min(cfg.maxCaptchaRounds, 8);
+    let suspiciousSeenCount = 0;
+    let invalidCaptchaSeenCount = 0;
+    let malformedCaptchaCount = 0;
+    let captchaMissingStreak = 0;
+    let noCaptchaBootstrapCount = 0;
+    for (let attempt = 1; attempt <= passwordAttemptMax; attempt += 1) {
       let previousCaptchaSrc = "";
       if (attempt === 1) {
         const fingerprintSnapshot = await collectBrowserFingerprintSnapshot(page).catch(() => null);
@@ -2802,6 +2865,7 @@ async function completeSignup(
       const hasCaptchaImage = preSubmitSnapshot?.hasCaptchaImage ?? (await page.locator('img[alt="captcha"]').count()) > 0;
 
       if (hasCaptchaInput) {
+        captchaMissingStreak = 0;
         previousCaptchaSrc = await page
           .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
           .catch(() => "");
@@ -2812,13 +2876,18 @@ async function completeSignup(
           log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
         }
         if (code.length !== 6) {
+          malformedCaptchaCount += 1;
           log(`signup password captcha OCR len=${code.length} (expect=6), refresh and retry`);
           if (previousCaptchaSrc) {
             await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
           }
+          if (malformedCaptchaCount >= 2) {
+            throw new Error("invalid_captcha");
+          }
           await page.waitForTimeout(700);
           continue;
         }
+        malformedCaptchaCount = 0;
         await fillInput(page, 'input[name="captcha"]', code);
       } else {
         const challengeHint = preSubmitSnapshot?.challengeHint || false;
@@ -2829,7 +2898,7 @@ async function completeSignup(
           Boolean(preSubmitSnapshot?.hasTurnstileResponseInput) ||
           Boolean(preSubmitSnapshot?.hasRecaptchaResponseInput) ||
           Boolean(preSubmitSnapshot?.hasHcaptchaResponseInput);
-        const warmupRounds = Math.min(4, cfg.maxCaptchaRounds);
+        const warmupRounds = Math.min(4, passwordAttemptMax);
         if (attempt < warmupRounds && hasCaptchaSignal) {
           // Give the challenge widget time to hydrate before fallback submit.
           log(
@@ -2838,7 +2907,46 @@ async function completeSignup(
           await page.waitForTimeout(2500);
           continue;
         }
-        log(`signup password captcha input missing (attempt=${attempt}), continue submit without captcha`);
+        if (hasCaptchaSignal && attempt < passwordAttemptMax) {
+          log(`signup password captcha challenge visible but input missing (attempt=${attempt}), waiting for hydration`);
+          await page.waitForTimeout(randomInt(2400, 4200));
+          continue;
+        }
+        if (!hasCaptchaSignal) {
+          captchaMissingStreak += 1;
+          const dwellMs = attempt === 1 ? randomInt(11000, 21000) : randomInt(7000, 15000);
+          log(`signup password captcha absent (attempt=${attempt}, streak=${captchaMissingStreak}), dwell=${dwellMs}ms`);
+          await page.waitForTimeout(dwellMs);
+          await page.waitForSelector('input[name="captcha"]', { timeout: 2200 }).catch(() => {});
+          const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+          if (lateCaptchaInput) {
+            log(`signup password captcha input appeared after dwell (attempt=${attempt}), retrying with OCR`);
+            continue;
+          }
+          if (noCaptchaBootstrapCount < 1) {
+            noCaptchaBootstrapCount += 1;
+            log(`signup password captcha still absent (attempt=${attempt}), allow one bootstrap submit`);
+          } else if (attempt < passwordAttemptMax) {
+            log(`signup password captcha still absent after bootstrap, forcing reload (attempt=${attempt})`);
+            await safeGoto(page, page.url());
+            await page.waitForTimeout(randomInt(1200, 2600));
+            continue;
+          } else {
+            throw new Error("signup_password_captcha_missing");
+          }
+        } else if (attempt >= passwordAttemptMax) {
+          throw new Error("signup_password_captcha_missing");
+        }
+        if (!hasCaptchaSignal && noCaptchaBootstrapCount > 0) {
+          // Submit once without captcha to trigger server-side challenge hydration.
+        } else if (attempt < passwordAttemptMax) {
+          log(`signup password forcing reload for captcha hydration (attempt=${attempt})`);
+          await safeGoto(page, page.url());
+          await page.waitForTimeout(randomInt(1200, 2600));
+          continue;
+        } else {
+          throw new Error("signup_password_captcha_missing");
+        }
       }
 
       const passwordDiag = await page.evaluate(() => {
@@ -2853,6 +2961,9 @@ async function completeSignup(
       });
       log(`signup password diag attempt=${attempt} ${JSON.stringify(passwordDiag)}`);
 
+      if (hasCaptchaInput) {
+        await page.waitForTimeout(randomInt(900, 2600));
+      }
       await clickSubmit(page);
       await page.waitForTimeout(2200);
 
@@ -2882,39 +2993,77 @@ async function completeSignup(
         .map((text) => (text.length > 180 ? `${text.slice(0, 180)}...` : text));
       log(`signup password step still present after submit (attempt=${attempt}) errors=${compactErrors.join(" | ") || "n/a"}`);
       const hasIpRateLimitMarker = formErrors.some((text) => /Too many signups from the same IP/i.test(text));
-      if (hasIpRateLimitMarker) {
-        throw new Error("risk_control_ip_rate_limit");
-      }
-      const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
       const postSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
       if (postSubmitSnapshot) {
         hooks?.onPasswordSnapshot?.(postSubmitSnapshot);
       }
+      const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+      const hasIpBlockedCode = postSubmitErrorCodes.some((code) => /ip-signup-blocked/i.test(code));
+      if (hasIpRateLimitMarker || hasIpBlockedCode) {
+        throw new Error("risk_control_ip_rate_limit");
+      }
+      const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
+      const hasExtensibilityCode = postSubmitErrorCodes.some((code) =>
+        /custom-script-error-code_extensibility_error/i.test(code),
+      );
+      if (hasExtensibilityCode) {
+        throw new Error("risk_control_suspicious_activity");
+      }
       if (hasSuspiciousMarker) {
+        suspiciousSeenCount += 1;
         const challengeEscalated =
           Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
           Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
           Boolean(postSubmitSnapshot?.hasCaptchaContainer);
-        if (challengeEscalated && attempt < cfg.maxCaptchaRounds) {
-          log(`signup password suspicious marker with captcha challenge present (attempt=${attempt}), retrying`);
+        if (challengeEscalated && attempt < passwordAttemptMax && suspiciousSeenCount < 2) {
+          log(`signup password suspicious marker with captcha challenge present (attempt=${attempt}), retrying once`);
           await page.waitForTimeout(1800);
           continue;
         }
         // Let mode-level retry rotate identity/proxy after hard suspicious block.
         throw new Error("risk_control_suspicious_activity");
       }
-      const hasCaptchaErrorMarker = formErrors.some((text) => /captcha|challenge|robot|verification/i.test(text));
+      if (suspiciousSeenCount > 0) {
+        suspiciousSeenCount -= 1;
+      }
+      const hasInvalidCaptchaCode = postSubmitErrorCodes.some((code) =>
+        /invalid-captcha/i.test(code),
+      );
+      if (hasInvalidCaptchaCode) {
+        invalidCaptchaSeenCount += 1;
+        if (previousCaptchaSrc) {
+          await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
+        }
+        if (invalidCaptchaSeenCount >= 2 || attempt >= passwordAttemptMax - 1) {
+          log(`signup password invalid captcha repeated ${invalidCaptchaSeenCount} times, rotate mode attempt early`);
+          throw new Error("invalid_captcha");
+        }
+        log(`signup password invalid captcha on attempt ${attempt}, refreshing and retrying`);
+        await page.waitForTimeout(1300);
+        continue;
+      }
+      invalidCaptchaSeenCount = 0;
       if (!hasCaptchaInput) {
-        if (hasCaptchaErrorMarker && attempt < cfg.maxCaptchaRounds) {
-          log(`signup password missing captcha input but server still asks challenge (attempt=${attempt}), retrying`);
-          await page.waitForTimeout(1500);
+        const hasCaptchaSignalAfter =
+          Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
+          Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
+          Boolean(postSubmitSnapshot?.hasCaptchaContainer) ||
+          Boolean(postSubmitSnapshot?.hasTurnstileResponseInput) ||
+          Boolean(postSubmitSnapshot?.hasRecaptchaResponseInput) ||
+          Boolean(postSubmitSnapshot?.hasHcaptchaResponseInput) ||
+          Boolean(postSubmitSnapshot?.challengeHint);
+        if (hasCaptchaSignalAfter && attempt < passwordAttemptMax) {
+          log(`signup password challenge appeared after bootstrap submit (attempt=${attempt}), retrying with captcha`);
+          await page.waitForTimeout(1400);
           continue;
         }
-        if (attempt < cfg.maxCaptchaRounds) {
-          log(`signup password submit without captcha not accepted (attempt=${attempt}), retrying`);
-          await page.waitForTimeout(1200);
+        if (attempt < passwordAttemptMax) {
+          log(`signup password bootstrap submit produced no challenge (attempt=${attempt}), reloading`);
+          await safeGoto(page, page.url());
+          await page.waitForTimeout(randomInt(1200, 2600));
           continue;
         }
+        throw new Error("signup_password_captcha_missing");
       }
       if (captchaRefreshed) {
         continue;
@@ -2926,7 +3075,7 @@ async function completeSignup(
           continue;
         }
       }
-      if (attempt < cfg.maxCaptchaRounds) {
+      if (attempt < passwordAttemptMax) {
         log(`signup password submission not accepted on attempt ${attempt}, retrying`);
         continue;
       }
@@ -2947,7 +3096,7 @@ async function completeSignup(
     ) {
       throw new Error("signup_password_captcha_missing");
     }
-    throw new Error(`signup password step failed after ${cfg.maxCaptchaRounds} attempts`);
+    throw new Error(`signup password step failed after ${passwordAttemptMax} attempts`);
   }
 }
 
@@ -3286,7 +3435,7 @@ function resolveModeList(mode: RunMode): Array<"headed" | "headless"> {
 }
 
 function shouldRetryModeFailure(message: string): boolean {
-  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|invalid_captcha|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|captcha_ocr_unstable|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|invalid_captcha|timeout|network|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
     message,
   );
 }
@@ -3510,7 +3659,7 @@ async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promis
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     try {
-      const resp = await fetch(endpoint);
+      const resp = await fetchWithTimeout(endpoint, 2500);
       if (resp.ok) {
         const payload = (await resp.json()) as JsonRecord;
         const ws = typeof payload.webSocketDebuggerUrl === "string" ? payload.webSocketDebuggerUrl.trim() : "";
@@ -3573,7 +3722,23 @@ async function launchNativeChromeCdp(
 
     try {
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
-      const browser = await chromium.connectOverCDP(wsEndpoint, { timeout: 45_000 });
+      // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
+      const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
+      let browser: Browser | null = null;
+      const connectErrors: string[] = [];
+      for (const endpoint of cdpEndpoints) {
+        try {
+          browser = await connectOverCdpWithTimeout(endpoint, 60_000);
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          connectErrors.push(`${endpoint.startsWith("ws://") ? "ws" : "http"}: ${message.split("\n")[0]}`);
+          await delay(500);
+        }
+      }
+      if (!browser) {
+        throw new Error(`overCDP: ${connectErrors.join(" | ") || "unknown connect error"}`);
+      }
       const context = browser.contexts()[0];
       if (!context) {
         await browser.close().catch(() => {});
