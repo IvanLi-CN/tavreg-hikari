@@ -3006,17 +3006,17 @@ async function completeSignup(
       const hasExtensibilityCode = postSubmitErrorCodes.some((code) =>
         /custom-script-error-code_extensibility_error/i.test(code),
       );
-      if (hasExtensibilityCode) {
-        throw new Error("risk_control_suspicious_activity");
-      }
-      if (hasSuspiciousMarker) {
+      const hasSuspiciousSignal = hasSuspiciousMarker || hasExtensibilityCode;
+      if (hasSuspiciousSignal) {
         suspiciousSeenCount += 1;
         const challengeEscalated =
           Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
           Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
           Boolean(postSubmitSnapshot?.hasCaptchaContainer);
         if (challengeEscalated && attempt < passwordAttemptMax && suspiciousSeenCount < 2) {
-          log(`signup password suspicious marker with captcha challenge present (attempt=${attempt}), retrying once`);
+          log(
+            `signup password suspicious marker with captcha challenge present (attempt=${attempt}, extensibility=${hasExtensibilityCode ? 1 : 0}), retrying once`,
+          );
           await page.waitForTimeout(1800);
           continue;
         }
