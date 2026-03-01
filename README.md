@@ -64,11 +64,13 @@ Run in headless mode:
 bun run start -- --mode headless
 ```
 
-Run both headed and headless in one command:
+Run in headed mode:
 
 ```bash
-bun run start -- --mode both
+bun run start -- --mode headed
 ```
+
+`--mode` only supports `headed` and `headless`.
 
 Print secrets to terminal summary (disabled by default):
 
@@ -174,7 +176,7 @@ Additional artifacts:
 - `output/browser_precheck.json`: latest browser precheck report
 - `output/browser_precheck_headed.json`: headed precheck report
 - `output/browser_precheck_headless.json`: headless precheck report
-- `output/run_summary.json`: summary for single or multiple run modes
+- `output/run_summary.json`: summary payload for the single requested run mode
 - `output/proxy/node-usage.json`: proxy node usage history and recent selection window
 - `output/registry/signup-tasks.sqlite`: SQLite task ledger (run status, risk signals, proxy IP history)
 
