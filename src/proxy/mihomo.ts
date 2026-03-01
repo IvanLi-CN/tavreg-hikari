@@ -35,6 +35,9 @@ interface MihomoProcess {
 const RELEASE_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const RELEASE_TAG_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags";
 
+// Avoid duplicate downloads when multiple runs start in parallel.
+const mihomoBinaryCache = new Map<string, Promise<string>>();
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -122,40 +125,57 @@ function selectAsset(
 }
 
 async function downloadMihomoBinary(cfg: MihomoConfig): Promise<string> {
-  const { os, archAliases } = resolvePlatform();
-  const tagOverride = cfg.version ? (cfg.version.startsWith("v") ? cfg.version : `v${cfg.version}`) : null;
-  const release = await fetchRelease(tagOverride ? `${RELEASE_TAG_API}/${tagOverride}` : RELEASE_API);
-  const tag = tagOverride || release.tag;
-  const assets = release.assets;
-  const asset = selectAsset(assets, os, archAliases, tag);
-
-  if (!asset.browser_download_url || !asset.name) {
-    throw new Error("mihomo_asset_invalid");
+  const cacheKey = `${cfg.version || "latest"}:${process.platform}:${process.arch}`;
+  const cached = mihomoBinaryCache.get(cacheKey);
+  if (cached) {
+    return await cached;
   }
 
-  const versionLabel = tag.replace(/^v/, "");
-  const dir = path.join(cfg.downloadDir, versionLabel);
-  const binName = os === "windows" ? "mihomo.exe" : "mihomo";
-  const binPath = path.join(dir, binName);
+  const downloadPromise = (async (): Promise<string> => {
+    const { os, archAliases } = resolvePlatform();
+    const tagOverride = cfg.version ? (cfg.version.startsWith("v") ? cfg.version : `v${cfg.version}`) : null;
+    const release = await fetchRelease(tagOverride ? `${RELEASE_TAG_API}/${tagOverride}` : RELEASE_API);
+    const tag = tagOverride || release.tag;
+    const assets = release.assets;
+    const asset = selectAsset(assets, os, archAliases, tag);
 
-  if (await fileExists(binPath)) {
+    if (!asset.browser_download_url || !asset.name) {
+      throw new Error("mihomo_asset_invalid");
+    }
+
+    const versionLabel = tag.replace(/^v/, "");
+    const dir = path.join(cfg.downloadDir, versionLabel);
+    const binName = os === "windows" ? "mihomo.exe" : "mihomo";
+    const binPath = path.join(dir, binName);
+
+    if (await fileExists(binPath)) {
+      return binPath;
+    }
+
+    await mkdir(dir, { recursive: true });
+    const resp = await fetch(asset.browser_download_url);
+    if (!resp.ok) {
+      throw new Error(`mihomo_download_failed:${resp.status}`);
+    }
+
+    const gzBuffer = Buffer.from(await resp.arrayBuffer());
+    const binBuffer = gunzipSync(gzBuffer);
+    await writeFile(binPath, binBuffer);
+    if (os !== "windows") {
+      await chmod(binPath, 0o755);
+    }
+
     return binPath;
-  }
+  })();
 
-  await mkdir(dir, { recursive: true });
-  const resp = await fetch(asset.browser_download_url);
-  if (!resp.ok) {
-    throw new Error(`mihomo_download_failed:${resp.status}`);
+  mihomoBinaryCache.set(cacheKey, downloadPromise);
+  try {
+    return await downloadPromise;
+  } catch (error) {
+    // Allow retry after transient download failures.
+    mihomoBinaryCache.delete(cacheKey);
+    throw error;
   }
-
-  const gzBuffer = Buffer.from(await resp.arrayBuffer());
-  const binBuffer = gunzipSync(gzBuffer);
-  await writeFile(binPath, binBuffer);
-  if (os !== "windows") {
-    await chmod(binPath, 0o755);
-  }
-
-  return binPath;
 }
 
 function looksLikeBase64(text: string): boolean {

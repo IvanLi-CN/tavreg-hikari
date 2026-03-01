@@ -78,6 +78,12 @@ Print secrets to terminal summary (disabled by default):
 bun run start -- --print-secrets
 ```
 
+Batch run (need N successful accounts, run up to P in parallel; defaults: `--need 1 --parallel 1`):
+
+```bash
+bun run start -- --need 5 --parallel 2
+```
+
 Skip browser precheck temporarily (debug only):
 
 ```bash
@@ -160,6 +166,8 @@ Script writes result to:
 
 - `output/result.json`
 
+In batch mode, `output/result.json` contains the **last** successful result; check `output/run_summary.json` for all results.
+
 Fields:
 
 - `mode`: run mode (`headed` or `headless`)
@@ -173,10 +181,13 @@ Fields:
 
 Additional artifacts:
 
-- `output/browser_precheck.json`: latest browser precheck report
-- `output/browser_precheck_headed.json`: headed precheck report
-- `output/browser_precheck_headless.json`: headless precheck report
-- `output/run_summary.json`: summary payload for the single requested run mode
+- `output/run_summary.json`: summary payload (includes `results` array; batch mode may contain multiple entries)
+- Single-run mode (default `--need 1 --parallel 1`):
+  - `output/browser_precheck.json`: latest browser precheck report
+  - `output/browser_precheck_headed.json`: headed precheck report
+  - `output/browser_precheck_headless.json`: headless precheck report
+- Batch mode (`--need > 1` and/or `--parallel > 1`):
+  - Per-run artifacts are stored under `output/runs/<batchId>/<runId>/`
 - `output/proxy/node-usage.json`: proxy node usage history and recent selection window
 - `output/registry/signup-tasks.sqlite`: SQLite task ledger (run status, risk signals, proxy IP history)
 

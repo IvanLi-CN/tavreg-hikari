@@ -14,6 +14,8 @@
 
 - 完整注册（推荐）：
   - `BROWSER_ENGINE=chrome CHROME_NATIVE_AUTOMATION=true RUN_MODE=headed bun run start -- --mode headed --browser-engine chrome`
+- 批量注册（成功数达到需求数即结束）：
+  - `bun run start -- --need 5 --parallel 2`
 - 站点人工检查：
   - `bun run start -- --inspect-sites --browser-engine chrome`
 
@@ -35,9 +37,10 @@
    - 打开链接并确认验证成功信号。
 7. 登录并提取 API Key。
 8. 持久化输出：
-   - `output/result.json`
-   - `output/run_summary.json`
-   - `output/browser_precheck*.json`
+   - `output/result.json`（批量模式下为最后一个成功结果）
+   - `output/run_summary.json`（包含 `need/parallel/successCount/failureCount/results[]`）
+   - 单次运行：`output/browser_precheck*.json`
+   - 批量/并行：`output/runs/<batchId>/<runId>/browser_precheck*.json`（以及其它诊断产物）
 
 ## 重试策略
 
@@ -48,7 +51,8 @@
 ## 失败排查
 
 1. 预检因 WebRTC 或 IP 不一致失败：
-   - 查看 `output/browser_precheck_headed.json`。
+   - 单次运行：查看 `output/browser_precheck_headed.json`。
+   - 批量/并行：查看 `output/runs/<batchId>/<runId>/browser_precheck_headed.json`（`batchId/runId` 可从 `output/run_summary.json` 或 SQLite 台账中获取）。
    - 对比“选中代理出口 IP”和“浏览器实际观测 IP”。
 2. 验证码反复失败：
    - 提高 `MAX_CAPTCHA_ROUNDS`。
@@ -57,7 +61,8 @@
    - 提高 `EMAIL_WAIT_MS`。
    - 检查当前邮箱服务 API 可用性。
 4. API Key 未提取到：
-   - 查看 `output/network_headed.json` 与 `output/home_headed.html`。
+   - 单次运行：查看 `output/network_headed.json` 与 `output/home_headed.html`。
+   - 批量/并行：查看 `output/runs/<batchId>/<runId>/network_headed.json` 与 `output/runs/<batchId>/<runId>/home_headed.html`。
 
 ## 执行约束
 

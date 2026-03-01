@@ -5,7 +5,7 @@ import { Impit } from "impit";
 import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
 import { randomBytes, randomInt } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 import process from "node:process";
@@ -28,6 +28,8 @@ interface CliArgs {
   skipPrecheck: boolean;
   inspectSites: boolean;
   printSecrets: boolean;
+  parallel: number;
+  need: number;
 }
 
 interface AppConfig {
@@ -322,6 +324,16 @@ function parseMailProvider(raw: string | undefined): MailProvider | null {
   return null;
 }
 
+function parsePositiveInt(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const normalized = raw.trim();
+  if (!normalized) return null;
+  const num = Number(normalized);
+  if (!Number.isFinite(num) || !Number.isInteger(num)) return null;
+  if (num < 1) return null;
+  return num;
+}
+
 function parseArgs(argv: string[]): CliArgs {
   let proxyNode: string | undefined;
   let mode: RunMode | undefined;
@@ -329,6 +341,8 @@ function parseArgs(argv: string[]): CliArgs {
   let skipPrecheck = false;
   let inspectSites = false;
   let printSecrets = false;
+  let parallel = 1;
+  let need = 1;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === "--proxy-node" && argv[i + 1]) {
@@ -386,8 +400,51 @@ function parseArgs(argv: string[]): CliArgs {
       printSecrets = true;
       continue;
     }
+    if (arg === "--parallel" && argv[i + 1]) {
+      const parsed = parsePositiveInt(argv[i + 1]);
+      if (!parsed) {
+        throw new Error(`invalid --parallel value: ${argv[i + 1]}`);
+      }
+      parallel = parsed;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--parallel=")) {
+      const parsed = parsePositiveInt(arg.slice("--parallel=".length));
+      if (!parsed) {
+        throw new Error(`invalid --parallel value: ${arg.slice("--parallel=".length)}`);
+      }
+      parallel = parsed;
+      continue;
+    }
+    if (arg === "--need" && argv[i + 1]) {
+      const parsed = parsePositiveInt(argv[i + 1]);
+      if (!parsed) {
+        throw new Error(`invalid --need value: ${argv[i + 1]}`);
+      }
+      need = parsed;
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--need=")) {
+      const parsed = parsePositiveInt(arg.slice("--need=".length));
+      if (!parsed) {
+        throw new Error(`invalid --need value: ${arg.slice("--need=".length)}`);
+      }
+      need = parsed;
+      continue;
+    }
   }
-  return { proxyNode: proxyNode?.trim() || undefined, mode, browserEngine, skipPrecheck, inspectSites, printSecrets };
+  return {
+    proxyNode: proxyNode?.trim() || undefined,
+    mode,
+    browserEngine,
+    skipPrecheck,
+    inspectSites,
+    printSecrets,
+    parallel,
+    need,
+  };
 }
 
 function defaultProxyNodeUsageState(): ProxyNodeUsageState {
@@ -666,15 +723,18 @@ function nodeSelectionScore(
   );
 }
 
-function buildMihomoConfig(cfg: AppConfig): MihomoConfig {
+function buildMihomoConfig(
+  cfg: AppConfig,
+  overrides?: { apiPort?: number; mixedPort?: number; workDir?: string },
+): MihomoConfig {
   return {
     subscriptionUrl: cfg.mihomoSubscriptionUrl,
-    apiPort: cfg.mihomoApiPort,
-    mixedPort: cfg.mihomoMixedPort,
+    apiPort: overrides?.apiPort ?? cfg.mihomoApiPort,
+    mixedPort: overrides?.mixedPort ?? cfg.mihomoMixedPort,
     groupName: "CODEX_AUTO",
     routeGroupName: "CODEX_ROUTE",
     checkUrl: cfg.proxyCheckUrl,
-    workDir: path.join(OUTPUT_PATH, "mihomo"),
+    workDir: overrides?.workDir ?? path.join(OUTPUT_PATH, "mihomo"),
     downloadDir: path.resolve("downloads", "mihomo"),
   };
 }
@@ -1381,8 +1441,24 @@ function extractTavilyKeyDeep(node: unknown): string | null {
 }
 
 async function writeJson(path: URL, payload: unknown): Promise<void> {
-  await mkdir(OUTPUT_DIR, { recursive: true });
-  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  const dir = new URL(".", path);
+  await mkdir(dir, { recursive: true });
+  const content = `${JSON.stringify(payload, null, 2)}\n`;
+  const targetPath = fileURLToPath(path);
+  const tmpPath = `${targetPath}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(tmpPath, content, "utf8");
+  try {
+    await rename(tmpPath, targetPath);
+  } catch (error: any) {
+    // Best-effort fallback for platforms where rename won't overwrite.
+    const code = typeof error?.code === "string" ? error.code : "";
+    if (code === "EEXIST" || code === "EPERM") {
+      await rm(targetPath, { force: true }).catch(() => {});
+      await rename(tmpPath, targetPath);
+      return;
+    }
+    throw error;
+  }
 }
 
 type IpProbeScope = "domestic" | "global";
@@ -3033,6 +3109,7 @@ async function completeSignup(
   email: string,
   password: string,
   cfg: AppConfig,
+  outputDir: URL,
   hooks?: SignupDiagHooks,
 ): Promise<void> {
   await safeGoto(page, "https://app.tavily.com/api/auth/login");
@@ -3073,9 +3150,9 @@ async function completeSignup(
         if (fingerprintSnapshot) {
           hooks?.onFingerprintSnapshot?.(fingerprintSnapshot);
         }
-        await writeFile(new URL("signup_password_before.html", OUTPUT_DIR), await page.content(), "utf8");
+        await writeFile(new URL("signup_password_before.html", outputDir), await page.content(), "utf8");
         const snap = await page.screenshot({ fullPage: true });
-        await writeFile(new URL("signup_password_before.png", OUTPUT_DIR), snap);
+        await writeFile(new URL("signup_password_before.png", outputDir), snap);
       }
 
       const passwordInputs = page.locator('input[type="password"]');
@@ -3233,9 +3310,9 @@ async function completeSignup(
       await page.waitForTimeout(2200);
 
       if (attempt === 1) {
-        await writeFile(new URL("signup_password_after1.html", OUTPUT_DIR), await page.content(), "utf8");
+        await writeFile(new URL("signup_password_after1.html", outputDir), await page.content(), "utf8");
         const snap = await page.screenshot({ fullPage: true });
-        await writeFile(new URL("signup_password_after1.png", OUTPUT_DIR), snap);
+        await writeFile(new URL("signup_password_after1.png", outputDir), snap);
       }
 
       if (!/\/u\/signup\/password/i.test(page.url())) {
@@ -3933,6 +4010,51 @@ async function resolveDebuggingPort(preferredPort: number): Promise<number> {
   });
 }
 
+const RESERVED_LOCAL_PORTS = new Set<number>();
+
+async function reserveLocalPort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (!port || port <= 0) {
+          reject(new Error("failed to reserve local port"));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+async function reserveUniqueLocalPort(): Promise<number> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = await reserveLocalPort();
+    if (RESERVED_LOCAL_PORTS.has(port)) {
+      continue;
+    }
+    RESERVED_LOCAL_PORTS.add(port);
+    return port;
+  }
+  throw new Error("failed to reserve a unique local port");
+}
+
+async function reserveMihomoPorts(): Promise<{ apiPort: number; mixedPort: number }> {
+  const apiPort = await reserveUniqueLocalPort();
+  let mixedPort = await reserveUniqueLocalPort();
+  while (mixedPort === apiPort) {
+    mixedPort = await reserveUniqueLocalPort();
+  }
+  return { apiPort, mixedPort };
+}
+
 async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promise<string> {
   const endpoint = `http://127.0.0.1:${port}/json/version`;
   const started = Date.now();
@@ -4257,7 +4379,21 @@ async function runSingleMode(
     notes.push(`${mailbox.provider} mailbox created (${mailbox.accountId})`);
   }
 
-  const mihomoController = await startMihomo(buildMihomoConfig(cfg));
+  const batchEnabled = args.need > 1 || args.parallel > 1;
+  const diagOutputDir = batchEnabled ? new URL(`runs/${ctx.batchId}/${runId}/`, OUTPUT_DIR) : OUTPUT_DIR;
+  await mkdir(diagOutputDir, { recursive: true });
+
+  let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
+  if (batchEnabled) {
+    const ports = await reserveMihomoPorts();
+    mihomoOverrides = {
+      apiPort: ports.apiPort,
+      mixedPort: ports.mixedPort,
+      workDir: path.join(OUTPUT_PATH, "mihomo", ctx.batchId, runId),
+    };
+  }
+
+  const mihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
   const browserEngine = args.browserEngine || cfg.browserEngine;
   const useNativeChrome = browserEngine === "chrome" && mode === "headed" && cfg.chromeNativeAutomation;
   let browser: Browser | null = null;
@@ -4686,8 +4822,8 @@ async function runSingleMode(
       failureStage = "browser_precheck";
       const precheck = await runBrowserPrecheck(page, cfg, mode, selectedProxy, locale);
       precheckPassed = precheck.passed;
-      await writeJson(new URL(`browser_precheck_${mode}.json`, OUTPUT_DIR), precheck);
-      await writeJson(new URL("browser_precheck.json", OUTPUT_DIR), precheck);
+      await writeJson(new URL(`browser_precheck_${mode}.json`, diagOutputDir), precheck);
+      await writeJson(new URL("browser_precheck.json", diagOutputDir), precheck);
       if (!precheck.passed) {
         throw new Error(`browser precheck failed: ${precheck.issues.join(" | ")}`);
       }
@@ -4711,7 +4847,7 @@ async function runSingleMode(
 
       for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
-          await completeSignup(page, solver, email, password, cfg, {
+          await completeSignup(page, solver, email, password, cfg, diagOutputDir, {
             onPasswordSnapshot: (snapshot) => {
               passwordStepSnapshots.push(snapshot);
               if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
@@ -4780,8 +4916,8 @@ async function runSingleMode(
         await loginAndReachHome(page, solver, email, password, cfg);
         await page.waitForTimeout(1500);
         if (attempt === 1) {
-          await writeFile(new URL(`home_${mode}.html`, OUTPUT_DIR), await page.content(), "utf8");
-          await writeJson(new URL(`network_${mode}.json`, OUTPUT_DIR), networkLog.slice(-120));
+          await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
+          await writeJson(new URL(`network_${mode}.json`, diagOutputDir), networkLog.slice(-120));
         }
 
         apiKey = await getDefaultApiKey(page, cfg);
@@ -4874,10 +5010,10 @@ async function runSingleMode(
     localErrorCode = deriveErrorCode(message, failureStage, risk);
     localErrorMessage = message;
     try {
-      await writeJson(new URL(`network_fail_${mode}.json`, OUTPUT_DIR), networkLog.slice(-180));
-      await writeJson(new URL(`request_fail_${mode}.json`, OUTPUT_DIR), requestLog.slice(-180));
-      await writeJson(new URL(`resource_fail_${mode}.json`, OUTPUT_DIR), resourceLog.slice(-220));
-      await writeJson(new URL(`failure_context_${mode}.json`, OUTPUT_DIR), {
+      await writeJson(new URL(`network_fail_${mode}.json`, diagOutputDir), networkLog.slice(-180));
+      await writeJson(new URL(`request_fail_${mode}.json`, diagOutputDir), requestLog.slice(-180));
+      await writeJson(new URL(`resource_fail_${mode}.json`, diagOutputDir), resourceLog.slice(-220));
+      await writeJson(new URL(`failure_context_${mode}.json`, diagOutputDir), {
         failedAt: new Date().toISOString(),
         stage: failureStage,
         url: page ? page.url() : null,
@@ -4886,7 +5022,7 @@ async function runSingleMode(
         notes,
       });
       if (page) {
-        await writeFile(new URL(`failure_page_${mode}.html`, OUTPUT_DIR), await page.content(), "utf8");
+        await writeFile(new URL(`failure_page_${mode}.html`, diagOutputDir), await page.content(), "utf8");
       }
     } catch {
       // best effort diagnostics only
@@ -5100,7 +5236,10 @@ async function run(): Promise<void> {
 
   try {
     const requestedMode = args.mode || cfg.runMode;
-    log(`start mode=${requestedMode} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
+    const batchEnabled = args.need > 1 || args.parallel > 1;
+    log(
+      `start mode=${requestedMode} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"} need=${args.need} parallel=${args.parallel}`,
+    );
 
     const allModels = await listModels(cfg);
     const modelCandidates = resolveCaptchaModelCandidates(cfg.preferredModel, allModels, 5);
@@ -5108,53 +5247,128 @@ async function run(): Promise<void> {
     log(`captcha model candidates: ${modelCandidates.join(", ")}`);
     const solver = new CaptchaSolver(cfg, modelCandidates);
 
-    let result: ResultPayload | null = null;
-    let lastError: Error | null = null;
+    const results: ResultPayload[] = [];
+    const failures: Array<{ runIndex: number; error: string }> = [];
 
-    for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
-      try {
-        result = await runSingleMode(cfg, args, solver, resolvedModel, requestedMode, {
-          batchId,
-          modeAttempt: attempt,
-          taskLedger,
-        });
-        if (attempt > 1) {
-          result.notes.push(`mode retry succeeded on attempt ${attempt}`);
+    const runOne = async (runIndex: number): Promise<ResultPayload> => {
+      let result: ResultPayload | null = null;
+      let lastError: Error | null = null;
+
+      for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
+        try {
+          result = await runSingleMode(cfg, args, solver, resolvedModel, requestedMode, {
+            batchId,
+            modeAttempt: attempt,
+            taskLedger,
+          });
+          if (attempt > 1) {
+            result.notes.push(`mode retry succeeded on attempt ${attempt}`);
+          }
+          return result;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          lastError = error instanceof Error ? error : new Error(message);
+          if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
+            log(`[${requestedMode}] run attempt ${attempt} failed (batch-run=${runIndex}), retrying: ${message}`);
+            continue;
+          }
+          break;
         }
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        lastError = error instanceof Error ? error : new Error(message);
-        if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
-          log(`[${requestedMode}] run attempt ${attempt} failed, retrying: ${message}`);
-          continue;
-        }
-        break;
       }
-    }
 
-    if (!result) {
       throw lastError || new Error(`[${requestedMode}] run failed without result`);
-    }
+    };
 
-    log(`[${requestedMode}] finished account=${result.email}`);
+    if (!batchEnabled) {
+      const result = await runOne(1);
+      results.push(result);
+      log(`[${requestedMode}] finished account=${result.email}`);
+    } else {
+      const need = args.need;
+      const parallel = args.parallel;
+      const running = new Set<Promise<void>>();
+      let launched = 0;
+
+      const launch = (): void => {
+        launched += 1;
+        const runIndex = launched;
+        const p = (async () => {
+          log(`[batch] start run=${runIndex} active=${running.size + 1}/${parallel} success=${results.length}/${need}`);
+          try {
+            const result = await runOne(runIndex);
+            results.push(result);
+            log(`[batch] success run=${runIndex} account=${result.email} success=${results.length}/${need}`);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            failures.push({ runIndex, error: message });
+            log(`[batch] fail run=${runIndex} success=${results.length}/${need}: ${message}`);
+          }
+        })().finally(() => {
+          running.delete(p);
+        });
+        running.add(p);
+      };
+
+      while (results.length < need) {
+        while (running.size < parallel && results.length + running.size < need) {
+          launch();
+        }
+        if (running.size === 0) {
+          throw new Error(`batch scheduler stalled: need=${need} success=${results.length}`);
+        }
+        await Promise.race(Array.from(running));
+      }
+
+      await Promise.all(Array.from(running));
+      log(`[batch] completed success=${results.length}/${need} failures=${failures.length}`);
+    }
 
     const summaryPayload = {
       batchId,
       requestedMode,
       completedAt: new Date().toISOString(),
       model: resolvedModel,
-      results: [result],
+      need: args.need,
+      parallel: args.parallel,
+      successCount: results.length,
+      failureCount: failures.length,
+      failures: failures.slice(-50),
+      results,
     };
     await writeJson(new URL("run_summary.json", OUTPUT_DIR), summaryPayload);
 
-    await writeJson(new URL("result.json", OUTPUT_DIR), result);
+    const resultOutput = results[results.length - 1]!;
+    await writeJson(new URL("result.json", OUTPUT_DIR), resultOutput);
     log("saved output/result.json");
 
-    console.log(`ACCOUNT=${result.email}`);
+    if (!batchEnabled) {
+      console.log(`ACCOUNT=${resultOutput.email}`);
+      if (args.printSecrets) {
+        console.log(`PASSWORD=${resultOutput.password}`);
+        console.log(`DEFAULT_API_KEY=${resultOutput.apiKey}`);
+      } else {
+        console.log("SECRETS=hidden (pass --print-secrets to show)");
+      }
+      return;
+    }
+
+    console.log(`BATCH_ID=${batchId}`);
+    console.log(`NEED=${args.need}`);
+    console.log(`SUCCESS=${results.length}`);
+    console.log(`FAILURE=${failures.length}`);
+    console.log(`ACCOUNT=${resultOutput.email}`);
+    for (let i = 0; i < results.length; i += 1) {
+      const item = results[i]!;
+      console.log(`ACCOUNT_${i + 1}=${item.email}`);
+    }
     if (args.printSecrets) {
-      console.log(`PASSWORD=${result.password}`);
-      console.log(`DEFAULT_API_KEY=${result.apiKey}`);
+      console.log(`PASSWORD=${resultOutput.password}`);
+      console.log(`DEFAULT_API_KEY=${resultOutput.apiKey}`);
+      for (let i = 0; i < results.length; i += 1) {
+        const item = results[i]!;
+        console.log(`PASSWORD_${i + 1}=${item.password}`);
+        console.log(`DEFAULT_API_KEY_${i + 1}=${item.apiKey}`);
+      }
     } else {
       console.log("SECRETS=hidden (pass --print-secrets to show)");
     }
