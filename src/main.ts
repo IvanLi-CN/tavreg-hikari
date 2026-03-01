@@ -17,7 +17,7 @@ import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js"
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
-type RunMode = "headed" | "headless" | "both";
+type RunMode = "headed" | "headless";
 type BrowserEngine = "camoufox" | "chrome";
 type MailProvider = "duckmail" | "vmail";
 
@@ -302,7 +302,7 @@ function toInt(raw: string | undefined, fallback: number): number {
 function parseRunMode(raw: string | undefined): RunMode | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
-  if (value === "headed" || value === "headless" || value === "both") {
+  if (value === "headed" || value === "headless") {
     return value;
   }
   return null;
@@ -3583,7 +3583,11 @@ function resolveChromeExecutablePath(raw: string | undefined): string | undefine
 }
 
 function loadConfig(): AppConfig {
-  const envRunMode = parseRunMode(process.env.RUN_MODE);
+  const rawRunMode = (process.env.RUN_MODE || "").trim();
+  const envRunMode = parseRunMode(rawRunMode);
+  if (rawRunMode && !envRunMode) {
+    throw new Error(`Invalid env RUN_MODE: ${rawRunMode}. Supported values: headed|headless`);
+  }
   const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
   const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "vmail";
@@ -3703,11 +3707,6 @@ function isRecoverableBrowserError(reason: string): boolean {
   return /Execution context was destroyed|Target closed|Navigation|Cannot find context|page has been closed|context has been closed|browser has been closed|Target page, context or browser has been closed/i.test(
     reason,
   );
-}
-
-function resolveModeList(mode: RunMode): Array<"headed" | "headless"> {
-  if (mode === "both") return ["headed", "headless"];
-  return [mode];
 }
 
 function shouldRetryModeFailure(message: string): boolean {
@@ -5101,8 +5100,7 @@ async function run(): Promise<void> {
 
   try {
     const requestedMode = args.mode || cfg.runMode;
-    const modes = resolveModeList(requestedMode);
-    log(`start modes=${modes.join(",")} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
+    log(`start mode=${requestedMode} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"}`);
 
     const allModels = await listModels(cfg);
     const modelCandidates = resolveCaptchaModelCandidates(cfg.preferredModel, allModels, 5);
@@ -5110,73 +5108,55 @@ async function run(): Promise<void> {
     log(`captcha model candidates: ${modelCandidates.join(", ")}`);
     const solver = new CaptchaSolver(cfg, modelCandidates);
 
-    const results: ResultPayload[] = [];
-    for (const mode of modes) {
-      let result: ResultPayload | null = null;
-      let lastError: Error | null = null;
+    let result: ResultPayload | null = null;
+    let lastError: Error | null = null;
 
-      for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
-        try {
-          result = await runSingleMode(cfg, args, solver, resolvedModel, mode, {
-            batchId,
-            modeAttempt: attempt,
-            taskLedger,
-          });
-          if (attempt > 1) {
-            result.notes.push(`mode retry succeeded on attempt ${attempt}`);
-          }
-          break;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          lastError = error instanceof Error ? error : new Error(message);
-          if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
-            log(`[${mode}] run attempt ${attempt} failed, retrying: ${message}`);
-            continue;
-          }
-          break;
+    for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
+      try {
+        result = await runSingleMode(cfg, args, solver, resolvedModel, requestedMode, {
+          batchId,
+          modeAttempt: attempt,
+          taskLedger,
+        });
+        if (attempt > 1) {
+          result.notes.push(`mode retry succeeded on attempt ${attempt}`);
         }
+        break;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = error instanceof Error ? error : new Error(message);
+        if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
+          log(`[${requestedMode}] run attempt ${attempt} failed, retrying: ${message}`);
+          continue;
+        }
+        break;
       }
-
-      if (!result) {
-        throw lastError || new Error(`[${mode}] run failed without result`);
-      }
-
-      results.push(result);
-      log(`[${mode}] finished account=${result.email}`);
     }
+
+    if (!result) {
+      throw lastError || new Error(`[${requestedMode}] run failed without result`);
+    }
+
+    log(`[${requestedMode}] finished account=${result.email}`);
 
     const summaryPayload = {
       batchId,
       requestedMode,
       completedAt: new Date().toISOString(),
       model: resolvedModel,
-      results,
+      results: [result],
     };
     await writeJson(new URL("run_summary.json", OUTPUT_DIR), summaryPayload);
 
-    const resultOutput: unknown = results.length === 1 ? results[0] : summaryPayload;
-    await writeJson(new URL("result.json", OUTPUT_DIR), resultOutput);
+    await writeJson(new URL("result.json", OUTPUT_DIR), result);
     log("saved output/result.json");
 
-    if (results.length === 1) {
-      const only = results[0]!;
-      console.log(`ACCOUNT=${only.email}`);
-      if (args.printSecrets) {
-        console.log(`PASSWORD=${only.password}`);
-        console.log(`DEFAULT_API_KEY=${only.apiKey}`);
-      } else {
-        console.log("SECRETS=hidden (pass --print-secrets to show)");
-      }
+    console.log(`ACCOUNT=${result.email}`);
+    if (args.printSecrets) {
+      console.log(`PASSWORD=${result.password}`);
+      console.log(`DEFAULT_API_KEY=${result.apiKey}`);
     } else {
-      for (const item of results) {
-        console.log(`[${item.mode}] ACCOUNT=${item.email}`);
-        if (args.printSecrets) {
-          console.log(`[${item.mode}] PASSWORD=${item.password}`);
-          console.log(`[${item.mode}] DEFAULT_API_KEY=${item.apiKey}`);
-        } else {
-          console.log(`[${item.mode}] SECRETS=hidden (pass --print-secrets to show)`);
-        }
-      }
+      console.log("SECRETS=hidden (pass --print-secrets to show)");
     }
   } finally {
     taskLedger?.close();
