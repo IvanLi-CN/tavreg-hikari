@@ -255,6 +255,17 @@ function log(message: string): void {
   console.log(`[${ts()}] ${message}`);
 }
 
+function renderAccountSummaryLine(index: number, result: ResultPayload, includeSecrets: boolean): string {
+  if (includeSecrets) {
+    return `ACCOUNT_${index}=${JSON.stringify({
+      email: result.email,
+      password: result.password,
+      apiKey: result.apiKey,
+    })}`;
+  }
+  return `ACCOUNT_${index}=${JSON.stringify({ email: result.email })}`;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5342,13 +5353,11 @@ async function run(): Promise<void> {
     log("saved output/result.json");
 
     if (!batchEnabled) {
-      console.log(`ACCOUNT=${resultOutput.email}`);
+      console.log(renderAccountSummaryLine(1, resultOutput, args.printSecrets));
       if (args.printSecrets) {
-        console.log(`PASSWORD=${resultOutput.password}`);
-        console.log(`DEFAULT_API_KEY=${resultOutput.apiKey}`);
-      } else {
-        console.log("SECRETS=hidden (pass --print-secrets to show)");
+        return;
       }
+      console.log("SECRETS=hidden (pass --print-secrets to show)");
       return;
     }
 
@@ -5356,20 +5365,11 @@ async function run(): Promise<void> {
     console.log(`NEED=${args.need}`);
     console.log(`SUCCESS=${results.length}`);
     console.log(`FAILURE=${failures.length}`);
-    console.log(`ACCOUNT=${resultOutput.email}`);
     for (let i = 0; i < results.length; i += 1) {
       const item = results[i]!;
-      console.log(`ACCOUNT_${i + 1}=${item.email}`);
+      console.log(renderAccountSummaryLine(i + 1, item, args.printSecrets));
     }
-    if (args.printSecrets) {
-      console.log(`PASSWORD=${resultOutput.password}`);
-      console.log(`DEFAULT_API_KEY=${resultOutput.apiKey}`);
-      for (let i = 0; i < results.length; i += 1) {
-        const item = results[i]!;
-        console.log(`PASSWORD_${i + 1}=${item.password}`);
-        console.log(`DEFAULT_API_KEY_${i + 1}=${item.apiKey}`);
-      }
-    } else {
+    if (!args.printSecrets) {
       console.log("SECRETS=hidden (pass --print-secrets to show)");
     }
   } finally {
