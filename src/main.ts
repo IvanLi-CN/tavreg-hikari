@@ -3249,25 +3249,30 @@ async function completeSignup(
         if (!hasCaptchaSignal) {
           captchaMissingStreak += 1;
           const directSubmitDwellMs = attempt === 1 ? randomInt(1200, 2600) : randomInt(900, 1800);
-          const shouldSubmitWithoutCaptcha =
-            cfg.allowPasswordSubmitWithoutCaptcha || captchaMissingStreak >= 3;
-          if (shouldSubmitWithoutCaptcha) {
+          const shouldForceSubmitWithoutCaptcha = cfg.allowPasswordSubmitWithoutCaptcha;
+          if (shouldForceSubmitWithoutCaptcha) {
             log(
-              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), warmup submit without captcha after dwell=${directSubmitDwellMs}ms`,
+              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), force submit without captcha after dwell=${directSubmitDwellMs}ms`,
             );
             await page.waitForTimeout(directSubmitDwellMs);
             allowSubmitWithoutCaptcha = true;
           } else {
+            // If no challenge signal is present, wait for late hydration once before deciding.
             log(
-              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), reload for challenge hydration after dwell=${directSubmitDwellMs}ms`,
+              `signup password captcha input missing with no challenge signal (attempt=${attempt}, streak=${captchaMissingStreak}), wait network idle after dwell=${directSubmitDwellMs}ms`,
             );
             await page.waitForTimeout(directSubmitDwellMs);
-            if (attempt >= passwordAttemptMax) {
-              throw new Error("signup_password_captcha_missing");
+            await page.waitForLoadState("networkidle", { timeout: 2600 }).catch(() => {});
+            await page.waitForSelector('input[name="captcha"]', { timeout: 1200 }).catch(() => {});
+            const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
+            if (lateCaptchaInput) {
+              log(`signup password captcha input appeared after network idle (attempt=${attempt}), retrying with OCR`);
+              continue;
             }
-            await safeGoto(page, page.url());
-            await page.waitForTimeout(randomInt(1200, 2600));
-            continue;
+            log(
+              `signup password still no captcha/challenge signal after network idle (attempt=${attempt}), submit without captcha`,
+            );
+            allowSubmitWithoutCaptcha = true;
           }
         } else {
           captchaMissingStreak += 1;
