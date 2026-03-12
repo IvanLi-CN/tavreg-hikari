@@ -196,7 +196,7 @@ Additional artifacts:
 - Registration flow includes image captcha; OCR is done via OpenAI-compatible API in `.env.local`.
 - OCR retries now use a long backoff window, so short-term `429/503` bursts do not fail immediately.
 - Captcha OCR uses `/models`-driven fallback candidates (no voting), and rotates model preference when upstream errors or repeated captcha rejections are observed.
-- Mailbox provider defaults to `vmail`; set `MAIL_PROVIDER=duckmail` to switch provider.
+- Mailbox provider defaults to `gptmail` (`https://mail.chatgpt.org.uk`); set `MAIL_PROVIDER=vmail` or `MAIL_PROVIDER=duckmail` to switch provider.
 - Browser automation is executed by Python Camoufox (`camoufox.sync_api.Camoufox`) launched from Bun/TypeScript.
 - Signup requires email verification success; missing verification link is treated as failure.
 - Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.

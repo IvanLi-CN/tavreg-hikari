@@ -19,7 +19,13 @@ import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./stor
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
 type BrowserEngine = "camoufox" | "chrome";
-type MailProvider = "duckmail" | "vmail";
+type MailProvider = "duckmail" | "gptmail" | "vmail";
+
+interface GptmailAuthPayload {
+  token: string;
+  email?: string;
+  expiresAt?: number;
+}
 
 interface CliArgs {
   proxyNode?: string;
@@ -36,6 +42,8 @@ interface AppConfig {
   openaiBaseUrl: string;
   openaiKey: string;
   preferredModel: string;
+  captchaModelCandidateCount: number;
+  strictPreferredModel: boolean;
   runMode: RunMode;
   browserEngine: BrowserEngine;
   inspectBrowserEngine: BrowserEngine;
@@ -58,6 +66,7 @@ interface AppConfig {
   humanConfirmText: string;
   mailProvider: MailProvider;
   mailPollMs: number;
+  gptmailBaseUrl: string;
   vmailBaseUrl: string;
   vmailApiKey?: string;
   vmailDomain?: string;
@@ -174,6 +183,40 @@ interface PasswordStepSnapshot {
   visibleErrors: string[];
 }
 
+interface AuthChallengeSnapshot {
+  collectedAt: string;
+  url: string;
+  hasCaptchaInput: boolean;
+  captchaValueLength: number;
+  hasCaptchaImage: boolean;
+  hasCaptchaContainer: boolean;
+  hasChallengeFrame: boolean;
+  hasTurnstileApi: boolean;
+  hasChallengeCheckbox: boolean;
+  challengeCheckboxChecked?: boolean;
+  challengeFrameUrl?: string;
+  captchaProvider?: string;
+  captchaSiteKeyHint?: string;
+  challengeHint: boolean;
+  visibleErrors: string[];
+  visibleErrorCodes: string[];
+}
+
+interface ChallengeBoxRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface ManagedChallengeCdpSnapshot {
+  frameUrl?: string;
+  iframeBox?: ChallengeBoxRect;
+  checkboxBox?: ChallengeBoxRect;
+  checkboxChecked?: boolean;
+  hasCheckbox: boolean;
+}
+
 interface BrowserFingerprintSnapshot {
   collectedAt: string;
   url: string;
@@ -208,12 +251,25 @@ interface ModeRunContext {
   taskLedger: TaskLedger | null;
 }
 
+interface PreparedSignupTask {
+  taskId: string;
+  email: string;
+  password: string;
+  mailbox: MailboxSession | null;
+  proxyName: string;
+  proxyIp: string;
+  proxyGeo?: GeoInfo;
+  ipEmailOrdinal: number;
+}
+
 interface BrowserIdentityProfile {
   userAgent: string;
   navigatorPlatform: string;
   cdpPlatform: string;
   acceptLanguage: string;
   languages: string[];
+  hardwareConcurrency: number;
+  deviceMemory: number;
 }
 
 interface ProxyNodeUsageEntry {
@@ -244,6 +300,7 @@ loadDotenv({ path: ".env.local", quiet: true });
 const OUTPUT_DIR = new URL("../output/", import.meta.url);
 const OUTPUT_PATH = fileURLToPath(OUTPUT_DIR);
 const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
+const MODEL_CACHE_PATH = new URL("ocr-model-cache.json", OUTPUT_DIR);
 const AUTH_CHALLENGE_RESOURCE_RE =
   /(?:challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha|hcaptcha\.com|recaptcha(?:\.net|\.com)|friendly-challenge|cdn\.auth0\.com\/ulp)/i;
 
@@ -331,7 +388,7 @@ function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
 function parseMailProvider(raw: string | undefined): MailProvider | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
-  if (value === "duckmail" || value === "vmail") return value;
+  if (value === "duckmail" || value === "gptmail" || value === "vmail") return value;
   return null;
 }
 
@@ -1472,6 +1529,60 @@ async function writeJson(path: URL, payload: unknown): Promise<void> {
   }
 }
 
+async function readJsonFile(path: URL): Promise<unknown | null> {
+  try {
+    const targetPath = fileURLToPath(path);
+    const raw = await readFile(targetPath, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function builtInCaptchaModels(preferred: string): string[] {
+  return Array.from(
+    new Set(
+      [
+        preferred,
+        "Qwen2.5-VL-72B-Instruct",
+        "Qwen3-VL-32B-Instruct",
+        "DeepSeek-OCR",
+        "Qwen2.5-VL-32B-Instruct",
+        "Qwen3-VL-30B-A3B-Instruct",
+      ]
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0),
+    ),
+  );
+}
+
+async function readCachedModels(preferred: string): Promise<string[]> {
+  const payload = await readJsonFile(MODEL_CACHE_PATH);
+  if (!payload || typeof payload !== "object") {
+    return builtInCaptchaModels(preferred);
+  }
+
+  const payloadRecord = payload as JsonRecord;
+  const rawModels = payloadRecord.models;
+  const cached = Array.isArray(rawModels)
+    ? rawModels
+        .filter((item: unknown): item is string => typeof item === "string")
+        .map((item: string) => item.trim())
+        .filter((item: string) => item.length > 0)
+    : [];
+  if (cached.length === 0) {
+    return builtInCaptchaModels(preferred);
+  }
+
+  return Array.from(new Set([...cached, ...builtInCaptchaModels(preferred)]));
+}
+
+async function writeCachedModels(models: string[]): Promise<void> {
+  const deduped = Array.from(new Set(models.map((item) => item.trim()).filter((item) => item.length > 0)));
+  if (deduped.length === 0) return;
+  await writeJson(MODEL_CACHE_PATH, { updatedAt: ts(), models: deduped });
+}
+
 type IpProbeScope = "domestic" | "global";
 
 interface IpProbeSnapshot {
@@ -2148,6 +2259,13 @@ async function listModels(cfg: AppConfig): Promise<string[]> {
     }
   }
   if (!payload) {
+    const fallbackModels = await readCachedModels(cfg.preferredModel);
+    if (fallbackModels.length > 0) {
+      const fallbackSource = await readJsonFile(MODEL_CACHE_PATH) ? "cache+builtins" : "builtins";
+      const reason = lastError ? trunc(lastError.message) : "failed to load models";
+      log(`models endpoint unavailable, use ${fallbackSource} (${fallbackModels.length}) reason=${reason}`);
+      return fallbackModels;
+    }
     throw lastError || new Error("failed to load models");
   }
 
@@ -2156,6 +2274,15 @@ async function listModels(cfg: AppConfig): Promise<string[]> {
     if (item && typeof item.id === "string" && item.id.trim()) {
       models.push(item.id.trim());
     }
+  }
+  if (models.length === 0) {
+    const fallbackModels = await readCachedModels(cfg.preferredModel);
+    if (fallbackModels.length > 0) {
+      log(`models endpoint returned empty list, use cached/built-in models (${fallbackModels.length})`);
+      return fallbackModels;
+    }
+  } else {
+    await writeCachedModels(models);
   }
   return models;
 }
@@ -2443,6 +2570,67 @@ function normalizeVmailBaseUrl(raw: string): string {
   return `${trimmed}/api/v1`;
 }
 
+function normalizeGptmailBaseUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed || "https://mail.chatgpt.org.uk";
+}
+
+function extractCookieValue(setCookieHeader: string | null, name: string): string | null {
+  if (!setCookieHeader) return null;
+  const match = setCookieHeader.match(new RegExp(`(?:^|,\\s*)${name}=([^;]+)`, "i"));
+  return match?.[1]?.trim() || null;
+}
+
+function extractGptmailAuthPayload(payload: unknown): GptmailAuthPayload | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as JsonRecord;
+  const auth = record.auth;
+  if (!auth || typeof auth !== "object") return null;
+  const authRecord = auth as JsonRecord;
+  const token = typeof authRecord.token === "string" ? authRecord.token.trim() : "";
+  if (!token) return null;
+  const email = typeof authRecord.email === "string" ? authRecord.email.trim() : undefined;
+  const expiresAtRaw = authRecord.expires_at ?? authRecord.expiresAt;
+  const expiresAt = typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw) ? expiresAtRaw : undefined;
+  return { token, email, expiresAt };
+}
+
+function extractGptmailBootstrapAuth(html: string): GptmailAuthPayload {
+  const match = html.match(/window\.__BROWSER_AUTH\s*=\s*(\{[\s\S]*?\});/i);
+  if (!match?.[1]) {
+    throw new Error("gptmail bootstrap auth missing");
+  }
+  const parsed = parseBody(match[1]);
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("gptmail bootstrap auth invalid");
+  }
+  const parsedRecord = parsed as JsonRecord;
+  const token = typeof parsedRecord.token === "string" ? parsedRecord.token.trim() : "";
+  if (!token) {
+    throw new Error("gptmail bootstrap auth token missing");
+  }
+  const email = typeof parsedRecord.email === "string" ? parsedRecord.email.trim() : undefined;
+  const expiresAtRaw = parsedRecord.expires_at ?? parsedRecord.expiresAt;
+  const expiresAt = typeof expiresAtRaw === "number" && Number.isFinite(expiresAtRaw) ? expiresAtRaw : undefined;
+  return { token, email, expiresAt };
+}
+
+function buildGptmailHeaders(cookieValue: string, authToken: string): Record<string, string> {
+  return {
+    Accept: "application/json",
+    Cookie: `gm_sid=${cookieValue}`,
+    "X-Inbox-Token": authToken,
+  };
+}
+
+function syncGptmailMailboxAuth(mailbox: MailboxSession, payload: unknown): void {
+  if (mailbox.provider !== "gptmail") return;
+  const auth = extractGptmailAuthPayload(payload);
+  if (auth?.token) {
+    mailbox.headers["X-Inbox-Token"] = auth.token;
+  }
+}
+
 function buildVmailAuthHeaders(apiKey: string): Record<string, string> {
   const key = apiKey.trim();
   return {
@@ -2639,7 +2827,62 @@ async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
   throw lastError || new Error("vmail mailbox create failed");
 }
 
+async function createGptmailSession(cfg: AppConfig): Promise<MailboxSession> {
+  const baseUrl = normalizeGptmailBaseUrl(cfg.gptmailBaseUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25_000);
+
+  let landingHtml = "";
+  let gmSid = "";
+  try {
+    const resp = await fetch(baseUrl, {
+      method: "GET",
+      headers: { "User-Agent": "Mozilla/5.0" },
+      signal: controller.signal,
+    });
+    landingHtml = await resp.text();
+    if (!resp.ok) {
+      throw new Error(`http_failed:${resp.status}:${trunc(landingHtml, 240)}`);
+    }
+    gmSid = extractCookieValue(resp.headers.get("set-cookie"), "gm_sid") || "";
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("http_failed:network:timeout");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!gmSid) {
+    throw new Error("gptmail session cookie missing");
+  }
+
+  const bootstrapAuth = extractGptmailBootstrapAuth(landingHtml);
+  const generated = await httpJson<JsonRecord>("GET", `${baseUrl}/api/generate-email`, {
+    headers: buildGptmailHeaders(gmSid, bootstrapAuth.token),
+  });
+  const generatedData =
+    generated.data && typeof generated.data === "object" ? (generated.data as JsonRecord) : (generated as JsonRecord);
+  const address = typeof generatedData.email === "string" ? generatedData.email.trim() : "";
+  if (!address) {
+    throw new Error("gptmail generate-email response missing address");
+  }
+
+  const auth = extractGptmailAuthPayload(generated) || bootstrapAuth;
+  return {
+    provider: "gptmail",
+    baseUrl,
+    address,
+    accountId: address,
+    headers: buildGptmailHeaders(gmSid, auth.token),
+  };
+}
+
 async function createMailboxSession(cfg: AppConfig): Promise<MailboxSession> {
+  if (cfg.mailProvider === "gptmail") {
+    return await createGptmailSession(cfg);
+  }
   if (cfg.mailProvider === "duckmail") {
     return await createDuckmailSession(cfg);
   }
@@ -2663,6 +2906,19 @@ async function waitForVerificationLink(
           headers: mailbox.headers,
         });
         items = ((messages["hydra:member"] as unknown[]) || []).slice(0, 50);
+      } else if (mailbox.provider === "gptmail") {
+        const messages = await httpJson<JsonRecord>(
+          "GET",
+          `${mailbox.baseUrl}/api/emails?email=${encodeURIComponent(mailbox.address)}`,
+          {
+            headers: mailbox.headers,
+          },
+        );
+        syncGptmailMailboxAuth(mailbox, messages);
+        const data = messages.data;
+        if (data && typeof data === "object" && Array.isArray((data as JsonRecord).emails)) {
+          items = ((data as JsonRecord).emails as unknown[]).slice(0, 50);
+        }
       } else {
         const messages = await httpJson<unknown>(
           "GET",
@@ -2704,15 +2960,18 @@ async function waitForVerificationLink(
         const detailUrl =
           mailbox.provider === "duckmail"
             ? `${mailbox.baseUrl}/messages/${encodeURIComponent(messageId)}`
+            : mailbox.provider === "gptmail"
+              ? `${mailbox.baseUrl}/api/email/${encodeURIComponent(messageId)}`
             : `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages/${encodeURIComponent(
                 messageId,
               )}`;
         const detail = await httpJson<JsonRecord>("GET", detailUrl, {
           headers: mailbox.headers,
         });
+        syncGptmailMailboxAuth(mailbox, detail);
 
         const payload =
-          mailbox.provider === "vmail" && detail.data && typeof detail.data === "object"
+          mailbox.provider !== "duckmail" && detail.data && typeof detail.data === "object"
             ? (detail.data as JsonRecord)
             : detail;
         const fromDetail = extractVerificationLinkFromPayload(payload, allowlist);
@@ -2843,14 +3102,46 @@ async function collectVisibleFormErrors(page: any): Promise<string[]> {
   });
 }
 
+function isIgnorableErrorCode(code: string): boolean {
+  return /^password-policy-/i.test(code);
+}
+
 async function collectVisibleErrorCodes(page: any): Promise<string[]> {
   return await page.evaluate(() => {
+    const visible = (el: Element): boolean => {
+      const style = window.getComputedStyle(el as HTMLElement);
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    };
     const nodes = Array.from(document.querySelectorAll("[data-error-code]"));
     const codes = nodes
+      .filter(visible)
       .map((el) => (el.getAttribute("data-error-code") || "").trim())
-      .filter((code) => /^[a-z0-9_-]{3,120}$/i.test(code));
+      .filter((code) => /^[a-z0-9_-]{3,120}$/i.test(code))
+      .filter((code) => !isIgnorableErrorCode(code));
     return Array.from(new Set(codes)).slice(0, 12);
   });
+}
+
+function detectExplicitFormRejection(formErrors: string[], errorCodes: string[]): string | null {
+  if (errorCodes.some((code) => /ip-signup-blocked/i.test(code))) {
+    return "risk_control_ip_rate_limit";
+  }
+  if (formErrors.some((text) => /Too many signups from the same IP/i.test(text))) {
+    return "risk_control_ip_rate_limit";
+  }
+  if (errorCodes.some((code) => /custom-script-error-code_extensibility_error/i.test(code))) {
+    return "auth0_extensibility_error";
+  }
+  if (
+    errorCodes.some((code) => /suspicious/i.test(code)) ||
+    formErrors.some((text) => /Suspicious activity detected/i.test(text))
+  ) {
+    return "risk_control_suspicious_activity";
+  }
+  if (errorCodes.some((code) => /invalid-captcha/i.test(code))) {
+    return "invalid_captcha";
+  }
+  return null;
 }
 
 async function collectPasswordStepSnapshot(page: any): Promise<PasswordStepSnapshot> {
@@ -2900,6 +3191,333 @@ async function collectPasswordStepSnapshot(page: any): Promise<PasswordStepSnaps
       : [],
     visibleErrors,
   };
+}
+
+async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSnapshot> {
+  const payload = await page.evaluate(() => {
+    const captchaContainer = document.querySelector("div[data-captcha-sitekey]");
+    const sitekey = (captchaContainer?.getAttribute("data-captcha-sitekey") || "").trim();
+    const captchaInput = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+    const bodyText = document.body?.innerText || "";
+    const hasChallengeFrame = !!document.querySelector(
+      'iframe[src*="challenges.cloudflare.com"], iframe[title*="challenge" i], iframe[title*="turnstile" i]',
+    );
+    return {
+      url: window.location.href,
+      hasCaptchaInput: !!captchaInput,
+      captchaValueLength: captchaInput?.value?.length || 0,
+      hasCaptchaImage: !!document.querySelector('img[alt="captcha"]'),
+      hasCaptchaContainer: !!captchaContainer,
+      hasChallengeFrame,
+      hasTurnstileApi:
+        typeof (window as Window & { turnstile?: { render?: unknown; execute?: unknown; reset?: unknown } }).turnstile
+          ?.render === "function",
+      captchaProvider: (captchaContainer?.getAttribute("data-captcha-provider") || "").trim(),
+      captchaSiteKeyHint:
+        sitekey.length >= 10 ? `${sitekey.slice(0, 8)}...${sitekey.slice(-4)}` : sitekey || undefined,
+      challengeHint: /challenge|captcha|robot|verify/i.test(bodyText),
+    };
+  });
+
+  const challengeFrame = (typeof page.frames === "function"
+    ? page.frames().find((frame: any) => /challenges\.cloudflare\.com/i.test(String(frame?.url?.() || "")))
+    : null) || null;
+  const cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+  const visibleErrors = await collectVisibleFormErrors(page).catch(() => []);
+  const visibleErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+  return {
+    collectedAt: new Date().toISOString(),
+    url: typeof payload.url === "string" ? payload.url : page.url(),
+    hasCaptchaInput: Boolean(payload.hasCaptchaInput),
+    captchaValueLength:
+      typeof payload.captchaValueLength === "number" && Number.isFinite(payload.captchaValueLength)
+        ? Math.max(0, payload.captchaValueLength)
+        : 0,
+    hasCaptchaImage: Boolean(payload.hasCaptchaImage),
+    hasCaptchaContainer: Boolean(payload.hasCaptchaContainer),
+    hasChallengeFrame: Boolean(payload.hasChallengeFrame || challengeFrame || cdpSnapshot?.frameUrl),
+    hasTurnstileApi: Boolean(payload.hasTurnstileApi),
+    hasChallengeCheckbox: Boolean(cdpSnapshot?.hasCheckbox),
+    challengeCheckboxChecked:
+      typeof cdpSnapshot?.checkboxChecked === "boolean" ? cdpSnapshot.checkboxChecked : undefined,
+    challengeFrameUrl:
+      typeof cdpSnapshot?.frameUrl === "string" && cdpSnapshot.frameUrl ? cdpSnapshot.frameUrl : undefined,
+    captchaProvider: typeof payload.captchaProvider === "string" && payload.captchaProvider ? payload.captchaProvider : undefined,
+    captchaSiteKeyHint:
+      typeof payload.captchaSiteKeyHint === "string" && payload.captchaSiteKeyHint ? payload.captchaSiteKeyHint : undefined,
+    challengeHint: Boolean(payload.challengeHint),
+    visibleErrors,
+    visibleErrorCodes,
+  };
+}
+
+function hasManagedAuthChallenge(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
+  if (!snapshot) return false;
+  return (
+    snapshot.hasCaptchaContainer ||
+    snapshot.hasCaptchaInput ||
+    snapshot.hasChallengeFrame ||
+    snapshot.hasChallengeCheckbox ||
+    snapshot.hasTurnstileApi ||
+    snapshot.captchaProvider === "auth0_v2"
+  );
+}
+
+function toChallengeBoxRect(content: number[] | undefined): ChallengeBoxRect | undefined {
+  if (!Array.isArray(content) || content.length < 8) return undefined;
+  const isFiniteNumber = (value: number | undefined): value is number => typeof value === "number" && Number.isFinite(value);
+  const xs = [content[0], content[2], content[4], content[6]].filter(isFiniteNumber);
+  const ys = [content[1], content[3], content[5], content[7]].filter(isFiniteNumber);
+  if (xs.length !== 4 || ys.length !== 4) return undefined;
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  if (!Number.isFinite(minX) || !Number.isFinite(maxX) || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+    return undefined;
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(0, maxX - minX),
+    height: Math.max(0, maxY - minY),
+  };
+}
+
+async function createCdpSession(target: any): Promise<any | null> {
+  try {
+    const targetPage = typeof target?.page === "function" ? target.page() : target;
+    const context = typeof targetPage?.context === "function" ? targetPage.context() : null;
+    if (!context || typeof context.newCDPSession !== "function") return null;
+    return await context.newCDPSession(target);
+  } catch {
+    return null;
+  }
+}
+
+async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedChallengeCdpSnapshot | null> {
+  const challengeFrame =
+    typeof page.frames === "function"
+      ? page.frames().find((frame: any) => /challenges\.cloudflare\.com/i.test(String(frame?.url?.() || "")))
+      : null;
+  if (!challengeFrame) {
+    return {
+      hasCheckbox: false,
+    };
+  }
+
+  const pageCdp = await createCdpSession(page);
+  const frameCdp = await createCdpSession(challengeFrame);
+  if (!pageCdp || !frameCdp) {
+    return {
+      frameUrl: typeof challengeFrame.url === "function" ? challengeFrame.url() : undefined,
+      hasCheckbox: false,
+    };
+  }
+
+  const pageAx = await pageCdp.send("Accessibility.getFullAXTree").catch(() => null);
+  const iframeNode =
+    pageAx?.nodes?.find((node: any) => /Cloudflare security challenge/i.test(String(node?.name?.value || ""))) || null;
+  const iframeBox = iframeNode?.backendDOMNodeId
+    ? toChallengeBoxRect((await pageCdp.send("DOM.getBoxModel", { backendNodeId: iframeNode.backendDOMNodeId }).catch(() => null))?.model?.content)
+    : undefined;
+
+  const frameAx = await frameCdp.send("Accessibility.getFullAXTree").catch(() => null);
+  const checkboxNode =
+    frameAx?.nodes?.find(
+      (node: any) => node?.role?.value === "checkbox" && /verify you are human/i.test(String(node?.name?.value || "")),
+    ) || null;
+  const checkboxBox = checkboxNode?.backendDOMNodeId
+    ? toChallengeBoxRect((await frameCdp.send("DOM.getBoxModel", { backendNodeId: checkboxNode.backendDOMNodeId }).catch(() => null))?.model?.content)
+    : undefined;
+  const checkedValue = checkboxNode?.properties?.find?.((item: any) => item?.name === "checked")?.value?.value;
+
+  return {
+    frameUrl: typeof challengeFrame.url === "function" ? challengeFrame.url() : undefined,
+    iframeBox,
+    checkboxBox,
+    checkboxChecked: checkedValue === "true" ? true : checkedValue === "false" ? false : undefined,
+    hasCheckbox: Boolean(checkboxNode),
+  };
+}
+
+async function waitForManagedChallengeReady(
+  page: any,
+  formKind: "signup" | "login",
+  timeoutMs: number,
+): Promise<AuthChallengeSnapshot | null> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  let latest: AuthChallengeSnapshot | null = null;
+  while (Date.now() < deadline) {
+    latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+    if (!latest || !hasManagedAuthChallenge(latest)) {
+      return latest;
+    }
+    if (latest.captchaValueLength > 0 || latest.hasChallengeCheckbox || latest.hasChallengeFrame || latest.hasTurnstileApi) {
+      return latest;
+    }
+    await page.waitForTimeout(250);
+  }
+  if (latest && hasManagedAuthChallenge(latest)) {
+    log(
+      `${formKind} managed challenge still not ready (provider=${latest.captchaProvider || "unknown"}, input=${
+        latest.hasCaptchaInput ? 1 : 0
+      }, frame=${latest.hasChallengeFrame ? 1 : 0}, checkbox=${latest.hasChallengeCheckbox ? 1 : 0})`,
+    );
+  }
+  return latest;
+}
+
+async function waitForManagedChallengeOutcome(
+  page: any,
+  formKind: "signup" | "login",
+  successUrlPattern: RegExp,
+  timeoutMs: number,
+): Promise<{ status: "success" | "token_ready" | "timeout" | "rejected"; snapshot: AuthChallengeSnapshot | null; rejection?: string }> {
+  const deadline = Date.now() + Math.max(1_500, timeoutMs);
+  let latest: AuthChallengeSnapshot | null = null;
+  while (Date.now() < deadline) {
+    if (successUrlPattern.test(page.url())) {
+      return { status: "success", snapshot: latest };
+    }
+    latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+    const rejection = latest ? detectExplicitFormRejection(latest.visibleErrors, latest.visibleErrorCodes) : null;
+    if (rejection) {
+      return { status: "rejected", snapshot: latest, rejection };
+    }
+    if (latest?.captchaValueLength && latest.captchaValueLength > 0) {
+      log(`${formKind} managed challenge token ready (len=${latest.captchaValueLength})`);
+      return { status: "token_ready", snapshot: latest };
+    }
+    await page.waitForTimeout(400);
+  }
+  return { status: "timeout", snapshot: latest };
+}
+
+async function waitForManagedChallengeToken(
+  page: any,
+  formKind: "signup" | "login",
+  timeoutMs: number,
+): Promise<{ status: "token_ready" | "timeout" | "rejected"; snapshot: AuthChallengeSnapshot | null; rejection?: string }> {
+  const deadline = Date.now() + Math.max(1_500, timeoutMs);
+  let latest: AuthChallengeSnapshot | null = null;
+  while (Date.now() < deadline) {
+    latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+    const rejection = latest ? detectExplicitFormRejection(latest.visibleErrors, latest.visibleErrorCodes) : null;
+    if (rejection) {
+      return { status: "rejected", snapshot: latest, rejection };
+    }
+    if (latest?.captchaValueLength && latest.captchaValueLength > 0) {
+      log(`${formKind} managed challenge token ready before submit (len=${latest.captchaValueLength})`);
+      return { status: "token_ready", snapshot: latest };
+    }
+    await page.waitForTimeout(400);
+  }
+  return { status: "timeout", snapshot: latest };
+}
+
+async function tryActivateManagedChallenge(page: any, formKind: "signup" | "login"): Promise<boolean> {
+  const cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+  if (cdpSnapshot?.iframeBox && cdpSnapshot?.checkboxBox) {
+    const pageCdp = await createCdpSession(page);
+    const challengeFrame =
+      typeof page.frames === "function"
+        ? page.frames().find((frame: any) => /challenges\.cloudflare\.com/i.test(String(frame?.url?.() || "")))
+        : null;
+    const frameCdp = challengeFrame ? await createCdpSession(challengeFrame) : null;
+    const centerX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
+    const centerY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
+    if (pageCdp && Number.isFinite(centerX) && Number.isFinite(centerY)) {
+      const steps = 12;
+      const startX = Math.max(0, centerX - randomInt(18, 42));
+      const startY = Math.max(0, centerY - randomInt(6, 22));
+      await pageCdp
+        .send("Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: startX,
+          y: startY,
+          button: "none",
+          buttons: 0,
+        })
+        .catch(() => {});
+      for (let idx = 1; idx <= steps; idx += 1) {
+        const progress = idx / steps;
+        await pageCdp
+          .send("Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: startX + (centerX - startX) * progress,
+            y: startY + (centerY - startY) * progress,
+            button: "none",
+            buttons: 0,
+          })
+          .catch(() => {});
+        await page.waitForTimeout(randomInt(12, 28));
+      }
+      await pageCdp
+        .send("Input.dispatchMouseEvent", {
+          type: "mousePressed",
+          x: centerX,
+          y: centerY,
+          button: "left",
+          buttons: 1,
+          clickCount: 1,
+        })
+        .catch(() => {});
+      await page.waitForTimeout(randomInt(70, 150));
+      await pageCdp
+        .send("Input.dispatchMouseEvent", {
+          type: "mouseReleased",
+          x: centerX,
+          y: centerY,
+          button: "left",
+          buttons: 0,
+          clickCount: 1,
+        })
+        .catch(() => {});
+      if (frameCdp) {
+        const frameAx = await frameCdp.send("Accessibility.getFullAXTree").catch(() => null);
+        const checkboxNode =
+          frameAx?.nodes?.find(
+            (node: any) => node?.role?.value === "checkbox" && /verify you are human/i.test(String(node?.name?.value || "")),
+          ) || null;
+        if (checkboxNode?.backendDOMNodeId) {
+          await frameCdp.send("DOM.focus", { backendNodeId: checkboxNode.backendDOMNodeId }).catch(() => {});
+          for (const type of ["rawKeyDown", "keyUp"]) {
+            await pageCdp
+              .send("Input.dispatchKeyEvent", {
+                type,
+                windowsVirtualKeyCode: 32,
+                nativeVirtualKeyCode: 49,
+                code: "Space",
+                key: " ",
+              })
+              .catch(() => {});
+            await page.waitForTimeout(randomInt(24, 48));
+          }
+        }
+      }
+      log(`${formKind} managed challenge checkbox activated via cdp`);
+      return true;
+    }
+  }
+
+  const selectors = ['iframe[src*="challenges.cloudflare.com"]', 'iframe[title*="challenge" i]', 'iframe[title*="turnstile" i]'];
+  for (const selector of selectors) {
+    const frame = page.locator(selector).first();
+    if ((await frame.count().catch(() => 0)) <= 0) continue;
+    const box = await frame.boundingBox().catch(() => null);
+    if (!box || box.width < 20 || box.height < 20) continue;
+    await page.mouse.move(box.x + 18, box.y + box.height / 2, {
+      steps: randomInt(8, 18),
+    });
+    await page.waitForTimeout(randomInt(60, 140));
+    await page.mouse.click(box.x + 18, box.y + box.height / 2, {
+      delay: randomInt(70, 170),
+    });
+    log(`${formKind} managed challenge frame clicked (fallback)`);
+    return true;
+  }
+  return false;
 }
 
 async function collectBrowserFingerprintSnapshot(page: any): Promise<BrowserFingerprintSnapshot> {
@@ -3061,6 +3679,33 @@ async function solveCaptchaForm(
 
     await fillInput(page, emailSelector, email);
 
+    const preSubmitChallenge = hasCaptcha ? null : await collectAuthChallengeSnapshot(page).catch(() => null);
+    if (!hasCaptcha && hasManagedAuthChallenge(preSubmitChallenge)) {
+      const readySnapshot = await waitForManagedChallengeReady(page, formKind, 12_000);
+      let tokenOutcome = await waitForManagedChallengeToken(page, formKind, 8_000);
+      if (
+        tokenOutcome.status === "timeout" &&
+        (readySnapshot?.hasChallengeCheckbox || tokenOutcome.snapshot?.hasChallengeCheckbox || readySnapshot?.hasChallengeFrame)
+      ) {
+        const interacted = await tryActivateManagedChallenge(page, formKind);
+        if (interacted) {
+          tokenOutcome = await waitForManagedChallengeToken(page, formKind, 20_000);
+        }
+      }
+      if (tokenOutcome.status === "rejected" && tokenOutcome.rejection && tokenOutcome.rejection !== "invalid_captcha") {
+        throw new Error(tokenOutcome.rejection);
+      }
+      if (tokenOutcome.status !== "token_ready") {
+        log(
+          `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
+            tokenOutcome.snapshot?.hasChallengeFrame || readySnapshot?.hasChallengeFrame ? 1 : 0
+          }, checkbox=${tokenOutcome.snapshot?.hasChallengeCheckbox || readySnapshot?.hasChallengeCheckbox ? 1 : 0})`,
+        );
+        await page.waitForTimeout(randomInt(600, 1200));
+        continue;
+      }
+    }
+
     const previousUrl = page.url();
     await clickSubmit(page);
 
@@ -3081,11 +3726,73 @@ async function solveCaptchaForm(
       return;
     }
 
+    if (!hasCaptcha) {
+      const managedOutcome = await waitForManagedChallengeOutcome(page, formKind, successUrlPattern, 22_000);
+      if (managedOutcome.status === "success") {
+        return;
+      }
+      if (managedOutcome.status === "rejected" && managedOutcome.rejection) {
+        if (managedOutcome.rejection !== "invalid_captcha") {
+          throw new Error(managedOutcome.rejection);
+        }
+      }
+      if (managedOutcome.status === "token_ready") {
+        await clickSubmit(page);
+        try {
+          await page.waitForURL(successUrlPattern, { timeout: 15_000 });
+          return;
+        } catch {
+          await page.waitForTimeout(1500);
+          if (successUrlPattern.test(page.url())) {
+            return;
+          }
+        }
+      }
+      if (
+        managedOutcome.status === "timeout" &&
+        managedOutcome.snapshot &&
+        managedOutcome.snapshot.hasChallengeFrame &&
+        managedOutcome.snapshot.captchaValueLength === 0
+      ) {
+        const interacted = await tryActivateManagedChallenge(page, formKind);
+        if (interacted) {
+          const postClickOutcome = await waitForManagedChallengeOutcome(page, formKind, successUrlPattern, 18_000);
+          if (postClickOutcome.status === "success") {
+            return;
+          }
+          if (postClickOutcome.status === "rejected" && postClickOutcome.rejection && postClickOutcome.rejection !== "invalid_captcha") {
+            throw new Error(postClickOutcome.rejection);
+          }
+          if (postClickOutcome.status === "token_ready") {
+            await clickSubmit(page);
+            try {
+              await page.waitForURL(successUrlPattern, { timeout: 15_000 });
+              return;
+            } catch {
+              await page.waitForTimeout(1500);
+              if (successUrlPattern.test(page.url())) {
+                return;
+              }
+            }
+          }
+        }
+      }
+    }
+
     const currentCaptchaSrc = hasCaptcha
       ? ((await page
           .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
           .catch(() => "")) || "")
       : "";
+    const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+    const errorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+    if (errorCodes.length > 0) {
+      log(`${formKind} error codes after submit (attempt=${attempt}): ${errorCodes.join(", ")}`);
+    }
+    const explicitRejection = detectExplicitFormRejection(formErrors, errorCodes);
+    if (explicitRejection && explicitRejection !== "invalid_captcha") {
+      throw new Error(explicitRejection);
+    }
 
     if (hasCaptcha && currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc) {
       solver.rotatePreferredModel(`${formKind}_captcha_rejected`);
@@ -3102,16 +3809,25 @@ async function solveCaptchaForm(
       }
     }
 
-    solver.rotatePreferredModel(`${formKind}_captcha_retry`);
-    log(`${formKind} captcha rejected on attempt ${attempt}, retrying`);
+    if (hasCaptcha) {
+      solver.rotatePreferredModel(`${formKind}_captcha_retry`);
+      log(`${formKind} captcha rejected on attempt ${attempt}, retrying`);
+    } else {
+      log(`${formKind} challenge not satisfied on attempt ${attempt}, retrying`);
+    }
   }
 
-  throw new Error(`${formKind} captcha failed after ${maxRounds} rounds`);
+  throw new Error(`${formKind} challenge failed after ${maxRounds} rounds`);
 }
 
 interface SignupDiagHooks {
   onPasswordSnapshot?: (snapshot: PasswordStepSnapshot) => void;
   onFingerprintSnapshot?: (snapshot: BrowserFingerprintSnapshot) => void;
+}
+
+interface SignupAttemptPolicy {
+  signupChallengeRounds: number;
+  passwordStepRounds: number;
 }
 
 async function completeSignup(
@@ -3121,6 +3837,7 @@ async function completeSignup(
   password: string,
   cfg: AppConfig,
   outputDir: URL,
+  policy: SignupAttemptPolicy,
   hooks?: SignupDiagHooks,
 ): Promise<void> {
   await safeGoto(page, "https://app.tavily.com/api/auth/login");
@@ -3136,7 +3853,7 @@ async function completeSignup(
 
   await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password/i, { timeout: 90000 });
   if (/\/u\/signup\/identifier/i.test(page.url())) {
-    await solveCaptchaForm(page, solver, "signup", email, cfg.maxCaptchaRounds);
+    await solveCaptchaForm(page, solver, "signup", email, Math.max(1, policy.signupChallengeRounds));
     await page.waitForTimeout(1200);
   }
 
@@ -3150,7 +3867,7 @@ async function completeSignup(
   if (/\/u\/signup\/password/i.test(page.url())) {
     // Slow down on password step to reduce bot-like burst behavior.
     await page.waitForTimeout(randomInt(3000, 8500));
-    const passwordAttemptMax = Math.min(cfg.maxCaptchaRounds, 8);
+    const passwordAttemptMax = Math.max(1, Math.min(policy.passwordStepRounds, cfg.maxCaptchaRounds, 8));
     let suspiciousSeenCount = 0;
     let invalidCaptchaSeenCount = 0;
     let captchaMissingStreak = 0;
@@ -3355,18 +4072,52 @@ async function completeSignup(
       if (postSubmitSnapshot) {
         hooks?.onPasswordSnapshot?.(postSubmitSnapshot);
       }
+      const postSubmitChallengeSnapshot = await collectAuthChallengeSnapshot(page).catch(() => null);
+      if (postSubmitChallengeSnapshot && hasManagedAuthChallenge(postSubmitChallengeSnapshot)) {
+        log(
+          `signup password managed challenge detected after submit (attempt=${attempt}, frame=${
+            postSubmitChallengeSnapshot.hasChallengeFrame ? 1 : 0
+          }, checkbox=${postSubmitChallengeSnapshot.hasChallengeCheckbox ? 1 : 0}, token=${
+            postSubmitChallengeSnapshot.captchaValueLength
+          })`,
+        );
+        const readySnapshot = await waitForManagedChallengeReady(page, "signup", 12_000);
+        let tokenOutcome = await waitForManagedChallengeToken(page, "signup", 8_000);
+        if (
+          tokenOutcome.status === "timeout" &&
+          (readySnapshot?.hasChallengeCheckbox || tokenOutcome.snapshot?.hasChallengeCheckbox || readySnapshot?.hasChallengeFrame)
+        ) {
+          const interacted = await tryActivateManagedChallenge(page, "signup");
+          if (interacted) {
+            tokenOutcome = await waitForManagedChallengeToken(page, "signup", 20_000);
+          }
+        }
+        if (tokenOutcome.status === "token_ready") {
+          log(`signup password managed challenge token ready after submit (attempt=${attempt})`);
+          await clickSubmit(page);
+          try {
+            await page.waitForURL(/app\.tavily\.com\/home|\/u\/signup\/password/i, { timeout: 15_000 });
+          } catch {
+            await page.waitForTimeout(1800);
+          }
+          if (!/\/u\/signup\/password/i.test(page.url())) {
+            return;
+          }
+        }
+      }
       const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
       if (postSubmitErrorCodes.length > 0) {
         log(`signup password error codes (attempt=${attempt}): ${postSubmitErrorCodes.join(", ")}`);
       }
-      const hasIpBlockedCode = postSubmitErrorCodes.some((code) => /ip-signup-blocked/i.test(code));
-      if (hasIpRateLimitMarker || hasIpBlockedCode) {
+      const explicitRejection = detectExplicitFormRejection(formErrors, postSubmitErrorCodes);
+      if (explicitRejection === "risk_control_ip_rate_limit" || hasIpRateLimitMarker) {
         throw new Error("risk_control_ip_rate_limit");
       }
+      if (explicitRejection === "auth0_extensibility_error") {
+        throw new Error("auth0_extensibility_error");
+      }
       const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
-      const hasExtensibilityCode = postSubmitErrorCodes.some((code) =>
-        /custom-script-error-code_extensibility_error/i.test(code),
-      );
+      const hasExtensibilityCode = explicitRejection === "auth0_extensibility_error";
       const hasSuspiciousSignal = hasSuspiciousMarker || hasExtensibilityCode;
       if (hasSuspiciousSignal) {
         suspiciousSeenCount += 1;
@@ -3374,7 +4125,7 @@ async function completeSignup(
           Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
           Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
           Boolean(postSubmitSnapshot?.hasCaptchaContainer);
-        if (challengeEscalated && attempt < passwordAttemptMax && suspiciousSeenCount < 2) {
+        if (!hasExtensibilityCode && challengeEscalated && attempt < passwordAttemptMax && suspiciousSeenCount < 2) {
           log(
             `signup password suspicious marker with captcha challenge present (attempt=${attempt}, extensibility=${hasExtensibilityCode ? 1 : 0}), retrying once`,
           );
@@ -3442,8 +4193,15 @@ async function completeSignup(
   }
 }
 
-async function loginAndReachHome(page: any, solver: CaptchaSolver, email: string, password: string, cfg: AppConfig): Promise<void> {
-  for (let cycle = 1; cycle <= 5; cycle += 1) {
+async function loginAndReachHome(
+  page: any,
+  solver: CaptchaSolver,
+  email: string,
+  password: string,
+  cfg: AppConfig,
+  maxCycles = 5,
+): Promise<void> {
+  for (let cycle = 1; cycle <= Math.max(1, maxCycles); cycle += 1) {
     await safeGoto(page, "https://app.tavily.com/home");
     await page.waitForTimeout(1200);
 
@@ -3479,10 +4237,10 @@ async function loginAndReachHome(page: any, solver: CaptchaSolver, email: string
   throw new Error(`login flow did not reach home, last_url=${page.url()}`);
 }
 
-async function getDefaultApiKey(page: any, cfg: AppConfig): Promise<string | null> {
+async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promise<string | null> {
   await page.waitForLoadState("domcontentloaded", { timeout: 30000 });
 
-  for (let round = 1; round <= 6; round += 1) {
+  for (let round = 1; round <= Math.max(1, maxRounds); round += 1) {
     await page.waitForTimeout(1200);
 
     const fromDom = await page.evaluate(() => {
@@ -3683,7 +4441,8 @@ function loadConfig(): AppConfig {
   }
   const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
-  const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "vmail";
+  const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "gptmail";
+  const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
   const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
   if (envMailProvider === "vmail" && !vmailBaseUrl) {
@@ -3701,6 +4460,8 @@ function loadConfig(): AppConfig {
     openaiBaseUrl: mustEnv("OPENAI_BASE_URL"),
     openaiKey: mustEnv("OPENAI_KEY"),
     preferredModel: mustEnv("MODEL_NAME"),
+    captchaModelCandidateCount: Math.max(1, toInt(process.env.CAPTCHA_MODEL_CANDIDATE_COUNT, 5)),
+    strictPreferredModel: toBool(process.env.STRICT_PREFERRED_MODEL, false),
     runMode: envRunMode || fallbackRunMode,
     browserEngine: envBrowserEngine,
     inspectBrowserEngine: envInspectBrowserEngine,
@@ -3723,6 +4484,7 @@ function loadConfig(): AppConfig {
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
     mailProvider: envMailProvider,
     mailPollMs: toInt(process.env.MAIL_POLL_MS || process.env.DUCKMAIL_POLL_MS, 2500),
+    gptmailBaseUrl,
     vmailBaseUrl,
     vmailApiKey: (process.env.VMAIL_API_KEY || "").trim() || undefined,
     vmailDomain: (process.env.VMAIL_DOMAIN || "").trim() || undefined,
@@ -3803,7 +4565,7 @@ function isRecoverableBrowserError(reason: string): boolean {
 }
 
 function shouldRetryModeFailure(message: string): boolean {
-  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|captcha_ocr_unstable|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|invalid_captcha|native_cdp_unavailable|timeout|network|fetch failed|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|captcha_ocr_unstable|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|invalid_captcha|native_cdp_unavailable|timeout|network|fetch failed|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
     message,
   );
 }
@@ -3836,7 +4598,9 @@ function normalizeChromeVersion(raw: string): string {
 function buildBrowserIdentityProfile(locale: string, browserVersion: string): BrowserIdentityProfile {
   const normalizedLocale = locale || "en-US";
   const langPrefix = (normalizedLocale.split("-")[0] || "en").toLowerCase();
-  const languages = [normalizedLocale, `${langPrefix}-${normalizedLocale.split("-")[1] || "US"}`, langPrefix]
+  const fallbackRegion = normalizedLocale.split("-")[1] || "US";
+  const variantLanguages = shuffleChars([`${langPrefix}-${fallbackRegion}`, langPrefix, "en-US"]);
+  const languages = [normalizedLocale, ...variantLanguages]
     .map((item) => item.trim())
     .filter((item, index, all) => item.length > 0 && all.indexOf(item) === index)
     .slice(0, 3);
@@ -3851,6 +4615,8 @@ function buildBrowserIdentityProfile(locale: string, browserVersion: string): Br
     cdpPlatform: "macOS",
     acceptLanguage,
     languages,
+    hardwareConcurrency: [4, 8, 10, 12][randomInt(0, 4)] || 8,
+    deviceMemory: [4, 8, 16][randomInt(0, 3)] || 8,
   };
 }
 
@@ -3919,6 +4685,8 @@ async function applyBrowserIdentityToContext(
         defineReadonly(navigator, "platform", profile.navigatorPlatform);
         defineReadonly(navigator, "language", firstLanguage);
         defineReadonly(navigator, "languages", profile.languages);
+        defineReadonly(navigator, "hardwareConcurrency", profile.hardwareConcurrency);
+        defineReadonly(navigator, "deviceMemory", profile.deviceMemory);
       }, identity)
       .catch(() => {});
   }
@@ -4362,6 +5130,94 @@ async function applyEngineStealth(
   }, lang);
 }
 
+function collectBlockedIpsFromLedger(taskLedger: TaskLedger | null): Set<string> {
+  const blockedIps = new Set<string>();
+  if (!taskLedger) return blockedIps;
+  try {
+    for (const ip of taskLedger.listRecentRateLimitedIps()) blockedIps.add(ip);
+    for (const ip of taskLedger.listRecentSuspiciousIps()) blockedIps.add(ip);
+    for (const ip of taskLedger.listRecentCaptchaMissingIps()) blockedIps.add(ip);
+    for (const ip of taskLedger.listRecentInvalidCaptchaIps()) blockedIps.add(ip);
+  } catch (error) {
+    log(`task ledger read skipped (recent blocked ips): ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return blockedIps;
+}
+
+async function preselectTaskProxy(
+  cfg: AppConfig,
+  args: CliArgs,
+  batchId: string,
+  taskId: string,
+  taskLedger: TaskLedger | null,
+  ipQuotaBlocked: Set<string>,
+): Promise<NodeCheckResult> {
+  const blockedIps = collectBlockedIpsFromLedger(taskLedger);
+  for (const ip of ipQuotaBlocked) blockedIps.add(ip);
+
+  const batchEnabled = args.need > 1 || args.parallel > 1;
+  let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
+  if (batchEnabled) {
+    const ports = await reserveMihomoPorts();
+    mihomoOverrides = {
+      apiPort: ports.apiPort,
+      mixedPort: ports.mixedPort,
+      workDir: path.join(OUTPUT_PATH, "mihomo", batchId, `${taskId}-preselect`),
+    };
+  }
+
+  const controller = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
+  try {
+    return await selectProxyNode(controller, cfg, args.proxyNode, blockedIps);
+  } finally {
+    await controller.stop();
+  }
+}
+
+async function prepareSignupTask(
+  cfg: AppConfig,
+  args: CliArgs,
+  batchId: string,
+  taskLedger: TaskLedger | null,
+  ipEmailUsage: Map<string, Set<string>>,
+  taskOrdinal: number,
+): Promise<PreparedSignupTask> {
+  const mailbox = cfg.existingEmail && cfg.existingPassword ? null : await createMailboxSession(cfg);
+  const email = cfg.existingEmail || mailbox?.address || "";
+  const password = cfg.existingPassword || randomPassword();
+  const ipQuotaBlocked = new Set<string>();
+  for (const [ip, emails] of ipEmailUsage.entries()) {
+    if (emails.size >= 3) {
+      ipQuotaBlocked.add(ip);
+    }
+  }
+
+  const taskId = `task-${taskOrdinal}-${randomBytes(2).toString("hex")}`;
+  const selectedProxy = await preselectTaskProxy(cfg, args, batchId, taskId, taskLedger, ipQuotaBlocked);
+  const proxyIp = normalizeIp(selectedProxy.geo?.ip);
+  if (!proxyIp) {
+    throw new Error(`task proxy missing egress ip: ${selectedProxy.name}`);
+  }
+
+  let emailSet = ipEmailUsage.get(proxyIp);
+  if (!emailSet) {
+    emailSet = new Set<string>();
+    ipEmailUsage.set(proxyIp, emailSet);
+  }
+  emailSet.add(email);
+
+  return {
+    taskId,
+    email,
+    password,
+    mailbox,
+    proxyName: selectedProxy.name,
+    proxyIp,
+    proxyGeo: compactGeo(selectedProxy.geo),
+    ipEmailOrdinal: emailSet.size,
+  };
+}
+
 async function runSingleMode(
   cfg: AppConfig,
   args: CliArgs,
@@ -4369,30 +5225,41 @@ async function runSingleMode(
   resolvedModel: string,
   mode: "headed" | "headless",
   ctx: ModeRunContext,
+  preparedTask?: PreparedSignupTask,
 ): Promise<ResultPayload> {
   const notes: string[] = [];
   let failureStage = "init";
-  const runId = `signup-${Date.now()}-${randomBytes(4).toString("hex")}`;
+  const runId = preparedTask
+    ? `${preparedTask.taskId}-attempt-${ctx.modeAttempt}-${randomBytes(3).toString("hex")}`
+    : `signup-${Date.now()}-${randomBytes(4).toString("hex")}`;
   const startedAt = new Date().toISOString();
   const ledger = ctx.taskLedger;
 
-  let mailbox: MailboxSession | null = null;
-  let email = cfg.existingEmail || "";
-  let password = cfg.existingPassword || "";
+  let mailbox: MailboxSession | null = preparedTask?.mailbox || null;
+  let email = preparedTask?.email || cfg.existingEmail || "";
+  let password = preparedTask?.password || cfg.existingPassword || "";
   let verificationLink: string | null = null;
   let apiKey: string | null = null;
   let verifyPassed = false;
   let precheckPassed = !cfg.browserPrecheckEnabled || args.skipPrecheck;
 
-  if (email && password) {
+  if (!preparedTask && email && password) {
     log(`[${mode}] existing account mode: ${email}`);
     notes.push("existing account mode enabled");
   } else {
-    mailbox = await createMailboxSession(cfg);
-    email = mailbox.address;
-    password = randomPassword();
-    log(`[${mode}] ${mailbox.provider} mailbox: ${email}`);
-    notes.push(`${mailbox.provider} mailbox created (${mailbox.accountId})`);
+    if (!preparedTask) {
+      mailbox = await createMailboxSession(cfg);
+      email = mailbox.address;
+      password = randomPassword();
+      log(`[${mode}] ${mailbox.provider} mailbox: ${email}`);
+      notes.push(`${mailbox.provider} mailbox created (${mailbox.accountId})`);
+    }
+  }
+  if (preparedTask) {
+    notes.push(`task id: ${preparedTask.taskId}`);
+    notes.push(`task retry: ${ctx.modeAttempt}/3`);
+    notes.push(`task fixed proxy: ${preparedTask.proxyName} (${preparedTask.proxyIp})`);
+    notes.push(`task ip-email ordinal: ${preparedTask.ipEmailOrdinal}/3`);
   }
 
   const batchEnabled = args.need > 1 || args.parallel > 1;
@@ -4429,6 +5296,13 @@ async function runSingleMode(
   let selectedGeo: GeoInfo | undefined;
   let localErrorCode = "";
   let localErrorMessage = "";
+  const taskScopedAttempt = Boolean(preparedTask);
+  const signupAttemptPolicy: SignupAttemptPolicy = {
+    signupChallengeRounds: taskScopedAttempt ? 1 : cfg.maxCaptchaRounds,
+    passwordStepRounds: taskScopedAttempt ? 1 : Math.min(cfg.maxCaptchaRounds, 8),
+  };
+  const loginCycleMax = taskScopedAttempt ? 1 : 5;
+  const apiKeyFetchRoundMax = taskScopedAttempt ? 1 : 6;
 
   const { domain: initialEmailDomain, localLen: initialEmailLocalLen } = splitEmail(email);
   const ledgerRecord: SignupTaskRecord = {
@@ -4436,7 +5310,7 @@ async function runSingleMode(
     batchId: ctx.batchId,
     mode,
     attemptIndex: ctx.modeAttempt,
-    modeRetryMax: cfg.modeRetryMax,
+    modeRetryMax: preparedTask ? 3 : cfg.modeRetryMax,
     status: "running",
     startedAt,
     modelName: resolvedModel,
@@ -4574,7 +5448,7 @@ async function runSingleMode(
               (entry): entry is string =>
                 typeof entry === "string" &&
                 /^[a-z0-9_-]{3,80}$/i.test(entry) &&
-                !/^password-policy-/i.test(entry),
+                !isIgnorableErrorCode(entry),
             );
           if (matchedCodes.length > 0) {
             responseErrorCodes = Array.from(new Set(matchedCodes)).slice(0, 10);
@@ -4629,26 +5503,17 @@ async function runSingleMode(
 
   try {
     failureStage = "proxy_select";
-    const blockedIpsFromLedger = new Set<string>();
-    if (ledger) {
-      try {
-        for (const ip of ledger.listRecentRateLimitedIps()) {
-          blockedIpsFromLedger.add(ip);
-        }
-        for (const ip of ledger.listRecentSuspiciousIps()) {
-          blockedIpsFromLedger.add(ip);
-        }
-        for (const ip of ledger.listRecentCaptchaMissingIps()) {
-          blockedIpsFromLedger.add(ip);
-        }
-        for (const ip of ledger.listRecentInvalidCaptchaIps()) {
-          blockedIpsFromLedger.add(ip);
-        }
-      } catch (error) {
-        log(`task ledger read skipped (recent blocked ips): ${error instanceof Error ? error.message : String(error)}`);
+    if (preparedTask) {
+      selectedProxy = await selectProxyNode(mihomoController, cfg, preparedTask.proxyName);
+      const actualProxyIp = normalizeIp(selectedProxy.geo?.ip);
+      if (!actualProxyIp || !sameIp(actualProxyIp, preparedTask.proxyIp)) {
+        throw new Error(
+          `task_proxy_ip_mismatch: expected=${preparedTask.proxyIp} actual=${actualProxyIp || "unknown"} node=${preparedTask.proxyName}`,
+        );
       }
+    } else {
+      selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode, collectBlockedIpsFromLedger(ledger));
     }
-    selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode, blockedIpsFromLedger);
     const geo = selectedProxy.geo;
     selectedGeo = geo;
     if (!geo || !geo.ip) {
@@ -4861,9 +5726,9 @@ async function runSingleMode(
         notes.push("human confirmation accepted before signup");
       }
 
-      for (let attempt = 1; attempt <= 2; attempt += 1) {
+      for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
         try {
-          await completeSignup(page, solver, email, password, cfg, diagOutputDir, {
+          await completeSignup(page, solver, email, password, cfg, diagOutputDir, signupAttemptPolicy, {
             onPasswordSnapshot: (snapshot) => {
               passwordStepSnapshots.push(snapshot);
               if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
@@ -4904,9 +5769,9 @@ async function runSingleMode(
     }
 
     failureStage = "login_home";
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
       try {
-        await loginAndReachHome(page, solver, email, password, cfg);
+        await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
         notes.push("reached app home");
         break;
       } catch (error) {
@@ -4921,7 +5786,7 @@ async function runSingleMode(
 
     failureStage = "api_key";
     let lastKeyError: Error | null = null;
-    for (let attempt = 1; attempt <= 5; attempt += 1) {
+    for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 5); attempt += 1) {
       try {
         const sampled = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
         if (sampled) {
@@ -4929,14 +5794,14 @@ async function runSingleMode(
           break;
         }
 
-        await loginAndReachHome(page, solver, email, password, cfg);
+        await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
         await page.waitForTimeout(1500);
         if (attempt === 1) {
           await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
           await writeJson(new URL(`network_${mode}.json`, diagOutputDir), networkLog.slice(-120));
         }
 
-        apiKey = await getDefaultApiKey(page, cfg);
+        apiKey = await getDefaultApiKey(page, cfg, apiKeyFetchRoundMax);
         if (apiKey) break;
 
         const sampledAfter = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
@@ -5258,41 +6123,55 @@ async function run(): Promise<void> {
     );
 
     const allModels = await listModels(cfg);
-    const modelCandidates = resolveCaptchaModelCandidates(cfg.preferredModel, allModels, 5);
+    const modelCandidates = cfg.strictPreferredModel
+      ? [cfg.preferredModel]
+      : resolveCaptchaModelCandidates(cfg.preferredModel, allModels, cfg.captchaModelCandidateCount);
     const resolvedModel = modelCandidates[0]!;
     log(`captcha model candidates: ${modelCandidates.join(", ")}`);
     const solver = new CaptchaSolver(cfg, modelCandidates);
 
     const results: ResultPayload[] = [];
-    const failures: Array<{ runIndex: number; error: string }> = [];
+    const failures: Array<{ runIndex: number; taskId?: string; error: string }> = [];
+    const taskRetryMax = 3;
+    const ipEmailUsage = new Map<string, Set<string>>();
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
-      let result: ResultPayload | null = null;
+      const preparedTask = await prepareSignupTask(cfg, args, batchId, taskLedger, ipEmailUsage, runIndex);
       let lastError: Error | null = null;
 
-      for (let attempt = 1; attempt <= cfg.modeRetryMax; attempt += 1) {
+      for (let attempt = 1; attempt <= taskRetryMax; attempt += 1) {
         try {
-          result = await runSingleMode(cfg, args, solver, resolvedModel, requestedMode, {
-            batchId,
-            modeAttempt: attempt,
-            taskLedger,
-          });
+          const result = await runSingleMode(
+            cfg,
+            args,
+            solver,
+            resolvedModel,
+            requestedMode,
+            {
+              batchId,
+              modeAttempt: attempt,
+              taskLedger,
+            },
+            preparedTask,
+          );
           if (attempt > 1) {
-            result.notes.push(`mode retry succeeded on attempt ${attempt}`);
+            result.notes.push(`task retry succeeded on attempt ${attempt}`);
           }
           return result;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           lastError = error instanceof Error ? error : new Error(message);
-          if (attempt < cfg.modeRetryMax && shouldRetryModeFailure(message)) {
-            log(`[${requestedMode}] run attempt ${attempt} failed (batch-run=${runIndex}), retrying: ${message}`);
+          if (attempt < taskRetryMax) {
+            log(
+              `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}), retrying with fresh browser: ${message}`,
+            );
             continue;
           }
           break;
         }
       }
 
-      throw lastError || new Error(`[${requestedMode}] run failed without result`);
+      throw lastError || new Error(`[${requestedMode}] task failed without result`);
     };
 
     if (!batchEnabled) {
