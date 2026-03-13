@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
@@ -635,6 +636,26 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
   }
 }
 
+function buildSubscriptionCachePath(cfg: MihomoConfig): string {
+  const key = createHash("sha256").update(cfg.subscriptionUrl).digest("hex").slice(0, 16);
+  return path.join(cfg.downloadDir, "subscription-cache", `${key}.json`);
+}
+
+async function readCachedSubscription(cachePath: string): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(cachePath, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedSubscription(cachePath: string, payload: Record<string, unknown>): Promise<void> {
+  await mkdir(path.dirname(cachePath), { recursive: true });
+  await writeFile(cachePath, `${JSON.stringify(payload)}\n`, "utf8");
+}
+
 function buildConfigObject(
   cfg: MihomoConfig,
   subscription: Record<string, unknown> | null,
@@ -837,7 +858,18 @@ function buildConfigObject(
 async function writeConfig(cfg: MihomoConfig): Promise<{ configPath: string; providerNames: string[] }> {
   await mkdir(cfg.workDir, { recursive: true });
   const configPath = path.join(cfg.workDir, "mihomo.yaml");
-  const subscription = await fetchSubscription(cfg.subscriptionUrl);
+  const subscriptionCachePath = buildSubscriptionCachePath(cfg);
+  let subscription: Record<string, unknown>;
+  try {
+    subscription = await fetchSubscription(cfg.subscriptionUrl);
+    await writeCachedSubscription(subscriptionCachePath, subscription);
+  } catch (error) {
+    const cached = await readCachedSubscription(subscriptionCachePath);
+    if (!cached) {
+      throw error;
+    }
+    subscription = cached;
+  }
   const { config, providerNames } = buildConfigObject(cfg, subscription);
   const yaml = yamlStringify(config);
   await writeFile(configPath, yaml, "utf8");
