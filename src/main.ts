@@ -12,7 +12,7 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
-import { checkNode, resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
+import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
@@ -249,6 +249,9 @@ interface ModeRunContext {
   batchId: string;
   modeAttempt: number;
   taskLedger: TaskLedger | null;
+  runtimeRecentProxyIps: string[];
+  ipEmailUsage: Map<string, Set<string>>;
+  activeProxyIps: Set<string>;
 }
 
 interface PreparedSignupTask {
@@ -257,7 +260,7 @@ interface PreparedSignupTask {
   password: string;
   mailbox: MailboxSession | null;
   proxyName: string;
-  proxyIp: string;
+  proxyIp?: string;
   proxyGeo?: GeoInfo;
   ipEmailOrdinal: number;
 }
@@ -621,6 +624,29 @@ async function writeProxyNodeUsageState(state: ProxyNodeUsageState): Promise<voi
   await writeJson(PROXY_NODE_USAGE_PATH, state);
 }
 
+async function recordProxyNodeTaskOutcome(
+  name: string,
+  geo: GeoInfo | undefined,
+  outcome: "ok" | "fail",
+  nowIso = new Date().toISOString(),
+): Promise<void> {
+  const usage = await readProxyNodeUsageState();
+  const previous = usage.nodes[name] || { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
+  const nodeIp = normalizeIp(geo?.ip) || previous.lastIp;
+  usage.nodes[name] = {
+    ...previous,
+    lastCheckedAt: nowIso,
+    lastUsedAt: nowIso,
+    lastOutcome: outcome,
+    lastIp: nodeIp,
+    lastGeo: compactGeo(geo) || previous.lastGeo,
+    successCount: outcome === "ok" ? (previous.successCount || 0) + 1 : previous.successCount,
+    failCount: outcome === "fail" ? (previous.failCount || 0) + 1 : previous.failCount,
+    consecutiveFailCount: outcome === "fail" ? (previous.consecutiveFailCount || 0) + 1 : 0,
+  };
+  await writeProxyNodeUsageState(usage);
+}
+
 function pushRecentUnique(values: string[], value: string | undefined, limit: number): string[] {
   const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized) return values.slice(0, limit);
@@ -740,53 +766,99 @@ async function waitForProxyEgressIp(
   throw new Error(`proxy_egress_not_switched: expected=${targetIp} observed=${lastObserved || "unknown"}`);
 }
 
+interface ProxyIpUsageEntry {
+  ip: string;
+  lastUsedMs: number | null;
+  lastOutcome?: "ok" | "fallback" | "fail";
+  consecutiveFailCount: number;
+  failCount: number;
+}
+
+function buildProxyIpUsageIndex(usage: ProxyNodeUsageState): Map<string, ProxyIpUsageEntry> {
+  const byIp = new Map<string, ProxyIpUsageEntry>();
+  for (const entry of Object.values(usage.nodes)) {
+    const ip = normalizeIp(entry.lastIp || entry.lastGeo?.ip);
+    if (!ip) continue;
+    const lastUsedMs = entry.lastUsedAt ? Date.parse(entry.lastUsedAt) : NaN;
+    const normalizedLastUsedMs = Number.isFinite(lastUsedMs) ? lastUsedMs : null;
+    const current = byIp.get(ip);
+    if (!current) {
+      byIp.set(ip, {
+        ip,
+        lastUsedMs: normalizedLastUsedMs,
+        lastOutcome: entry.lastOutcome,
+        consecutiveFailCount: entry.consecutiveFailCount || 0,
+        failCount: entry.failCount || 0,
+      });
+      continue;
+    }
+    const currentMs = current.lastUsedMs ?? Number.NEGATIVE_INFINITY;
+    const nextMs = normalizedLastUsedMs ?? Number.NEGATIVE_INFINITY;
+    if (nextMs >= currentMs) {
+      current.lastUsedMs = normalizedLastUsedMs;
+      current.lastOutcome = entry.lastOutcome;
+      current.consecutiveFailCount = entry.consecutiveFailCount || 0;
+      current.failCount = entry.failCount || 0;
+    } else {
+      current.consecutiveFailCount = Math.max(current.consecutiveFailCount, entry.consecutiveFailCount || 0);
+      current.failCount = Math.max(current.failCount, entry.failCount || 0);
+    }
+  }
+  return byIp;
+}
+
 function nodeSelectionScore(
   name: string,
   usage: ProxyNodeUsageState,
+  recentSelectedIps: string[],
   nowMs: number,
   cfg: AppConfig,
+  ipUsageByIp: Map<string, ProxyIpUsageEntry>,
 ): number {
   const entry = usage.nodes[name];
-  if (!entry) {
-    return 180 + Math.random() * 16;
+  const nodeIp = normalizeIp(entry?.lastIp || entry?.lastGeo?.ip);
+  const unknownIpFailPenalty =
+    ((entry?.lastOutcome === "fail" ? 180 : 0) + (entry?.consecutiveFailCount || 0) * 260 + (entry?.failCount || 0) * 20);
+  const unknownIpLatencyPenalty = typeof entry?.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 90 : 0;
+  const unknownIpOrg = (entry?.lastGeo?.org || "").toLowerCase();
+  const unknownIpHostingPenalty =
+    /colocrossing|colo crossing|hostpapa|zmto|digitalocean|linode|vultr|ovh|hetzner|contabo|amazon|aws|google cloud|azure|oracle cloud|hosting|datacenter|data center|vps|server/i.test(
+      unknownIpOrg,
+    )
+      ? 2400
+      : 0;
+  if (!nodeIp) {
+    return 15_000 + unknownIpFailPenalty + unknownIpLatencyPenalty + unknownIpHostingPenalty + Math.random() * 16;
   }
 
-  const countPenalty = 0;
-  const recentPenalty = 0;
-  const hottestPenalty = 0;
-  const recentIpPenalty = entry.lastIp && usage.recentSelectedIps.includes(entry.lastIp) ? 1200 : 0;
-  const hottestIpPenalty = entry.lastIp && usage.recentSelectedIps[0] === entry.lastIp ? 480 : 0;
-  const lastUsedMs = entry.lastUsedAt ? Date.parse(entry.lastUsedAt) : NaN;
+  const ipUsage = ipUsageByIp.get(nodeIp);
+  const recentIpPenalty = recentSelectedIps.includes(nodeIp) ? 1800 : 0;
+  const hottestIpPenalty = recentSelectedIps[0] === nodeIp ? 900 : 0;
+  const lastUsedMs = ipUsage?.lastUsedMs ?? NaN;
+  const neverUsedPenalty = Number.isFinite(lastUsedMs) ? 0 : 8_000;
+  const idleMinutes = Number.isFinite(lastUsedMs) ? Math.max(0, (nowMs - lastUsedMs) / 60_000) : 0;
+  const longUnusedBonus = -Math.min(7_200, Math.round(idleMinutes * 2));
   const cooldownRemaining = Number.isFinite(lastUsedMs) ? cfg.nodeReuseCooldownMs - (nowMs - lastUsedMs) : 0;
   const cooldownPenalty =
-    cooldownRemaining > 0 ? Math.round((cooldownRemaining / Math.max(1, cfg.nodeReuseCooldownMs)) * 700) : 0;
-  const successCount = entry.successCount || 0;
-  const failCount = entry.failCount || 0;
-  const checkedCount = successCount + failCount;
-  const successRate = checkedCount > 0 ? successCount / checkedCount : null;
-  const reliabilityPenalty = successRate == null ? 0 : Math.round((1 - successRate) * 260);
-  const failPenalty = (entry.lastOutcome === "fail" ? 120 : 0) + (entry.consecutiveFailCount || 0) * 220 + failCount * 18;
-  const latencyPenalty = typeof entry.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 70 : 0;
-  const org = (entry.lastGeo?.org || "").toLowerCase();
+    cooldownRemaining > 0 ? Math.round((cooldownRemaining / Math.max(1, cfg.nodeReuseCooldownMs)) * 900) : 0;
+  const failPenalty = ((ipUsage?.lastOutcome === "fail" ? 180 : 0) + (ipUsage?.consecutiveFailCount || 0) * 260);
+  const latencyPenalty = typeof entry?.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 90 : 0;
+  const org = (entry?.lastGeo?.org || "").toLowerCase();
   const hostingPenalty =
     /colocrossing|colo crossing|hostpapa|zmto|digitalocean|linode|vultr|ovh|hetzner|contabo|amazon|aws|google cloud|azure|oracle cloud|hosting|datacenter|data center|vps|server/i.test(
       org,
     )
       ? 2400
       : 0;
-  const outcomeBonus = entry.lastOutcome === "ok" ? -140 : entry.lastOutcome === "fallback" ? -40 : 0;
   return (
-    countPenalty +
-    recentPenalty +
-    hottestPenalty +
+    neverUsedPenalty +
+    longUnusedBonus +
     recentIpPenalty +
     hottestIpPenalty +
     cooldownPenalty +
-    reliabilityPenalty +
     failPenalty +
     latencyPenalty +
     hostingPenalty +
-    outcomeBonus +
     Math.random() * 0.01
   );
 }
@@ -807,427 +879,134 @@ function buildMihomoConfig(
   };
 }
 
+async function switchProxyGroup(controller: Awaited<ReturnType<typeof startMihomo>>, name: string): Promise<void> {
+  await controller.setGroupProxy(name);
+  const selected = await controller.getGroupSelection().catch(() => null);
+  if (selected && selected !== name) {
+    throw new Error(`proxy_group_mismatch:${name}->${selected}`);
+  }
+  // Mihomo needs a short settle window after switching groups, otherwise Chrome hits ERR_CONNECTION_CLOSED on the old tunnel.
+  await delay(5_000);
+}
+
 async function selectProxyNode(
   controller: Awaited<ReturnType<typeof startMihomo>>,
   cfg: AppConfig,
   overrideName?: string,
   blockedEgressIps: Set<string> = new Set(),
+  runtimeRecentSelectedIps: string[] = [],
+  overrideExpectedIp?: string,
+  busyProxyNames: Set<string> = new Set(),
+  busyProxyIps: Set<string> = new Set(),
 ): Promise<NodeCheckResult> {
-  const options = {
-    checkUrl: cfg.proxyCheckUrl,
-    timeoutMs: cfg.proxyCheckTimeoutMs,
-    maxLatencyMs: cfg.proxyLatencyMaxMs,
-    ipinfoToken: cfg.ipinfoToken,
-  };
   const usage = await readProxyNodeUsageState();
   const nowMs = Date.now();
   const nowIso = new Date().toISOString();
-  const blockedIps = new Set(
-    Array.from(blockedEgressIps)
-      .map((item) => normalizeIp(item))
-      .filter((item): item is string => typeof item === "string" && item.length > 0),
-  );
-  const isBlockedByRisk = (ip: string | undefined): boolean => {
-    const normalized = normalizeIp(ip);
-    if (!normalized) return false;
-    if (cfg.taskLedger.allowRateLimitedIpFallback) return false;
-    return blockedIps.has(normalized);
-  };
-  const localEgressIp = normalizeIp(await resolveLocalEgressIp(options.timeoutMs));
-  if (localEgressIp) {
-    log(`proxy local direct egress IP: ${localEgressIp}`);
-  }
-  if (blockedIps.size > 0) {
-    const preview = Array.from(blockedIps).slice(0, 8).join(", ");
-    log(`proxy ip blocked by recent rate-limit events: ${preview}${blockedIps.size > 8 ? " ..." : ""}`);
-  }
   const emptyUsageEntry: ProxyNodeUsageEntry = { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
-  const ensureGroupSelected = async (name: string, expectedIp?: string): Promise<void> => {
-    await controller.setGroupProxy(name);
-    const selected = await controller.getGroupSelection().catch(() => null);
-    if (selected && selected !== name) {
-      throw new Error(`proxy_group_mismatch:${name}->${selected}`);
-    }
-    await waitForProxyEgressIp(controller.proxyServer, expectedIp, options.timeoutMs, options.ipinfoToken);
-  };
-  const runCfProbeForNode = async (name: string): Promise<{ passed: boolean; reason?: string; cached: boolean }> => {
-    if (!cfg.cfProbeEnabled) {
-      return { passed: true, cached: false };
-    }
-    const entry = usage.nodes[name];
-    if (isCfProbeFresh(entry, nowMs, cfg.cfProbeCacheTtlMs, cfg.cfProbeUrl)) {
-      const passed = entry?.lastCfProbePassed !== false;
-      return { passed, reason: passed ? undefined : "cached_cf_probe_failed", cached: true };
-    }
-    await ensureGroupSelected(name);
-    const probe = await probeCfViaProxy(controller.proxyServer, cfg.cfProbeUrl, cfg.cfProbeTimeoutMs);
-    const previous = usage.nodes[name] || emptyUsageEntry;
-    usage.nodes[name] = {
-      ...previous,
-      lastCfProbeAt: nowIso,
-      lastCfProbePassed: probe.passed,
-      lastCfProbeUrl: cfg.cfProbeUrl,
-      lastOutcome: probe.passed ? previous.lastOutcome : "fail",
-      failCount: probe.passed ? previous.failCount : (previous.failCount || 0) + 1,
-      consecutiveFailCount: probe.passed ? previous.consecutiveFailCount : (previous.consecutiveFailCount || 0) + 1,
-    };
-    return { passed: probe.passed, reason: probe.reason, cached: false };
-  };
 
-  if (overrideName) {
-    const result = await checkNode(controller, overrideName, options);
-    const previous = usage.nodes[overrideName] || emptyUsageEntry;
-    if (result.error) {
-      usage.nodes[overrideName] = {
-        ...previous,
-        lastCheckedAt: nowIso,
-        lastOutcome: "fail",
-        lastLatencyMs: result.latencyMs ?? null,
-        lastGeo: compactGeo(result.geo),
-        failCount: (previous.failCount || 0) + 1,
-        consecutiveFailCount: (previous.consecutiveFailCount || 0) + 1,
-      };
-      await writeProxyNodeUsageState(usage);
-      throw new Error(`proxy_node_unavailable:${overrideName}:${result.error}`);
-    }
-    const cfProbe = await runCfProbeForNode(overrideName);
-    if (!cfProbe.passed) {
-      await writeProxyNodeUsageState(usage);
-      throw new Error(`proxy_cf_probe_failed:${overrideName}:${cfProbe.reason || "unknown"}`);
-    }
-    await ensureGroupSelected(overrideName, normalizeIp(result.geo?.ip));
-    usage.nodes[overrideName] = {
+  const persistSelection = async (name: string, result: NodeCheckResult, outcome: "ok" | "fallback"): Promise<void> => {
+    const previous = usage.nodes[name] || emptyUsageEntry;
+    const nodeIp = normalizeIp(result.geo?.ip);
+    usage.nodes[name] = {
       ...previous,
       count: (previous.count || 0) + 1,
       lastUsedAt: nowIso,
       lastCheckedAt: nowIso,
-      lastOutcome: result.ok ? "ok" : "fallback",
-      lastLatencyMs: result.latencyMs ?? null,
-      successCount: (previous.successCount || 0) + 1,
-      consecutiveFailCount: 0,
-      lastIp: normalizeIp(result.geo?.ip),
-      lastGeo: compactGeo(result.geo),
+      lastOutcome: outcome,
+      lastLatencyMs: result.latencyMs ?? previous.lastLatencyMs ?? null,
+      lastIp: nodeIp || previous.lastIp,
+      lastGeo: compactGeo(result.geo) || previous.lastGeo,
+      consecutiveFailCount: previous.consecutiveFailCount || 0,
     };
-    usage.recentSelected = pushRecentUnique(usage.recentSelected, overrideName, cfg.nodeRecentWindow);
-    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, normalizeIp(result.geo?.ip), cfg.nodeRecentWindow);
+    usage.recentSelected = pushRecentUnique(usage.recentSelected, name, cfg.nodeRecentWindow);
+    if (nodeIp) {
+      const updated = pushRecentUnique(runtimeRecentSelectedIps, nodeIp, cfg.nodeRecentWindow);
+      runtimeRecentSelectedIps.splice(0, runtimeRecentSelectedIps.length, ...updated);
+    }
     await writeProxyNodeUsageState(usage);
-    log(
-      `proxy override selected: ${overrideName} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${
-        normalizeIp(result.geo?.ip) || "?"
-      }`,
-    );
+  };
+
+  const buildResult = (name: string, previous: ProxyNodeUsageEntry, expectedIp?: string): NodeCheckResult => {
+    const nodeIp = normalizeIp(expectedIp) || normalizeIp(previous.lastGeo?.ip) || normalizeIp(previous.lastIp);
+    return {
+      name,
+      ok: true,
+      latencyMs: previous.lastLatencyMs ?? null,
+      geo: nodeIp ? ({ ...(compactGeo(previous.lastGeo) || {}), ip: nodeIp } as GeoInfo) : previous.lastGeo,
+    };
+  };
+
+  if (overrideName) {
+    const previous = usage.nodes[overrideName] || emptyUsageEntry;
+    await switchProxyGroup(controller, overrideName);
+    const result = buildResult(overrideName, previous, overrideExpectedIp);
+    await persistSelection(overrideName, result, "ok");
+    log(`proxy override selected: ${overrideName} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${normalizeIp(result.geo?.ip) || "?"}`);
     return result;
   }
 
   const nodes = await controller.listGroupNodes();
-  const names = nodes.map((node) => node.name).filter((name) => name.trim().length > 0);
-  let deferredLogTotal = 0;
-  let deferredLogSuppressed = 0;
-  const logDeferred = (
-    prefix: "proxy cached candidate deferred" | "proxy candidate deferred",
-    name: string,
-    latencyMs: number | null | undefined,
-    ip: string | undefined,
-  ): void => {
-    deferredLogTotal += 1;
-    if (deferredLogTotal <= cfg.nodeDeferLogMax) {
-      log(`${prefix} (duplicate egress IP): ${name} latency=${latencyMs ?? "n/a"}ms egress_ip=${ip || "?"}`);
-      return;
-    }
-    deferredLogSuppressed += 1;
-  };
-  const flushDeferredLogSummary = (): void => {
-    if (deferredLogSuppressed > 0) {
-      log(`proxy deferred logs suppressed: ${deferredLogSuppressed} more candidates (NODE_DEFER_LOG_MAX=${cfg.nodeDeferLogMax})`);
-      deferredLogSuppressed = 0;
-    }
-  };
+  const allNames = nodes.map((node) => node.name).filter((name) => name.trim().length > 0);
+  const names = allNames.filter((name) => !busyProxyNames.has(name));
+  const ipUsageByIp = buildProxyIpUsageIndex(usage);
   const scoreByNode = new Map<string, number>();
   for (const name of names) {
-    scoreByNode.set(name, nodeSelectionScore(name, usage, nowMs, cfg));
+    scoreByNode.set(name, nodeSelectionScore(name, usage, runtimeRecentSelectedIps, nowMs, cfg, ipUsageByIp));
   }
   const prioritized = [...names].sort((a, b) => {
     const diff = (scoreByNode.get(a) || 0) - (scoreByNode.get(b) || 0);
     return diff !== 0 ? diff : a.localeCompare(b);
   });
+  const cooldownBlockedIps = new Set<string>();
+  for (const item of ipUsageByIp.values()) {
+    if (!Number.isFinite(item.lastUsedMs)) continue;
+    if (nowMs - (item.lastUsedMs as number) < cfg.nodeReuseCooldownMs) {
+      cooldownBlockedIps.add(item.ip);
+    }
+  }
   const orderPreview = prioritized
     .slice(0, 8)
     .map((name) => `${name}(${(scoreByNode.get(name) || 0).toFixed(1)})`)
     .join(", ");
   log(`proxy node order: ${orderPreview}${prioritized.length > 8 ? " ..." : ""}`);
-  log(`proxy recent egress IPs: ${usage.recentSelectedIps.length > 0 ? usage.recentSelectedIps.join(", ") : "(none)"}`);
-
-  const cachedFreshCandidates = prioritized
-    .map((name) => ({ name, entry: usage.nodes[name] }))
-    .filter((item) => isUsageEntryFresh(item.entry, nowMs, cfg.nodeCheckCacheTtlMs));
-  const cachedFreshNameSet = new Set(cachedFreshCandidates.map((item) => item.name));
-  log(
-    `proxy cache status: fresh=${cachedFreshCandidates.length}/${prioritized.length} ttl=${cfg.nodeCheckCacheTtlMs}ms`,
-  );
-
-  const cachedDeferredSameIp: NodeCheckResult[] = [];
-  const blockedByRiskDeferred: NodeCheckResult[] = [];
-  for (const cached of cachedFreshCandidates) {
-    const entry = cached.entry;
-    if (!entry) continue;
-    if (entry.lastOutcome === "fail") continue;
-    const cachedGeo = compactGeo(entry.lastGeo);
-    const cachedIp = normalizeIp(cachedGeo?.ip || entry.lastIp);
-    if (!cachedGeo?.ip && !cachedIp) continue;
-    const cachedResult: NodeCheckResult = {
-      name: cached.name,
-      latencyMs: entry.lastLatencyMs ?? null,
-      geo: cachedGeo || (cachedIp ? ({ ip: cachedIp } as GeoInfo) : undefined),
-      ok: true,
-    };
-    const sameAsLocalIp = !!(localEgressIp && cachedIp && sameIp(cachedIp, localEgressIp));
-    if (sameAsLocalIp) {
-      usage.nodes[cached.name] = {
-        ...entry,
-        lastCheckedAt: nowIso,
-        lastOutcome: "fail",
-        lastLatencyMs: entry.lastLatencyMs ?? null,
-        lastIp: cachedIp,
-        lastGeo: compactGeo(cachedResult.geo),
-        failCount: (entry.failCount || 0) + 1,
-        consecutiveFailCount: (entry.consecutiveFailCount || 0) + 1,
-      };
-      log(
-        `proxy cached candidate rejected (same as local egress): ${cached.name} latency=${
-          cachedResult.latencyMs ?? "n/a"
-        }ms egress_ip=${cachedIp || "?"}`,
-      );
-      continue;
-    }
-    if (isBlockedByRisk(cachedIp)) {
-      blockedByRiskDeferred.push(cachedResult);
-      log(`proxy cached candidate deferred (recent ip rate-limit): ${cached.name} egress_ip=${cachedIp || "?"}`);
-      continue;
-    }
-    const hitsRecentIp = cachedIp ? usage.recentSelectedIps.includes(cachedIp) : false;
-    if (hitsRecentIp) {
-      logDeferred("proxy cached candidate deferred", cached.name, cachedResult.latencyMs, cachedIp);
-      cachedDeferredSameIp.push(cachedResult);
-      continue;
-    }
-    const cfProbe = await runCfProbeForNode(cached.name);
-    if (!cfProbe.passed) {
-      log(`proxy cached candidate rejected (cf probe failed): ${cached.name} reason=${cfProbe.reason || "unknown"}`);
-      continue;
-    }
-    await ensureGroupSelected(cached.name, cachedIp);
-    usage.nodes[cached.name] = {
-      ...entry,
-      count: (entry.count || 0) + 1,
-      lastUsedAt: nowIso,
-      lastCheckedAt: entry.lastCheckedAt,
-      lastOutcome: "ok",
-      lastLatencyMs: entry.lastLatencyMs ?? null,
-      lastIp: cachedIp,
-      lastGeo: compactGeo(cachedResult.geo),
-      consecutiveFailCount: 0,
-    };
-    usage.recentSelected = pushRecentUnique(usage.recentSelected, cached.name, cfg.nodeRecentWindow);
-    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, cachedIp, cfg.nodeRecentWindow);
-    await writeProxyNodeUsageState(usage);
-    flushDeferredLogSummary();
+  log(`proxy recent egress IPs: ${runtimeRecentSelectedIps.length > 0 ? runtimeRecentSelectedIps.join(", ") : "(none)"}`);
+  if (cooldownBlockedIps.size > 0) {
     log(
-      `proxy selected from cache: ${cached.name} latency=${cachedResult.latencyMs ?? "n/a"}ms egress_ip=${cachedIp || "?"}`,
+      `proxy cooldown-blocked IPs (${Math.round(cfg.nodeReuseCooldownMs / 3_600_000)}h): ${Array.from(cooldownBlockedIps)
+        .slice(0, 6)
+        .join(", ")}${cooldownBlockedIps.size > 6 ? " ..." : ""}`,
     );
-    return cachedResult;
+  }
+  if (blockedEgressIps.size > 0) {
+    log(`proxy blocked IPs: ${Array.from(blockedEgressIps).slice(0, 6).join(", ")}${blockedEgressIps.size > 6 ? " ..." : ""}`);
+  }
+  if (busyProxyNames.size > 0) {
+    log(`proxy busy nodes: ${Array.from(busyProxyNames).slice(0, 6).join(", ")}${busyProxyNames.size > 6 ? " ..." : ""}`);
+  }
+  if (busyProxyIps.size > 0) {
+    log(`proxy busy IPs: ${Array.from(busyProxyIps).slice(0, 6).join(", ")}${busyProxyIps.size > 6 ? " ..." : ""}`);
   }
 
-  const checked: NodeCheckResult[] = [];
-  const sameIpDeferred: NodeCheckResult[] = [];
-  const scanStartedMs = Date.now();
   for (const name of prioritized) {
-    if (cachedFreshNameSet.has(name)) {
+    const previous = usage.nodes[name] || emptyUsageEntry;
+    const previousIp = normalizeIp(previous.lastGeo?.ip) || normalizeIp(previous.lastIp);
+    if (previousIp && cooldownBlockedIps.has(previousIp)) {
       continue;
     }
-    if (checked.length >= cfg.nodeScanMaxChecks) {
-      log(`proxy scan capped by node count: checked=${checked.length} max=${cfg.nodeScanMaxChecks}`);
-      break;
-    }
-    if (Date.now() - scanStartedMs >= cfg.nodeScanMaxMs) {
-      log(`proxy scan capped by elapsed time: elapsed=${Date.now() - scanStartedMs}ms max=${cfg.nodeScanMaxMs}ms`);
-      break;
-    }
-    const result = await checkNode(controller, name, options);
-    checked.push(result);
-    const nodeIp = normalizeIp(result.geo?.ip);
-    const previous = usage.nodes[name] || { count: 0, successCount: 0, failCount: 0, consecutiveFailCount: 0 };
-    usage.nodes[name] = {
-      ...previous,
-      lastCheckedAt: nowIso,
-      lastOutcome: result.ok ? "ok" : "fail",
-      lastLatencyMs: result.latencyMs ?? null,
-      lastIp: nodeIp,
-      lastGeo: compactGeo(result.geo),
-      successCount: result.ok ? (previous.successCount || 0) + 1 : previous.successCount,
-      failCount: result.ok ? previous.failCount : (previous.failCount || 0) + 1,
-      consecutiveFailCount: result.ok ? 0 : (previous.consecutiveFailCount || 0) + 1,
-    };
-    if (!result.ok) {
-      log(
-        `proxy candidate failed: ${name} latency=${result.latencyMs ?? "n/a"}ms error=${result.error || "threshold_miss"} egress_ip=${
-          nodeIp || "?"
-        }`,
-      );
-    }
-    if (result.ok) {
-      if (isBlockedByRisk(nodeIp)) {
-        blockedByRiskDeferred.push(result);
-        log(`proxy candidate deferred (recent ip rate-limit): ${name} latency=${result.latencyMs ?? "n/a"}ms ip=${nodeIp || "?"}`);
-        continue;
-      }
-      const hitsRecentIp = nodeIp ? usage.recentSelectedIps.includes(nodeIp) : false;
-      const hasUncheckedCandidate = checked.length < prioritized.length;
-      if (hitsRecentIp && hasUncheckedCandidate) {
-        logDeferred("proxy candidate deferred", name, result.latencyMs, nodeIp);
-        sameIpDeferred.push(result);
-        continue;
-      }
-      const cfProbe = await runCfProbeForNode(name);
-      if (!cfProbe.passed) {
-        log(`proxy candidate rejected (cf probe failed): ${name} reason=${cfProbe.reason || "unknown"}`);
-        continue;
-      }
-      await ensureGroupSelected(name, nodeIp);
-      usage.nodes[name] = {
-        ...usage.nodes[name],
-        count: (previous.count || 0) + 1,
-        lastUsedAt: nowIso,
-        lastCheckedAt: nowIso,
-        lastOutcome: "ok",
-        lastIp: nodeIp,
-        lastGeo: compactGeo(result.geo),
-        consecutiveFailCount: 0,
-      };
-      usage.recentSelected = pushRecentUnique(usage.recentSelected, name, cfg.nodeRecentWindow);
-      usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, nodeIp, cfg.nodeRecentWindow);
-      await writeProxyNodeUsageState(usage);
-      flushDeferredLogSummary();
-      log(`proxy selected: ${name} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${nodeIp || "?"}`);
-      return result;
-    }
-  }
-
-  const combinedDeferred = [...cachedDeferredSameIp, ...sameIpDeferred];
-  if (combinedDeferred.length > 0) {
-    if (!cfg.allowSameEgressIpFallback) {
-      const deferredIps = Array.from(
-        new Set(
-          combinedDeferred
-            .map((item) => normalizeIp(item.geo?.ip))
-            .filter((item): item is string => typeof item === "string" && item.length > 0),
-        ),
-      );
-      flushDeferredLogSummary();
-      throw new Error(
-        `proxy_no_distinct_egress_ip: all available candidates share repeated egress IPs (${deferredIps.join(",") || "unknown"})`,
-      );
-    }
-    const sortedDeferred = [...combinedDeferred].sort(
-      (a, b) => (a.latencyMs || Number.MAX_SAFE_INTEGER) - (b.latencyMs || Number.MAX_SAFE_INTEGER),
-    );
-    for (const deferred of sortedDeferred) {
-      const cfProbe = await runCfProbeForNode(deferred.name);
-      if (!cfProbe.passed) {
-        log(`proxy deferred candidate rejected (cf probe failed): ${deferred.name} reason=${cfProbe.reason || "unknown"}`);
-        continue;
-      }
-      const previous = usage.nodes[deferred.name] || emptyUsageEntry;
-      const deferredIp = normalizeIp(deferred.geo?.ip);
-      await ensureGroupSelected(deferred.name, deferredIp);
-      usage.nodes[deferred.name] = {
-        ...previous,
-        count: (previous.count || 0) + 1,
-        successCount: previous.successCount || 0,
-        failCount: previous.failCount || 0,
-        lastUsedAt: nowIso,
-        lastCheckedAt: nowIso,
-        lastOutcome: "ok",
-        lastLatencyMs: deferred.latencyMs ?? null,
-        lastIp: deferredIp,
-        lastGeo: compactGeo(deferred.geo),
-        consecutiveFailCount: 0,
-      };
-      usage.recentSelected = pushRecentUnique(usage.recentSelected, deferred.name, cfg.nodeRecentWindow);
-      usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, deferredIp, cfg.nodeRecentWindow);
-      await writeProxyNodeUsageState(usage);
-      flushDeferredLogSummary();
-      log(
-        `proxy selected from deferred same-ip pool: ${deferred.name} latency=${deferred.latencyMs}ms ip=${
-          deferredIp || "?"
-        }`,
-      );
-      return deferred;
-    }
-  }
-
-  const fallbackPool = checked.filter(
-    (item) => !item.error && item.geo?.ip && typeof item.latencyMs === "number",
-  );
-  const fallbackNoRiskPool = fallbackPool.filter((item) => !isBlockedByRisk(item.geo?.ip));
-  if (fallbackNoRiskPool.length === 0 && blockedByRiskDeferred.length > 0 && !cfg.taskLedger.allowRateLimitedIpFallback) {
-    await writeProxyNodeUsageState(usage);
-    flushDeferredLogSummary();
-    const blockedPreview = Array.from(
-      new Set(
-        blockedByRiskDeferred
-          .map((item) => normalizeIp(item.geo?.ip))
-          .filter((item): item is string => typeof item === "string" && item.length > 0),
-      ),
-    )
-      .slice(0, 10)
-      .join(",");
-    throw new Error(`proxy_node_blocked_by_recent_ip_rate_limit:${blockedPreview || "unknown"}`);
-  }
-  const fallbackFreshIpPool = fallbackPool.filter((item) => {
-    const ip = normalizeIp(item.geo?.ip);
-    return ip ? !usage.recentSelectedIps.includes(ip) : false;
-  });
-  const fallbackCandidates = (
-    fallbackFreshIpPool.length > 0
-      ? fallbackFreshIpPool.filter((item) => !isBlockedByRisk(item.geo?.ip))
-      : fallbackNoRiskPool
-  ).sort(
-    (a, b) => (a.latencyMs || Number.MAX_SAFE_INTEGER) - (b.latencyMs || Number.MAX_SAFE_INTEGER),
-  );
-  for (const fallback of fallbackCandidates) {
-    const cfProbe = await runCfProbeForNode(fallback.name);
-    if (!cfProbe.passed) {
-      log(`proxy fallback candidate rejected (cf probe failed): ${fallback.name} reason=${cfProbe.reason || "unknown"}`);
+    if (previousIp && blockedEgressIps.has(previousIp)) {
       continue;
     }
-    const previous = usage.nodes[fallback.name] || emptyUsageEntry;
-    const fallbackIp = normalizeIp(fallback.geo?.ip);
-    await ensureGroupSelected(fallback.name, fallbackIp);
-    usage.nodes[fallback.name] = {
-      ...previous,
-      count: (previous.count || 0) + 1,
-      lastUsedAt: nowIso,
-      lastCheckedAt: nowIso,
-      lastOutcome: "fallback",
-      lastLatencyMs: fallback.latencyMs ?? null,
-      successCount: (previous.successCount || 0) + 1,
-      lastIp: fallbackIp,
-      lastGeo: compactGeo(fallback.geo),
-      consecutiveFailCount: 0,
-    };
-    usage.recentSelected = pushRecentUnique(usage.recentSelected, fallback.name, cfg.nodeRecentWindow);
-    usage.recentSelectedIps = pushRecentUnique(usage.recentSelectedIps, fallbackIp, cfg.nodeRecentWindow);
-    await writeProxyNodeUsageState(usage);
-    flushDeferredLogSummary();
-    log(
-      `proxy fallback selected due to threshold miss: ${fallback.name} latency=${fallback.latencyMs}ms ip=${fallback.geo?.ip || "?"}`,
-    );
-    return fallback;
+    if (previousIp && busyProxyIps.has(previousIp)) {
+      continue;
+    }
+    await switchProxyGroup(controller, name);
+    const result = buildResult(name, previous);
+    await persistSelection(name, result, "ok");
+    log(`proxy selected by node rotation: ${name} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${normalizeIp(result.geo?.ip) || "?"}`);
+    return result;
   }
 
-  await writeProxyNodeUsageState(usage);
-  flushDeferredLogSummary();
-  throw new Error(`proxy_node_unavailable:all checked=${checked.length}`);
+  throw new Error("proxy_no_available_node");
 }
 
 function shuffleChars(values: string[]): string[] {
@@ -1655,6 +1434,12 @@ const GLOBAL_IP_PROBE_TARGETS: IpProbeTarget[] = [
   { name: "ipinfo", scope: "global", url: "https://ipinfo.io/json" },
 ];
 
+const SINGLE_BROWSER_IP_PROBE_TARGET: IpProbeTarget = {
+  name: "ipify",
+  scope: "global",
+  url: "https://api.ipify.org/",
+};
+
 function parseCsvList(raw: string | undefined): string[] {
   if (!raw || !raw.trim()) return [];
   return raw
@@ -1758,6 +1543,10 @@ async function safeCollectIpProbeSnapshot(page: any, target: IpProbeTarget, wait
       error: message,
     };
   }
+}
+
+async function collectSingleBrowserIpProbe(page: any): Promise<IpProbeSnapshot> {
+  return await safeCollectIpProbeSnapshot(page, SINGLE_BROWSER_IP_PROBE_TARGET, 4500);
 }
 
 async function collectIpProbeSnapshotInContext(context: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
@@ -2085,14 +1874,19 @@ function trunc(value: unknown, max = 240): string {
   }
 }
 
-async function httpJson<T = unknown>(
+interface HttpRequestOptions {
+  headers?: Record<string, string>;
+  body?: unknown;
+  timeoutMs?: number;
+  proxyUrl?: string;
+}
+
+async function fetchWithOptionalProxy(
   method: string,
   url: string,
-  options?: { headers?: Record<string, string>; body?: unknown; timeoutMs?: number },
-): Promise<T> {
-  const timeoutMs = options?.timeoutMs ?? 25000;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  options?: HttpRequestOptions,
+): Promise<any> {
+  const timeoutMs = options?.timeoutMs ?? 25_000;
 
   let body: string | undefined;
   if (typeof options?.body === "string") {
@@ -2106,14 +1900,37 @@ async function httpJson<T = unknown>(
     headers["Content-Type"] = headers["Content-Type"] || "application/json";
   }
 
+  if (options?.proxyUrl) {
+    const impit = new Impit({ proxyUrl: options.proxyUrl, timeout: timeoutMs });
+    return await impit.fetch(url, {
+      method: method.toUpperCase() as any,
+      headers,
+      body,
+    });
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(url, {
+    return await fetch(url, {
       method: method.toUpperCase(),
       headers,
       body,
       signal: controller.signal,
     });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("http_failed:network:timeout");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
+async function httpJson<T = unknown>(method: string, url: string, options?: HttpRequestOptions): Promise<T> {
+  try {
+    const resp = await fetchWithOptionalProxy(method, url, options);
     const text = await resp.text();
     const parsed = parseBody(text);
 
@@ -2122,12 +1939,13 @@ async function httpJson<T = unknown>(
     }
     return parsed as T;
   } catch (error) {
+    if (error instanceof Error && error.message === "http_failed:network:timeout") {
+      throw error;
+    }
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error("http_failed:network:timeout");
     }
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -2639,7 +2457,7 @@ function buildVmailAuthHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
+async function createDuckmailSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
   const baseUrl = cfg.duckmailBaseUrl.replace(/\/+$/, "");
   const headers: Record<string, string> = {};
   if (cfg.duckmailApiKey) {
@@ -2653,6 +2471,7 @@ async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
 
   const domainsResp = await httpJson<{ "hydra:member"?: Array<{ domain?: string }> }>("GET", `${baseUrl}/domains`, {
     headers,
+    proxyUrl,
   });
 
   const domains = (domainsResp["hydra:member"] || [])
@@ -2686,6 +2505,7 @@ async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
       const created = await httpJson<JsonRecord>("POST", `${baseUrl}/accounts`, {
         headers: { ...headers, "Content-Type": "application/json" },
         body: { address, password: mailboxPassword },
+        proxyUrl,
       });
       accountId = typeof created.id === "string" ? created.id : "";
       createdOk = true;
@@ -2712,6 +2532,7 @@ async function createDuckmailSession(cfg: AppConfig): Promise<MailboxSession> {
       tokenResp = await httpJson<JsonRecord>("POST", `${baseUrl}/token`, {
         headers: { ...headers, "Content-Type": "application/json" },
         body: { address, password: mailboxPassword },
+        proxyUrl,
       });
       break;
     } catch (error) {
@@ -2754,7 +2575,7 @@ function parseVmailAllowedDomains(message: string): string[] {
     .filter((item) => /^[a-z0-9.-]+$/i.test(item));
 }
 
-async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
+async function createVmailSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
   if (!cfg.vmailApiKey) {
     throw new Error("vmail api key missing (set VMAIL_API_KEY)");
   }
@@ -2782,6 +2603,7 @@ async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
           "Content-Type": "application/json",
         },
         body,
+        proxyUrl,
       });
 
       const data = (created.data && typeof created.data === "object" ? (created.data as JsonRecord) : created) as JsonRecord;
@@ -2827,18 +2649,15 @@ async function createVmailSession(cfg: AppConfig): Promise<MailboxSession> {
   throw lastError || new Error("vmail mailbox create failed");
 }
 
-async function createGptmailSession(cfg: AppConfig): Promise<MailboxSession> {
+async function createGptmailSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
   const baseUrl = normalizeGptmailBaseUrl(cfg.gptmailBaseUrl);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 25_000);
-
   let landingHtml = "";
   let gmSid = "";
   try {
-    const resp = await fetch(baseUrl, {
-      method: "GET",
+    const resp = await fetchWithOptionalProxy("GET", baseUrl, {
       headers: { "User-Agent": "Mozilla/5.0" },
-      signal: controller.signal,
+      timeoutMs: 25_000,
+      proxyUrl,
     });
     landingHtml = await resp.text();
     if (!resp.ok) {
@@ -2846,12 +2665,10 @@ async function createGptmailSession(cfg: AppConfig): Promise<MailboxSession> {
     }
     gmSid = extractCookieValue(resp.headers.get("set-cookie"), "gm_sid") || "";
   } catch (error) {
-    if (error instanceof Error && error.name === "AbortError") {
+    if (error instanceof Error && (error.name === "AbortError" || error.message === "http_failed:network:timeout")) {
       throw new Error("http_failed:network:timeout");
     }
     throw error;
-  } finally {
-    clearTimeout(timer);
   }
 
   if (!gmSid) {
@@ -2861,6 +2678,7 @@ async function createGptmailSession(cfg: AppConfig): Promise<MailboxSession> {
   const bootstrapAuth = extractGptmailBootstrapAuth(landingHtml);
   const generated = await httpJson<JsonRecord>("GET", `${baseUrl}/api/generate-email`, {
     headers: buildGptmailHeaders(gmSid, bootstrapAuth.token),
+    proxyUrl,
   });
   const generatedData =
     generated.data && typeof generated.data === "object" ? (generated.data as JsonRecord) : (generated as JsonRecord);
@@ -2879,14 +2697,14 @@ async function createGptmailSession(cfg: AppConfig): Promise<MailboxSession> {
   };
 }
 
-async function createMailboxSession(cfg: AppConfig): Promise<MailboxSession> {
+async function createMailboxSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
   if (cfg.mailProvider === "gptmail") {
-    return await createGptmailSession(cfg);
+    return await createGptmailSession(cfg, proxyUrl);
   }
   if (cfg.mailProvider === "duckmail") {
-    return await createDuckmailSession(cfg);
+    return await createDuckmailSession(cfg, proxyUrl);
   }
-  return await createVmailSession(cfg);
+  return await createVmailSession(cfg, proxyUrl);
 }
 
 async function waitForVerificationLink(
@@ -2894,6 +2712,7 @@ async function waitForVerificationLink(
   timeoutMs: number,
   pollMs: number,
   allowlist: string[],
+  proxyUrl?: string,
 ): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   const seen = new Set<string>();
@@ -2904,6 +2723,7 @@ async function waitForVerificationLink(
       if (mailbox.provider === "duckmail") {
         const messages = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/messages`, {
           headers: mailbox.headers,
+          proxyUrl,
         });
         items = ((messages["hydra:member"] as unknown[]) || []).slice(0, 50);
       } else if (mailbox.provider === "gptmail") {
@@ -2912,6 +2732,7 @@ async function waitForVerificationLink(
           `${mailbox.baseUrl}/api/emails?email=${encodeURIComponent(mailbox.address)}`,
           {
             headers: mailbox.headers,
+            proxyUrl,
           },
         );
         syncGptmailMailboxAuth(mailbox, messages);
@@ -2925,6 +2746,7 @@ async function waitForVerificationLink(
           `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages?limit=20`,
           {
             headers: mailbox.headers,
+            proxyUrl,
           },
         );
         if (messages && typeof messages === "object" && !Array.isArray(messages)) {
@@ -2967,6 +2789,7 @@ async function waitForVerificationLink(
               )}`;
         const detail = await httpJson<JsonRecord>("GET", detailUrl, {
           headers: mailbox.headers,
+          proxyUrl,
         });
         syncGptmailMailboxAuth(mailbox, detail);
 
@@ -3015,7 +2838,7 @@ async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> 
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const transient = /NS_BINDING_ABORTED|ERR_ABORTED|interrupted by another navigation|frame was detached/i.test(
+      const transient = /NS_BINDING_ABORTED|ERR_ABORTED|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|interrupted by another navigation|frame was detached/i.test(
         message,
       );
       if (!transient || attempt >= 3) {
@@ -3420,11 +3243,6 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
   const cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
   if (cdpSnapshot?.iframeBox && cdpSnapshot?.checkboxBox) {
     const pageCdp = await createCdpSession(page);
-    const challengeFrame =
-      typeof page.frames === "function"
-        ? page.frames().find((frame: any) => /challenges\.cloudflare\.com/i.test(String(frame?.url?.() || "")))
-        : null;
-    const frameCdp = challengeFrame ? await createCdpSession(challengeFrame) : null;
     const centerX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
     const centerY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
     if (pageCdp && Number.isFinite(centerX) && Number.isFinite(centerY)) {
@@ -3474,27 +3292,11 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
           clickCount: 1,
         })
         .catch(() => {});
-      if (frameCdp) {
-        const frameAx = await frameCdp.send("Accessibility.getFullAXTree").catch(() => null);
-        const checkboxNode =
-          frameAx?.nodes?.find(
-            (node: any) => node?.role?.value === "checkbox" && /verify you are human/i.test(String(node?.name?.value || "")),
-          ) || null;
-        if (checkboxNode?.backendDOMNodeId) {
-          await frameCdp.send("DOM.focus", { backendNodeId: checkboxNode.backendDOMNodeId }).catch(() => {});
-          for (const type of ["rawKeyDown", "keyUp"]) {
-            await pageCdp
-              .send("Input.dispatchKeyEvent", {
-                type,
-                windowsVirtualKeyCode: 32,
-                nativeVirtualKeyCode: 49,
-                code: "Space",
-                key: " ",
-              })
-              .catch(() => {});
-            await page.waitForTimeout(randomInt(24, 48));
-          }
-        }
+      await page.waitForTimeout(randomInt(400, 900));
+      const afterClickSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+      if (afterClickSnapshot?.checkboxChecked === true) {
+        log(`${formKind} managed challenge checkbox checked via cdp`);
+        return true;
       }
       log(`${formKind} managed challenge checkbox activated via cdp`);
       return true;
@@ -3518,6 +3320,50 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
     return true;
   }
   return false;
+}
+
+async function ensureManagedChallengeTokenBeforeSubmit(
+  page: any,
+  formKind: "signup" | "login",
+): Promise<{ status: "token_ready" | "timeout" | "rejected"; snapshot: AuthChallengeSnapshot | null; rejection?: string }> {
+  let latest = await waitForManagedChallengeReady(page, formKind, 12_000);
+  let lastOutcome = await waitForManagedChallengeToken(page, formKind, 8_000);
+  if (lastOutcome.status === "rejected") {
+    return lastOutcome;
+  }
+  if (lastOutcome.status === "token_ready") {
+    return lastOutcome;
+  }
+
+  for (let activationRound = 1; activationRound <= 3; activationRound += 1) {
+    const snapshot = lastOutcome.snapshot || latest;
+    const canInteract = Boolean(
+      snapshot?.hasChallengeCheckbox ||
+        snapshot?.hasChallengeFrame ||
+        snapshot?.hasTurnstileApi ||
+        snapshot?.hasCaptchaContainer,
+    );
+    if (!canInteract) {
+      return lastOutcome;
+    }
+    const interacted = await tryActivateManagedChallenge(page, formKind);
+    if (!interacted) {
+      await page.waitForTimeout(800);
+    }
+    lastOutcome = await waitForManagedChallengeToken(page, formKind, activationRound === 1 ? 20_000 : 12_000);
+    if (lastOutcome.status === "rejected") {
+      return lastOutcome;
+    }
+    if (lastOutcome.status === "token_ready") {
+      return lastOutcome;
+    }
+    latest = lastOutcome.snapshot || latest;
+    log(
+      `${formKind} managed challenge token still unavailable after activation round ${activationRound} (frame=${snapshot?.hasChallengeFrame ? 1 : 0}, checkbox=${snapshot?.hasChallengeCheckbox ? 1 : 0})`,
+    );
+  }
+
+  return lastOutcome;
 }
 
 async function collectBrowserFingerprintSnapshot(page: any): Promise<BrowserFingerprintSnapshot> {
@@ -3681,29 +3527,53 @@ async function solveCaptchaForm(
 
     const preSubmitChallenge = hasCaptcha ? null : await collectAuthChallengeSnapshot(page).catch(() => null);
     if (!hasCaptcha && hasManagedAuthChallenge(preSubmitChallenge)) {
-      const readySnapshot = await waitForManagedChallengeReady(page, formKind, 12_000);
-      let tokenOutcome = await waitForManagedChallengeToken(page, formKind, 8_000);
-      if (
-        tokenOutcome.status === "timeout" &&
-        (readySnapshot?.hasChallengeCheckbox || tokenOutcome.snapshot?.hasChallengeCheckbox || readySnapshot?.hasChallengeFrame)
-      ) {
-        const interacted = await tryActivateManagedChallenge(page, formKind);
-        if (interacted) {
-          tokenOutcome = await waitForManagedChallengeToken(page, formKind, 20_000);
-        }
-      }
+      const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, formKind);
       if (tokenOutcome.status === "rejected" && tokenOutcome.rejection && tokenOutcome.rejection !== "invalid_captcha") {
         throw new Error(tokenOutcome.rejection);
       }
-      if (tokenOutcome.status !== "token_ready") {
-        log(
-          `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
-            tokenOutcome.snapshot?.hasChallengeFrame || readySnapshot?.hasChallengeFrame ? 1 : 0
-          }, checkbox=${tokenOutcome.snapshot?.hasChallengeCheckbox || readySnapshot?.hasChallengeCheckbox ? 1 : 0})`,
-        );
-        await page.waitForTimeout(randomInt(600, 1200));
-        continue;
+
+      const previousUrl = page.url();
+      await clickSubmit(page);
+
+      try {
+        await page.waitForURL(successUrlPattern, { timeout: 10_000 });
+        return;
+      } catch {
+        // Auth0 turnstile hooks may requestSubmit asynchronously after the challenge completes.
       }
+
+      const managedOutcome = await waitForManagedChallengeOutcome(page, formKind, successUrlPattern, 25_000);
+      if (managedOutcome.status === "success") {
+        return;
+      }
+      if (managedOutcome.status === "rejected" && managedOutcome.rejection && managedOutcome.rejection !== "invalid_captcha") {
+        throw new Error(managedOutcome.rejection);
+      }
+      if (managedOutcome.status === "token_ready") {
+        await page.waitForTimeout(2_500);
+        if (successUrlPattern.test(page.url())) {
+          return;
+        }
+        if (page.url() === previousUrl) {
+          await clickSubmit(page);
+          try {
+            await page.waitForURL(successUrlPattern, { timeout: 15_000 });
+            return;
+          } catch {
+            await page.waitForTimeout(1_500);
+            if (successUrlPattern.test(page.url())) {
+              return;
+            }
+          }
+        }
+      }
+      log(
+        `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
+          managedOutcome.snapshot?.hasChallengeFrame || tokenOutcome.snapshot?.hasChallengeFrame ? 1 : 0
+        }, checkbox=${managedOutcome.snapshot?.hasChallengeCheckbox || tokenOutcome.snapshot?.hasChallengeCheckbox ? 1 : 0})`,
+      );
+      await page.waitForTimeout(randomInt(600, 1200));
+      continue;
     }
 
     const previousUrl = page.url();
@@ -4513,7 +4383,7 @@ function loadConfig(): AppConfig {
         : ["tavily.com", "auth.tavily.com", "app.tavily.com"],
     modeRetryMax: Math.max(1, toInt(process.env.MODE_RETRY_MAX, 3)),
     browserLaunchRetryMax: Math.max(1, toInt(process.env.BROWSER_LAUNCH_RETRY_MAX, 3)),
-    nodeReuseCooldownMs: Math.max(60_000, toInt(process.env.NODE_REUSE_COOLDOWN_MS, 30 * 60_000)),
+    nodeReuseCooldownMs: Math.max(12 * 60 * 60_000, toInt(process.env.NODE_REUSE_COOLDOWN_MS, 12 * 60 * 60_000)),
     nodeRecentWindow: Math.max(1, toInt(process.env.NODE_RECENT_WINDOW, 4)),
     nodeCheckCacheTtlMs: Math.max(30_000, toInt(process.env.NODE_CHECK_CACHE_TTL_MS, 10 * 60_000)),
     nodeScanMaxChecks: Math.max(5, toInt(process.env.NODE_SCAN_MAX_CHECKS, 40)),
@@ -4734,7 +4604,11 @@ async function launchBrowserWithEngine(
     if (cfg.chromeExecutablePath) {
       options.executablePath = cfg.chromeExecutablePath;
     }
-    return await chromium.launch(options);
+    const browser = await chromium.launch(options);
+    if (process.platform === "darwin" && mode === "headed") {
+      await activateMacApp("Google Chrome");
+    }
+    return browser;
   }
 
   const camoufoxGeoip = cfg.camoufoxGeoipEnabled && geoIp.trim().length > 0 ? geoIp : false;
@@ -4764,6 +4638,17 @@ function createChildProcessStopper(child: ReturnType<typeof spawn>): () => Promi
     }
     child.kill("SIGKILL");
   };
+}
+
+async function activateMacApp(appName: string): Promise<void> {
+  if (process.platform !== "darwin") return;
+  await new Promise<void>((resolve) => {
+    const child = spawn("osascript", ["-e", `tell application "${appName}" to activate`], {
+      stdio: "ignore",
+    });
+    child.once("error", () => resolve());
+    child.once("exit", () => resolve());
+  });
 }
 
 function buildChromeProfileCandidates(baseDir: string): string[] {
@@ -4892,12 +4777,11 @@ async function launchNativeChromeCdp(
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
       "--new-window",
-      "about:blank",
     ];
 
     const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore" });
     const stop = createChildProcessStopper(child);
-    await delay(1000);
+    await delay(1800);
     if (child.exitCode != null) {
       lastError = new Error(
         `native chrome exited early: ${child.exitCode}${usingBaseProfile ? " (base profile fallback)" : ""}`,
@@ -4906,6 +4790,7 @@ async function launchNativeChromeCdp(
     }
 
     try {
+      await activateMacApp("Google Chrome");
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
       const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
@@ -5062,6 +4947,15 @@ async function configureNativeChromePage(
   }
 }
 
+function shouldUseNativeChromeAutomation(
+  browserEngine: BrowserEngine,
+  mode: "headed" | "headless",
+  enabled: boolean,
+): boolean {
+  if (browserEngine !== "chrome" || mode !== "headed" || !enabled) return false;
+  return true;
+}
+
 async function launchNativeChromeInspect(
   cfg: AppConfig,
   proxyServer: string,
@@ -5089,10 +4983,11 @@ async function launchNativeChromeInspect(
     stdio: "ignore",
   });
   const stop = createChildProcessStopper(child);
-  await delay(1200);
+  await delay(1800);
   if (child.exitCode != null) {
     throw new Error(`native chrome exited early: ${child.exitCode}`);
   }
+  await activateMacApp("Google Chrome");
   return {
     stop,
     details: {
@@ -5151,6 +5046,9 @@ async function preselectTaskProxy(
   taskId: string,
   taskLedger: TaskLedger | null,
   ipQuotaBlocked: Set<string>,
+  runtimeRecentProxyIps: string[],
+  busyProxyNames: Set<string>,
+  busyProxyIps: Set<string>,
 ): Promise<NodeCheckResult> {
   const blockedIps = collectBlockedIpsFromLedger(taskLedger);
   for (const ip of ipQuotaBlocked) blockedIps.add(ip);
@@ -5168,7 +5066,35 @@ async function preselectTaskProxy(
 
   const controller = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
   try {
-    return await selectProxyNode(controller, cfg, args.proxyNode, blockedIps);
+    return await selectProxyNode(controller, cfg, args.proxyNode, blockedIps, runtimeRecentProxyIps, undefined, busyProxyNames, busyProxyIps);
+  } finally {
+    await controller.stop();
+  }
+}
+
+async function createTaskMailboxSession(
+  cfg: AppConfig,
+  batchId: string,
+  taskId: string,
+  proxyName: string,
+  proxyIpHint?: string,
+): Promise<MailboxSession> {
+  let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
+  const ports = await reserveMihomoPorts();
+  mihomoOverrides = {
+    apiPort: ports.apiPort,
+    mixedPort: ports.mixedPort,
+    workDir: path.join(OUTPUT_PATH, "mihomo", batchId, `${taskId}-mailbox`),
+  };
+
+  const controller = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
+  try {
+    await switchProxyGroup(controller, proxyName);
+    const mailbox = await createMailboxSession(cfg, controller.proxyServer);
+    log(
+      `mailbox created via task proxy: provider=${mailbox.provider} node=${proxyName} proxy_ip_hint=${proxyIpHint || "unknown"} address=${mailbox.address}`,
+    );
+    return mailbox;
   } finally {
     await controller.stop();
   }
@@ -5180,10 +5106,11 @@ async function prepareSignupTask(
   batchId: string,
   taskLedger: TaskLedger | null,
   ipEmailUsage: Map<string, Set<string>>,
+  runtimeRecentProxyIps: string[],
+  activeProxyNames: Set<string>,
+  activeProxyIps: Set<string>,
   taskOrdinal: number,
 ): Promise<PreparedSignupTask> {
-  const mailbox = cfg.existingEmail && cfg.existingPassword ? null : await createMailboxSession(cfg);
-  const email = cfg.existingEmail || mailbox?.address || "";
   const password = cfg.existingPassword || randomPassword();
   const ipQuotaBlocked = new Set<string>();
   for (const [ip, emails] of ipEmailUsage.entries()) {
@@ -5193,29 +5120,77 @@ async function prepareSignupTask(
   }
 
   const taskId = `task-${taskOrdinal}-${randomBytes(2).toString("hex")}`;
-  const selectedProxy = await preselectTaskProxy(cfg, args, batchId, taskId, taskLedger, ipQuotaBlocked);
-  const proxyIp = normalizeIp(selectedProxy.geo?.ip);
-  if (!proxyIp) {
-    throw new Error(`task proxy missing egress ip: ${selectedProxy.name}`);
+  const proxyBootstrapAttempts = 6;
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= proxyBootstrapAttempts; attempt += 1) {
+    const selectedProxy = await preselectTaskProxy(
+      cfg,
+      args,
+      batchId,
+      taskId,
+      taskLedger,
+      ipQuotaBlocked,
+      runtimeRecentProxyIps,
+      activeProxyNames,
+      activeProxyIps,
+    );
+    const proxyIp = normalizeIp(selectedProxy.geo?.ip);
+    if (activeProxyNames.has(selectedProxy.name)) {
+      log(`task proxy bootstrap skipped busy node: ${selectedProxy.name}`);
+      continue;
+    }
+    if (proxyIp && activeProxyIps.has(proxyIp)) {
+      log(`task proxy bootstrap skipped busy IP: ${selectedProxy.name} -> ${proxyIp}`);
+      continue;
+    }
+    activeProxyNames.add(selectedProxy.name);
+    if (proxyIp) activeProxyIps.add(proxyIp);
+
+    try {
+      const mailbox =
+        cfg.existingEmail && cfg.existingPassword
+          ? null
+          : await createTaskMailboxSession(cfg, batchId, taskId, selectedProxy.name, proxyIp);
+      const email = cfg.existingEmail || mailbox?.address || "";
+      let ipEmailOrdinal = 0;
+
+      if (proxyIp) {
+        let emailSet = ipEmailUsage.get(proxyIp);
+        if (!emailSet) {
+          emailSet = new Set<string>();
+          ipEmailUsage.set(proxyIp, emailSet);
+        }
+        emailSet.add(email);
+        ipEmailOrdinal = emailSet.size;
+      }
+
+      return {
+        taskId,
+        email,
+        password,
+        mailbox,
+        proxyName: selectedProxy.name,
+        proxyIp: proxyIp || undefined,
+        proxyGeo: compactGeo(selectedProxy.geo),
+        ipEmailOrdinal,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      activeProxyNames.delete(selectedProxy.name);
+      if (proxyIp) activeProxyIps.delete(proxyIp);
+      await recordProxyNodeTaskOutcome(selectedProxy.name, selectedProxy.geo, "fail");
+      log(
+        `task proxy bootstrap failed ${attempt}/${proxyBootstrapAttempts}: node=${selectedProxy.name} ip=${proxyIp || "unknown"} error=${message.split("\n")[0]}`,
+      );
+      if (attempt >= proxyBootstrapAttempts) {
+        break;
+      }
+    }
   }
 
-  let emailSet = ipEmailUsage.get(proxyIp);
-  if (!emailSet) {
-    emailSet = new Set<string>();
-    ipEmailUsage.set(proxyIp, emailSet);
-  }
-  emailSet.add(email);
-
-  return {
-    taskId,
-    email,
-    password,
-    mailbox,
-    proxyName: selectedProxy.name,
-    proxyIp,
-    proxyGeo: compactGeo(selectedProxy.geo),
-    ipEmailOrdinal: emailSet.size,
-  };
+  throw lastError || new Error("task proxy bootstrap failed");
 }
 
 async function runSingleMode(
@@ -5246,20 +5221,14 @@ async function runSingleMode(
   if (!preparedTask && email && password) {
     log(`[${mode}] existing account mode: ${email}`);
     notes.push("existing account mode enabled");
-  } else {
-    if (!preparedTask) {
-      mailbox = await createMailboxSession(cfg);
-      email = mailbox.address;
-      password = randomPassword();
-      log(`[${mode}] ${mailbox.provider} mailbox: ${email}`);
-      notes.push(`${mailbox.provider} mailbox created (${mailbox.accountId})`);
-    }
   }
   if (preparedTask) {
     notes.push(`task id: ${preparedTask.taskId}`);
     notes.push(`task retry: ${ctx.modeAttempt}/3`);
-    notes.push(`task fixed proxy: ${preparedTask.proxyName} (${preparedTask.proxyIp})`);
-    notes.push(`task ip-email ordinal: ${preparedTask.ipEmailOrdinal}/3`);
+    notes.push(`task fixed proxy: ${preparedTask.proxyName} (${preparedTask.proxyIp || "ip-pending"})`);
+    if (preparedTask.ipEmailOrdinal > 0) {
+      notes.push(`task ip-email ordinal: ${preparedTask.ipEmailOrdinal}/3`);
+    }
   }
 
   const batchEnabled = args.need > 1 || args.parallel > 1;
@@ -5278,7 +5247,7 @@ async function runSingleMode(
 
   const mihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
   const browserEngine = args.browserEngine || cfg.browserEngine;
-  const useNativeChrome = browserEngine === "chrome" && mode === "headed" && cfg.chromeNativeAutomation;
+  const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.chromeNativeAutomation);
   let browser: Browser | null = null;
   let context: any = null;
   let page: any = null;
@@ -5504,26 +5473,41 @@ async function runSingleMode(
   try {
     failureStage = "proxy_select";
     if (preparedTask) {
-      selectedProxy = await selectProxyNode(mihomoController, cfg, preparedTask.proxyName);
+      const expectedTaskIp = normalizeIp(preparedTask.proxyIp);
+      selectedProxy = await selectProxyNode(
+        mihomoController,
+        cfg,
+        preparedTask.proxyName,
+        new Set(),
+        ctx.runtimeRecentProxyIps,
+        expectedTaskIp,
+      );
       const actualProxyIp = normalizeIp(selectedProxy.geo?.ip);
-      if (!actualProxyIp || !sameIp(actualProxyIp, preparedTask.proxyIp)) {
+      if (expectedTaskIp && (!actualProxyIp || !sameIp(actualProxyIp, expectedTaskIp))) {
         throw new Error(
-          `task_proxy_ip_mismatch: expected=${preparedTask.proxyIp} actual=${actualProxyIp || "unknown"} node=${preparedTask.proxyName}`,
+          `task_proxy_ip_mismatch: expected=${expectedTaskIp} actual=${actualProxyIp || "unknown"} node=${preparedTask.proxyName}`,
         );
       }
     } else {
-      selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode, collectBlockedIpsFromLedger(ledger));
+      selectedProxy = await selectProxyNode(
+        mihomoController,
+        cfg,
+        args.proxyNode,
+        collectBlockedIpsFromLedger(ledger),
+        ctx.runtimeRecentProxyIps,
+      );
     }
-    const geo = selectedProxy.geo;
+    const geo = (selectedProxy.geo || {}) as GeoInfo;
     selectedGeo = geo;
-    if (!geo || !geo.ip) {
-      throw new Error("proxy_geo_missing");
-    }
 
     const locale = deriveLocale(geo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
     notes.push(`proxy node: ${selectedProxy.name}`);
-    notes.push(`proxy ip: ${geo.ip}`);
+    if (geo.ip) {
+      notes.push(`proxy ip: ${geo.ip}`);
+    } else {
+      notes.push("proxy ip: pending browser confirmation");
+    }
     notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
     if (!useNativeChrome && browserEngine === "camoufox") {
       notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
@@ -5572,7 +5556,7 @@ async function runSingleMode(
           throw new Error(`native_cdp_unavailable: ${compact}`);
         }
       }
-      return await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip);
+      return await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip || "");
     };
 
     const closeBrowserSession = async (): Promise<void> => {
@@ -5699,27 +5683,69 @@ async function runSingleMode(
     ledgerRecord.notesJson = safeJsonStringify(notes);
     persistLedgerRecord("after-browser-launch");
 
-    if (cfg.browserPrecheckEnabled && !args.skipPrecheck) {
-      failureStage = "browser_precheck";
-      const precheck = await runBrowserPrecheck(page, cfg, mode, selectedProxy, locale);
-      precheckPassed = precheck.passed;
-      await writeJson(new URL(`browser_precheck_${mode}.json`, diagOutputDir), precheck);
-      await writeJson(new URL("browser_precheck.json", diagOutputDir), precheck);
-      if (!precheck.passed) {
-        throw new Error(`browser precheck failed: ${precheck.issues.join(" | ")}`);
-      }
-      notes.push("browser precheck passed");
-      ledgerRecord.precheckPassed = true;
-      ledgerRecord.notesJson = safeJsonStringify(notes);
-      ledgerRecord.detailsJson = safeJsonStringify({
-        precheck,
-      });
-      persistLedgerRecord("after-precheck");
+    failureStage = "browser_ip_probe";
+    const browserIpProbe = await collectSingleBrowserIpProbe(page);
+    const browserObservedIp = normalizeIp(browserIpProbe.ip || browserIpProbe.ipCandidates?.[0]);
+    if (!browserObservedIp) {
+      throw new Error(`browser_proxy_ip_missing:${browserIpProbe.error || browserIpProbe.url}`);
     }
+    const localDirectIp = await resolveLocalEgressIp(8_000);
+    if (localDirectIp && sameIp(localDirectIp, browserObservedIp)) {
+      throw new Error(`browser_proxy_same_as_local_ip:${browserObservedIp}:${selectedProxy.name}`);
+    }
+    const expectedProxyIp = normalizeIp(selectedProxy.geo?.ip);
+    if (expectedProxyIp && !sameIp(expectedProxyIp, browserObservedIp)) {
+      notes.push(`browser ip superseded cached ip: expected=${expectedProxyIp} actual=${browserObservedIp}`);
+    }
+    selectedProxy.geo = { ...(selectedProxy.geo || {}), ip: browserObservedIp } as GeoInfo;
+    selectedGeo = selectedProxy.geo;
+    ledgerRecord.proxyIp = browserObservedIp;
+    if (preparedTask) {
+      const previousTaskIp = normalizeIp(preparedTask.proxyIp);
+      if (previousTaskIp && previousTaskIp !== browserObservedIp) {
+        ctx.activeProxyIps.delete(previousTaskIp);
+      }
+      preparedTask.proxyIp = browserObservedIp;
+      ctx.activeProxyIps.add(browserObservedIp);
+      let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+      if (!emailSet) {
+        emailSet = new Set<string>();
+        ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+      }
+      if (!emailSet.has(email) && emailSet.size >= 3) {
+        throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+      }
+      emailSet.add(email);
+      preparedTask.ipEmailOrdinal = emailSet.size;
+      notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+    }
+    precheckPassed = true;
+    notes.push(`browser observed ip: ${browserObservedIp}`);
+    ledgerRecord.precheckPassed = true;
+    ledgerRecord.notesJson = safeJsonStringify(notes);
+    ledgerRecord.detailsJson = safeJsonStringify({
+      browserIpProbe,
+    });
+    persistLedgerRecord("after-browser-ip-probe");
 
     if (cfg.existingEmail && cfg.existingPassword) {
       notes.push("skip signup (existing account)");
     } else {
+      if (!mailbox) {
+        mailbox = await createMailboxSession(cfg, mihomoController.proxyServer);
+        email = mailbox.address;
+        password = password || randomPassword();
+        log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
+        notes.push(`${mailbox.provider} mailbox created via proxy (${mailbox.accountId})`);
+        ledgerRecord.emailAddress = email;
+        const mailboxSplit = splitEmail(email);
+        ledgerRecord.emailDomain = mailboxSplit.domain;
+        ledgerRecord.emailLocalLen = mailboxSplit.localLen;
+        ledgerRecord.password = password;
+        ledgerRecord.notesJson = safeJsonStringify(notes);
+        persistLedgerRecord("after-mailbox-create");
+      }
+
       failureStage = "signup";
       if (cfg.humanConfirmBeforeSignup) {
         await confirmHumanControl(cfg, email, "before signup");
@@ -5754,7 +5780,13 @@ async function runSingleMode(
       }
 
       failureStage = "email_verify_wait";
-      verificationLink = await waitForVerificationLink(mailbox!, cfg.emailWaitMs, cfg.mailPollMs, cfg.verifyHostAllowlist);
+      verificationLink = await waitForVerificationLink(
+        mailbox!,
+        cfg.emailWaitMs,
+        cfg.mailPollMs,
+        cfg.verifyHostAllowlist,
+        mihomoController.proxyServer,
+      );
       if (!verificationLink) {
         throw new Error("verification email not found within timeout");
       }
@@ -5852,6 +5884,9 @@ async function runSingleMode(
     ledgerRecord.apiKey = apiKey;
     ledgerRecord.apiKeyPrefix = apiKey.slice(0, Math.min(apiKey.length, 12));
     ledgerRecord.notesJson = safeJsonStringify(notes);
+    if (selectedProxy?.name) {
+      await recordProxyNodeTaskOutcome(selectedProxy.name, selectedProxy.geo, "ok");
+    }
     ledgerRecord.detailsJson = safeJsonStringify({
       risk: successRisk,
       snippets: successRisk.snippets,
@@ -5907,6 +5942,9 @@ async function runSingleMode(
       }
     } catch {
       // best effort diagnostics only
+    }
+    if (selectedProxy?.name) {
+      await recordProxyNodeTaskOutcome(selectedProxy.name, selectedProxy.geo, "fail");
     }
     ledgerRecord.status = "failed";
     ledgerRecord.completedAt = new Date().toISOString();
@@ -5968,22 +6006,19 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
   const notes: string[] = [];
   const mihomoController = await startMihomo(buildMihomoConfig(cfg));
   const browserEngine = args.browserEngine || cfg.inspectBrowserEngine;
-  const useNativeChrome = browserEngine === "chrome" && cfg.inspectChromeNative;
+  const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.inspectChromeNative);
   let browser: Browser | null = null;
   let context: any = null;
   let nativeChromeStop: (() => Promise<void>) | null = null;
 
   try {
     const selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode);
-    const geo = selectedProxy.geo;
-    if (!geo || !geo.ip) {
-      throw new Error("proxy_geo_missing");
-    }
+    const geo = (selectedProxy.geo || {}) as GeoInfo;
 
     const locale = deriveLocale(geo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
     notes.push(`proxy node: ${selectedProxy.name}`);
-    notes.push(`proxy ip: ${geo.ip}`);
+    notes.push(`proxy ip: ${geo.ip || "pending browser confirmation"}`);
     notes.push(`browser engine: ${browserEngine}`);
     if (browserEngine === "camoufox") {
       notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
@@ -6011,7 +6046,7 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
         notes,
       });
     } else {
-      browser = await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip);
+      browser = await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip || "");
 
       const contextOptions: BrowserContextOptions = {
         locale,
@@ -6134,41 +6169,62 @@ async function run(): Promise<void> {
     const failures: Array<{ runIndex: number; taskId?: string; error: string }> = [];
     const taskRetryMax = 3;
     const ipEmailUsage = new Map<string, Set<string>>();
+    const runtimeRecentProxyIps: string[] = [];
+    const activeProxyNames = new Set<string>();
+    const activeProxyIps = new Set<string>();
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
-      const preparedTask = await prepareSignupTask(cfg, args, batchId, taskLedger, ipEmailUsage, runIndex);
+      const preparedTask = await prepareSignupTask(
+        cfg,
+        args,
+        batchId,
+        taskLedger,
+        ipEmailUsage,
+        runtimeRecentProxyIps,
+        activeProxyNames,
+        activeProxyIps,
+        runIndex,
+      );
       let lastError: Error | null = null;
 
-      for (let attempt = 1; attempt <= taskRetryMax; attempt += 1) {
-        try {
-          const result = await runSingleMode(
-            cfg,
-            args,
-            solver,
-            resolvedModel,
-            requestedMode,
-            {
-              batchId,
-              modeAttempt: attempt,
-              taskLedger,
-            },
-            preparedTask,
-          );
-          if (attempt > 1) {
-            result.notes.push(`task retry succeeded on attempt ${attempt}`);
-          }
-          return result;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          lastError = error instanceof Error ? error : new Error(message);
-          if (attempt < taskRetryMax) {
-            log(
-              `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}), retrying with fresh browser: ${message}`,
+      try {
+        for (let attempt = 1; attempt <= taskRetryMax; attempt += 1) {
+          try {
+            const result = await runSingleMode(
+              cfg,
+              args,
+              solver,
+              resolvedModel,
+              requestedMode,
+              {
+                batchId,
+                modeAttempt: attempt,
+                taskLedger,
+                runtimeRecentProxyIps,
+                ipEmailUsage,
+                activeProxyIps,
+              },
+              preparedTask,
             );
-            continue;
+            if (attempt > 1) {
+              result.notes.push(`task retry succeeded on attempt ${attempt}`);
+            }
+            return result;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            lastError = error instanceof Error ? error : new Error(message);
+            if (attempt < taskRetryMax) {
+              log(
+                `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}), retrying with fresh browser: ${message}`,
+              );
+              continue;
+            }
+            break;
           }
-          break;
         }
+      } finally {
+        activeProxyNames.delete(preparedTask.proxyName);
+        if (preparedTask.proxyIp) activeProxyIps.delete(preparedTask.proxyIp);
       }
 
       throw lastError || new Error(`[${requestedMode}] task failed without result`);

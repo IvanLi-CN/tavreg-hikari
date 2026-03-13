@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import process from "node:process";
@@ -31,6 +31,19 @@ export interface MihomoConfig {
 interface MihomoProcess {
   stop: () => Promise<void>;
 }
+
+const RESERVED_PROXY_NAMES = new Set([
+  "DIRECT",
+  "REJECT",
+  "GLOBAL",
+  "AUTO",
+  "PROXY",
+  "COMPATIBLE",
+  "PASS",
+  "FINAL",
+  "CODEX_ROUTE",
+  "CODEX_AUTO",
+]);
 
 const RELEASE_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const RELEASE_TAG_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags";
@@ -189,13 +202,338 @@ function decodeBase64IfNeeded(text: string): string {
   if (!looksLikeBase64(text)) return text;
   try {
     const decoded = Buffer.from(text.trim(), "base64").toString("utf8");
-    if (/proxies:|proxy-providers:|proxy-groups:/i.test(decoded)) {
+    if (/proxies:|proxy-providers:|proxy-groups:|:\/\//i.test(decoded)) {
       return decoded;
     }
   } catch {
     // ignore
   }
   return text;
+}
+
+function decodeBase64Loose(text: string): string | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const normalized = trimmed.replace(/\s+/g, "");
+  const padding = normalized.length % 4 === 0 ? "" : "=".repeat(4 - (normalized.length % 4));
+  try {
+    return Buffer.from(`${normalized}${padding}`, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function decodeNodeName(hash: string): string {
+  const raw = hash.replace(/^#/, "").trim();
+  if (!raw) return "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function parseBooleanFlag(value: string | null, fallback: boolean): boolean {
+  if (value == null || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function parsePortValue(raw: string): number | null {
+  const port = Number.parseInt(raw.trim(), 10);
+  return Number.isInteger(port) && port > 0 ? port : null;
+}
+
+function pushUniqueProxy(
+  deduped: Map<string, Record<string, unknown>>,
+  proxy: Record<string, unknown> | null,
+): void {
+  if (!proxy) return;
+  const name = typeof proxy.name === "string" ? proxy.name.trim() : "";
+  if (!name || deduped.has(name)) return;
+  deduped.set(name, proxy);
+}
+
+function parseVlessUri(line: string): Record<string, unknown> | null {
+  let url: URL;
+  try {
+    url = new URL(line);
+  } catch {
+    return null;
+  }
+  const name = decodeNodeName(url.hash);
+  const port = parsePortValue(url.port);
+  if (!name || !url.hostname || !port || !url.username) return null;
+
+  const params = url.searchParams;
+  const network = (params.get("type") || "tcp").trim().toLowerCase();
+  const security = (params.get("security") || "").trim().toLowerCase();
+  const proxy: Record<string, unknown> = {
+    name,
+    type: "vless",
+    server: url.hostname,
+    port,
+    uuid: decodeURIComponent(url.username),
+    udp: true,
+    cipher: "auto",
+  };
+  if (security === "tls" || security === "reality") {
+    proxy.tls = true;
+  }
+  const flow = params.get("flow")?.trim();
+  if (flow) proxy.flow = flow;
+  const fingerprint = params.get("fp")?.trim();
+  if (fingerprint) proxy["client-fingerprint"] = fingerprint;
+  const servername = params.get("sni")?.trim();
+  if (servername) {
+    proxy.servername = servername;
+    proxy["skip-cert-verify"] = parseBooleanFlag(params.get("insecure"), false);
+  }
+  if (security === "reality") {
+    const realityOpts: Record<string, unknown> = {};
+    const publicKey = params.get("pbk")?.trim();
+    if (publicKey) realityOpts["public-key"] = publicKey;
+    if (params.has("sid")) realityOpts["short-id"] = params.get("sid") || "";
+    if (Object.keys(realityOpts).length > 0) proxy["reality-opts"] = realityOpts;
+  }
+  if (network && network !== "tcp") {
+    proxy.network = network;
+  }
+  if (network === "grpc") {
+    const serviceName = params.get("serviceName")?.trim();
+    if (serviceName) {
+      proxy["grpc-opts"] = { "grpc-service-name": serviceName };
+    }
+  } else if (network === "ws") {
+    const wsOpts: Record<string, unknown> = {};
+    const host = params.get("host")?.trim();
+    const pathValue = params.get("path")?.trim();
+    if (pathValue) wsOpts.path = pathValue;
+    if (host) wsOpts.headers = { Host: host };
+    if (Object.keys(wsOpts).length > 0) proxy["ws-opts"] = wsOpts;
+  }
+  return proxy;
+}
+
+function parseHysteria2Uri(line: string): Record<string, unknown> | null {
+  let url: URL;
+  try {
+    url = new URL(line);
+  } catch {
+    return null;
+  }
+  const name = decodeNodeName(url.hash);
+  const port = parsePortValue(url.port);
+  if (!name || !url.hostname || !port || !url.username) return null;
+
+  const proxy: Record<string, unknown> = {
+    name,
+    type: "hysteria2",
+    server: url.hostname,
+    port,
+    password: decodeURIComponent(url.username),
+    udp: true,
+    "skip-cert-verify": parseBooleanFlag(url.searchParams.get("insecure"), false),
+  };
+  const sni = url.searchParams.get("sni")?.trim();
+  if (sni) proxy.sni = sni;
+  const obfs = url.searchParams.get("obfs")?.trim();
+  if (obfs) proxy.obfs = obfs;
+  const obfsPassword = url.searchParams.get("obfs-password")?.trim();
+  if (obfsPassword) proxy["obfs-password"] = obfsPassword;
+  return proxy;
+}
+
+function parseShadowsocksUri(line: string): Record<string, unknown> | null {
+  let url: URL;
+  try {
+    url = new URL(line);
+  } catch {
+    return null;
+  }
+  const name = decodeNodeName(url.hash);
+  const port = parsePortValue(url.port);
+  if (!name || !url.hostname || !port) return null;
+
+  let cipher = "";
+  let password = "";
+  const rawUser = decodeURIComponent(url.username || "");
+  if (rawUser) {
+    const decodedUser = decodeBase64Loose(rawUser);
+    const auth = decodedUser && decodedUser.includes(":") ? decodedUser : rawUser;
+    const idx = auth.indexOf(":");
+    if (idx > 0) {
+      cipher = auth.slice(0, idx);
+      password = auth.slice(idx + 1);
+    }
+  }
+  if ((!cipher || !password) && url.password) {
+    cipher = rawUser;
+    password = decodeURIComponent(url.password);
+  }
+  if (!cipher || !password) return null;
+
+  return {
+    name,
+    type: "ss",
+    server: url.hostname,
+    port,
+    cipher,
+    password,
+    udp: true,
+  };
+}
+
+function parseTuicUri(line: string): Record<string, unknown> | null {
+  let url: URL;
+  try {
+    url = new URL(line);
+  } catch {
+    return null;
+  }
+  const name = decodeNodeName(url.hash);
+  const port = parsePortValue(url.port);
+  if (!name || !url.hostname || !port || !url.username) return null;
+
+  const proxy: Record<string, unknown> = {
+    name,
+    type: "tuic",
+    server: url.hostname,
+    port,
+    version: 5,
+    uuid: decodeURIComponent(url.username),
+    password: decodeURIComponent(url.password || ""),
+    "skip-cert-verify": parseBooleanFlag(url.searchParams.get("insecure"), false),
+  };
+  if (!proxy.password) return null;
+  const sni = url.searchParams.get("sni")?.trim();
+  if (sni) proxy.sni = sni;
+  const alpn = url.searchParams
+    .get("alpn")
+    ?.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (alpn && alpn.length > 0) proxy.alpn = alpn;
+  const congestion = url.searchParams.get("congestion_control")?.trim();
+  if (congestion) proxy["congestion-controller"] = congestion;
+  const udpRelayMode = url.searchParams.get("udp_relay_mode")?.trim();
+  if (udpRelayMode) proxy["udp-relay-mode"] = udpRelayMode;
+  return proxy;
+}
+
+function parseProxyUri(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  if (trimmed.startsWith("vless://")) return parseVlessUri(trimmed);
+  if (trimmed.startsWith("hysteria2://")) return parseHysteria2Uri(trimmed);
+  if (trimmed.startsWith("ss://")) return parseShadowsocksUri(trimmed);
+  if (trimmed.startsWith("tuic://")) return parseTuicUri(trimmed);
+  return null;
+}
+
+function parseProviderPayloadToProxies(content: string): Record<string, unknown>[] {
+  const text = decodeBase64IfNeeded(content).trim();
+  if (!text) return [];
+
+  const deduped = new Map<string, Record<string, unknown>>();
+  try {
+    const parsed = yamlParse(text) as unknown;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item && typeof item === "object") {
+          pushUniqueProxy(deduped, { ...(item as Record<string, unknown>) });
+        }
+      }
+    } else if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const proxies = Array.isArray(record.proxies) ? record.proxies : [];
+      for (const item of proxies) {
+        if (item && typeof item === "object") {
+          pushUniqueProxy(deduped, { ...(item as Record<string, unknown>) });
+        }
+      }
+    }
+  } catch {
+    // fall through to URI parsing
+  }
+  if (deduped.size > 0) {
+    return [...deduped.values()];
+  }
+
+  for (const line of text.split(/\r?\n/)) {
+    pushUniqueProxy(deduped, parseProxyUri(line));
+  }
+  return [...deduped.values()];
+}
+
+function extractUriProxyName(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return null;
+  const hashIndex = trimmed.lastIndexOf("#");
+  if (hashIndex < 0 || hashIndex >= trimmed.length - 1) return null;
+  const raw = trimmed.slice(hashIndex + 1).trim();
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+async function parseProviderNodeNames(filePath: string): Promise<ProxyNode[]> {
+  let raw = "";
+  try {
+    raw = await readFile(filePath, "utf8");
+  } catch {
+    return [];
+  }
+  const text = raw.trim();
+  if (!text) return [];
+
+  const deduped = new Map<string, ProxyNode>();
+  const pushNode = (name: unknown, type?: unknown): void => {
+    if (typeof name !== "string") return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    if (!deduped.has(trimmed)) {
+      deduped.set(trimmed, { name: trimmed, type: typeof type === "string" ? type : undefined });
+    }
+  };
+
+  try {
+    const parsed = yamlParse(text) as unknown;
+    if (Array.isArray(parsed)) {
+      for (const item of parsed) {
+        if (item && typeof item === "object") {
+          const record = item as Record<string, unknown>;
+          pushNode(record.name, record.type);
+        }
+      }
+    } else if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const proxies = Array.isArray(record.proxies) ? record.proxies : [];
+      for (const item of proxies) {
+        if (item && typeof item === "object") {
+          const proxy = item as Record<string, unknown>;
+          pushNode(proxy.name, proxy.type);
+        }
+      }
+    }
+  } catch {
+    // fall through to URI-line parsing
+  }
+
+  if (deduped.size > 0) {
+    return [...deduped.values()];
+  }
+
+  for (const line of text.split(/\r?\n/)) {
+    const name = extractUriProxyName(line);
+    if (name) pushNode(name);
+  }
+  return [...deduped.values()];
 }
 
 function normalizeProviders(
@@ -241,7 +579,31 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
   const raw = await resp.text();
   const content = decodeBase64IfNeeded(raw);
   const parsed = yamlParse(content) as Record<string, unknown>;
-  return typeof parsed === "object" && parsed ? parsed : {};
+  const subscription = typeof parsed === "object" && parsed ? parsed : {};
+  const providers = (subscription["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
+  const materializedProviders: Record<string, Record<string, unknown>[]> = {};
+
+  for (const [name, provider] of Object.entries(providers)) {
+    const providerUrl = typeof provider?.url === "string" ? provider.url.trim() : "";
+    if (!providerUrl) continue;
+    try {
+      const providerResp = await fetch(providerUrl, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
+      if (!providerResp.ok) continue;
+      const providerText = await providerResp.text();
+      const proxies = parseProviderPayloadToProxies(providerText);
+      if (proxies.length > 0) {
+        materializedProviders[name] = proxies;
+      }
+    } catch {
+      // ignore individual provider fetch failures and keep the rest of the subscription usable
+    }
+  }
+
+  if (Object.keys(materializedProviders).length > 0) {
+    subscription.__materializedProxyProviders = materializedProviders;
+  }
+
+  return subscription;
 }
 
 function buildConfigObject(
@@ -284,6 +646,19 @@ function buildConfigObject(
   const providersRaw = (subscription?.["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
   const ruleProvidersRaw = (subscription?.["rule-providers"] || {}) as Record<string, Record<string, unknown>>;
   const proxiesRaw = Array.isArray(subscription?.proxies) ? subscription?.proxies : [];
+  const materializedProviderMap = (
+    subscription?.__materializedProxyProviders && typeof subscription.__materializedProxyProviders === "object"
+      ? subscription.__materializedProxyProviders
+      : {}
+  ) as Record<string, Record<string, unknown>[]>;
+  const materializedProviderNames = new Set(
+    Object.entries(materializedProviderMap)
+      .filter(([, proxies]) => Array.isArray(proxies) && proxies.length > 0)
+      .map(([name]) => name),
+  );
+  const materializedProviderProxies = Object.values(materializedProviderMap).flatMap((proxies) =>
+    Array.isArray(proxies) ? proxies : [],
+  );
   const subscriptionGroupsRaw = Array.isArray(subscription?.["proxy-groups"])
     ? (subscription?.["proxy-groups"] as unknown[]).filter((item) => item && typeof item === "object")
     : [];
@@ -300,7 +675,7 @@ function buildConfigObject(
     }
     return null;
   };
-  const normalizedProxies = proxiesRaw.map((item) => {
+  const normalizeProxy = (item: unknown): unknown => {
     if (!item || typeof item !== "object") return item;
     const clone = { ...(item as Record<string, unknown>) };
     const dialer = clone["dialer-proxy"];
@@ -313,11 +688,48 @@ function buildConfigObject(
       }
     }
     return clone;
+  };
+  const normalizedProxyMap = new Map<string, Record<string, unknown>>();
+  for (const item of [...proxiesRaw, ...materializedProviderProxies]) {
+    const normalized = normalizeProxy(item);
+    if (!normalized || typeof normalized !== "object") continue;
+    const proxy = normalized as Record<string, unknown>;
+    const name = typeof proxy.name === "string" ? proxy.name.trim() : "";
+    if (!name || normalizedProxyMap.has(name)) continue;
+    normalizedProxyMap.set(name, proxy);
+  }
+  const normalizedProxies = [...normalizedProxyMap.values()];
+
+  const expandedSubscriptionGroups = subscriptionGroupsRaw.map((item) => {
+    const clone = { ...(item as Record<string, unknown>) };
+    const rawUse = Array.isArray(clone.use) ? clone.use.filter((value) => typeof value === "string") : [];
+    const rawProxies = Array.isArray(clone.proxies) ? clone.proxies.filter((value) => typeof value === "string") : [];
+    const expandedNames = rawUse.flatMap((providerName) =>
+      materializedProviderNames.has(providerName as string)
+        ? (materializedProviderMap[providerName as string] || [])
+            .map((proxy) => (typeof proxy.name === "string" ? proxy.name : ""))
+            .filter(Boolean)
+        : [],
+    );
+    const mergedNames = [...new Set([...rawProxies, ...expandedNames])];
+    const remainingUse = rawUse.filter((providerName) => !materializedProviderNames.has(providerName as string));
+    if (mergedNames.length > 0) {
+      clone.proxies = mergedNames;
+    }
+    if (remainingUse.length > 0) {
+      clone.use = remainingUse;
+    } else {
+      delete clone.use;
+    }
+    return clone;
   });
 
-  const providerNames = Object.keys(providersRaw);
+  const activeProvidersRaw = Object.fromEntries(
+    Object.entries(providersRaw).filter(([name]) => !materializedProviderNames.has(name)),
+  ) as Record<string, Record<string, unknown>>;
+  const providerNames = Object.keys(activeProvidersRaw);
   if (providerNames.length > 0) {
-    config["proxy-providers"] = normalizeProviders(providersRaw, cfg.checkUrl);
+    config["proxy-providers"] = normalizeProviders(activeProvidersRaw, cfg.checkUrl);
   }
   if (Object.keys(ruleProvidersRaw).length > 0) {
     config["rule-providers"] = normalizeRuleProviders(ruleProvidersRaw);
@@ -356,7 +768,7 @@ function buildConfigObject(
   }
 
   config["proxy-groups"] = [
-    ...subscriptionGroupsRaw,
+    ...expandedSubscriptionGroups,
     autoGroup,
     routeGroup,
   ];
@@ -483,6 +895,39 @@ async function updateProxyProvider(apiBaseUrl: string, name: string): Promise<vo
   }
 }
 
+function isReservedProxyName(name: string): boolean {
+  return RESERVED_PROXY_NAMES.has(name.trim().toUpperCase());
+}
+
+function isNonSelectableProxyName(name: string): boolean {
+  const normalized = name.trim();
+  if (!normalized) return true;
+  if (isReservedProxyName(normalized)) return true;
+  return /剩余流量|套餐到期|到期时间|官网|流量重置|重置时间|会员群|售后|备用网址|公告|通知/i.test(normalized);
+}
+
+async function listProviderNodes(workDir: string, providerNames: string[]): Promise<ProxyNode[]> {
+  const deduped = new Map<string, ProxyNode>();
+  for (const providerName of providerNames) {
+    const candidates = [
+      path.join(workDir, "proxy_providers", `${providerName}.yaml`),
+      path.join(workDir, "proxy_providers", `${providerName}.yml`),
+    ];
+    for (const filePath of candidates) {
+      const nodes = await parseProviderNodeNames(filePath);
+      if (nodes.length === 0) continue;
+      for (const node of nodes) {
+        if (isNonSelectableProxyName(node.name)) continue;
+        if (!deduped.has(node.name)) {
+          deduped.set(node.name, node);
+        }
+      }
+      break;
+    }
+  }
+  return [...deduped.values()];
+}
+
 async function ensureRouteGroupSelection(apiBaseUrl: string, routeGroup: string, targetGroup: string): Promise<void> {
   await httpJson("PUT", `${apiBaseUrl}/proxies/${encodeURIComponent(routeGroup)}`, { name: targetGroup }, 10_000);
   const payload = await httpJson<{ proxies?: Record<string, { now?: string }> }>(
@@ -548,14 +993,28 @@ export async function startMihomo(cfg: MihomoConfig): Promise<ProxyController> {
       10_000,
     );
     const group = payload.proxies?.[cfg.groupName];
-    const nodes = group?.all || [];
-    return nodes
-      .filter((name) => typeof name === "string")
-      .filter((name) => {
-        const normalized = String(name).trim().toUpperCase();
-        return !["DIRECT", "REJECT", "GLOBAL", "AUTO", "PROXY", "CODEX_ROUTE", "CODEX_AUTO"].includes(normalized);
-      })
-      .map((name) => ({ name }));
+    const groupNodes = Array.isArray(group?.all) ? group.all : [];
+    const providerNodes = await listProviderNodes(cfg.workDir, providerNames);
+    const providerByName = new Map<string, ProxyNode>();
+    for (const node of providerNodes) {
+      providerByName.set(node.name, node);
+    }
+
+    const deduped = new Map<string, ProxyNode>();
+    for (const rawName of groupNodes) {
+      if (typeof rawName !== "string") continue;
+      const name = rawName.trim();
+      if (isNonSelectableProxyName(name)) continue;
+      deduped.set(name, providerByName.get(name) || { name });
+    }
+
+    if (deduped.size > 0) return [...deduped.values()];
+
+    for (const node of providerNodes) {
+      if (isNonSelectableProxyName(node.name)) continue;
+      deduped.set(node.name, node);
+    }
+    return [...deduped.values()];
   };
 
   const getGroupSelection = async (): Promise<string | null> => {
