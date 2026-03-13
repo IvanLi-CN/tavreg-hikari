@@ -50,6 +50,11 @@ const RELEASE_TAG_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/
 
 // Avoid duplicate downloads when multiple runs start in parallel.
 const mihomoBinaryCache = new Map<string, Promise<string>>();
+const subscriptionCache = new Map<
+  string,
+  { expiresAt: number; payload: Record<string, unknown> } | Promise<Record<string, unknown>>
+>();
+const SUBSCRIPTION_CACHE_TTL_MS = 10 * 60 * 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -572,38 +577,62 @@ function normalizeRuleProviders(
 }
 
 async function fetchSubscription(url: string): Promise<Record<string, unknown>> {
-  const resp = await fetch(url, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
-  if (!resp.ok) {
-    throw new Error(`mihomo_subscription_failed:${resp.status}`);
+  const cached = subscriptionCache.get(url);
+  if (cached && !(cached instanceof Promise) && cached.expiresAt > Date.now()) {
+    return cached.payload;
   }
-  const raw = await resp.text();
-  const content = decodeBase64IfNeeded(raw);
-  const parsed = yamlParse(content) as Record<string, unknown>;
-  const subscription = typeof parsed === "object" && parsed ? parsed : {};
-  const providers = (subscription["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
-  const materializedProviders: Record<string, Record<string, unknown>[]> = {};
+  if (cached instanceof Promise) {
+    return await cached;
+  }
 
-  for (const [name, provider] of Object.entries(providers)) {
-    const providerUrl = typeof provider?.url === "string" ? provider.url.trim() : "";
-    if (!providerUrl) continue;
-    try {
-      const providerResp = await fetch(providerUrl, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
-      if (!providerResp.ok) continue;
-      const providerText = await providerResp.text();
-      const proxies = parseProviderPayloadToProxies(providerText);
-      if (proxies.length > 0) {
-        materializedProviders[name] = proxies;
-      }
-    } catch {
-      // ignore individual provider fetch failures and keep the rest of the subscription usable
+  const pending = (async (): Promise<Record<string, unknown>> => {
+    const resp = await fetch(url, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
+    if (!resp.ok) {
+      throw new Error(`mihomo_subscription_failed:${resp.status}`);
     }
-  }
+    const raw = await resp.text();
+    const content = decodeBase64IfNeeded(raw);
+    const parsed = yamlParse(content) as Record<string, unknown>;
+    const subscription = typeof parsed === "object" && parsed ? parsed : {};
+    const providers = (subscription["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
+    const materializedProviders: Record<string, Record<string, unknown>[]> = {};
 
-  if (Object.keys(materializedProviders).length > 0) {
-    subscription.__materializedProxyProviders = materializedProviders;
-  }
+    for (const [name, provider] of Object.entries(providers)) {
+      const providerUrl = typeof provider?.url === "string" ? provider.url.trim() : "";
+      if (!providerUrl) continue;
+      try {
+        const providerResp = await fetch(providerUrl, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
+        if (!providerResp.ok) continue;
+        const providerText = await providerResp.text();
+        const proxies = parseProviderPayloadToProxies(providerText).filter((proxy) => {
+          const proxyName = typeof proxy?.name === "string" ? proxy.name : "";
+          return !isNonSelectableProxyName(proxyName);
+        });
+        if (proxies.length > 0) {
+          materializedProviders[name] = proxies;
+        }
+      } catch {
+        // ignore individual provider fetch failures and keep the rest of the subscription usable
+      }
+    }
 
-  return subscription;
+    if (Object.keys(materializedProviders).length > 0) {
+      subscription.__materializedProxyProviders = materializedProviders;
+    }
+    subscriptionCache.set(url, {
+      expiresAt: Date.now() + SUBSCRIPTION_CACHE_TTL_MS,
+      payload: subscription,
+    });
+    return subscription;
+  })();
+
+  subscriptionCache.set(url, pending);
+  try {
+    return await pending;
+  } catch (error) {
+    subscriptionCache.delete(url);
+    throw error;
+  }
 }
 
 function buildConfigObject(
@@ -903,7 +932,9 @@ function isNonSelectableProxyName(name: string): boolean {
   const normalized = name.trim();
   if (!normalized) return true;
   if (isReservedProxyName(normalized)) return true;
-  return /剩余流量|套餐到期|到期时间|官网|流量重置|重置时间|会员群|售后|备用网址|公告|通知/i.test(normalized);
+  return /剩余流量|套餐到期|到期时间|官网|流量重置|重置时间|会员群|售后|备用网址|公告|通知|过于频繁拉取订阅|频繁拉取/i.test(
+    normalized,
+  );
 }
 
 async function listProviderNodes(workDir: string, providerNames: string[]): Promise<ProxyNode[]> {
