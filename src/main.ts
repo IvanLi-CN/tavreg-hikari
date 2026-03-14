@@ -188,6 +188,9 @@ interface AuthChallengeSnapshot {
   url: string;
   hasCaptchaInput: boolean;
   captchaValueLength: number;
+  turnstileValueLength: number;
+  recaptchaValueLength: number;
+  hcaptchaValueLength: number;
   hasCaptchaImage: boolean;
   hasCaptchaContainer: boolean;
   hasChallengeFrame: boolean;
@@ -213,8 +216,10 @@ interface ManagedChallengeCdpSnapshot {
   frameUrl?: string;
   iframeBox?: ChallengeBoxRect;
   checkboxBox?: ChallengeBoxRect;
+  refreshBox?: ChallengeBoxRect;
   checkboxChecked?: boolean;
   hasCheckbox: boolean;
+  statusText?: string;
 }
 
 interface BrowserFingerprintSnapshot {
@@ -271,8 +276,12 @@ interface BrowserIdentityProfile {
   cdpPlatform: string;
   acceptLanguage: string;
   languages: string[];
+  vendor: string;
   hardwareConcurrency: number;
   deviceMemory: number;
+  maxTouchPoints: number;
+  webglVendor: string;
+  webglRenderer: string;
 }
 
 interface ProxyNodeUsageEntry {
@@ -938,7 +947,10 @@ async function selectProxyNode(
 
   if (overrideName) {
     const previous = usage.nodes[overrideName] || emptyUsageEntry;
-    await switchProxyGroup(controller, overrideName);
+    const currentSelection = await controller.getGroupSelection().catch(() => null);
+    if (currentSelection !== overrideName) {
+      await switchProxyGroup(controller, overrideName);
+    }
     const result = buildResult(overrideName, previous, overrideExpectedIp);
     await persistSelection(overrideName, result, "ok");
     log(`proxy override selected: ${overrideName} latency=${result.latencyMs ?? "n/a"}ms egress_ip=${normalizeIp(result.geo?.ip) || "?"}`);
@@ -1225,6 +1237,8 @@ function summarizeRiskSignals(requestLog: RequestDiagRecord[], networkLog: Netwo
 function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary): string {
   const normalized = (message || "").toLowerCase();
   if (/native_cdp_unavailable/i.test(message)) return "native_cdp_unavailable";
+  if (/auth_session_invalid_request/i.test(message)) return "auth_session_invalid_request";
+  if (/challenge_unresponsive/i.test(message)) return "challenge_unresponsive";
   if (/risk_control_ip_rate_limit/i.test(message)) return "too_many_signups_same_ip";
   if (risk.hasIpRateLimit) return "too_many_signups_same_ip";
   if (/signup_password_captcha_missing/i.test(message)) return "signup_password_captcha_missing";
@@ -1435,9 +1449,9 @@ const GLOBAL_IP_PROBE_TARGETS: IpProbeTarget[] = [
 ];
 
 const SINGLE_BROWSER_IP_PROBE_TARGET: IpProbeTarget = {
-  name: "ipify",
+  name: "ifconfig",
   scope: "global",
-  url: "https://api.ipify.org/",
+  url: "https://ifconfig.me/ip",
 };
 
 function parseCsvList(raw: string | undefined): string[] {
@@ -1547,6 +1561,16 @@ async function safeCollectIpProbeSnapshot(page: any, target: IpProbeTarget, wait
 
 async function collectSingleBrowserIpProbe(page: any): Promise<IpProbeSnapshot> {
   return await safeCollectIpProbeSnapshot(page, SINGLE_BROWSER_IP_PROBE_TARGET, 4500);
+}
+
+async function collectSingleBrowserIpProbeWithMinimalContext(browser: Browser): Promise<IpProbeSnapshot> {
+  const probeContext = await browser.newContext();
+  try {
+    const probePage = await probeContext.newPage();
+    return await safeCollectIpProbeSnapshot(probePage, SINGLE_BROWSER_IP_PROBE_TARGET, 4500);
+  } finally {
+    await probeContext.close().catch(() => {});
+  }
 }
 
 async function collectIpProbeSnapshotInContext(context: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
@@ -2850,6 +2874,92 @@ async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> 
   }
 }
 
+async function hasAuthSessionErrorPage(page: any): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return /invalid_request/i.test(text) && /couldn't find your session|too many login dialogs|refreshed during login/i.test(text);
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function ensureAuthIdentifierFieldReady(page: any, selector: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    const count = await page.locator(selector).count().catch(() => 0);
+    if (count > 0) {
+      return;
+    }
+    if (await hasAuthSessionErrorPage(page)) {
+      throw new Error("auth_session_invalid_request");
+    }
+    await page.waitForTimeout(350);
+  }
+  await page.waitForSelector(selector, { timeout: 1_000 });
+}
+
+async function openAuthFlowEntry(
+  page: any,
+  kind: "signup" | "login",
+): Promise<void> {
+  const appRootUrl = "https://app.tavily.com/";
+  const appHomeUrl = "https://app.tavily.com/home";
+  const entryUrls = [
+    { label: "app-root", url: appRootUrl },
+    { label: "app-home", url: appHomeUrl },
+  ];
+  const successPattern =
+    kind === "signup"
+      ? /\/u\/login\/identifier|\/u\/signup\/identifier|\/u\/signup\/password/i
+      : /\/u\/login\/identifier|\/u\/login\/password|app\.tavily\.com\/home/i;
+  let lastError: Error | null = null;
+
+  const tryNavigation = async (label: string, url: string): Promise<boolean> => {
+    try {
+      await safeGoto(page, url, 60_000);
+      await page.waitForTimeout(900);
+      if (kind === "login" && /app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
+        return true;
+      }
+      if (successPattern.test(page.url())) {
+        return true;
+      }
+      await page.waitForURL(successPattern, { timeout: 25_000 });
+      return true;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const message = lastError.message.split("\n")[0];
+      log(`${kind} entry transient via ${label}: ${message}`);
+      return false;
+    }
+  };
+
+  for (const entry of entryUrls) {
+    if (!(await tryNavigation(entry.label, entry.url))) {
+      continue;
+    }
+    if (await hasAuthSessionErrorPage(page)) {
+      log(`${kind} entry invalid_request page detected via ${entry.label}, retrying next entry`);
+      await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+      continue;
+    }
+    if (kind === "signup" && /\/u\/login\/identifier/i.test(page.url())) {
+      await clickSignUp(page);
+      await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password/i, { timeout: 30_000 });
+      if (await hasAuthSessionErrorPage(page)) {
+        log(`${kind} entry invalid_request page detected after clickSignUp, retrying next entry`);
+        await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+        continue;
+      }
+    }
+    return;
+  }
+
+  throw lastError || new Error(`${kind} auth entry unavailable`);
+}
+
 async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
   const step = 800;
   const rounds = Math.max(1, Math.floor(stableMs / step));
@@ -3021,6 +3131,9 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
     const captchaContainer = document.querySelector("div[data-captcha-sitekey]");
     const sitekey = (captchaContainer?.getAttribute("data-captcha-sitekey") || "").trim();
     const captchaInput = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+    const turnstileInput = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+    const recaptchaInput = document.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null;
+    const hcaptchaInput = document.querySelector('textarea[name="h-captcha-response"], input[name="h-captcha-response"]') as HTMLInputElement | null;
     const bodyText = document.body?.innerText || "";
     const hasChallengeFrame = !!document.querySelector(
       'iframe[src*="challenges.cloudflare.com"], iframe[title*="challenge" i], iframe[title*="turnstile" i]',
@@ -3029,6 +3142,9 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
       url: window.location.href,
       hasCaptchaInput: !!captchaInput,
       captchaValueLength: captchaInput?.value?.length || 0,
+      turnstileValueLength: turnstileInput?.value?.length || 0,
+      recaptchaValueLength: recaptchaInput?.value?.length || 0,
+      hcaptchaValueLength: hcaptchaInput?.value?.length || 0,
       hasCaptchaImage: !!document.querySelector('img[alt="captcha"]'),
       hasCaptchaContainer: !!captchaContainer,
       hasChallengeFrame,
@@ -3055,6 +3171,18 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
     captchaValueLength:
       typeof payload.captchaValueLength === "number" && Number.isFinite(payload.captchaValueLength)
         ? Math.max(0, payload.captchaValueLength)
+        : 0,
+    turnstileValueLength:
+      typeof payload.turnstileValueLength === "number" && Number.isFinite(payload.turnstileValueLength)
+        ? Math.max(0, payload.turnstileValueLength)
+        : 0,
+    recaptchaValueLength:
+      typeof payload.recaptchaValueLength === "number" && Number.isFinite(payload.recaptchaValueLength)
+        ? Math.max(0, payload.recaptchaValueLength)
+        : 0,
+    hcaptchaValueLength:
+      typeof payload.hcaptchaValueLength === "number" && Number.isFinite(payload.hcaptchaValueLength)
+        ? Math.max(0, payload.hcaptchaValueLength)
         : 0,
     hasCaptchaImage: Boolean(payload.hasCaptchaImage),
     hasCaptchaContainer: Boolean(payload.hasCaptchaContainer),
@@ -3083,6 +3211,27 @@ function hasManagedAuthChallenge(snapshot: AuthChallengeSnapshot | null | undefi
     snapshot.hasChallengeCheckbox ||
     snapshot.hasTurnstileApi ||
     snapshot.captchaProvider === "auth0_v2"
+  );
+}
+
+function getChallengeTokenLength(snapshot: AuthChallengeSnapshot | null | undefined): number {
+  if (!snapshot) return 0;
+  return Math.max(
+    snapshot.captchaValueLength || 0,
+    snapshot.turnstileValueLength || 0,
+    snapshot.recaptchaValueLength || 0,
+    snapshot.hcaptchaValueLength || 0,
+  );
+}
+
+function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
+  if (!snapshot) return false;
+  return (
+    snapshot.challengeCheckboxChecked === true ||
+    snapshot.hasChallengeCheckbox ||
+    snapshot.hasChallengeFrame ||
+    snapshot.hasTurnstileApi ||
+    getChallengeTokenLength(snapshot) > 0
   );
 }
 
@@ -3150,8 +3299,17 @@ async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedCha
     frameAx?.nodes?.find(
       (node: any) => node?.role?.value === "checkbox" && /verify you are human/i.test(String(node?.name?.value || "")),
     ) || null;
+  const refreshNode =
+    frameAx?.nodes?.find((node: any) => node?.role?.value === "link" && /refresh/i.test(String(node?.name?.value || ""))) || null;
+  const statusNode =
+    frameAx?.nodes?.find((node: any) =>
+      /verification expired|verify you are human|checking your browser/i.test(String(node?.name?.value || "")),
+    ) || null;
   const checkboxBox = checkboxNode?.backendDOMNodeId
     ? toChallengeBoxRect((await frameCdp.send("DOM.getBoxModel", { backendNodeId: checkboxNode.backendDOMNodeId }).catch(() => null))?.model?.content)
+    : undefined;
+  const refreshBox = refreshNode?.backendDOMNodeId
+    ? toChallengeBoxRect((await frameCdp.send("DOM.getBoxModel", { backendNodeId: refreshNode.backendDOMNodeId }).catch(() => null))?.model?.content)
     : undefined;
   const checkedValue = checkboxNode?.properties?.find?.((item: any) => item?.name === "checked")?.value?.value;
 
@@ -3159,8 +3317,10 @@ async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedCha
     frameUrl: typeof challengeFrame.url === "function" ? challengeFrame.url() : undefined,
     iframeBox,
     checkboxBox,
+    refreshBox,
     checkboxChecked: checkedValue === "true" ? true : checkedValue === "false" ? false : undefined,
     hasCheckbox: Boolean(checkboxNode),
+    statusText: typeof statusNode?.name?.value === "string" ? statusNode.name.value : undefined,
   };
 }
 
@@ -3176,7 +3336,7 @@ async function waitForManagedChallengeReady(
     if (!latest || !hasManagedAuthChallenge(latest)) {
       return latest;
     }
-    if (latest.captchaValueLength > 0 || latest.hasChallengeCheckbox || latest.hasChallengeFrame || latest.hasTurnstileApi) {
+    if (getChallengeTokenLength(latest) > 0 || latest.hasChallengeCheckbox || latest.hasChallengeFrame || latest.hasTurnstileApi) {
       return latest;
     }
     await page.waitForTimeout(250);
@@ -3208,8 +3368,13 @@ async function waitForManagedChallengeOutcome(
     if (rejection) {
       return { status: "rejected", snapshot: latest, rejection };
     }
-    if (latest?.captchaValueLength && latest.captchaValueLength > 0) {
-      log(`${formKind} managed challenge token ready (len=${latest.captchaValueLength})`);
+    const tokenLength = getChallengeTokenLength(latest);
+    if (tokenLength > 0) {
+      log(
+        `${formKind} managed challenge token ready (captcha=${latest?.captchaValueLength || 0}, turnstile=${
+          latest?.turnstileValueLength || 0
+        }, recaptcha=${latest?.recaptchaValueLength || 0}, hcaptcha=${latest?.hcaptchaValueLength || 0})`,
+      );
       return { status: "token_ready", snapshot: latest };
     }
     await page.waitForTimeout(400);
@@ -3230,8 +3395,13 @@ async function waitForManagedChallengeToken(
     if (rejection) {
       return { status: "rejected", snapshot: latest, rejection };
     }
-    if (latest?.captchaValueLength && latest.captchaValueLength > 0) {
-      log(`${formKind} managed challenge token ready before submit (len=${latest.captchaValueLength})`);
+    const tokenLength = getChallengeTokenLength(latest);
+    if (tokenLength > 0) {
+      log(
+        `${formKind} managed challenge token ready before submit (captcha=${latest?.captchaValueLength || 0}, turnstile=${
+          latest?.turnstileValueLength || 0
+        }, recaptcha=${latest?.recaptchaValueLength || 0}, hcaptcha=${latest?.hcaptchaValueLength || 0})`,
+      );
       return { status: "token_ready", snapshot: latest };
     }
     await page.waitForTimeout(400);
@@ -3240,15 +3410,14 @@ async function waitForManagedChallengeToken(
 }
 
 async function tryActivateManagedChallenge(page: any, formKind: "signup" | "login"): Promise<boolean> {
-  const cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+  let cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
   if (cdpSnapshot?.iframeBox && cdpSnapshot?.checkboxBox) {
     const pageCdp = await createCdpSession(page);
-    const centerX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
-    const centerY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
-    if (pageCdp && Number.isFinite(centerX) && Number.isFinite(centerY)) {
+    const clickAt = async (x: number, y: number): Promise<void> => {
+      if (!pageCdp) return;
       const steps = 12;
-      const startX = Math.max(0, centerX - randomInt(18, 42));
-      const startY = Math.max(0, centerY - randomInt(6, 22));
+      const startX = Math.max(0, x - randomInt(18, 42));
+      const startY = Math.max(0, y - randomInt(6, 22));
       await pageCdp
         .send("Input.dispatchMouseEvent", {
           type: "mouseMoved",
@@ -3263,8 +3432,8 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
         await pageCdp
           .send("Input.dispatchMouseEvent", {
             type: "mouseMoved",
-            x: startX + (centerX - startX) * progress,
-            y: startY + (centerY - startY) * progress,
+            x: startX + (x - startX) * progress,
+            y: startY + (y - startY) * progress,
             button: "none",
             buttons: 0,
           })
@@ -3274,8 +3443,8 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
       await pageCdp
         .send("Input.dispatchMouseEvent", {
           type: "mousePressed",
-          x: centerX,
-          y: centerY,
+          x,
+          y,
           button: "left",
           buttons: 1,
           clickCount: 1,
@@ -3285,39 +3454,64 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
       await pageCdp
         .send("Input.dispatchMouseEvent", {
           type: "mouseReleased",
-          x: centerX,
-          y: centerY,
+          x,
+          y,
           button: "left",
           buttons: 0,
           clickCount: 1,
         })
         .catch(() => {});
+    };
+
+    if (
+      pageCdp &&
+      cdpSnapshot.refreshBox &&
+      cdpSnapshot.statusText &&
+      /verification expired/i.test(cdpSnapshot.statusText)
+    ) {
+      const refreshX = cdpSnapshot.iframeBox.x + cdpSnapshot.refreshBox.x + cdpSnapshot.refreshBox.width / 2;
+      const refreshY = cdpSnapshot.iframeBox.y + cdpSnapshot.refreshBox.y + cdpSnapshot.refreshBox.height / 2;
+      if (Number.isFinite(refreshX) && Number.isFinite(refreshY)) {
+        await clickAt(refreshX, refreshY);
+        log(`${formKind} managed challenge refreshed via cdp`);
+        await page.waitForTimeout(randomInt(1_000, 1_800));
+        cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => cdpSnapshot);
+      }
+    }
+
+    if (!cdpSnapshot?.iframeBox || !cdpSnapshot?.checkboxBox || !pageCdp) {
+      return false;
+    }
+    const offsetCenterX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
+    const offsetCenterY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
+    if (Number.isFinite(offsetCenterX) && Number.isFinite(offsetCenterY)) {
+      await clickAt(offsetCenterX, offsetCenterY);
       await page.waitForTimeout(randomInt(400, 900));
       const afterClickSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
       if (afterClickSnapshot?.checkboxChecked === true) {
         log(`${formKind} managed challenge checkbox checked via cdp`);
         return true;
       }
-      log(`${formKind} managed challenge checkbox activated via cdp`);
+      if (afterClickSnapshot?.hasCheckbox) {
+        const directCenterX = cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
+        const directCenterY = cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
+        if (Number.isFinite(directCenterX) && Number.isFinite(directCenterY)) {
+          await clickAt(directCenterX, directCenterY);
+          await page.waitForTimeout(randomInt(400, 900));
+          const afterDirectClickSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+          if (afterDirectClickSnapshot?.checkboxChecked === true) {
+            log(`${formKind} managed challenge checkbox checked via cdp direct-box click`);
+            return true;
+          }
+        }
+      }
+      log(
+        `${formKind} managed challenge checkbox activated via cdp (checkbox=${
+          afterClickSnapshot?.hasCheckbox ? 1 : 0
+        }, checked=${Boolean(afterClickSnapshot?.checkboxChecked) ? 1 : 0})`,
+      );
       return true;
     }
-  }
-
-  const selectors = ['iframe[src*="challenges.cloudflare.com"]', 'iframe[title*="challenge" i]', 'iframe[title*="turnstile" i]'];
-  for (const selector of selectors) {
-    const frame = page.locator(selector).first();
-    if ((await frame.count().catch(() => 0)) <= 0) continue;
-    const box = await frame.boundingBox().catch(() => null);
-    if (!box || box.width < 20 || box.height < 20) continue;
-    await page.mouse.move(box.x + 18, box.y + box.height / 2, {
-      steps: randomInt(8, 18),
-    });
-    await page.waitForTimeout(randomInt(60, 140));
-    await page.mouse.click(box.x + 18, box.y + box.height / 2, {
-      delay: randomInt(70, 170),
-    });
-    log(`${formKind} managed challenge frame clicked (fallback)`);
-    return true;
   }
   return false;
 }
@@ -3359,7 +3553,11 @@ async function ensureManagedChallengeTokenBeforeSubmit(
     }
     latest = lastOutcome.snapshot || latest;
     log(
-      `${formKind} managed challenge token still unavailable after activation round ${activationRound} (frame=${snapshot?.hasChallengeFrame ? 1 : 0}, checkbox=${snapshot?.hasChallengeCheckbox ? 1 : 0})`,
+      `${formKind} managed challenge token still unavailable after activation round ${activationRound} (frame=${
+        snapshot?.hasChallengeFrame ? 1 : 0
+      }, checkbox=${snapshot?.hasChallengeCheckbox ? 1 : 0}, captcha=${lastOutcome.snapshot?.captchaValueLength || 0}, turnstile=${
+        lastOutcome.snapshot?.turnstileValueLength || 0
+      })`,
     );
   }
 
@@ -3478,6 +3676,7 @@ async function solveCaptchaForm(
     formKind === "signup"
       ? /\/u\/signup\/password|app\.tavily\.com\/home/i
       : /\/u\/login\/password|app\.tavily\.com\/home/i;
+  await ensureAuthIdentifierFieldReady(page, emailSelector, 12_000);
 
   for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
     let hasCaptcha = (await page.locator('img[alt="captcha"]').count()) > 0;
@@ -3531,8 +3730,28 @@ async function solveCaptchaForm(
       if (tokenOutcome.status === "rejected" && tokenOutcome.rejection && tokenOutcome.rejection !== "invalid_captcha") {
         throw new Error(tokenOutcome.rejection);
       }
+      const allowSubmitWithoutVisibleToken =
+        tokenOutcome.status === "timeout" && canSubmitManagedChallengeWithoutVisibleToken(tokenOutcome.snapshot);
+      if (tokenOutcome.status === "timeout" && !allowSubmitWithoutVisibleToken) {
+        log(
+          `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
+            tokenOutcome.snapshot?.hasChallengeFrame ? 1 : 0
+          }, checkbox=${tokenOutcome.snapshot?.hasChallengeCheckbox ? 1 : 0}, captcha=${
+            tokenOutcome.snapshot?.captchaValueLength || 0
+          }, turnstile=${tokenOutcome.snapshot?.turnstileValueLength || 0})`,
+        );
+        await page.waitForTimeout(randomInt(600, 1200));
+        continue;
+      }
 
       const previousUrl = page.url();
+      if (allowSubmitWithoutVisibleToken) {
+        log(
+          `${formKind} managed challenge armed without visible token; submit once with checkbox state=${
+            tokenOutcome.snapshot?.challengeCheckboxChecked ? 1 : 0
+          }`,
+        );
+      }
       await clickSubmit(page);
 
       try {
@@ -3565,6 +3784,27 @@ async function solveCaptchaForm(
               return;
             }
           }
+        }
+      }
+      if (allowSubmitWithoutVisibleToken) {
+        if (successUrlPattern.test(page.url())) {
+          return;
+        }
+        const explicitRejection = detectExplicitFormRejection(
+          managedOutcome.snapshot?.visibleErrors || [],
+          managedOutcome.snapshot?.visibleErrorCodes || [],
+        );
+        if (explicitRejection && explicitRejection !== "invalid_captcha") {
+          throw new Error(explicitRejection);
+        }
+        if (
+          getChallengeTokenLength(managedOutcome.snapshot || tokenOutcome.snapshot) === 0 &&
+          (managedOutcome.snapshot?.hasChallengeCheckbox ||
+            tokenOutcome.snapshot?.hasChallengeCheckbox ||
+            managedOutcome.snapshot?.hasChallengeFrame ||
+            tokenOutcome.snapshot?.hasChallengeFrame)
+        ) {
+          throw new Error("challenge_unresponsive");
         }
       }
       log(
@@ -3710,8 +3950,7 @@ async function completeSignup(
   policy: SignupAttemptPolicy,
   hooks?: SignupDiagHooks,
 ): Promise<void> {
-  await safeGoto(page, "https://app.tavily.com/api/auth/login");
-  await page.waitForURL(/auth\.tavily\.com/i, { timeout: 90000 });
+  await openAuthFlowEntry(page, "signup");
 
   if (!/\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
     if (/\/u\/login\/identifier/i.test(page.url())) {
@@ -4081,7 +4320,7 @@ async function loginAndReachHome(
       }
     }
 
-    await safeGoto(page, "https://app.tavily.com/api/auth/login");
+    await openAuthFlowEntry(page, "login");
     await page.waitForTimeout(900);
 
     if (/\/u\/login\/identifier/i.test(page.url())) {
@@ -4440,6 +4679,12 @@ function shouldRetryModeFailure(message: string): boolean {
   );
 }
 
+function shouldRetryTaskFailure(message: string): boolean {
+  return !/challenge_unresponsive|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|proxy_ip_quota_exceeded/i.test(
+    message,
+  );
+}
+
 function getChromeWebRtcPolicyArgs(cfg: AppConfig): string[] {
   if (!cfg.chromeWebrtcHardened) return [];
   return [
@@ -4485,8 +4730,12 @@ function buildBrowserIdentityProfile(locale: string, browserVersion: string): Br
     cdpPlatform: "macOS",
     acceptLanguage,
     languages,
+    vendor: "Google Inc.",
     hardwareConcurrency: [4, 8, 10, 12][randomInt(0, 4)] || 8,
     deviceMemory: [4, 8, 16][randomInt(0, 3)] || 8,
+    maxTouchPoints: 0,
+    webglVendor: "Intel Inc.",
+    webglRenderer: "Intel Iris OpenGL Engine",
   };
 }
 
@@ -4520,6 +4769,25 @@ async function applyPageIdentityOverrides(
       userAgent: identity.userAgent,
       acceptLanguage: identity.languages[0] || "en-US",
       platform: identity.cdpPlatform,
+      userAgentMetadata: {
+        brands: [
+          { brand: "Not:A-Brand", version: "99" },
+          { brand: "Google Chrome", version: "145" },
+          { brand: "Chromium", version: "145" },
+        ],
+        fullVersionList: [
+          { brand: "Not:A-Brand", version: "99.0.0.0" },
+          { brand: "Google Chrome", version: normalizeChromeVersion(identity.userAgent) },
+          { brand: "Chromium", version: normalizeChromeVersion(identity.userAgent) },
+        ],
+        platform: identity.cdpPlatform,
+        platformVersion: "10.15.7",
+        architecture: "x86",
+        model: "",
+        mobile: false,
+        bitness: "64",
+        wow64: false,
+      },
     })
     .catch(() => {});
   if (timezoneId) {
@@ -4553,10 +4821,63 @@ async function applyBrowserIdentityToContext(
         defineReadonly(navigator, "userAgent", profile.userAgent);
         defineReadonly(navigator, "appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
         defineReadonly(navigator, "platform", profile.navigatorPlatform);
+        defineReadonly(navigator, "vendor", profile.vendor);
         defineReadonly(navigator, "language", firstLanguage);
         defineReadonly(navigator, "languages", profile.languages);
         defineReadonly(navigator, "hardwareConcurrency", profile.hardwareConcurrency);
         defineReadonly(navigator, "deviceMemory", profile.deviceMemory);
+        defineReadonly(navigator, "maxTouchPoints", profile.maxTouchPoints);
+        defineReadonly(navigator, "pdfViewerEnabled", true);
+
+        const pdfMimeType = {
+          type: "application/pdf",
+          suffixes: "pdf",
+          description: "Portable Document Format",
+          enabledPlugin: null as any,
+        };
+        const pdfPlugin = {
+          name: "Chrome PDF Viewer",
+          filename: "internal-pdf-viewer",
+          description: "Portable Document Format",
+          0: pdfMimeType,
+          length: 1,
+          item: (index: number) => (index === 0 ? pdfMimeType : null),
+          namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
+        };
+        pdfMimeType.enabledPlugin = pdfPlugin;
+        const plugins = {
+          0: pdfPlugin,
+          length: 1,
+          item: (index: number) => (index === 0 ? pdfPlugin : null),
+          namedItem: (name: string) => (name === pdfPlugin.name ? pdfPlugin : null),
+          refresh: () => undefined,
+          [Symbol.iterator]: function* () {
+            yield pdfPlugin;
+          },
+        };
+        const mimeTypes = {
+          0: pdfMimeType,
+          length: 1,
+          item: (index: number) => (index === 0 ? pdfMimeType : null),
+          namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
+          [Symbol.iterator]: function* () {
+            yield pdfMimeType;
+          },
+        };
+        defineReadonly(navigator, "plugins", plugins);
+        defineReadonly(navigator, "mimeTypes", mimeTypes);
+
+        const patchWebgl = (Ctor: any): void => {
+          if (!Ctor?.prototype?.getParameter) return;
+          const originalGetParameter = Ctor.prototype.getParameter;
+          Ctor.prototype.getParameter = function (param: number) {
+            if (param === 37445) return profile.webglVendor;
+            if (param === 37446) return profile.webglRenderer;
+            return originalGetParameter.call(this, param);
+          };
+        };
+        patchWebgl((window as any).WebGLRenderingContext);
+        patchWebgl((window as any).WebGL2RenderingContext);
       }, identity)
       .catch(() => {});
   }
@@ -4967,7 +5288,7 @@ async function launchNativeChromeInspect(
   if (!cfg.chromeExecutablePath) {
     throw new Error("chrome executable path is not configured");
   }
-  const targets = ["https://fingerprint.goldenowl.ai/", "https://ip.skk.moe/"];
+  const targets = ["https://app.tavily.com/", SINGLE_BROWSER_IP_PROBE_TARGET.url];
   await mkdir(cfg.inspectChromeProfileDir, { recursive: true });
 
   const args = [
@@ -5049,9 +5370,23 @@ async function preselectTaskProxy(
   runtimeRecentProxyIps: string[],
   busyProxyNames: Set<string>,
   busyProxyIps: Set<string>,
+  existingController?: Awaited<ReturnType<typeof startMihomo>>,
 ): Promise<NodeCheckResult> {
   const blockedIps = collectBlockedIpsFromLedger(taskLedger);
   for (const ip of ipQuotaBlocked) blockedIps.add(ip);
+
+  if (existingController) {
+    return await selectProxyNode(
+      existingController,
+      cfg,
+      args.proxyNode,
+      blockedIps,
+      runtimeRecentProxyIps,
+      undefined,
+      busyProxyNames,
+      busyProxyIps,
+    );
+  }
 
   const batchEnabled = args.need > 1 || args.parallel > 1;
   let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
@@ -5105,6 +5440,7 @@ async function prepareSignupTask(
   args: CliArgs,
   batchId: string,
   taskLedger: TaskLedger | null,
+  existingController: Awaited<ReturnType<typeof startMihomo>> | undefined,
   ipEmailUsage: Map<string, Set<string>>,
   runtimeRecentProxyIps: string[],
   activeProxyNames: Set<string>,
@@ -5134,6 +5470,7 @@ async function prepareSignupTask(
       runtimeRecentProxyIps,
       activeProxyNames,
       activeProxyIps,
+      existingController,
     );
     const proxyIp = normalizeIp(selectedProxy.geo?.ip);
     if (activeProxyNames.has(selectedProxy.name)) {
@@ -5148,32 +5485,15 @@ async function prepareSignupTask(
     if (proxyIp) activeProxyIps.add(proxyIp);
 
     try {
-      const mailbox =
-        cfg.existingEmail && cfg.existingPassword
-          ? null
-          : await createTaskMailboxSession(cfg, batchId, taskId, selectedProxy.name, proxyIp);
-      const email = cfg.existingEmail || mailbox?.address || "";
-      let ipEmailOrdinal = 0;
-
-      if (proxyIp) {
-        let emailSet = ipEmailUsage.get(proxyIp);
-        if (!emailSet) {
-          emailSet = new Set<string>();
-          ipEmailUsage.set(proxyIp, emailSet);
-        }
-        emailSet.add(email);
-        ipEmailOrdinal = emailSet.size;
-      }
-
       return {
         taskId,
-        email,
+        email: cfg.existingEmail || "",
         password,
-        mailbox,
+        mailbox: null,
         proxyName: selectedProxy.name,
         proxyIp: proxyIp || undefined,
         proxyGeo: compactGeo(selectedProxy.geo),
-        ipEmailOrdinal,
+        ipEmailOrdinal: 0,
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -5201,6 +5521,7 @@ async function runSingleMode(
   mode: "headed" | "headless",
   ctx: ModeRunContext,
   preparedTask?: PreparedSignupTask,
+  existingMihomoController?: Awaited<ReturnType<typeof startMihomo>>,
 ): Promise<ResultPayload> {
   const notes: string[] = [];
   let failureStage = "init";
@@ -5236,7 +5557,7 @@ async function runSingleMode(
   await mkdir(diagOutputDir, { recursive: true });
 
   let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
-  if (batchEnabled) {
+  if (!existingMihomoController && batchEnabled) {
     const ports = await reserveMihomoPorts();
     mihomoOverrides = {
       apiPort: ports.apiPort,
@@ -5245,7 +5566,7 @@ async function runSingleMode(
     };
   }
 
-  const mihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
+  const mihomoController = existingMihomoController || (await startMihomo(buildMihomoConfig(cfg, mihomoOverrides)));
   const browserEngine = args.browserEngine || cfg.browserEngine;
   const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.chromeNativeAutomation);
   let browser: Browser | null = null;
@@ -5684,8 +6005,18 @@ async function runSingleMode(
     persistLedgerRecord("after-browser-launch");
 
     failureStage = "browser_ip_probe";
-    const browserIpProbe = await collectSingleBrowserIpProbe(page);
-    const browserObservedIp = normalizeIp(browserIpProbe.ip || browserIpProbe.ipCandidates?.[0]);
+    let browserIpProbe = await collectSingleBrowserIpProbe(page);
+    let browserObservedIp = normalizeIp(browserIpProbe.ip || browserIpProbe.ipCandidates?.[0]);
+    if (!browserObservedIp && browser && browserEngine === "chrome" && process.platform === "darwin") {
+      log(`browser ip probe fallback via minimal context: ${browserIpProbe.error || browserIpProbe.url}`);
+      const fallbackProbe = await collectSingleBrowserIpProbeWithMinimalContext(browser);
+      const fallbackObservedIp = normalizeIp(fallbackProbe.ip || fallbackProbe.ipCandidates?.[0]);
+      if (fallbackObservedIp) {
+        browserIpProbe = fallbackProbe;
+        browserObservedIp = fallbackObservedIp;
+        notes.push(`browser ip probe fallback used: ${fallbackProbe.name}`);
+      }
+    }
     if (!browserObservedIp) {
       throw new Error(`browser_proxy_ip_missing:${browserIpProbe.error || browserIpProbe.url}`);
     }
@@ -5707,17 +6038,23 @@ async function runSingleMode(
       }
       preparedTask.proxyIp = browserObservedIp;
       ctx.activeProxyIps.add(browserObservedIp);
-      let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
-      if (!emailSet) {
-        emailSet = new Set<string>();
-        ctx.ipEmailUsage.set(browserObservedIp, emailSet);
-      }
-      if (!emailSet.has(email) && emailSet.size >= 3) {
+      const existingEmailSet = ctx.ipEmailUsage.get(browserObservedIp);
+      if ((!email || !email.trim()) && existingEmailSet && existingEmailSet.size >= 3) {
         throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
       }
-      emailSet.add(email);
-      preparedTask.ipEmailOrdinal = emailSet.size;
-      notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+      if (email) {
+        let emailSet = existingEmailSet;
+        if (!emailSet) {
+          emailSet = new Set<string>();
+          ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+        }
+        if (!emailSet.has(email) && emailSet.size >= 3) {
+          throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+        }
+        emailSet.add(email);
+        preparedTask.ipEmailOrdinal = emailSet.size;
+        notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+      }
     }
     precheckPassed = true;
     notes.push(`browser observed ip: ${browserObservedIp}`);
@@ -5732,11 +6069,36 @@ async function runSingleMode(
       notes.push("skip signup (existing account)");
     } else {
       if (!mailbox) {
+        if (!email) {
+          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          if (!emailSet) {
+            emailSet = new Set<string>();
+            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+          }
+          if (emailSet.size >= 3) {
+            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+          }
+        }
         mailbox = await createMailboxSession(cfg, mihomoController.proxyServer);
         email = mailbox.address;
         password = password || randomPassword();
         log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
         notes.push(`${mailbox.provider} mailbox created via proxy (${mailbox.accountId})`);
+        if (preparedTask) {
+          preparedTask.mailbox = mailbox;
+          preparedTask.email = email;
+          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          if (!emailSet) {
+            emailSet = new Set<string>();
+            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+          }
+          if (!emailSet.has(email) && emailSet.size >= 3) {
+            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+          }
+          emailSet.add(email);
+          preparedTask.ipEmailOrdinal = emailSet.size;
+          notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+        }
         ledgerRecord.emailAddress = email;
         const mailboxSplit = splitEmail(email);
         ledgerRecord.emailDomain = mailboxSplit.domain;
@@ -5986,7 +6348,7 @@ async function runSingleMode(
       notes,
     });
     persistLedgerRecord("failure");
-    throw new Error(`mode=${mode} stage=${failureStage}: ${message}`);
+    throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     if (context && !useNativeChrome) {
       await context.close().catch(() => {});
@@ -5997,7 +6359,9 @@ async function runSingleMode(
     if (nativeChromeStop != null) {
       await (nativeChromeStop as () => Promise<void>)().catch(() => {});
     }
-    await mihomoController.stop();
+    if (!existingMihomoController) {
+      await mihomoController.stop();
+    }
   }
 }
 
@@ -6029,8 +6393,8 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
       nativeChromeStop = nativeChrome.stop;
       notes.push(`native chrome executable: ${nativeChrome.details.executablePath}`);
       notes.push(`native chrome profile: ${nativeChrome.details.profileDir}`);
-      notes.push("opened fingerprint.goldenowl.ai");
-      notes.push("opened ip.skk.moe");
+      notes.push("opened app.tavily.com");
+      notes.push(`opened ${SINGLE_BROWSER_IP_PROBE_TARGET.url}`);
 
       await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
         mode: "inspect-sites-native-chrome",
@@ -6064,18 +6428,22 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
       context = await browser.newContext(contextOptions);
       await applyEngineStealth(context, browserEngine, locale, cfg.chromeStealthJsEnabled);
 
-      const fingerprintPage = await context.newPage();
-      await safeGoto(fingerprintPage, "https://fingerprint.goldenowl.ai/", 120000);
-      await fingerprintPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
-      await writeFile(new URL("inspect_fingerprint.png", OUTPUT_DIR), await fingerprintPage.screenshot({ fullPage: true }));
-      notes.push("opened fingerprint.goldenowl.ai");
+      const tavilyPage = await context.newPage();
+      await safeGoto(tavilyPage, "https://app.tavily.com/", 120000);
+      await tavilyPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
+      if (/\/u\/login\/identifier/i.test(tavilyPage.url())) {
+        await clickSignUp(tavilyPage).catch(() => {});
+        await tavilyPage.waitForTimeout(1200);
+      }
+      await writeFile(new URL("inspect_tavily.png", OUTPUT_DIR), await tavilyPage.screenshot({ fullPage: true }));
+      notes.push("opened app.tavily.com");
 
-      const ipSkkPage = await context.newPage();
-      await safeGoto(ipSkkPage, "https://ip.skk.moe/", 120000);
-      await ipSkkPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
-      await writeFile(new URL("inspect_ip_skk.png", OUTPUT_DIR), await ipSkkPage.screenshot({ fullPage: true }));
-      await ipSkkPage.bringToFront();
-      notes.push("opened ip.skk.moe");
+      const ipInfoPage = await context.newPage();
+      await safeGoto(ipInfoPage, SINGLE_BROWSER_IP_PROBE_TARGET.url, 120000);
+      await ipInfoPage.waitForLoadState("domcontentloaded", { timeout: 60000 });
+      await writeFile(new URL("inspect_ipinfo.png", OUTPUT_DIR), await ipInfoPage.screenshot({ fullPage: true }));
+      await tavilyPage.bringToFront();
+      notes.push(`opened ${SINGLE_BROWSER_IP_PROBE_TARGET.url}`);
 
       await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
         mode: "inspect-sites",
@@ -6088,8 +6456,8 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
           timezone: geo.timezone,
         },
         pages: [
-          { url: await fingerprintPage.url(), title: await fingerprintPage.title().catch(() => "") },
-          { url: await ipSkkPage.url(), title: await ipSkkPage.title().catch(() => "") },
+          { url: await tavilyPage.url(), title: await tavilyPage.title().catch(() => "") },
+          { url: await ipInfoPage.url(), title: await ipInfoPage.title().catch(() => "") },
         ],
         notes,
       });
@@ -6174,11 +6542,20 @@ async function run(): Promise<void> {
     const activeProxyIps = new Set<string>();
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
+      let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
+      const ports = await reserveMihomoPorts();
+      mihomoOverrides = {
+        apiPort: ports.apiPort,
+        mixedPort: ports.mixedPort,
+        workDir: path.join(OUTPUT_PATH, "mihomo", batchId, `task-${runIndex}`),
+      };
+      const taskMihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
       const preparedTask = await prepareSignupTask(
         cfg,
         args,
         batchId,
         taskLedger,
+        taskMihomoController,
         ipEmailUsage,
         runtimeRecentProxyIps,
         activeProxyNames,
@@ -6205,6 +6582,7 @@ async function run(): Promise<void> {
                 activeProxyIps,
               },
               preparedTask,
+              taskMihomoController,
             );
             if (attempt > 1) {
               result.notes.push(`task retry succeeded on attempt ${attempt}`);
@@ -6213,11 +6591,16 @@ async function run(): Promise<void> {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             lastError = error instanceof Error ? error : new Error(message);
-            if (attempt < taskRetryMax) {
+            if (attempt < taskRetryMax && shouldRetryTaskFailure(message)) {
               log(
                 `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}), retrying with fresh browser: ${message}`,
               );
               continue;
+            }
+            if (attempt < taskRetryMax) {
+              log(
+                `[${requestedMode}] task ${preparedTask.taskId} fail-fast after attempt ${attempt}/${taskRetryMax} (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}): ${message}`,
+              );
             }
             break;
           }
@@ -6225,6 +6608,7 @@ async function run(): Promise<void> {
       } finally {
         activeProxyNames.delete(preparedTask.proxyName);
         if (preparedTask.proxyIp) activeProxyIps.delete(preparedTask.proxyIp);
+        await taskMihomoController.stop().catch(() => {});
       }
 
       throw lastError || new Error(`[${requestedMode}] task failed without result`);

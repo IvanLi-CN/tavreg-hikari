@@ -48,14 +48,12 @@ const RESERVED_PROXY_NAMES = new Set([
 
 const RELEASE_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest";
 const RELEASE_TAG_API = "https://api.github.com/repos/MetaCubeX/mihomo/releases/tags";
+const BROWSER_LIKE_SUBSCRIPTION_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
 // Avoid duplicate downloads when multiple runs start in parallel.
 const mihomoBinaryCache = new Map<string, Promise<string>>();
-const subscriptionCache = new Map<
-  string,
-  { expiresAt: number; payload: Record<string, unknown> } | Promise<Record<string, unknown>>
->();
-const SUBSCRIPTION_CACHE_TTL_MS = 10 * 60 * 1000;
+const subscriptionInflight = new Map<string, Promise<Record<string, unknown>>>();
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -104,6 +102,27 @@ async function fetchRelease(url: string): Promise<{ tag: string; assets: Release
   const tag = payload.tag_name?.trim();
   if (!tag) throw new Error("mihomo_release_missing_tag");
   return { tag, assets: payload.assets || [] };
+}
+
+function buildSubscriptionRequestHeaders(url: string): Record<string, string> {
+  void url;
+  return {
+    "Accept":
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "User-Agent": BROWSER_LIKE_SUBSCRIPTION_UA,
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-CH-UA": "\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\"",
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": "\"macOS\"",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Priority": "u=0, i",
+  };
 }
 
 function selectAsset(
@@ -578,23 +597,40 @@ function normalizeRuleProviders(
 }
 
 async function fetchSubscription(url: string): Promise<Record<string, unknown>> {
-  const cached = subscriptionCache.get(url);
-  if (cached && !(cached instanceof Promise) && cached.expiresAt > Date.now()) {
-    return cached.payload;
-  }
-  if (cached instanceof Promise) {
-    return await cached;
+  const inflight = subscriptionInflight.get(url);
+  if (inflight) {
+    return await inflight;
   }
 
   const pending = (async (): Promise<Record<string, unknown>> => {
-    const resp = await fetch(url, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
+    const resp = await fetch(url, {
+      headers: buildSubscriptionRequestHeaders(url),
+      cache: "no-store",
+    });
     if (!resp.ok) {
       throw new Error(`mihomo_subscription_failed:${resp.status}`);
     }
     const raw = await resp.text();
     const content = decodeBase64IfNeeded(raw);
-    const parsed = yamlParse(content) as Record<string, unknown>;
-    const subscription = typeof parsed === "object" && parsed ? parsed : {};
+    let subscription: Record<string, unknown> = {};
+    try {
+      const parsed = yamlParse(content) as Record<string, unknown>;
+      subscription = typeof parsed === "object" && parsed ? parsed : {};
+    } catch {
+      subscription = {};
+    }
+    if (
+      Object.keys(subscription).length === 0 ||
+      (!Array.isArray(subscription.proxies) && !subscription["proxy-providers"] && !subscription["proxy-groups"])
+    ) {
+      const proxies = parseProviderPayloadToProxies(content).filter((proxy) => {
+        const proxyName = typeof proxy?.name === "string" ? proxy.name : "";
+        return !isNonSelectableProxyName(proxyName);
+      });
+      if (proxies.length > 0) {
+        subscription = { proxies };
+      }
+    }
     const providers = (subscription["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
     const materializedProviders: Record<string, Record<string, unknown>[]> = {};
 
@@ -602,7 +638,10 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
       const providerUrl = typeof provider?.url === "string" ? provider.url.trim() : "";
       if (!providerUrl) continue;
       try {
-        const providerResp = await fetch(providerUrl, { headers: { Accept: "text/plain, application/yaml, text/yaml" } });
+        const providerResp = await fetch(providerUrl, {
+          headers: buildSubscriptionRequestHeaders(providerUrl),
+          cache: "no-store",
+        });
         if (!providerResp.ok) continue;
         const providerText = await providerResp.text();
         const proxies = parseProviderPayloadToProxies(providerText).filter((proxy) => {
@@ -620,19 +659,17 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
     if (Object.keys(materializedProviders).length > 0) {
       subscription.__materializedProxyProviders = materializedProviders;
     }
-    subscriptionCache.set(url, {
-      expiresAt: Date.now() + SUBSCRIPTION_CACHE_TTL_MS,
-      payload: subscription,
-    });
     return subscription;
   })();
 
-  subscriptionCache.set(url, pending);
+  subscriptionInflight.set(url, pending);
   try {
     return await pending;
   } catch (error) {
-    subscriptionCache.delete(url);
+    subscriptionInflight.delete(url);
     throw error;
+  } finally {
+    subscriptionInflight.delete(url);
   }
 }
 
