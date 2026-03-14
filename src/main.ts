@@ -92,6 +92,7 @@ interface AppConfig {
   verifyHostAllowlist: string[];
   modeRetryMax: number;
   browserLaunchRetryMax: number;
+  taskAttemptTimeoutMs: number;
   nodeReuseCooldownMs: number;
   nodeRecentWindow: number;
   nodeCheckCacheTtlMs: number;
@@ -1237,6 +1238,7 @@ function summarizeRiskSignals(requestLog: RequestDiagRecord[], networkLog: Netwo
 function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary): string {
   const normalized = (message || "").toLowerCase();
   if (/native_cdp_unavailable/i.test(message)) return "native_cdp_unavailable";
+  if (/task_attempt_timeout/i.test(message)) return "task_attempt_timeout";
   if (/auth_session_invalid_request/i.test(message)) return "auth_session_invalid_request";
   if (/challenge_unresponsive/i.test(message)) return "challenge_unresponsive";
   if (/risk_control_ip_rate_limit/i.test(message)) return "too_many_signups_same_ip";
@@ -4622,6 +4624,7 @@ function loadConfig(): AppConfig {
         : ["tavily.com", "auth.tavily.com", "app.tavily.com"],
     modeRetryMax: Math.max(1, toInt(process.env.MODE_RETRY_MAX, 3)),
     browserLaunchRetryMax: Math.max(1, toInt(process.env.BROWSER_LAUNCH_RETRY_MAX, 3)),
+    taskAttemptTimeoutMs: Math.max(60_000, toInt(process.env.TASK_ATTEMPT_TIMEOUT_MS, 8 * 60_000)),
     nodeReuseCooldownMs: Math.max(12 * 60 * 60_000, toInt(process.env.NODE_REUSE_COOLDOWN_MS, 12 * 60 * 60_000)),
     nodeRecentWindow: Math.max(1, toInt(process.env.NODE_RECENT_WINDOW, 4)),
     nodeCheckCacheTtlMs: Math.max(30_000, toInt(process.env.NODE_CHECK_CACHE_TTL_MS, 10 * 60_000)),
@@ -5621,6 +5624,19 @@ async function runSingleMode(
     }
   };
   persistLedgerRecord("start");
+  let taskHeartbeat: ReturnType<typeof setInterval> | null = null;
+  let taskTimeout: ReturnType<typeof setTimeout> | null = null;
+  let taskTimedOut = false;
+  const stopTaskWatchers = (): void => {
+    if (taskHeartbeat) {
+      clearInterval(taskHeartbeat);
+      taskHeartbeat = null;
+    }
+    if (taskTimeout) {
+      clearTimeout(taskTimeout);
+      taskTimeout = null;
+    }
+  };
 
   const bindPageEvents = (targetPage: any): void => {
     const pushResourceLog = (entry: ResourceDiagRecord): void => {
@@ -5900,6 +5916,22 @@ async function runSingleMode(
       nativeChromeContext = null;
       nativeChromeMode = null;
     };
+    const startTaskWatchers = (): void => {
+      stopTaskWatchers();
+      taskHeartbeat = setInterval(() => {
+        ledgerRecord.notesJson = safeJsonStringify(notes);
+        persistLedgerRecord("heartbeat");
+      }, 15_000);
+      taskTimeout = setTimeout(() => {
+        taskTimedOut = true;
+        log(`[${mode}] task attempt timeout after ${cfg.taskAttemptTimeoutMs}ms at stage=${failureStage}`);
+        void closeBrowserSession();
+        if (!existingMihomoController) {
+          void mihomoController.stop().catch(() => {});
+        }
+      }, cfg.taskAttemptTimeoutMs);
+    };
+    startTaskWatchers();
 
     const syncBrowserIdentityProfile = (recordNote: boolean): void => {
       if (browserEngine === "chrome" && cfg.chromeIdentityOverride) {
@@ -6283,7 +6315,8 @@ async function runSingleMode(
       notes,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const message = taskTimedOut ? `task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}` : rawMessage;
     const risk = summarizeRiskSignals(requestLog, networkLog);
     localErrorCode = deriveErrorCode(message, failureStage, risk);
     localErrorMessage = message;
@@ -6350,6 +6383,7 @@ async function runSingleMode(
     persistLedgerRecord("failure");
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
+    stopTaskWatchers();
     if (context && !useNativeChrome) {
       await context.close().catch(() => {});
     }
