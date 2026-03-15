@@ -42,6 +42,7 @@ export interface VirtualDisplaySession {
 const AUTO_DISPLAY = "auto";
 const AUTO_DISPLAY_START = 99;
 const AUTO_DISPLAY_END = 140;
+const RESERVED_VIRTUAL_DISPLAYS = new Set<string>();
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,14 +69,29 @@ function displayLooksBusy(display: string): boolean {
   return existsSync(lockPath) || existsSync(socketPath);
 }
 
-function resolveManagedDisplay(displaySetting: string): string {
+function reserveManagedDisplay(displaySetting: string): string {
   const normalized = normalizeDisplaySetting(displaySetting);
-  if (normalized !== AUTO_DISPLAY) return normalized;
+  if (normalized !== AUTO_DISPLAY) {
+    if (RESERVED_VIRTUAL_DISPLAYS.has(normalized)) {
+      throw new Error(`display already reserved by current process: ${normalized}`);
+    }
+    RESERVED_VIRTUAL_DISPLAYS.add(normalized);
+    return normalized;
+  }
   for (let num = AUTO_DISPLAY_START; num <= AUTO_DISPLAY_END; num += 1) {
     const candidate = `:${num}`;
-    if (!displayLooksBusy(candidate)) return candidate;
+    if (RESERVED_VIRTUAL_DISPLAYS.has(candidate)) continue;
+    if (!displayLooksBusy(candidate)) {
+      RESERVED_VIRTUAL_DISPLAYS.add(candidate);
+      return candidate;
+    }
   }
   throw new Error("no free Xvfb display found in auto range");
+}
+
+function releaseManagedDisplay(display: string | undefined): void {
+  if (!display) return;
+  RESERVED_VIRTUAL_DISPLAYS.delete(display);
 }
 
 function signalChildProcess(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -165,7 +181,7 @@ export async function ensureVirtualDisplaySession(
   }
 
   const executablePath = cfg.executablePath?.trim() || "Xvfb";
-  const display = resolveManagedDisplay(cfg.displayNum);
+  const display = reserveManagedDisplay(cfg.displayNum);
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
     DISPLAY: display,
@@ -195,6 +211,7 @@ export async function ensureVirtualDisplaySession(
   try {
     await waitForXvfbReady(display, child, cfg.startupTimeoutMs, () => spawnError);
   } catch (error) {
+    releaseManagedDisplay(display);
     await stop().catch(() => {});
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`virtual_display_unavailable:${reason}`);
@@ -204,7 +221,10 @@ export async function ensureVirtualDisplaySession(
     backend: "xvfb",
     display,
     env,
-    stop,
+    stop: async () => {
+      releaseManagedDisplay(display);
+      await stop();
+    },
   };
 }
 
