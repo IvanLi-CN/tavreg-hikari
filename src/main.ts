@@ -58,6 +58,7 @@ interface AppConfig {
   humanConfirmBeforeSignup: boolean;
   humanConfirmText: string;
   mailProvider: MailProvider;
+  blockedMailboxDomains: string[];
   mailPollMs: number;
   gptmailBaseUrl: string;
   vmailBaseUrl: string;
@@ -109,6 +110,79 @@ interface MailboxSession {
   address: string;
   accountId: string;
   headers: Record<string, string>;
+}
+
+function isBlockedMailboxAddress(blockedDomains: ReadonlySet<string>, address: string): boolean {
+  const { domain } = splitEmail(address);
+  return !!domain && blockedDomains.has(domain);
+}
+
+function computeMailboxPreloadTarget(need: number): number {
+  if (need <= 0) return 0;
+  return Math.max(1, Math.ceil(need * 0.25));
+}
+
+async function loadBlockedMailboxDomainsFromLedger(cfg: TaskLedgerConfig): Promise<string[]> {
+  if (!cfg.enabled) return [];
+  try {
+    if (typeof Bun !== "undefined") {
+      const { Database } = await import("bun:sqlite");
+      const db = new Database(cfg.dbPath, { create: false, strict: true });
+      try {
+        const rows = db
+          .prepare(
+            `
+            WITH stats AS (
+              SELECT
+                lower(email_domain) AS email_domain,
+                SUM(CASE WHEN error_code = 'risk_control_suspicious_activity' THEN 1 ELSE 0 END) AS suspicious_cnt,
+                SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS success_cnt
+              FROM signup_tasks
+              WHERE email_domain IS NOT NULL AND trim(email_domain) <> ''
+              GROUP BY lower(email_domain)
+            )
+            SELECT email_domain
+            FROM stats
+            WHERE suspicious_cnt >= 2
+              AND success_cnt = 0
+            `,
+          )
+          .all() as Array<{ email_domain?: string }>;
+        return rows.map((row) => String(row.email_domain || "").trim().toLowerCase()).filter(Boolean);
+      } finally {
+        db.close(false);
+      }
+    }
+
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(cfg.dbPath, { open: true, readOnly: true });
+    try {
+      const rows = db
+        .prepare(
+          `
+          WITH stats AS (
+            SELECT
+              lower(email_domain) AS email_domain,
+              SUM(CASE WHEN error_code = 'risk_control_suspicious_activity' THEN 1 ELSE 0 END) AS suspicious_cnt,
+              SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS success_cnt
+            FROM signup_tasks
+            WHERE email_domain IS NOT NULL AND trim(email_domain) <> ''
+            GROUP BY lower(email_domain)
+          )
+          SELECT email_domain
+          FROM stats
+          WHERE suspicious_cnt >= 2
+            AND success_cnt = 0
+          `,
+        )
+        .all() as Array<{ email_domain?: string }>;
+      return rows.map((row) => String(row.email_domain || "").trim().toLowerCase()).filter(Boolean);
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
 }
 
 interface ResultPayload {
@@ -261,6 +335,8 @@ interface ModeRunContext {
   runtimeRecentProxyIps: string[];
   ipEmailUsage: Map<string, Set<string>>;
   activeProxyIps: Set<string>;
+  blockedMailboxDomains: Set<string>;
+  mailboxDomainSuspiciousCounts: Map<string, number>;
 }
 
 interface PreparedSignupTask {
@@ -2407,14 +2483,30 @@ async function createGptmailSession(cfg: AppConfig, proxyUrl?: string): Promise<
   };
 }
 
-async function createMailboxSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
-  if (cfg.mailProvider === "gptmail") {
-    return await createGptmailSession(cfg, proxyUrl);
+async function createMailboxSession(cfg: AppConfig, blockedDomains: ReadonlySet<string>, proxyUrl?: string): Promise<MailboxSession> {
+  const createRawSession = async (): Promise<MailboxSession> => {
+    if (cfg.mailProvider === "gptmail") {
+      return await createGptmailSession(cfg, proxyUrl);
+    }
+    if (cfg.mailProvider === "duckmail") {
+      return await createDuckmailSession(cfg, proxyUrl);
+    }
+    return await createVmailSession(cfg, proxyUrl);
+  };
+
+  let lastBlockedDomain: string | undefined;
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    const mailbox = await createRawSession();
+    if (!isBlockedMailboxAddress(blockedDomains, mailbox.address)) {
+      return mailbox;
+    }
+    const { domain } = splitEmail(mailbox.address);
+    lastBlockedDomain = domain;
+    log(`mailbox domain skipped by denylist (attempt=${attempt}): ${mailbox.address}`);
+    await delay(Math.min(1200 * attempt, 4000));
   }
-  if (cfg.mailProvider === "duckmail") {
-    return await createDuckmailSession(cfg, proxyUrl);
-  }
-  return await createVmailSession(cfg, proxyUrl);
+
+  throw new Error(`mailbox_domain_blocked:${lastBlockedDomain || "unknown"}`);
 }
 
 async function waitForVerificationLink(
@@ -4747,6 +4839,9 @@ function loadConfig(): AppConfig {
   }
   const fallbackRunMode: RunMode = toBool(process.env.HEADLESS, false) ? "headless" : "headed";
   const verifyHostAllowlist = parseCsvList(process.env.VERIFY_HOST_ALLOWLIST).map((host) => host.toLowerCase());
+  const blockedMailboxDomains = Array.from(new Set(parseCsvList(process.env.BLOCKED_MAILBOX_DOMAINS).map((item) => item.trim().toLowerCase()))).filter(
+    (item) => item.length > 0,
+  );
   const defaultApiPort = 39090 + randomInt(0, 2000);
   const defaultMixedPort = 49090 + randomInt(0, 2000);
 
@@ -4769,6 +4864,7 @@ function loadConfig(): AppConfig {
     humanConfirmBeforeSignup: toBool(process.env.HUMAN_CONFIRM_BEFORE_SIGNUP, false),
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
     mailProvider: envMailProvider,
+    blockedMailboxDomains,
     mailPollMs: toInt(process.env.MAIL_POLL_MS || process.env.DUCKMAIL_POLL_MS, 2500),
     gptmailBaseUrl,
     vmailBaseUrl,
@@ -4858,7 +4954,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
+  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
     message,
   );
 }
@@ -5735,6 +5831,7 @@ async function preselectTaskProxy(
 
 async function createTaskMailboxSession(
   cfg: AppConfig,
+  blockedDomains: ReadonlySet<string>,
   batchId: string,
   taskId: string,
   proxyName: string,
@@ -5751,7 +5848,7 @@ async function createTaskMailboxSession(
   const controller = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
   try {
     await switchProxyGroup(controller, proxyName);
-    const mailbox = await createMailboxSession(cfg, controller.proxyServer);
+    const mailbox = await createMailboxSession(cfg, blockedDomains, controller.proxyServer);
     log(
       `mailbox created via task proxy: provider=${mailbox.provider} node=${proxyName} proxy_ip_hint=${proxyIpHint || "unknown"} address=${mailbox.address}`,
     );
@@ -5771,6 +5868,7 @@ async function prepareSignupTask(
   runtimeRecentProxyIps: string[],
   activeProxyNames: Set<string>,
   activeProxyIps: Set<string>,
+  blockedMailboxDomains: ReadonlySet<string>,
   taskOrdinal: number,
   preloadMailbox: boolean,
 ): Promise<PreparedSignupTask> {
@@ -5814,7 +5912,7 @@ async function prepareSignupTask(
     try {
       const mailboxPromise =
         preloadMailbox && !cfg.existingEmail
-          ? createTaskMailboxSession(cfg, batchId, taskId, selectedProxy.name, proxyIp || undefined)
+          ? createTaskMailboxSession(cfg, blockedMailboxDomains, batchId, taskId, selectedProxy.name, proxyIp || undefined)
           : null;
       return {
         taskId,
@@ -6533,7 +6631,7 @@ async function runSingleMode(
             throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
           }
         }
-        mailbox = await createMailboxSession(cfg, mihomoController.proxyServer);
+        mailbox = await createMailboxSession(cfg, ctx.blockedMailboxDomains, mihomoController.proxyServer);
         email = mailbox.address;
         password = password || randomPassword();
         log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
@@ -6751,6 +6849,16 @@ async function runSingleMode(
     const risk = summarizeRiskSignals(requestLog, networkLog);
     localErrorCode = deriveErrorCode(message, failureStage, risk);
     localErrorMessage = message;
+    const { domain: failedEmailDomain } = splitEmail(email);
+    if (localErrorCode === "risk_control_suspicious_activity" && failedEmailDomain) {
+      const nextCount = (ctx.mailboxDomainSuspiciousCounts.get(failedEmailDomain) || 0) + 1;
+      ctx.mailboxDomainSuspiciousCounts.set(failedEmailDomain, nextCount);
+      if (nextCount >= 2 && !ctx.blockedMailboxDomains.has(failedEmailDomain)) {
+        ctx.blockedMailboxDomains.add(failedEmailDomain);
+        notes.push(`mailbox domain denylisted after suspicious repeats: ${failedEmailDomain}`);
+        log(`mailbox domain added to runtime denylist: ${failedEmailDomain} (count=${nextCount})`);
+      }
+    }
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, diagOutputDir), networkLog.slice(-180));
       await writeJson(new URL(`request_fail_${mode}.json`, diagOutputDir), requestLog.slice(-180));
@@ -6975,11 +7083,18 @@ async function run(): Promise<void> {
   }
   const batchId = `batch-${Date.now()}-${randomBytes(3).toString("hex")}`;
   const taskLedger = await TaskLedger.open(cfg.taskLedger);
+  const historicalBlockedMailboxDomains = new Set<string>([
+    ...cfg.blockedMailboxDomains,
+    ...(await loadBlockedMailboxDomainsFromLedger(cfg.taskLedger)),
+  ]);
   if (taskLedger) {
     log(`task ledger enabled: ${taskLedger.dbPath()}`);
     const recovered = taskLedger.markStaleRunningAsFailed();
     if (recovered > 0) {
       log(`task ledger recovered interrupted running rows: ${recovered}`);
+    }
+    if (historicalBlockedMailboxDomains.size > 0) {
+      log(`mailbox denylist loaded: ${Array.from(historicalBlockedMailboxDomains).join(", ")}`);
     }
   } else {
     log("task ledger disabled");
@@ -6998,11 +7113,13 @@ async function run(): Promise<void> {
     const results: ResultPayload[] = [];
     const failures: Array<{ runIndex: number; taskId?: string; error: string }> = [];
     const taskRetryMax = 3;
-    const mailboxPreloadTarget = Math.max(1, Math.ceil(args.need * 0.25));
+    const mailboxPreloadTarget = computeMailboxPreloadTarget(args.need);
     const ipEmailUsage = new Map<string, Set<string>>();
     const runtimeRecentProxyIps: string[] = [];
     const activeProxyNames = new Set<string>();
     const activeProxyIps = new Set<string>();
+    const blockedMailboxDomains = new Set<string>(historicalBlockedMailboxDomains);
+    const mailboxDomainSuspiciousCounts = new Map<string, number>();
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
       let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
@@ -7023,6 +7140,7 @@ async function run(): Promise<void> {
         runtimeRecentProxyIps,
         activeProxyNames,
         activeProxyIps,
+        blockedMailboxDomains,
         runIndex,
         runIndex <= mailboxPreloadTarget,
       );
@@ -7044,6 +7162,8 @@ async function run(): Promise<void> {
                 runtimeRecentProxyIps,
                 ipEmailUsage,
                 activeProxyIps,
+                blockedMailboxDomains,
+                mailboxDomainSuspiciousCounts,
               },
               preparedTask,
               taskMihomoController,
