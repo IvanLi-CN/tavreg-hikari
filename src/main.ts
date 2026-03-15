@@ -345,7 +345,7 @@ interface PreparedSignupTask {
   email: string;
   password: string;
   mailbox: MailboxSession | null;
-  mailboxPromise?: Promise<MailboxSession> | null;
+  mailboxPromise?: Promise<{ ok: true; mailbox: MailboxSession } | { ok: false; error: unknown }> | null;
   proxyName: string;
   proxyIp?: string;
   proxyGeo?: GeoInfo;
@@ -2700,6 +2700,19 @@ async function collectPageSurfaceSummary(page: any): Promise<string> {
   }
 }
 
+async function hasRenderablePageSurface(page: any): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const title = (document.title || "").trim();
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const interactiveCount = document.querySelectorAll("a, button, input, form").length;
+      return title.length > 0 || bodyText.length >= 80 || interactiveCount > 0;
+    });
+  } catch {
+    return false;
+  }
+}
+
 async function waitForAuthEntrySurface(page: any, kind: "signup" | "login", timeoutMs: number): Promise<void> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   while (Date.now() < deadline) {
@@ -2802,6 +2815,12 @@ async function openAuthFlowEntry(
       await safeGoto(page, url, 60_000);
       await page.waitForTimeout(900);
       await waitForAuthEntrySurface(page, kind, 12_000);
+      if (!(await hasRenderablePageSurface(page)) && !successPattern.test(page.url())) {
+        log(`${kind} entry surface thin via ${label}, reloading once`);
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
+        await page.waitForTimeout(1_200);
+        await waitForAuthEntrySurface(page, kind, 10_000);
+      }
       if (kind === "login" && /app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
         return true;
       }
@@ -2918,29 +2937,59 @@ async function acceptPostSignupConsent(page: any): Promise<boolean> {
     if (!(await hasPostSignupConsentPrompt(page))) {
       return round > 1;
     }
-    const checkboxPoint =
-      (await findClickablePointViaAxName(page, [
-        /receive marketing emails/i,
-        /privacy policy/i,
-        /website terms of use/i,
-      ], ["checkbox"])) ||
-      (await findClickablePointByActionText(page, [
-        /receive marketing emails/i,
-        /privacy policy/i,
-        /website terms of use/i,
-      ]));
-    if (checkboxPoint) {
-      await dispatchMouseClickViaCdp(page, checkboxPoint.x, checkboxPoint.y);
-      await page.waitForTimeout(450 + round * 100);
+    const continuePoint =
+      (await findClickablePointViaAxName(page, [/^continue$/i], ["button", "link"])) ||
+      (await findClickablePointByActionText(page, [/^continue$/i])) ||
+      (await findClickablePointBySelector(page, 'button[type="submit"], button'));
+    if (continuePoint) {
+      await dispatchMouseClickViaCdp(page, continuePoint.x, continuePoint.y);
+    } else {
+      const closePoint =
+        (await findClickablePointBySelector(page, 'button[aria-label*="close" i], button[title*="close" i]')) ||
+        (await findClickablePointViaAxName(page, [/^close$/i, /^dismiss$/i], ["button"])) ||
+        (await findClickablePointByActionText(page, [/^close$/i, /^dismiss$/i]));
+      if (!closePoint) {
+        log(`post-signup consent action not found after round ${round}`);
+        continue;
+      }
+      await dispatchMouseClickViaCdp(page, closePoint.x, closePoint.y);
     }
-    await clickSubmit(page);
-    await page.waitForTimeout(1200 + round * 250);
+    const dismissDeadline = Date.now() + 8_000;
+    while (Date.now() < dismissDeadline) {
+      await page.waitForTimeout(350);
+      if (!(await hasPostSignupConsentPrompt(page))) {
+        break;
+      }
+    }
     if (!(await hasPostSignupConsentPrompt(page))) {
-      log(`post-signup consent accepted after round ${round}`);
+      log(`post-signup consent dismissed after round ${round}`);
       return true;
     }
   }
   return false;
+}
+
+async function dismissCookieBannerBestEffort(page: any): Promise<void> {
+  for (let round = 1; round <= 2; round += 1) {
+    const point =
+      (await findClickablePointViaAxName(page, [/^reject all$/i], ["button"])) ||
+      (await findClickablePointByActionText(page, [/^reject all$/i])) ||
+      (await findClickablePointBySelector(page, 'button[aria-label*="close" i], button[title*="close" i]')) ||
+      (await findClickablePointByActionText(page, [/^close$/i, /^dismiss$/i]));
+    if (!point) return;
+    await dispatchMouseClickViaCdp(page, point.x, point.y);
+    await page.waitForTimeout(700 + round * 150);
+    const stillVisible = await page
+      .evaluate(() => {
+        const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+        return /accept all cookies/i.test(text) || /reject all/i.test(text) || /cookie policy/i.test(text);
+      })
+      .catch(() => false);
+    if (!stillVisible) {
+      log(`cookie banner dismissed best-effort after round ${round}`);
+      return;
+    }
+  }
 }
 
 async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
@@ -4300,7 +4349,6 @@ async function completeSignup(
     await page.waitForTimeout(randomInt(3000, 8500));
     const passwordAttemptMax = Math.max(1, Math.min(policy.passwordStepRounds, cfg.maxCaptchaRounds, 8));
     let workingPassword = password;
-    let suspiciousSeenCount = 0;
     let invalidCaptchaSeenCount = 0;
     let captchaMissingStreak = 0;
     for (let attempt = 1; attempt <= passwordAttemptMax; attempt += 1) {
@@ -4474,6 +4522,18 @@ async function completeSignup(
         .map((text) => (text.length > 180 ? `${text.slice(0, 180)}...` : text));
       log(`signup password step still present after submit (attempt=${attempt}) errors=${compactErrors.join(" | ") || "n/a"}`);
       const hasIpRateLimitMarker = formErrors.some((text) => /Too many signups from the same IP/i.test(text));
+      const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+      if (postSubmitErrorCodes.length > 0) {
+        log(`signup password error codes (attempt=${attempt}): ${postSubmitErrorCodes.join(", ")}`);
+      }
+      const explicitRejection = detectExplicitFormRejection(formErrors, postSubmitErrorCodes);
+      const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
+      if (explicitRejection === "risk_control_ip_rate_limit" || hasIpRateLimitMarker) {
+        throw new Error("risk_control_ip_rate_limit");
+      }
+      if (explicitRejection === "auth0_extensibility_error" || hasSuspiciousMarker) {
+        throw new Error("risk_control_suspicious_activity");
+      }
       const postSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
       if (postSubmitSnapshot) {
         hooks?.onPasswordSnapshot?.(postSubmitSnapshot);
@@ -4523,10 +4583,6 @@ async function completeSignup(
           }
         }
       }
-      const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
-      if (postSubmitErrorCodes.length > 0) {
-        log(`signup password error codes (attempt=${attempt}): ${postSubmitErrorCodes.join(", ")}`);
-      }
       const hasTooWeakMarker = formErrors.some((text) => /password is too weak/i.test(text));
       const hasChallengeLoadMarker = formErrors.some((text) => /we couldn.?t load the security challenge/i.test(text));
       const hasUsersValidationCode = postSubmitErrorCodes.some((code) => /auth0-users-validation/i.test(code));
@@ -4550,35 +4606,6 @@ async function completeSignup(
         await safeGoto(page, page.url());
         await page.waitForTimeout(randomInt(1200, 2400));
         continue;
-      }
-      const explicitRejection = detectExplicitFormRejection(formErrors, postSubmitErrorCodes);
-      if (explicitRejection === "risk_control_ip_rate_limit" || hasIpRateLimitMarker) {
-        throw new Error("risk_control_ip_rate_limit");
-      }
-      if (explicitRejection === "auth0_extensibility_error") {
-        throw new Error("auth0_extensibility_error");
-      }
-      const hasSuspiciousMarker = formErrors.some((text) => /Suspicious activity detected/i.test(text));
-      const hasExtensibilityCode = explicitRejection === "auth0_extensibility_error";
-      const hasSuspiciousSignal = hasSuspiciousMarker || hasExtensibilityCode;
-      if (hasSuspiciousSignal) {
-        suspiciousSeenCount += 1;
-        const challengeEscalated =
-          Boolean(postSubmitSnapshot?.hasCaptchaInput) ||
-          Boolean(postSubmitSnapshot?.hasCaptchaImage) ||
-          Boolean(postSubmitSnapshot?.hasCaptchaContainer);
-        if (!hasExtensibilityCode && challengeEscalated && attempt < passwordAttemptMax && suspiciousSeenCount < 2) {
-          log(
-            `signup password suspicious marker with captcha challenge present (attempt=${attempt}, extensibility=${hasExtensibilityCode ? 1 : 0}), retrying once`,
-          );
-          await page.waitForTimeout(1800);
-          continue;
-        }
-        // Let mode-level retry rotate identity/proxy after hard suspicious block.
-        throw new Error("risk_control_suspicious_activity");
-      }
-      if (suspiciousSeenCount > 0) {
-        suspiciousSeenCount -= 1;
       }
       const hasInvalidCaptchaCode = postSubmitErrorCodes.some((code) =>
         /invalid-captcha/i.test(code),
@@ -6010,6 +6037,8 @@ async function prepareSignupTask(
       const mailboxPromise =
         preloadMailbox && !cfg.existingEmail
           ? createTaskMailboxSession(cfg, blockedMailboxDomains, batchId, taskId, selectedProxy.name, proxyIp || undefined)
+              .then((mailbox) => ({ ok: true as const, mailbox }))
+              .catch((error) => ({ ok: false as const, error }))
           : null;
       return {
         taskId,
@@ -6698,8 +6727,12 @@ async function runSingleMode(
     } else {
       if (!mailbox && preparedTask?.mailboxPromise) {
         try {
-          mailbox = await preparedTask.mailboxPromise;
+          const mailboxResult = await preparedTask.mailboxPromise;
           preparedTask.mailboxPromise = null;
+          if (!mailboxResult.ok) {
+            throw mailboxResult.error;
+          }
+          mailbox = mailboxResult.mailbox;
           preparedTask.mailbox = mailbox;
           email = mailbox.address;
           password = password || randomPassword();
@@ -6837,6 +6870,7 @@ async function runSingleMode(
     for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
       try {
         await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
+        await dismissCookieBannerBestEffort(page).catch(() => {});
         notes.push("reached app home");
         break;
       } catch (error) {
@@ -6861,6 +6895,7 @@ async function runSingleMode(
 
         await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
         await acceptPostSignupConsent(page).catch(() => false);
+        await dismissCookieBannerBestEffort(page).catch(() => {});
         await page.waitForTimeout(1500);
         if (attempt === 1) {
           await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
