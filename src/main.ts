@@ -3,9 +3,10 @@ import { Camoufox } from "camoufox-js";
 import { Resvg } from "@resvg/resvg-js";
 import { Impit } from "impit";
 import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
-import { randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import { spawn } from "node:child_process";
 import { sep as pathSep } from "node:path";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
 import path from "node:path";
@@ -2901,6 +2902,47 @@ async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
   return true;
 }
 
+async function hasPostSignupConsentPrompt(page: any): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return /receive marketing emails/i.test(text) && /privacy policy/i.test(text) && /website terms of use/i.test(text);
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function acceptPostSignupConsent(page: any): Promise<boolean> {
+  for (let round = 1; round <= 3; round += 1) {
+    if (!(await hasPostSignupConsentPrompt(page))) {
+      return round > 1;
+    }
+    const checkboxPoint =
+      (await findClickablePointViaAxName(page, [
+        /receive marketing emails/i,
+        /privacy policy/i,
+        /website terms of use/i,
+      ], ["checkbox"])) ||
+      (await findClickablePointByActionText(page, [
+        /receive marketing emails/i,
+        /privacy policy/i,
+        /website terms of use/i,
+      ]));
+    if (checkboxPoint) {
+      await dispatchMouseClickViaCdp(page, checkboxPoint.x, checkboxPoint.y);
+      await page.waitForTimeout(450 + round * 100);
+    }
+    await clickSubmit(page);
+    await page.waitForTimeout(1200 + round * 250);
+    if (!(await hasPostSignupConsentPrompt(page))) {
+      log(`post-signup consent accepted after round ${round}`);
+      return true;
+    }
+  }
+  return false;
+}
+
 async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
   await page.waitForSelector('img[alt="captcha"]', { timeout: 30000 });
   const src = await page.$eval('img[alt="captcha"]', (el: any) => String(el.src || ""));
@@ -4592,6 +4634,7 @@ async function loginAndReachHome(
     await page.waitForTimeout(1200);
 
     if (/app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
+      await acceptPostSignupConsent(page).catch(() => false);
       if (await waitHomeStable(page, 6500)) {
         return;
       }
@@ -4612,6 +4655,7 @@ async function loginAndReachHome(
 
     const current = page.url();
     if (/app\.tavily\.com\/home/i.test(current) && !/auth\.tavily\.com/i.test(current)) {
+      await acceptPostSignupConsent(page).catch(() => false);
       if (await waitHomeStable(page, 5000)) {
         return;
       }
@@ -4814,9 +4858,49 @@ function resolveChromeExecutablePath(raw: string | undefined): string | undefine
   const trimmed = (raw || "").trim();
   if (trimmed) return trimmed;
   if (process.platform === "darwin") {
+    const fingerprintChromium = "/Users/ivan/Projects/Ivan/tavreg-hikari/.tools/Chromium.app/Contents/MacOS/Chromium";
+    if (existsSync(fingerprintChromium)) return fingerprintChromium;
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }
   return undefined;
+}
+
+function isFingerprintChromiumExecutable(executablePath: string | undefined): boolean {
+  const normalized = (executablePath || "").trim().toLowerCase();
+  return normalized.endsWith('/chromium') || normalized.includes('/chromium.app/');
+}
+
+function resolveChromeAppName(executablePath: string | undefined): string {
+  return isFingerprintChromiumExecutable(executablePath) ? 'Chromium' : 'Google Chrome';
+}
+
+function buildFingerprintSeed(profileDir: string, proxyServer: string, locale: string): string {
+  const digest = createHash('sha256').update(`${profileDir}|${proxyServer}|${locale}`).digest('hex');
+  return String(parseInt(digest.slice(0, 8), 16) || 1000);
+}
+
+function getFingerprintChromiumArgs(
+  executablePath: string | undefined,
+  profileDir: string,
+  proxyServer: string,
+  locale: string,
+  acceptLanguage: string,
+  timezoneId?: string,
+): string[] {
+  if (!isFingerprintChromiumExecutable(executablePath)) return [];
+  const seed = buildFingerprintSeed(profileDir, proxyServer, locale);
+  const args = [
+    `--fingerprint=${seed}`,
+    '--fingerprint-platform=macos',
+    '--fingerprint-brand=Chrome',
+    `--lang=${locale}`,
+    `--accept-lang=${acceptLanguage}`,
+    '--disable-non-proxied-udp',
+  ];
+  if (timezoneId?.trim()) {
+    args.push(`--timezone=${timezoneId.trim()}`);
+  }
+  return args;
 }
 
 function loadConfig(): AppConfig {
@@ -4979,6 +5063,11 @@ function getChromeVisualArgs(): string[] {
     "--window-size=1512,982",
     "--force-device-scale-factor=2",
   ];
+}
+
+function getChromeCredentialStoreArgs(): string[] {
+  if (process.platform !== "darwin") return [];
+  return ["--use-mock-keychain", "--password-store=basic"];
 }
 
 function normalizeChromeVersion(raw: string): string {
@@ -5207,7 +5296,7 @@ async function launchBrowserWithEngine(
     }
     const browser = await chromium.launch(options);
     if (process.platform === "darwin" && mode === "headed" && cfg.chromeActivateOnLaunch) {
-      await activateMacApp("Google Chrome");
+      await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
     }
     return browser;
   }
@@ -5473,6 +5562,8 @@ async function launchNativeChromeCdp(
   mode: "headed" | "headless",
   proxyServer: string,
   locale: string,
+  acceptLanguage: string,
+  timezoneId?: string,
 ): Promise<{
   browser: Browser;
   context: any;
@@ -5491,8 +5582,7 @@ async function launchNativeChromeCdp(
     const usingBaseProfile = i > 0;
     await mkdir(profileDir, { recursive: true });
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
-    // Open the IP page first and Tavily second so Chrome keeps Tavily as the visible active tab.
-    const startupTargets = [SINGLE_BROWSER_IP_PROBE_TARGET.url, "https://app.tavily.com/"];
+    const startupTargets = ["https://app.tavily.com/"];
     const args = [
       `--remote-debugging-port=${debugPort}`,
       "--remote-debugging-address=127.0.0.1",
@@ -5506,6 +5596,8 @@ async function launchNativeChromeCdp(
       "--disable-background-networking",
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
+      ...getChromeCredentialStoreArgs(),
+      ...getFingerprintChromiumArgs(cfg.chromeExecutablePath, profileDir, proxyServer, locale, acceptLanguage, timezoneId),
     ];
     if (mode === "headless") {
       args.push("--headless=new", "--hide-scrollbars", "--mute-audio", ...startupTargets);
@@ -5526,7 +5618,7 @@ async function launchNativeChromeCdp(
 
     try {
       if (mode === "headed" && cfg.chromeActivateOnLaunch) {
-        await activateMacApp("Google Chrome");
+        await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
       }
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
@@ -5600,6 +5692,7 @@ async function launchChromePersistent(
           `--lang=${locale}`,
           ...getChromeVisualArgs(),
           ...getChromeWebRtcPolicyArgs(cfg),
+          ...getChromeCredentialStoreArgs(),
         ],
         locale: contextOptions.locale,
         timezoneId: contextOptions.timezoneId,
@@ -5697,6 +5790,8 @@ async function launchNativeChromeInspect(
   cfg: AppConfig,
   proxyServer: string,
   locale: string,
+  acceptLanguage: string,
+  timezoneId?: string,
 ): Promise<{
   stop: () => Promise<void>;
   details: { executablePath: string; profileDir: string; targets: string[] };
@@ -5704,7 +5799,7 @@ async function launchNativeChromeInspect(
   if (!cfg.chromeExecutablePath) {
     throw new Error("chrome executable path is not configured");
   }
-  const targets = [SINGLE_BROWSER_IP_PROBE_TARGET.url, "https://app.tavily.com/"];
+  const targets = ["https://app.tavily.com/"];
   await mkdir(cfg.inspectChromeProfileDir, { recursive: true });
 
   const args = [
@@ -5713,6 +5808,8 @@ async function launchNativeChromeInspect(
     `--lang=${locale}`,
     ...getChromeVisualArgs(),
     ...getChromeWebRtcPolicyArgs(cfg),
+    ...getChromeCredentialStoreArgs(),
+    ...getFingerprintChromiumArgs(cfg.chromeExecutablePath, cfg.inspectChromeProfileDir, proxyServer, locale, acceptLanguage, timezoneId),
     "--disable-background-mode",
     "--disable-background-networking",
     "--new-window",
@@ -5729,7 +5826,7 @@ async function launchNativeChromeInspect(
     throw new Error(`native chrome exited early: ${child.exitCode}`);
   }
   if (cfg.chromeActivateOnLaunch) {
-    await activateMacApp("Google Chrome");
+    await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
   }
   return {
     stop,
@@ -6307,7 +6404,14 @@ async function runSingleMode(
     const launchBrowser = async (): Promise<Browser> => {
       if (useNativeChrome) {
         try {
-          const launched = await launchNativeChromeCdp(cfg, mode, mihomoController.proxyServer, locale);
+          const launched = await launchNativeChromeCdp(
+            cfg,
+            mode,
+            mihomoController.proxyServer,
+            locale,
+            acceptLanguage,
+            geo.timezone,
+          );
           nativeChromeMode = "cdp";
           nativeChromeStop = launched.stop;
           nativeChromeContext = launched.context;
@@ -6368,7 +6472,7 @@ async function runSingleMode(
     startTaskWatchers();
 
     const syncBrowserIdentityProfile = (recordNote: boolean): void => {
-      if (browserEngine === "chrome" && cfg.chromeIdentityOverride) {
+      if (browserEngine === "chrome" && cfg.chromeIdentityOverride && !isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
         identity = buildBrowserIdentityProfile(locale, browser?.version?.() || "");
         if (recordNote) notes.push(`browser ua profile: ${identity.userAgent}`);
         return;
@@ -6394,7 +6498,9 @@ async function runSingleMode(
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, geo.timezone, false);
         }
-        await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled && !useNativeChrome);
+        if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
+          await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled && !useNativeChrome);
+        }
         const probeHost = new URL(SINGLE_BROWSER_IP_PROBE_TARGET.url).hostname.toLowerCase();
         const existingPages = typeof context.pages === "function" ? context.pages() : [];
         const disposablePages: any[] = [];
@@ -6435,7 +6541,11 @@ async function runSingleMode(
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, geo.timezone);
         }
+        if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
+          if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
         await applyEngineStealth(context, browserEngine, locale, cfg.chromeStealthJsEnabled);
+      }
+        }
         page = await context.newPage();
       }
       bindPageEvents(page);
@@ -6750,6 +6860,7 @@ async function runSingleMode(
         }
 
         await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
+        await acceptPostSignupConsent(page).catch(() => false);
         await page.waitForTimeout(1500);
         if (attempt === 1) {
           await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
@@ -6962,12 +7073,18 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     }
 
     if (useNativeChrome) {
-      const nativeChrome = await launchNativeChromeInspect(cfg, mihomoController.proxyServer, locale);
+      const nativeChrome = await launchNativeChromeInspect(
+        cfg,
+        mihomoController.proxyServer,
+        locale,
+        acceptLanguage,
+        geo.timezone,
+      );
       nativeChromeStop = nativeChrome.stop;
       notes.push(`native chrome executable: ${nativeChrome.details.executablePath}`);
       notes.push(`native chrome profile: ${nativeChrome.details.profileDir}`);
       notes.push("opened app.tavily.com");
-      notes.push(`opened ${SINGLE_BROWSER_IP_PROBE_TARGET.url}`);
+      notes.push(`fingerprint browser active: ${isFingerprintChromiumExecutable(cfg.chromeExecutablePath) ? "yes" : "no"}`);
 
       await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
         mode: "inspect-sites-native-chrome",
