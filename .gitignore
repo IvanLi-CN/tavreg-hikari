@@ -36,3 +36,5 @@ __pycache__
 
 # Finder (MacOS) folder config
 .DS_Store
+
+.tools/

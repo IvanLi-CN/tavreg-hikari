@@ -4928,7 +4928,7 @@ function resolveChromeExecutablePath(raw: string | undefined): string | undefine
   const trimmed = (raw || "").trim();
   if (trimmed) return trimmed;
   if (process.platform === "darwin") {
-    const fingerprintChromium = "/Users/ivan/Projects/Ivan/tavreg-hikari/.tools/Chromium.app/Contents/MacOS/Chromium";
+    const fingerprintChromium = path.resolve(process.cwd(), ".tools/Chromium.app/Contents/MacOS/Chromium");
     if (existsSync(fingerprintChromium)) return fingerprintChromium;
     return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }
