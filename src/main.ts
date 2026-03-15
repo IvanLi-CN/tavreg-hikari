@@ -1,5 +1,4 @@
 import { config as loadDotenv } from "dotenv";
-import { Camoufox } from "camoufox-js";
 import { Resvg } from "@resvg/resvg-js";
 import { Impit } from "impit";
 import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
@@ -20,7 +19,7 @@ import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./stor
 
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
-type BrowserEngine = "camoufox" | "chrome";
+type BrowserEngine = "chrome";
 type MailProvider = "duckmail" | "gptmail" | "vmail";
 
 interface GptmailAuthPayload {
@@ -50,7 +49,6 @@ interface AppConfig {
   chromeIdentityOverride: boolean;
   chromeStealthJsEnabled: boolean;
   chromeWebrtcHardened: boolean;
-  camoufoxGeoipEnabled: boolean;
   chromeProfileDir: string;
   chromeRemoteDebuggingPort: number;
   slowMoMs: number;
@@ -474,7 +472,7 @@ function parseRunMode(raw: string | undefined): RunMode | null {
 function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
-  if (value === "camoufox" || value === "chrome") return value;
+  if (value === "chrome" || value === "camoufox") return "chrome";
   return null;
 }
 
@@ -5009,7 +5007,6 @@ function loadConfig(): AppConfig {
     chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, true),
     chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, true),
     chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
-    camoufoxGeoipEnabled: toBool(process.env.CAMOUFOX_GEOIP_ENABLED, process.platform !== "darwin"),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
@@ -5345,43 +5342,29 @@ async function launchBrowserWithEngine(
   mode: "headed" | "headless",
   proxyServer: string,
   locale: string,
-  geoIp: string,
+  _geoIp: string,
 ): Promise<Browser> {
-  if (engine === "chrome") {
-    const options: LaunchOptions = {
-      headless: mode === "headless",
-      slowMo: Math.max(0, cfg.slowMoMs),
-      proxy: { server: proxyServer },
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        `--lang=${locale}`,
-        ...getChromeVisualArgs(),
-        ...getChromeWebRtcPolicyArgs(cfg),
-      ],
-      timeout: 180_000,
-    };
-    if (cfg.chromeExecutablePath) {
-      options.executablePath = cfg.chromeExecutablePath;
-    }
-    const browser = await chromium.launch(options);
-    if (process.platform === "darwin" && mode === "headed" && cfg.chromeActivateOnLaunch) {
-      await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
-    }
-    return browser;
-  }
-
-  const camoufoxGeoip = cfg.camoufoxGeoipEnabled && geoIp.trim().length > 0 ? geoIp : false;
-  return (await Camoufox({
+  const options: LaunchOptions = {
     headless: mode === "headless",
-    humanize: 1.2,
-    debug: false,
+    slowMo: Math.max(0, cfg.slowMoMs),
     proxy: { server: proxyServer },
-    locale,
-    geoip: camoufoxGeoip,
-    block_webrtc: false,
-    enable_cache: true,
-  })) as Browser;
+    ignoreDefaultArgs: ["--enable-automation"],
+    args: [
+      "--disable-blink-features=AutomationControlled",
+      `--lang=${locale}`,
+      ...getChromeVisualArgs(),
+      ...getChromeWebRtcPolicyArgs(cfg),
+    ],
+    timeout: 180_000,
+  };
+  if (cfg.chromeExecutablePath) {
+    options.executablePath = cfg.chromeExecutablePath;
+  }
+  const browser = await chromium.launch(options);
+  if (process.platform === "darwin" && mode === "headed" && cfg.chromeActivateOnLaunch) {
+    await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
+  }
+  return browser;
 }
 
 function trySignalChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
@@ -6484,9 +6467,6 @@ async function runSingleMode(
       notes.push("proxy ip: pending browser confirmation");
     }
     notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
-    if (!useNativeChrome && browserEngine === "camoufox") {
-      notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
-    }
     ledgerRecord.proxyNode = selectedProxy.name;
     ledgerRecord.proxyIp = normalizeIp(geo.ip);
     ledgerRecord.proxyCountry = geo.country;
@@ -7186,9 +7166,6 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip || "pending browser confirmation"}`);
     notes.push(`browser engine: ${browserEngine}`);
-    if (browserEngine === "camoufox") {
-      notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
-    }
 
     if (useNativeChrome) {
       const nativeChrome = await launchNativeChromeInspect(
