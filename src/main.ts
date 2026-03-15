@@ -5,8 +5,9 @@ import { Impit } from "impit";
 import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
 import { randomBytes, randomInt } from "node:crypto";
 import { spawn } from "node:child_process";
+import { sep as pathSep } from "node:path";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { createServer, isIP } from "node:net";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
@@ -49,6 +50,7 @@ interface AppConfig {
   inspectBrowserEngine: BrowserEngine;
   chromeExecutablePath?: string;
   chromeNativeAutomation: boolean;
+  chromeActivateOnLaunch: boolean;
   chromeIdentityOverride: boolean;
   chromeStealthJsEnabled: boolean;
   chromeWebrtcHardened: boolean;
@@ -184,6 +186,16 @@ interface PasswordStepSnapshot {
   visibleErrors: string[];
 }
 
+interface PasswordStrengthSnapshot {
+  len: number;
+  lower: boolean;
+  upper: boolean;
+  digit: boolean;
+  special: boolean;
+  tooWeak: boolean;
+  visiblePolicyErrors: string[];
+}
+
 interface AuthChallengeSnapshot {
   collectedAt: string;
   url: string;
@@ -265,6 +277,7 @@ interface PreparedSignupTask {
   email: string;
   password: string;
   mailbox: MailboxSession | null;
+  mailboxPromise?: Promise<MailboxSession> | null;
   proxyName: string;
   proxyIp?: string;
   proxyGeo?: GeoInfo;
@@ -960,7 +973,13 @@ async function selectProxyNode(
 
   const nodes = await controller.listGroupNodes();
   const allNames = nodes.map((node) => node.name).filter((name) => name.trim().length > 0);
+  if (allNames.length === 0) {
+    throw new Error("proxy_node_inventory_empty");
+  }
   const names = allNames.filter((name) => !busyProxyNames.has(name));
+  if (names.length === 0) {
+    throw new Error("proxy_all_nodes_busy");
+  }
   const ipUsageByIp = buildProxyIpUsageIndex(usage);
   const scoreByNode = new Map<string, number>();
   for (const name of names) {
@@ -1035,24 +1054,48 @@ function pickChar(alphabet: string): string {
   return alphabet[randomInt(0, alphabet.length)] || alphabet[0] || "a";
 }
 
+function countPasswordCategoryHits(password: string): number {
+  let hits = 0;
+  if (/[a-z]/.test(password)) hits += 1;
+  if (/[A-Z]/.test(password)) hits += 1;
+  if (/\d/.test(password)) hits += 1;
+  if (/[^A-Za-z0-9]/.test(password)) hits += 1;
+  return hits;
+}
+
+function hasTripleRepeatedChars(password: string): boolean {
+  return /(.)\1\1/.test(password);
+}
+
+function isCompliantGeneratedPassword(password: string): boolean {
+  return password.length >= 14 && countPasswordCategoryHits(password) >= 4 && !hasTripleRepeatedChars(password);
+}
+
 function randomPassword(): string {
   const lowers = "abcdefghijklmnopqrstuvwxyz";
   const uppers = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const digits = "0123456789";
-  const specials = "!@#$%^&*_-+=";
+  // Keep the special-character set aligned with Tavily/Auth0's visible password policy hint.
+  const specials = "!@#$%^&*";
   const all = `${lowers}${uppers}${digits}${specials}`;
-  // Keep passwords moderately short to avoid providers that enforce strict max length constraints.
-  const length = randomInt(10, 13);
-  const chars = [
-    pickChar(lowers),
-    pickChar(uppers),
-    pickChar(digits),
-    pickChar(specials),
-  ];
-  while (chars.length < length) {
-    chars.push(pickChar(all));
+  for (let attempt = 0; attempt < 32; attempt += 1) {
+    // Bias toward higher-entropy passwords to reduce "too weak" server-side rejections.
+    const length = randomInt(14, 19);
+    const chars = [
+      pickChar(lowers),
+      pickChar(uppers),
+      pickChar(digits),
+      pickChar(specials),
+    ];
+    while (chars.length < length) {
+      chars.push(pickChar(all));
+    }
+    const candidate = shuffleChars(chars).join("");
+    if (isCompliantGeneratedPassword(candidate)) {
+      return candidate;
+    }
   }
-  return shuffleChars(chars).join("");
+  return "Aa1!SecurePass97";
 }
 
 function pickRandom<T>(values: T[]): T {
@@ -1497,12 +1540,29 @@ function isPublicIpv4(ip: string): boolean {
   return true;
 }
 
-function extractPublicIpv4List(text: string): string[] {
-  const found = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+function isPublicIp(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 4) return isPublicIpv4(ip);
+  if (family !== 6) return false;
+  const normalized = ip.toLowerCase();
+  if (normalized === "::1" || normalized === "::") return false;
+  if (normalized.startsWith("fe8") || normalized.startsWith("fe9") || normalized.startsWith("fea") || normalized.startsWith("feb")) {
+    return false;
+  }
+  if (normalized.startsWith("fc") || normalized.startsWith("fd")) return false;
+  if (normalized.startsWith("ff")) return false;
+  return true;
+}
+
+function extractPublicIpList(text: string): string[] {
+  const found = [
+    ...(text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || []),
+    ...(text.match(/\b(?:(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{0,4})\b/g) || []),
+  ];
   const unique: string[] = [];
   for (const raw of found) {
     const normalized = normalizeIp(raw);
-    if (!normalized || !isPublicIpv4(normalized)) continue;
+    if (!normalized || !isPublicIp(normalized)) continue;
     if (!unique.includes(normalized)) {
       unique.push(normalized);
     }
@@ -1512,7 +1572,7 @@ function extractPublicIpv4List(text: string): string[] {
 
 async function collectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
   const expectedHost = new URL(target.url).hostname.toLowerCase();
-  await safeGoto(page, target.url);
+  await safeGoto(page, target.url, 15_000);
   await page.waitForLoadState("domcontentloaded", { timeout: 60000 });
   await page.waitForTimeout(waitMs);
 
@@ -1524,7 +1584,7 @@ async function collectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs =
     };
   });
   const text = typeof payload.text === "string" ? payload.text : "";
-  const ipCandidates = extractPublicIpv4List(text);
+  const ipCandidates = extractPublicIpList(text);
   const observedUrl = typeof payload.url === "string" ? payload.url : target.url;
   let observedHost = "";
   try {
@@ -1651,9 +1711,9 @@ async function collectGoldenSnapshot(page: any): Promise<GoldenSnapshot> {
     };
   })()`);
   const text = typeof payload.text === "string" ? payload.text : "";
-  const ipCandidates = extractPublicIpv4List(text);
+  const ipCandidates = extractPublicIpList(text);
   const labeledIp = normalizeIp(typeof payload.ipAddress === "string" ? payload.ipAddress : "");
-  const ipAddress = labeledIp && isPublicIpv4(labeledIp) ? labeledIp : ipCandidates[0];
+  const ipAddress = labeledIp && isPublicIp(labeledIp) ? labeledIp : ipCandidates[0];
 
   return {
     url: typeof payload.url === "string" ? payload.url : "https://fingerprint.goldenowl.ai/",
@@ -2887,6 +2947,102 @@ async function hasAuthSessionErrorPage(page: any): Promise<boolean> {
   }
 }
 
+async function hasAuthChallengeLoadErrorPage(page: any): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return /couldn[’']t load the security challenge/i.test(text) || /we couldn[’']t load the security challenge/i.test(text);
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function collectPageSurfaceSummary(page: any): Promise<string> {
+  try {
+    const payload = await page.evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      return {
+        url: window.location.href,
+        title: document.title || "",
+        readyState: document.readyState,
+        bodyLength: bodyText.length,
+        bodySample: bodyText.slice(0, 200),
+      };
+    });
+    return `url=${payload.url} title=${payload.title || "(empty)"} ready=${payload.readyState} body_len=${payload.bodyLength} body=${payload.bodySample || "(empty)"}`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
+    return `surface-unavailable: ${message}`;
+  }
+}
+
+async function waitForAuthEntrySurface(page: any, kind: "signup" | "login", timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    const url = page.url();
+    if (/auth\.tavily\.com/i.test(url) || /\/u\/login\/identifier|\/u\/signup\/identifier|\/u\/signup\/password/i.test(url)) {
+      return;
+    }
+    if (await hasAuthSessionErrorPage(page)) {
+      return;
+    }
+    const hints = await collectActionEntryHints(page);
+    if (hints.length > 0) {
+      return;
+    }
+    const hasBodyText = await page
+      .evaluate(() => Boolean((document.body?.innerText || "").replace(/\s+/g, "").length))
+      .catch(() => false);
+    if (hasBodyText) {
+      return;
+    }
+    await page.waitForTimeout(500);
+  }
+  log(`${kind} entry surface still empty after wait: ${await collectPageSurfaceSummary(page)}`);
+}
+
+async function waitForSignUpEntryReady(page: any, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    const directPoint = await findClickablePointBySelector(page, 'a[href*="/u/signup/identifier"], a[href*="signup"], a[href*="register"]');
+    if (directPoint) {
+      return true;
+    }
+    const textPoint =
+      (await findClickablePointByLinkText(page, /sign up|create account|get started|start for free/i)) ||
+      (await findClickablePointByActionText(page, [/sign up|create account|get started|start for free/i]));
+    if (textPoint) {
+      return true;
+    }
+    if (!(await hasAuthChallengeLoadErrorPage(page))) {
+      const readyState = await page.evaluate(() => document.readyState).catch(() => "loading");
+      if (readyState === "complete" || readyState === "interactive") {
+        return false;
+      }
+    }
+    await page.waitForTimeout(750);
+  }
+  return false;
+}
+
+async function navigateToSignupWithCurrentState(page: any): Promise<boolean> {
+  try {
+    const currentUrl = new URL(page.url());
+    const state = currentUrl.searchParams.get("state");
+    if (!state || !/\/u\/login\/identifier/i.test(currentUrl.pathname)) {
+      return false;
+    }
+    const signupUrl = new URL("/u/signup/identifier", currentUrl.origin);
+    signupUrl.searchParams.set("state", state);
+    await safeGoto(page, signupUrl.toString(), 60_000);
+    await page.waitForTimeout(800);
+    return /\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url());
+  } catch {
+    return false;
+  }
+}
+
 async function ensureAuthIdentifierFieldReady(page: any, selector: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   while (Date.now() < deadline) {
@@ -2922,13 +3078,13 @@ async function openAuthFlowEntry(
     try {
       await safeGoto(page, url, 60_000);
       await page.waitForTimeout(900);
+      await waitForAuthEntrySurface(page, kind, 12_000);
       if (kind === "login" && /app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
         return true;
       }
       if (successPattern.test(page.url())) {
         return true;
       }
-      await page.waitForURL(successPattern, { timeout: 25_000 });
       return true;
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
@@ -2947,16 +3103,64 @@ async function openAuthFlowEntry(
       await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
       continue;
     }
-    if (kind === "signup" && /\/u\/login\/identifier/i.test(page.url())) {
-      await clickSignUp(page);
-      await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password/i, { timeout: 30_000 });
+    if (kind === "signup" && /\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
+      return;
+    }
+    if (
+      kind === "signup" &&
+      (/\/u\/login\/identifier/i.test(page.url()) ||
+        (/app\.tavily\.com/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())))
+    ) {
+      const onLoginIdentifier = /\/u\/login\/identifier/i.test(page.url());
+      const entryReady = await waitForSignUpEntryReady(page, 12_000);
+      if (!entryReady && onLoginIdentifier && (await hasAuthChallengeLoadErrorPage(page))) {
+        log(`${kind} entry challenge unavailable on login page, reloading once`);
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
+        await page.waitForTimeout(1_200);
+        await waitForAuthEntrySurface(page, kind, 10_000);
+      }
+      let switchedToSignup = false;
+      try {
+        await clickSignUp(page);
+        await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password/i, { timeout: 30_000 });
+        switchedToSignup = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (onLoginIdentifier && /Sign up entry not found/i.test(message)) {
+          const navigated = await navigateToSignupWithCurrentState(page);
+          if (navigated) {
+            log(`${kind} entry switched via state-preserving signup URL`);
+            switchedToSignup = true;
+          } else {
+            throw error;
+          }
+        } else {
+          throw error;
+        }
+      }
+      if (!switchedToSignup) {
+        throw new Error("Sign up entry not found");
+      }
       if (await hasAuthSessionErrorPage(page)) {
         log(`${kind} entry invalid_request page detected after clickSignUp, retrying next entry`);
         await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
         continue;
       }
+      return;
     }
-    return;
+    if (successPattern.test(page.url())) {
+      return;
+    }
+    try {
+      await page.waitForURL(successPattern, { timeout: 10_000 });
+      return;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      const message = lastError.message.split("\n")[0];
+      log(`${kind} entry unresolved via ${entry.label}: ${message}`);
+      await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+      continue;
+    }
   }
 
   throw lastError || new Error(`${kind} auth entry unavailable`);
@@ -2998,11 +3202,11 @@ async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
 }
 
 async function refreshCaptchaImage(page: any, previousSrc: string): Promise<boolean> {
-  const image = page.locator('img[alt="captcha"]').first();
-  if ((await image.count()) <= 0) return false;
+  const point = await findClickablePointBySelector(page, 'img[alt="captcha"]');
+  if (!point) return false;
 
   try {
-    await image.click({ timeout: 1200 });
+    await dispatchMouseClickViaCdp(page, point.x, point.y);
   } catch {
     return false;
   }
@@ -3055,6 +3259,52 @@ async function collectVisibleErrorCodes(page: any): Promise<string[]> {
       .filter((code) => !isIgnorableErrorCode(code));
     return Array.from(new Set(codes)).slice(0, 12);
   });
+}
+
+async function collectPasswordStrengthSnapshot(page: any): Promise<PasswordStrengthSnapshot> {
+  return await page.evaluate(() => {
+    const input = document.querySelector('input[name="password"], input[type="password"]') as HTMLInputElement | null;
+    const value = input?.value || "";
+    const isVisible = (el: Element): el is HTMLElement => {
+      if (!(el instanceof HTMLElement)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const style = window.getComputedStyle(el);
+      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+    };
+    const policyErrors = Array.from(
+      document.querySelectorAll('[id*="password-too-weak"], .ulp-error-info, [data-error-code^="password-policy-"]'),
+    )
+      .filter(isVisible)
+      .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .slice(0, 10);
+    const normalized = policyErrors.join(" | ");
+    return {
+      len: value.length,
+      lower: /[a-z]/.test(value),
+      upper: /[A-Z]/.test(value),
+      digit: /\d/.test(value),
+      special: /[^A-Za-z0-9]/.test(value),
+      tooWeak: /too weak/i.test(normalized),
+      visiblePolicyErrors: policyErrors,
+    };
+  });
+}
+
+async function writePageArtifactsBestEffort(page: any, outputDir: URL, stem: string): Promise<void> {
+  try {
+    const html = await page.content();
+    await writeFile(new URL(`${stem}.html`, outputDir), html, "utf8");
+  } catch {
+    // Navigation races during Auth0 transitions should not fail the task.
+  }
+  try {
+    const snap = await page.screenshot({ fullPage: true });
+    await writeFile(new URL(`${stem}.png`, outputDir), snap);
+  } catch {
+    // Best-effort diagnostics only.
+  }
 }
 
 function detectExplicitFormRejection(formErrors: string[], errorCodes: string[]): string | null {
@@ -3269,6 +3519,339 @@ async function createCdpSession(target: any): Promise<any | null> {
   }
 }
 
+async function dispatchMouseClickViaCdp(page: any, x: number, y: number): Promise<void> {
+  const pageCdp = await createCdpSession(page);
+  if (!pageCdp) {
+    throw new Error("cdp_session_unavailable");
+  }
+  const steps = 10;
+  const startX = Math.max(0, x - randomInt(18, 42));
+  const startY = Math.max(0, y - randomInt(6, 22));
+  await pageCdp
+    .send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: startX,
+      y: startY,
+      button: "none",
+      buttons: 0,
+    })
+    .catch(() => {});
+  for (let idx = 1; idx <= steps; idx += 1) {
+    const progress = idx / steps;
+    await pageCdp
+      .send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: startX + (x - startX) * progress,
+        y: startY + (y - startY) * progress,
+        button: "none",
+        buttons: 0,
+      })
+      .catch(() => {});
+    await page.waitForTimeout(randomInt(12, 28));
+  }
+  await pageCdp
+    .send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    })
+    .catch(() => {});
+  await page.waitForTimeout(randomInt(70, 150));
+  await pageCdp
+    .send("Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      buttons: 0,
+      clickCount: 1,
+    })
+    .catch(() => {});
+}
+
+async function dispatchEnterViaCdp(page: any): Promise<void> {
+  const pageCdp = await createCdpSession(page);
+  if (!pageCdp) {
+    throw new Error("cdp_session_unavailable");
+  }
+  await pageCdp
+    .send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13,
+      text: "\r",
+      unmodifiedText: "\r",
+    })
+    .catch(() => {});
+  await page.waitForTimeout(randomInt(35, 90));
+  await pageCdp
+    .send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Enter",
+      code: "Enter",
+      windowsVirtualKeyCode: 13,
+      nativeVirtualKeyCode: 13,
+    })
+    .catch(() => {});
+}
+
+async function findClickablePointViaAxName(
+  page: any,
+  patterns: RegExp[],
+  roles: string[] = ["button", "link"],
+): Promise<{ x: number; y: number } | null> {
+  const pageCdp = await createCdpSession(page);
+  if (!pageCdp) return null;
+  const axTree = await pageCdp.send("Accessibility.getFullAXTree").catch(() => null);
+  const matchers = patterns;
+  const roleSet = new Set(roles.map((role) => role.toLowerCase()));
+  const matchNode =
+    axTree?.nodes?.find((node: any) => {
+      const role = String(node?.role?.value || "").toLowerCase();
+      const name = String(node?.name?.value || "");
+      if (!roleSet.has(role)) return false;
+      return matchers.some((pattern) => pattern.test(name));
+    }) || null;
+  if (!matchNode?.backendDOMNodeId) return null;
+  const box = await pageCdp
+    .send("DOM.getBoxModel", { backendNodeId: matchNode.backendDOMNodeId })
+    .catch(() => null);
+  const rect = toChallengeBoxRect(box?.model?.content);
+  if (!rect) return null;
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2,
+  };
+}
+
+async function findClickablePointBySelector(page: any, selector: string): Promise<{ x: number; y: number } | null> {
+  try {
+    const point = await page.evaluate((rawSelector: string) => {
+      const collectDeepMatches = (root: ParentNode, targetSelector: string): Element[] => {
+        const matches = Array.from(root.querySelectorAll(targetSelector));
+        const descendants = Array.from(root.querySelectorAll("*"));
+        for (const el of descendants) {
+          const shadowRoot = (el as HTMLElement & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+          if (shadowRoot) {
+            matches.push(...collectDeepMatches(shadowRoot, targetSelector));
+          }
+        }
+        return matches;
+      };
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        return true;
+      };
+      const target = collectDeepMatches(document, rawSelector).find(isVisible);
+      if (!target) return null;
+      const rect = target.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }, selector);
+    if (
+      point &&
+      typeof point.x === "number" &&
+      Number.isFinite(point.x) &&
+      typeof point.y === "number" &&
+      Number.isFinite(point.y)
+    ) {
+      return point;
+    }
+  } catch {
+    // ignore selector probe errors
+  }
+  return null;
+}
+
+async function findClickablePointByLinkText(page: any, pattern: RegExp): Promise<{ x: number; y: number } | null> {
+  try {
+    const point = await page.evaluate((source: string, flags: string) => {
+      const matcher = new RegExp(source, flags);
+      const collectDeepElements = (root: ParentNode, selector: string): Element[] => {
+        const matches = Array.from(root.querySelectorAll(selector));
+        const descendants = Array.from(root.querySelectorAll("*"));
+        for (const el of descendants) {
+          const shadowRoot = (el as HTMLElement & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+          if (shadowRoot) {
+            matches.push(...collectDeepElements(shadowRoot, selector));
+          }
+        }
+        return matches;
+      };
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        return true;
+      };
+      const target = collectDeepElements(document, "a").find(
+        (el) => isVisible(el) && matcher.test(el.textContent || ""),
+      ) as HTMLElement | undefined;
+      if (!target) return null;
+      const rect = target.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }, pattern.source, pattern.flags);
+    if (
+      point &&
+      typeof point.x === "number" &&
+      Number.isFinite(point.x) &&
+      typeof point.y === "number" &&
+      Number.isFinite(point.y)
+    ) {
+      return point;
+    }
+  } catch {
+    // ignore link probe errors
+  }
+  return null;
+}
+
+async function findClickablePointByActionText(
+  page: any,
+  patterns: RegExp[],
+): Promise<{ x: number; y: number } | null> {
+  try {
+    const patternPayload = patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags }));
+    const point = await page.evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
+      const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const collectDeepElements = (root: ParentNode, selector: string): Element[] => {
+        const matches = Array.from(root.querySelectorAll(selector));
+        const descendants = Array.from(root.querySelectorAll("*"));
+        for (const el of descendants) {
+          const shadowRoot = (el as HTMLElement & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+          if (shadowRoot) {
+            matches.push(...collectDeepElements(shadowRoot, selector));
+          }
+        }
+        return matches;
+      };
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        return true;
+      };
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+      const candidates = collectDeepElements(document, 'a, button, [role="button"], input[type="button"], input[type="submit"]')
+        .filter(isVisible)
+        .map((el) => {
+          const text = normalize(
+            [
+              el.textContent || "",
+              el.getAttribute("aria-label") || "",
+              el.getAttribute("title") || "",
+              el.getAttribute("value") || "",
+              el.getAttribute("data-testid") || "",
+              el.getAttribute("data-test") || "",
+            ].join(" "),
+          );
+          const href = normalize(el.getAttribute("href") || "");
+          return { el, text, href };
+        });
+
+      const scoreCandidate = (candidate: { text: string; href: string }) => {
+        let score = -1;
+        for (const matcher of matchers) {
+          if (matcher.test(candidate.href)) score = Math.max(score, 100);
+          if (matcher.test(candidate.text)) score = Math.max(score, 80);
+        }
+        if (/signup|register/i.test(candidate.href)) score = Math.max(score, 95);
+        if (/sign up|create account|register|start for free|get started/i.test(candidate.text)) {
+          score = Math.max(score, 70);
+        }
+        return score;
+      };
+
+      const winner = candidates
+        .map((candidate) => ({ ...candidate, score: scoreCandidate(candidate) }))
+        .filter((candidate) => candidate.score >= 0)
+        .sort((left, right) => right.score - left.score)[0];
+      if (!winner) return null;
+      const rect = winner.el.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
+    }, patternPayload);
+    if (
+      point &&
+      typeof point.x === "number" &&
+      Number.isFinite(point.x) &&
+      typeof point.y === "number" &&
+      Number.isFinite(point.y)
+    ) {
+      return point;
+    }
+  } catch {
+    // ignore action probe errors
+  }
+  return null;
+}
+
+async function collectActionEntryHints(page: any): Promise<string[]> {
+  try {
+    const entries = await page.evaluate(() => {
+      const collectDeepElements = (root: ParentNode, selector: string): Element[] => {
+        const matches = Array.from(root.querySelectorAll(selector));
+        const descendants = Array.from(root.querySelectorAll("*"));
+        for (const el of descendants) {
+          const shadowRoot = (el as HTMLElement & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+          if (shadowRoot) {
+            matches.push(...collectDeepElements(shadowRoot, selector));
+          }
+        }
+        return matches;
+      };
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === "hidden" || style.display === "none") return false;
+        return true;
+      };
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+      return collectDeepElements(document, 'a, button, [role="button"], input[type="button"], input[type="submit"]')
+        .filter(isVisible)
+        .map((el) => {
+          const tag = el.tagName.toLowerCase();
+          const text = normalize(
+            [
+              el.textContent || "",
+              el.getAttribute("aria-label") || "",
+              el.getAttribute("title") || "",
+              el.getAttribute("value") || "",
+            ].join(" "),
+          ).slice(0, 120);
+          const href = normalize(el.getAttribute("href") || "").slice(0, 160);
+          return `${tag}|text=${text || "(empty)"}|href=${href || "(none)"}`;
+        })
+        .slice(0, 20);
+    });
+    return Array.isArray(entries) ? entries.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedChallengeCdpSnapshot | null> {
   const challengeFrame =
     typeof page.frames === "function"
@@ -3411,66 +3994,39 @@ async function waitForManagedChallengeToken(
   return { status: "timeout", snapshot: latest };
 }
 
+async function waitForManagedChallengeDismissal(
+  page: any,
+  formKind: "signup" | "login",
+  timeoutMs: number,
+): Promise<AuthChallengeSnapshot | null> {
+  const deadline = Date.now() + Math.max(1_500, timeoutMs);
+  let latest: AuthChallengeSnapshot | null = null;
+  while (Date.now() < deadline) {
+    latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+    if (!latest) return latest;
+    if (!latest.hasChallengeFrame && !latest.hasChallengeCheckbox) {
+      return latest;
+    }
+    await page.waitForTimeout(300);
+  }
+  if (latest) {
+    log(
+      `${formKind} managed challenge still visible after token (frame=${latest.hasChallengeFrame ? 1 : 0}, checkbox=${
+        latest.hasChallengeCheckbox ? 1 : 0
+      }, token=${getChallengeTokenLength(latest)})`,
+    );
+  }
+  return latest;
+}
+
 async function tryActivateManagedChallenge(page: any, formKind: "signup" | "login"): Promise<boolean> {
   let cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
   if (cdpSnapshot?.iframeBox && cdpSnapshot?.checkboxBox) {
-    const pageCdp = await createCdpSession(page);
     const clickAt = async (x: number, y: number): Promise<void> => {
-      if (!pageCdp) return;
-      const steps = 12;
-      const startX = Math.max(0, x - randomInt(18, 42));
-      const startY = Math.max(0, y - randomInt(6, 22));
-      await pageCdp
-        .send("Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: startX,
-          y: startY,
-          button: "none",
-          buttons: 0,
-        })
-        .catch(() => {});
-      for (let idx = 1; idx <= steps; idx += 1) {
-        const progress = idx / steps;
-        await pageCdp
-          .send("Input.dispatchMouseEvent", {
-            type: "mouseMoved",
-            x: startX + (x - startX) * progress,
-            y: startY + (y - startY) * progress,
-            button: "none",
-            buttons: 0,
-          })
-          .catch(() => {});
-        await page.waitForTimeout(randomInt(12, 28));
-      }
-      await pageCdp
-        .send("Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          x,
-          y,
-          button: "left",
-          buttons: 1,
-          clickCount: 1,
-        })
-        .catch(() => {});
-      await page.waitForTimeout(randomInt(70, 150));
-      await pageCdp
-        .send("Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x,
-          y,
-          button: "left",
-          buttons: 0,
-          clickCount: 1,
-        })
-        .catch(() => {});
+      await dispatchMouseClickViaCdp(page, x, y);
     };
 
-    if (
-      pageCdp &&
-      cdpSnapshot.refreshBox &&
-      cdpSnapshot.statusText &&
-      /verification expired/i.test(cdpSnapshot.statusText)
-    ) {
+    if (cdpSnapshot.refreshBox && cdpSnapshot.statusText && /verification expired/i.test(cdpSnapshot.statusText)) {
       const refreshX = cdpSnapshot.iframeBox.x + cdpSnapshot.refreshBox.x + cdpSnapshot.refreshBox.width / 2;
       const refreshY = cdpSnapshot.iframeBox.y + cdpSnapshot.refreshBox.y + cdpSnapshot.refreshBox.height / 2;
       if (Number.isFinite(refreshX) && Number.isFinite(refreshY)) {
@@ -3481,7 +4037,7 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
       }
     }
 
-    if (!cdpSnapshot?.iframeBox || !cdpSnapshot?.checkboxBox || !pageCdp) {
+    if (!cdpSnapshot?.iframeBox || !cdpSnapshot?.checkboxBox) {
       return false;
     }
     const offsetCenterX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
@@ -3621,48 +4177,98 @@ async function collectBrowserFingerprintSnapshot(page: any): Promise<BrowserFing
   };
 }
 
-async function clickSubmit(page: any): Promise<void> {
-  await page.waitForTimeout(randomInt(220, 780));
-  const btn = page.locator('button[type="submit"], input[type="submit"]').first();
+async function waitForAuthFormPostResponse(page: any, pattern: RegExp, timeoutMs: number): Promise<boolean> {
   try {
-    await btn.click({ timeout: 10000 });
-    return;
+    await page.waitForResponse(
+      (resp: any) => {
+        try {
+          const url = String(resp.url?.() || "");
+          const req = typeof resp.request === "function" ? resp.request() : null;
+          const method = String(req?.method?.() || "GET").toUpperCase();
+          return method === "POST" && pattern.test(url);
+        } catch {
+          return false;
+        }
+      },
+      { timeout: timeoutMs },
+    );
+    return true;
   } catch {
-    await page.evaluate(() => {
-      const form = document.querySelector('form[data-form-primary="true"], form') as HTMLFormElement | null;
-      const submitEl = form?.querySelector('button[type="submit"], input[type="submit"]') as
-        | HTMLButtonElement
-        | HTMLInputElement
-        | null;
-      if (submitEl) {
-        submitEl.click();
-      } else if (form?.requestSubmit) {
-        form.requestSubmit();
-      } else if (form) {
-        form.submit();
-      }
-    });
+    return false;
   }
 }
 
+async function clickSubmit(page: any): Promise<void> {
+  await page.waitForTimeout(randomInt(220, 780));
+  let point =
+    (await findClickablePointBySelector(
+      page,
+      'button[type="submit"], input[type="submit"], button[name="action"], button[data-action-button-primary="true"]',
+    )) ||
+    (await findClickablePointViaAxName(page, [/^continue$/i, /^sign up$/i, /^create account$/i, /^get started$/i])) ||
+    (await findClickablePointByActionText(page, [/^continue$/i, /^sign up$/i, /^create account$/i, /^get started$/i]));
+  if (!point) {
+    const deadline = Date.now() + 12_000;
+    while (Date.now() < deadline && !point) {
+      await page.waitForTimeout(600);
+      point =
+        (await findClickablePointBySelector(
+          page,
+          'button[type="submit"], input[type="submit"], button[name="action"], button[data-action-button-primary="true"]',
+        )) ||
+        (await findClickablePointViaAxName(page, [/^continue$/i, /^sign up$/i, /^create account$/i, /^get started$/i])) ||
+        (await findClickablePointByActionText(page, [/^continue$/i, /^sign up$/i, /^create account$/i, /^get started$/i]));
+    }
+  }
+  if (!point) {
+    const inputPoint =
+      (await findClickablePointBySelector(page, 'input[type="email"], input[name="email"], input[type="text"]')) || null;
+    if (inputPoint) {
+      await dispatchMouseClickViaCdp(page, inputPoint.x, inputPoint.y);
+      await page.waitForTimeout(randomInt(120, 240));
+      await dispatchEnterViaCdp(page);
+      log("submit entry fallback via cdp Enter");
+      return;
+    }
+    await dispatchEnterViaCdp(page);
+    log("submit entry fallback via blind cdp Enter");
+    return;
+  }
+  await dispatchMouseClickViaCdp(page, point.x, point.y);
+}
+
 async function clickSignUp(page: any): Promise<void> {
-  const direct = page.locator('a[href*="/u/signup/identifier"]').first();
-  if ((await direct.count()) > 0) {
-    await direct.click();
+  const directPoint =
+    (await findClickablePointBySelector(page, 'a[href*="/u/signup/identifier"], a[href*="signup"], a[href*="register"]')) ||
+    (await findClickablePointViaAxName(page, [/^sign up$/i, /^create account$/i, /^get started$/i], ["link", "button"])) ||
+    (await findClickablePointByActionText(page, [
+      /\/u\/signup\/identifier/i,
+      /signup/i,
+      /register/i,
+      /sign up/i,
+      /create account/i,
+      /start for free/i,
+      /get started/i,
+    ]));
+  if (directPoint) {
+    await dispatchMouseClickViaCdp(page, directPoint.x, directPoint.y);
     return;
   }
 
-  const clicked = await page.evaluate(() => {
-    const links = Array.from(document.querySelectorAll("a"));
-    const target = links.find((el) => /sign up/i.test(el.textContent || ""));
-    if (!target) return false;
-    (target as HTMLAnchorElement).click();
-    return true;
-  });
-
-  if (!clicked) {
+  const fallbackPoint =
+    (await findClickablePointByLinkText(page, /sign up|create account|get started|start for free/i)) ||
+    (await findClickablePointByActionText(page, [/sign up|create account|get started|start for free/i]));
+  if (!fallbackPoint) {
+    const hints = await collectActionEntryHints(page);
+    if (hints.length > 0) {
+      log(`signup entry candidates: ${hints.join(" || ")}`);
+    } else {
+      log("signup entry candidates: (none)");
+    }
+    log(`signup entry surface: ${await collectPageSurfaceSummary(page)}`);
     throw new Error("Sign up entry not found");
   }
+  await dispatchMouseClickViaCdp(page, fallbackPoint.x, fallbackPoint.y);
 }
 
 async function solveCaptchaForm(
@@ -3951,7 +4557,7 @@ async function completeSignup(
   outputDir: URL,
   policy: SignupAttemptPolicy,
   hooks?: SignupDiagHooks,
-): Promise<void> {
+): Promise<string> {
   await openAuthFlowEntry(page, "signup");
 
   if (!/\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
@@ -3969,7 +4575,7 @@ async function completeSignup(
   }
 
   if (/app\.tavily\.com\/home/i.test(page.url())) {
-    return;
+    return password;
   }
   if (!/\/u\/signup\/password/i.test(page.url())) {
     throw new Error(`signup did not reach password step, current=${page.url()}`);
@@ -3979,6 +4585,7 @@ async function completeSignup(
     // Slow down on password step to reduce bot-like burst behavior.
     await page.waitForTimeout(randomInt(3000, 8500));
     const passwordAttemptMax = Math.max(1, Math.min(policy.passwordStepRounds, cfg.maxCaptchaRounds, 8));
+    let workingPassword = password;
     let suspiciousSeenCount = 0;
     let invalidCaptchaSeenCount = 0;
     let captchaMissingStreak = 0;
@@ -3989,20 +4596,18 @@ async function completeSignup(
         if (fingerprintSnapshot) {
           hooks?.onFingerprintSnapshot?.(fingerprintSnapshot);
         }
-        await writeFile(new URL("signup_password_before.html", outputDir), await page.content(), "utf8");
-        const snap = await page.screenshot({ fullPage: true });
-        await writeFile(new URL("signup_password_before.png", outputDir), snap);
+        await writePageArtifactsBestEffort(page, outputDir, "signup_password_before");
       }
 
       const passwordInputs = page.locator('input[type="password"]');
       const pwdCount = await passwordInputs.count();
       if (pwdCount === 0) {
-        await fillInput(page, 'input[name="password"]', password);
+        await fillInput(page, 'input[name="password"]', workingPassword);
       } else {
         for (let i = 0; i < pwdCount; i += 1) {
           const input = passwordInputs.nth(i);
           await input.fill("");
-          await input.type(password, { delay: randomInt(55, 135) });
+          await input.type(workingPassword, { delay: randomInt(55, 135) });
         }
       }
 
@@ -4134,17 +4739,30 @@ async function completeSignup(
         continue;
       }
 
-      const passwordDiag = await page.evaluate(() => {
-        const value = (document.querySelector('input[name="password"]') as HTMLInputElement | null)?.value || "";
-        return {
-          len: value.length,
-          lower: /[a-z]/.test(value),
-          upper: /[A-Z]/.test(value),
-          digit: /\d/.test(value),
-          special: /[^A-Za-z0-9]/.test(value),
-        };
-      });
+      const passwordDiag = await collectPasswordStrengthSnapshot(page).catch(() => ({
+        len: workingPassword.length,
+        lower: /[a-z]/.test(workingPassword),
+        upper: /[A-Z]/.test(workingPassword),
+        digit: /\d/.test(workingPassword),
+        special: /[^A-Za-z0-9]/.test(workingPassword),
+        tooWeak: false,
+        visiblePolicyErrors: [],
+      }));
       log(`signup password diag attempt=${attempt} ${JSON.stringify(passwordDiag)}`);
+      const passwordLooksWeak =
+        passwordDiag.len < 8 ||
+        [passwordDiag.lower, passwordDiag.upper, passwordDiag.digit, passwordDiag.special].filter(Boolean).length < 3 ||
+        passwordDiag.tooWeak;
+      if (passwordLooksWeak) {
+        if (!isCompliantGeneratedPassword(workingPassword)) {
+          workingPassword = randomPassword();
+          log(`signup password regenerated due to weak generator output (attempt=${attempt})`);
+        } else {
+          log(`signup password refill requested due to weak policy signal (attempt=${attempt})`);
+        }
+        await page.waitForTimeout(randomInt(500, 1100));
+        continue;
+      }
 
       await page.waitForTimeout(randomInt(900, 2600));
       if (allowSubmitWithoutCaptcha) {
@@ -4154,14 +4772,12 @@ async function completeSignup(
       await page.waitForTimeout(2200);
 
       if (attempt === 1) {
-        await writeFile(new URL("signup_password_after1.html", outputDir), await page.content(), "utf8");
-        const snap = await page.screenshot({ fullPage: true });
-        await writeFile(new URL("signup_password_after1.png", outputDir), snap);
+        await writePageArtifactsBestEffort(page, outputDir, "signup_password_after1");
       }
 
-      if (!/\/u\/signup\/password/i.test(page.url())) {
-        return;
-      }
+        if (!/\/u\/signup\/password/i.test(page.url())) {
+          return workingPassword;
+        }
 
       const currentCaptchaSrc =
         (await page
@@ -4205,20 +4821,56 @@ async function completeSignup(
         }
         if (tokenOutcome.status === "token_ready") {
           log(`signup password managed challenge token ready after submit (attempt=${attempt})`);
+          await waitForManagedChallengeDismissal(page, "signup", 6_000);
+          let submitTriggered = false;
           await clickSubmit(page);
+          submitTriggered = await waitForAuthFormPostResponse(page, /\/u\/signup\/password/i, 8_000);
+          if (!submitTriggered && /\/u\/signup\/password/i.test(page.url())) {
+            await dispatchEnterViaCdp(page);
+            log("signup password post-challenge submit fallback via cdp Enter");
+            submitTriggered = await waitForAuthFormPostResponse(page, /\/u\/signup\/password/i, 6_000);
+          }
           try {
             await page.waitForURL(/app\.tavily\.com\/home|\/u\/signup\/password/i, { timeout: 15_000 });
           } catch {
             await page.waitForTimeout(1800);
           }
           if (!/\/u\/signup\/password/i.test(page.url())) {
-            return;
+            return workingPassword;
+          }
+          if (!submitTriggered) {
+            log(`signup password post-challenge submit did not trigger POST (attempt=${attempt}), treat as suspicious`);
+            throw new Error("risk_control_suspicious_activity");
           }
         }
       }
       const postSubmitErrorCodes = await collectVisibleErrorCodes(page).catch(() => []);
       if (postSubmitErrorCodes.length > 0) {
         log(`signup password error codes (attempt=${attempt}): ${postSubmitErrorCodes.join(", ")}`);
+      }
+      const hasTooWeakMarker = formErrors.some((text) => /password is too weak/i.test(text));
+      const hasChallengeLoadMarker = formErrors.some((text) => /we couldn.?t load the security challenge/i.test(text));
+      const hasUsersValidationCode = postSubmitErrorCodes.some((code) => /auth0-users-validation/i.test(code));
+      if ((hasTooWeakMarker || hasUsersValidationCode) && !hasChallengeLoadMarker) {
+        if (attempt >= passwordAttemptMax) {
+          throw new Error("signup_password_step_failed");
+        }
+        const previousPassword = workingPassword;
+        workingPassword = randomPassword();
+        log(
+          `signup password rejected by validation (attempt=${attempt}), rotating password len=${previousPassword.length}->${workingPassword.length}`,
+        );
+        await page.waitForTimeout(randomInt(700, 1500));
+        continue;
+      }
+      if (hasChallengeLoadMarker) {
+        if (attempt >= passwordAttemptMax) {
+          throw new Error("signup_password_captcha_missing");
+        }
+        log(`signup password challenge failed to hydrate after submit (attempt=${attempt}), reloading`);
+        await safeGoto(page, page.url());
+        await page.waitForTimeout(randomInt(1200, 2400));
+        continue;
       }
       const explicitRejection = detectExplicitFormRejection(formErrors, postSubmitErrorCodes);
       if (explicitRejection === "risk_control_ip_rate_limit" || hasIpRateLimitMarker) {
@@ -4302,6 +4954,8 @@ async function completeSignup(
     }
     throw new Error(`signup password step failed after ${passwordAttemptMax} attempts`);
   }
+
+  return password;
 }
 
 async function loginAndReachHome(
@@ -4578,6 +5232,7 @@ function loadConfig(): AppConfig {
     inspectBrowserEngine: envInspectBrowserEngine,
     chromeExecutablePath: resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
     chromeNativeAutomation: toBool(process.env.CHROME_NATIVE_AUTOMATION, true),
+    chromeActivateOnLaunch: toBool(process.env.CHROME_ACTIVATE_ON_LAUNCH, true),
     chromeIdentityOverride: toBool(process.env.CHROME_IDENTITY_OVERRIDE, true),
     chromeStealthJsEnabled: toBool(process.env.CHROME_STEALTH_JS_ENABLED, true),
     chromeWebrtcHardened: toBool(process.env.CHROME_WEBRTC_HARDENED, true),
@@ -4683,7 +5338,13 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/challenge_unresponsive|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|proxy_ip_quota_exceeded/i.test(
+  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
+    message,
+  );
+}
+
+function shouldAbortBatchFailure(message: string): boolean {
+  return /browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty|Target page, context or browser has been closed|page has been closed|context has been closed|browser has been closed/i.test(
     message,
   );
 }
@@ -4929,7 +5590,7 @@ async function launchBrowserWithEngine(
       options.executablePath = cfg.chromeExecutablePath;
     }
     const browser = await chromium.launch(options);
-    if (process.platform === "darwin" && mode === "headed") {
+    if (process.platform === "darwin" && mode === "headed" && cfg.chromeActivateOnLaunch) {
       await activateMacApp("Google Chrome");
     }
     return browser;
@@ -4948,19 +5609,41 @@ async function launchBrowserWithEngine(
   })) as Browser;
 }
 
-function createChildProcessStopper(child: ReturnType<typeof spawn>): () => Promise<void> {
+function trySignalChildProcess(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (!pid) return;
+  try {
+    process.kill(-pid, signal);
+    return;
+  } catch {
+    // fall back to the direct child pid when no dedicated process group exists
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // ignore races while shutting down
+  }
+}
+
+function createChildProcessStopper(child: ReturnType<typeof spawn>, profileDir?: string): () => Promise<void> {
   let stopping = false;
   return async () => {
     if (stopping) return;
     stopping = true;
-    if (child.exitCode != null) return;
-    child.kill("SIGTERM");
-    const deadline = Date.now() + 5000;
-    while (Date.now() < deadline) {
-      if (child.exitCode != null) return;
-      await delay(150);
+    if (child.exitCode == null) {
+      trySignalChildProcess(child, "SIGTERM");
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        if (child.exitCode != null) break;
+        await delay(150);
+      }
+      if (child.exitCode == null) {
+        trySignalChildProcess(child, "SIGKILL");
+      }
     }
-    child.kill("SIGKILL");
+    if (profileDir) {
+      await cleanupManagedChromeProcesses(profileDir).catch(() => {});
+    }
   };
 }
 
@@ -4975,9 +5658,111 @@ async function activateMacApp(appName: string): Promise<void> {
   });
 }
 
+async function readPsTable(): Promise<Array<{ pid: number; pgid: number; command: string }>> {
+  return await new Promise((resolve) => {
+    const child = spawn("ps", ["-axo", "pid=,pgid=,command="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    const finish = () => {
+      const rows = stdout
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const match = line.match(/^(\d+)\s+(\d+)\s+(.*)$/);
+          if (!match) return null;
+          return {
+            pid: Number(match[1]),
+            pgid: Number(match[2]),
+            command: match[3] || "",
+          };
+        })
+        .filter((row): row is { pid: number; pgid: number; command: string } => Boolean(row));
+      resolve(rows);
+    };
+    child.once("error", () => resolve([]));
+    child.once("close", finish);
+  });
+}
+
+function normalizeProfileDir(profileDir: string): string {
+  return path.resolve(profileDir).replace(/[\/]+$/, "");
+}
+
+function commandMatchesProfileDir(command: string, profileDir: string): boolean {
+  if (!command || !profileDir) return false;
+  return command.includes(`--user-data-dir=${profileDir}`);
+}
+
+async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> {
+  const normalizedProfileDir = normalizeProfileDir(profileDir);
+  const collectMatched = async () =>
+    (await readPsTable()).filter((entry) => commandMatchesProfileDir(entry.command, normalizedProfileDir));
+
+  let matched = await collectMatched();
+  if (matched.length === 0) return;
+
+  const signalMatched = (signal: NodeJS.Signals, rows: Array<{ pid: number; pgid: number; command: string }>) => {
+    const pgids = Array.from(new Set(rows.map((entry) => entry.pgid).filter((pgid) => pgid > 1)));
+    for (const pgid of pgids) {
+      try {
+        process.kill(-pgid, signal);
+      } catch {
+        // ignore vanished groups
+      }
+    }
+    for (const entry of rows) {
+      try {
+        process.kill(entry.pid, signal);
+      } catch {
+        // ignore vanished children
+      }
+    }
+  };
+
+  signalMatched("SIGTERM", matched);
+  const gracefulDeadline = Date.now() + 4_000;
+  while (Date.now() < gracefulDeadline) {
+    await delay(150);
+    matched = await collectMatched();
+    if (matched.length === 0) return;
+  }
+
+  signalMatched("SIGKILL", matched);
+  const forceDeadline = Date.now() + 2_000;
+  while (Date.now() < forceDeadline) {
+    await delay(120);
+    matched = await collectMatched();
+    if (matched.length === 0) return;
+  }
+}
+
+async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
+  const normalizedBaseDir = `${normalizeProfileDir(baseDir)}${pathSep}`;
+  const processes = await readPsTable();
+  const profileDirs = new Set<string>();
+  for (const entry of processes) {
+    const match = entry.command.match(/--user-data-dir=([^\s]+)/);
+    const profileDir = match?.[1]?.trim();
+    if (!profileDir) continue;
+    const normalizedProfileDir = normalizeProfileDir(profileDir);
+    if (normalizedProfileDir.startsWith(normalizedBaseDir)) {
+      profileDirs.add(normalizedProfileDir);
+    }
+  }
+  for (const profileDir of profileDirs) {
+    await cleanupManagedChromeProcesses(profileDir);
+  }
+}
+
 function buildChromeProfileCandidates(baseDir: string): string[] {
   const runProfile = path.join(baseDir, `run-${Date.now()}-${randomInt(1000, 9999)}`);
-  return [runProfile, baseDir];
+  // Each registration attempt must get its own isolated Chrome profile.
+  return [runProfile];
 }
 
 async function resolveDebuggingPort(preferredPort: number): Promise<number> {
@@ -5069,6 +5854,7 @@ async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promis
 
 async function launchNativeChromeCdp(
   cfg: AppConfig,
+  mode: "headed" | "headless",
   proxyServer: string,
   locale: string,
 ): Promise<{
@@ -5089,6 +5875,8 @@ async function launchNativeChromeCdp(
     const usingBaseProfile = i > 0;
     await mkdir(profileDir, { recursive: true });
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
+    // Open the IP page first and Tavily second so Chrome keeps Tavily as the visible active tab.
+    const startupTargets = [SINGLE_BROWSER_IP_PROBE_TARGET.url, "https://app.tavily.com/"];
     const args = [
       `--remote-debugging-port=${debugPort}`,
       "--remote-debugging-address=127.0.0.1",
@@ -5098,13 +5886,20 @@ async function launchNativeChromeCdp(
       `--lang=${locale}`,
       "--no-first-run",
       "--no-default-browser-check",
+      "--disable-background-mode",
+      "--disable-background-networking",
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
-      "--new-window",
     ];
+    if (mode === "headless") {
+      args.push("--headless=new", "--hide-scrollbars", "--mute-audio", ...startupTargets);
+    } else {
+      args.push("--new-window", ...startupTargets);
+    }
 
-    const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore" });
-    const stop = createChildProcessStopper(child);
+    const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore", detached: true });
+    child.unref();
+    const stop = createChildProcessStopper(child, profileDir);
     await delay(1800);
     if (child.exitCode != null) {
       lastError = new Error(
@@ -5114,7 +5909,9 @@ async function launchNativeChromeCdp(
     }
 
     try {
-      await activateMacApp("Google Chrome");
+      if (mode === "headed" && cfg.chromeActivateOnLaunch) {
+        await activateMacApp("Google Chrome");
+      }
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
       const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
@@ -5273,10 +6070,10 @@ async function configureNativeChromePage(
 
 function shouldUseNativeChromeAutomation(
   browserEngine: BrowserEngine,
-  mode: "headed" | "headless",
+  _mode: "headed" | "headless",
   enabled: boolean,
 ): boolean {
-  if (browserEngine !== "chrome" || mode !== "headed" || !enabled) return false;
+  if (browserEngine !== "chrome" || !enabled) return false;
   return true;
 }
 
@@ -5291,7 +6088,7 @@ async function launchNativeChromeInspect(
   if (!cfg.chromeExecutablePath) {
     throw new Error("chrome executable path is not configured");
   }
-  const targets = ["https://app.tavily.com/", SINGLE_BROWSER_IP_PROBE_TARGET.url];
+  const targets = [SINGLE_BROWSER_IP_PROBE_TARGET.url, "https://app.tavily.com/"];
   await mkdir(cfg.inspectChromeProfileDir, { recursive: true });
 
   const args = [
@@ -5300,18 +6097,24 @@ async function launchNativeChromeInspect(
     `--lang=${locale}`,
     ...getChromeVisualArgs(),
     ...getChromeWebRtcPolicyArgs(cfg),
+    "--disable-background-mode",
+    "--disable-background-networking",
     "--new-window",
     ...targets,
   ];
   const child = spawn(cfg.chromeExecutablePath, args, {
     stdio: "ignore",
+    detached: true,
   });
-  const stop = createChildProcessStopper(child);
+  child.unref();
+  const stop = createChildProcessStopper(child, cfg.inspectChromeProfileDir);
   await delay(1800);
   if (child.exitCode != null) {
     throw new Error(`native chrome exited early: ${child.exitCode}`);
   }
-  await activateMacApp("Google Chrome");
+  if (cfg.chromeActivateOnLaunch) {
+    await activateMacApp("Google Chrome");
+  }
   return {
     stop,
     details: {
@@ -5449,6 +6252,7 @@ async function prepareSignupTask(
   activeProxyNames: Set<string>,
   activeProxyIps: Set<string>,
   taskOrdinal: number,
+  preloadMailbox: boolean,
 ): Promise<PreparedSignupTask> {
   const password = cfg.existingPassword || randomPassword();
   const ipQuotaBlocked = new Set<string>();
@@ -5488,11 +6292,16 @@ async function prepareSignupTask(
     if (proxyIp) activeProxyIps.add(proxyIp);
 
     try {
+      const mailboxPromise =
+        preloadMailbox && !cfg.existingEmail
+          ? createTaskMailboxSession(cfg, batchId, taskId, selectedProxy.name, proxyIp || undefined)
+          : null;
       return {
         taskId,
         email: cfg.existingEmail || "",
         password,
         mailbox: null,
+        mailboxPromise,
         proxyName: selectedProxy.name,
         proxyIp: proxyIp || undefined,
         proxyGeo: compactGeo(selectedProxy.geo),
@@ -5575,6 +6384,8 @@ async function runSingleMode(
   let browser: Browser | null = null;
   let context: any = null;
   let page: any = null;
+  let ipProbePage: any = null;
+  let ipProbePreloadPromise: Promise<void> | null = null;
   let nativeChromeStop: (() => Promise<void>) | null = null;
   let nativeChromeContext: any = null;
   let nativeChromeMode: "cdp" | "persistent" | null = null;
@@ -5878,7 +6689,7 @@ async function runSingleMode(
     const launchBrowser = async (): Promise<Browser> => {
       if (useNativeChrome) {
         try {
-          const launched = await launchNativeChromeCdp(cfg, mihomoController.proxyServer, locale);
+          const launched = await launchNativeChromeCdp(cfg, mode, mihomoController.proxyServer, locale);
           nativeChromeMode = "cdp";
           nativeChromeStop = launched.stop;
           nativeChromeContext = launched.context;
@@ -5897,6 +6708,11 @@ async function runSingleMode(
     };
 
     const closeBrowserSession = async (): Promise<void> => {
+      ipProbePreloadPromise = null;
+      if (ipProbePage) {
+        await ipProbePage.close().catch(() => {});
+        ipProbePage = null;
+      }
       if (context) {
         if (!useNativeChrome) {
           await context.close().catch(() => {});
@@ -5948,6 +6764,7 @@ async function runSingleMode(
     };
 
     const rebuildPage = async (): Promise<void> => {
+      ipProbePage = null;
       if (context && !useNativeChrome) {
         await context.close().catch(() => {});
       }
@@ -5956,15 +6773,37 @@ async function runSingleMode(
         if (!context) {
           throw new Error("native chrome context missing");
         }
-        const pages = typeof context.pages === "function" ? context.pages() : [];
-        for (const existing of pages) {
-          await existing.close().catch(() => {});
-        }
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, geo.timezone, false);
         }
         await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled && !useNativeChrome);
-        page = await context.newPage();
+        const probeHost = new URL(SINGLE_BROWSER_IP_PROBE_TARGET.url).hostname.toLowerCase();
+        const existingPages = typeof context.pages === "function" ? context.pages() : [];
+        const disposablePages: any[] = [];
+        for (const existing of existingPages) {
+          const currentUrl = typeof existing?.url === "function" ? String(existing.url() || "") : "";
+          let currentHost = "";
+          try {
+            currentHost = currentUrl ? new URL(currentUrl).hostname.toLowerCase() : "";
+          } catch {
+            currentHost = "";
+          }
+          if (!ipProbePage && currentHost && (currentHost === probeHost || currentHost.endsWith(`.${probeHost}`))) {
+            ipProbePage = existing;
+            continue;
+          }
+          if (!page) {
+            page = existing;
+            continue;
+          }
+          disposablePages.push(existing);
+        }
+        for (const extraPage of disposablePages) {
+          await extraPage.close().catch(() => {});
+        }
+        if (!page) {
+          page = await context.newPage();
+        }
         if (nativeChromeMode === "cdp" && identity) {
           await configureNativeChromePage(
             context,
@@ -5982,6 +6821,25 @@ async function runSingleMode(
         page = await context.newPage();
       }
       bindPageEvents(page);
+      const preloadTasks: Promise<unknown>[] = [
+        /app\.tavily\.com/i.test(String(page.url?.() || ""))
+          ? page.waitForLoadState("domcontentloaded", { timeout: 30_000 }).catch(() => {})
+          : safeGoto(page, "https://app.tavily.com/", 30_000).catch(() => {}),
+      ];
+      if (context && !ipProbePage) {
+        ipProbePage = await context.newPage().catch(() => null);
+      }
+      if (ipProbePage) {
+        const ipProbeUrl = String(ipProbePage.url?.() || "");
+        ipProbePreloadPromise = (/ifconfig\.me/i.test(ipProbeUrl)
+          ? ipProbePage.waitForLoadState("domcontentloaded", { timeout: 15_000 })
+          : safeGoto(ipProbePage, SINGLE_BROWSER_IP_PROBE_TARGET.url, 15_000).then(async () => {
+              await ipProbePage.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
+            })
+        ).catch(() => {});
+      }
+      await Promise.allSettled(preloadTasks);
+      await page.bringToFront().catch(() => {});
     };
 
     const launchAndPreparePage = async (recordIdentityNote: boolean): Promise<void> => {
@@ -6037,7 +6895,17 @@ async function runSingleMode(
     persistLedgerRecord("after-browser-launch");
 
     failureStage = "browser_ip_probe";
-    let browserIpProbe = await collectSingleBrowserIpProbe(page);
+    const pendingIpProbePreload: Promise<void> | null = ipProbePreloadPromise;
+    if (pendingIpProbePreload) {
+      await pendingIpProbePreload;
+      ipProbePreloadPromise = null;
+    }
+    let browserIpProbe =
+      ipProbePage != null
+        ? await safeCollectIpProbeSnapshot(ipProbePage, SINGLE_BROWSER_IP_PROBE_TARGET, 4500)
+        : context != null
+          ? await collectIpProbeSnapshotInContext(context, SINGLE_BROWSER_IP_PROBE_TARGET, 4500)
+        : await collectSingleBrowserIpProbe(page);
     let browserObservedIp = normalizeIp(browserIpProbe.ip || browserIpProbe.ipCandidates?.[0]);
     if (!browserObservedIp && browser && browserEngine === "chrome" && process.platform === "darwin") {
       log(`browser ip probe fallback via minimal context: ${browserIpProbe.error || browserIpProbe.url}`);
@@ -6100,6 +6968,40 @@ async function runSingleMode(
     if (cfg.existingEmail && cfg.existingPassword) {
       notes.push("skip signup (existing account)");
     } else {
+      if (!mailbox && preparedTask?.mailboxPromise) {
+        try {
+          mailbox = await preparedTask.mailboxPromise;
+          preparedTask.mailboxPromise = null;
+          preparedTask.mailbox = mailbox;
+          email = mailbox.address;
+          password = password || randomPassword();
+          notes.push(`${mailbox.provider} mailbox preloaded via proxy (${mailbox.accountId})`);
+          log(`[${mode}] ${mailbox.provider} mailbox preloaded via proxy ${browserObservedIp}: ${email}`);
+          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          if (!emailSet) {
+            emailSet = new Set<string>();
+            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+          }
+          if (!emailSet.has(email) && emailSet.size >= 3) {
+            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+          }
+          emailSet.add(email);
+          preparedTask.ipEmailOrdinal = emailSet.size;
+          notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+          ledgerRecord.emailAddress = email;
+          const mailboxSplit = splitEmail(email);
+          ledgerRecord.emailDomain = mailboxSplit.domain;
+          ledgerRecord.emailLocalLen = mailboxSplit.localLen;
+          ledgerRecord.password = password;
+          ledgerRecord.notesJson = safeJsonStringify(notes);
+          persistLedgerRecord("after-mailbox-preload");
+        } catch (error) {
+          preparedTask.mailboxPromise = null;
+          const message = error instanceof Error ? error.message : String(error);
+          notes.push(`mailbox preload failed: ${message.split("\n")[0]}`);
+        }
+      }
+
       if (!mailbox) {
         if (!email) {
           let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
@@ -6148,7 +7050,15 @@ async function runSingleMode(
 
       for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
         try {
-          await completeSignup(page, solver, email, password, cfg, diagOutputDir, signupAttemptPolicy, {
+          password = await completeSignup(
+            page,
+            solver,
+            email,
+            password,
+            cfg,
+            diagOutputDir,
+            signupAttemptPolicy,
+            {
             onPasswordSnapshot: (snapshot) => {
               passwordStepSnapshots.push(snapshot);
               if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
@@ -6160,6 +7070,7 @@ async function runSingleMode(
           });
           notes.push("signup flow submitted");
           ledgerRecord.signupSubmitted = true;
+          ledgerRecord.password = password;
           ledgerRecord.notesJson = safeJsonStringify(notes);
           persistLedgerRecord("after-signup-submit");
           break;
@@ -6528,6 +7439,8 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
 
 async function run(): Promise<void> {
   const cfg = loadConfig();
+  await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
+  await cleanupManagedChromeProcessesUnder(cfg.inspectChromeProfileDir).catch(() => {});
   const args = parseArgs(process.argv.slice(2));
   if (args.inspectSites) {
     log("start inspect-sites mode (headed)");
@@ -6570,6 +7483,7 @@ async function run(): Promise<void> {
     const results: ResultPayload[] = [];
     const failures: Array<{ runIndex: number; taskId?: string; error: string }> = [];
     const taskRetryMax = 3;
+    const mailboxPreloadTarget = Math.max(1, Math.ceil(args.need * 0.25));
     const ipEmailUsage = new Map<string, Set<string>>();
     const runtimeRecentProxyIps: string[] = [];
     const activeProxyNames = new Set<string>();
@@ -6595,6 +7509,7 @@ async function run(): Promise<void> {
         activeProxyNames,
         activeProxyIps,
         runIndex,
+        runIndex <= mailboxPreloadTarget,
       );
       let lastError: Error | null = null;
 
@@ -6655,7 +7570,9 @@ async function run(): Promise<void> {
     } else {
       const need = args.need;
       const parallel = args.parallel;
+      const maxBatchAttempts = Math.max(need, need * 5);
       const running = new Set<Promise<void>>();
+      let batchAbortError: Error | null = null;
       let launched = 0;
 
       const launch = (): void => {
@@ -6671,6 +7588,10 @@ async function run(): Promise<void> {
             const message = error instanceof Error ? error.message : String(error);
             failures.push({ runIndex, error: message });
             log(`[batch] fail run=${runIndex} success=${results.length}/${need}: ${message}`);
+            if (!batchAbortError && shouldAbortBatchFailure(message)) {
+              batchAbortError = error instanceof Error ? error : new Error(message);
+              log(`[batch] abort requested after run=${runIndex}: ${message}`);
+            }
           }
         })().finally(() => {
           running.delete(p);
@@ -6679,16 +7600,32 @@ async function run(): Promise<void> {
       };
 
       while (results.length < need) {
+        if (batchAbortError && running.size === 0) {
+          throw batchAbortError;
+        }
         while (running.size < parallel && results.length + running.size < need) {
+          if (batchAbortError) break;
+          if (launched >= maxBatchAttempts) break;
           launch();
         }
         if (running.size === 0) {
+          if (launched >= maxBatchAttempts) {
+            throw new Error(
+              `batch attempt limit reached: success=${results.length}/${need} launched=${launched}/${maxBatchAttempts}`,
+            );
+          }
           throw new Error(`batch scheduler stalled: need=${need} success=${results.length}`);
         }
         await Promise.race(Array.from(running));
       }
 
       await Promise.all(Array.from(running));
+      if (batchAbortError) {
+        throw batchAbortError;
+      }
+      if (results.length < need && launched >= maxBatchAttempts) {
+        throw new Error(`batch attempt limit reached: success=${results.length}/${need} launched=${launched}/${maxBatchAttempts}`);
+      }
       log(`[batch] completed success=${results.length}/${need} failures=${failures.length}`);
     }
 

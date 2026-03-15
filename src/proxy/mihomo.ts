@@ -659,6 +659,9 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
     if (Object.keys(materializedProviders).length > 0) {
       subscription.__materializedProxyProviders = materializedProviders;
     }
+    if (!subscriptionHasUsableNodes(subscription)) {
+      throw new Error("mihomo_subscription_empty");
+    }
     return subscription;
   })();
 
@@ -688,7 +691,20 @@ async function readCachedSubscription(cachePath: string): Promise<Record<string,
   }
 }
 
+function subscriptionHasUsableNodes(payload: Record<string, unknown> | null): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const proxies = Array.isArray(payload.proxies) ? payload.proxies : [];
+  if (proxies.some((item) => item && typeof item === "object" && typeof (item as Record<string, unknown>).name === "string")) {
+    return true;
+  }
+  const providers = (payload["proxy-providers"] || {}) as Record<string, unknown>;
+  if (Object.keys(providers).length > 0) return true;
+  const materialized = (payload.__materializedProxyProviders || {}) as Record<string, unknown>;
+  return Object.keys(materialized).length > 0;
+}
+
 async function writeCachedSubscription(cachePath: string, payload: Record<string, unknown>): Promise<void> {
+  if (!subscriptionHasUsableNodes(payload)) return;
   await mkdir(path.dirname(cachePath), { recursive: true });
   await writeFile(cachePath, `${JSON.stringify(payload)}\n`, "utf8");
 }
@@ -901,11 +917,15 @@ async function writeConfig(cfg: MihomoConfig): Promise<{ configPath: string; pro
     subscription = await fetchSubscription(cfg.subscriptionUrl);
     await writeCachedSubscription(subscriptionCachePath, subscription);
   } catch (error) {
-    const cached = await readCachedSubscription(subscriptionCachePath);
-    if (!cached) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/mihomo_subscription_failed:4\d\d|mihomo_subscription_empty/i.test(message)) {
       throw error;
     }
-    subscription = cached;
+    const cached = await readCachedSubscription(subscriptionCachePath);
+    if (!subscriptionHasUsableNodes(cached)) {
+      throw error;
+    }
+    subscription = cached as Record<string, unknown>;
   }
   const { config, providerNames } = buildConfigObject(cfg, subscription);
   const yaml = yamlStringify(config);
@@ -1001,7 +1021,7 @@ function isNonSelectableProxyName(name: string): boolean {
   const normalized = name.trim();
   if (!normalized) return true;
   if (isReservedProxyName(normalized)) return true;
-  return /剩余流量|套餐到期|到期时间|官网|流量重置|重置时间|会员群|售后|备用网址|公告|通知|过于频繁拉取订阅|频繁拉取/i.test(
+  return /剩余流量|套餐到期|到期时间|官网|流量重置|重置时间|距离下次重置剩余|会员群|售后|备用网址|公告|通知|过于频繁拉取订阅|频繁拉取/i.test(
     normalized,
   );
 }
