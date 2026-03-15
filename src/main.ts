@@ -7444,7 +7444,8 @@ async function run(): Promise<void> {
     } else {
       const need = args.need;
       const parallel = args.parallel;
-      const maxBatchAttempts = Math.max(need, need * 5);
+      const configuredMaxBatchAttempts = toInt(process.env.BATCH_MAX_ATTEMPTS, need * 5);
+      const maxBatchAttempts = Math.max(need, configuredMaxBatchAttempts);
       const running = new Set<Promise<void>>();
       let batchAbortError: Error | null = null;
       let launched = 0;
