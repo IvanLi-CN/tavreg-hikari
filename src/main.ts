@@ -40,11 +40,6 @@ interface CliArgs {
 }
 
 interface AppConfig {
-  openaiBaseUrl: string;
-  openaiKey: string;
-  preferredModel: string;
-  captchaModelCandidateCount: number;
-  strictPreferredModel: boolean;
   runMode: RunMode;
   browserEngine: BrowserEngine;
   inspectBrowserEngine: BrowserEngine;
@@ -59,10 +54,6 @@ interface AppConfig {
   chromeRemoteDebuggingPort: number;
   slowMoMs: number;
   maxCaptchaRounds: number;
-  ocrRetryWindowMs: number;
-  ocrInitialCooldownMs: number;
-  ocrMaxCooldownMs: number;
-  ocrRequestTimeoutMs: number;
   allowPasswordSubmitWithoutCaptcha: boolean;
   humanConfirmBeforeSignup: boolean;
   humanConfirmText: string;
@@ -326,7 +317,6 @@ loadDotenv({ path: ".env.local", quiet: true });
 const OUTPUT_DIR = new URL("../output/", import.meta.url);
 const OUTPUT_PATH = fileURLToPath(OUTPUT_DIR);
 const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
-const MODEL_CACHE_PATH = new URL("ocr-model-cache.json", OUTPUT_DIR);
 const AUTH_CHALLENGE_RESOURCE_RE =
   /(?:challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha|hcaptcha\.com|recaptcha(?:\.net|\.com)|friendly-challenge|cdn\.auth0\.com\/ulp)/i;
 
@@ -1286,6 +1276,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/challenge_unresponsive/i.test(message)) return "challenge_unresponsive";
   if (/risk_control_ip_rate_limit/i.test(message)) return "too_many_signups_same_ip";
   if (risk.hasIpRateLimit) return "too_many_signups_same_ip";
+  if (/mailbox_rate_limited/i.test(message)) return "mailbox_rate_limited";
   if (/signup_password_captcha_missing/i.test(message)) return "signup_password_captcha_missing";
   if (/risk_control_suspicious_activity/i.test(message) || risk.hasSuspiciousActivity) {
     return "risk_control_suspicious_activity";
@@ -1377,48 +1368,12 @@ async function readJsonFile(path: URL): Promise<unknown | null> {
   }
 }
 
-function builtInCaptchaModels(preferred: string): string[] {
-  return Array.from(
-    new Set(
-      [
-        preferred,
-        "Qwen2.5-VL-72B-Instruct",
-        "Qwen3-VL-32B-Instruct",
-        "DeepSeek-OCR",
-        "Qwen2.5-VL-32B-Instruct",
-        "Qwen3-VL-30B-A3B-Instruct",
-      ]
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0),
-    ),
-  );
-}
+class CaptchaSolver {
+  rotatePreferredModel(_reason: string): void {}
 
-async function readCachedModels(preferred: string): Promise<string[]> {
-  const payload = await readJsonFile(MODEL_CACHE_PATH);
-  if (!payload || typeof payload !== "object") {
-    return builtInCaptchaModels(preferred);
+  async solve(_pngData: Buffer): Promise<string> {
+    throw new Error("image_captcha_not_supported");
   }
-
-  const payloadRecord = payload as JsonRecord;
-  const rawModels = payloadRecord.models;
-  const cached = Array.isArray(rawModels)
-    ? rawModels
-        .filter((item: unknown): item is string => typeof item === "string")
-        .map((item: string) => item.trim())
-        .filter((item: string) => item.length > 0)
-    : [];
-  if (cached.length === 0) {
-    return builtInCaptchaModels(preferred);
-  }
-
-  return Array.from(new Set([...cached, ...builtInCaptchaModels(preferred)]));
-}
-
-async function writeCachedModels(models: string[]): Promise<void> {
-  const deduped = Array.from(new Set(models.map((item) => item.trim()).filter((item) => item.length > 0)));
-  if (deduped.length === 0) return;
-  await writeJson(MODEL_CACHE_PATH, { updatedAt: ts(), models: deduped });
 }
 
 type IpProbeScope = "domestic" | "global";
@@ -2095,361 +2050,9 @@ function extractVerificationLinkFromPayload(payload: unknown, allowlist: string[
   return null;
 }
 
-function normalizeModelName(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function isVisionLikeModel(name: string): boolean {
-  return /(vl|vision|ocr)/i.test(name);
-}
-
-function rankVisionModel(name: string): number {
-  const lower = name.toLowerCase();
-  let score = 0;
-  // Empirically the 72B VL model is more stable on Tavily's SVG captcha set.
-  if (/qwen2\.5-vl-72b-instruct/.test(lower)) score += 150;
-  if (/qwen3-vl-32b-instruct/.test(lower)) score += 135;
-  if (/deepseek-ocr/.test(lower)) score += 145;
-  if (/qwen.*instruct/.test(lower)) score += 100;
-  if (/ocr/.test(lower)) score += 95;
-  if (/vl/.test(lower)) score += 55;
-  if (/thinking/.test(lower)) score -= 30;
-  if (/30b|32b|34b/.test(lower)) score += 8;
-  if (/70b|72b/.test(lower)) score += 6;
-  if (/235b|a22b/.test(lower)) score += 3;
-  return score;
-}
-
-function levenshtein(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-
-  const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
-  for (let i = 0; i <= m; i += 1) dp[i]![0] = i;
-  for (let j = 0; j <= n; j += 1) dp[0]![j] = j;
-
-  for (let i = 1; i <= m; i += 1) {
-    for (let j = 1; j <= n; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      dp[i]![j] = Math.min(dp[i - 1]![j]! + 1, dp[i]![j - 1]! + 1, dp[i - 1]![j - 1]! + cost);
-    }
-  }
-
-  return dp[m]![n]!;
-}
-
-async function listModels(cfg: AppConfig): Promise<string[]> {
-  let payload: { data?: Array<{ id?: string }> } | null = null;
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      payload = await httpJson<{ data?: Array<{ id?: string }> }>("GET", `${cfg.openaiBaseUrl.replace(/\/+$/, "")}/models`, {
-        headers: { Authorization: `Bearer ${cfg.openaiKey}` },
-        timeoutMs: 25000,
-      });
-      break;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const transient = /:429:|:5\d\d:|network|timeout/i.test(message);
-      if (!transient || attempt === 5) {
-        lastError = error instanceof Error ? error : new Error(message);
-        break;
-      }
-      const waitMs = 1200 * attempt;
-      log(`models endpoint transient error, retry in ${waitMs}ms (attempt=${attempt})`);
-      await new Promise((resolve) => setTimeout(resolve, waitMs));
-    }
-  }
-  if (!payload) {
-    const fallbackModels = await readCachedModels(cfg.preferredModel);
-    if (fallbackModels.length > 0) {
-      const fallbackSource = await readJsonFile(MODEL_CACHE_PATH) ? "cache+builtins" : "builtins";
-      const reason = lastError ? trunc(lastError.message) : "failed to load models";
-      log(`models endpoint unavailable, use ${fallbackSource} (${fallbackModels.length}) reason=${reason}`);
-      return fallbackModels;
-    }
-    throw lastError || new Error("failed to load models");
-  }
-
-  const models: string[] = [];
-  for (const item of payload.data || []) {
-    if (item && typeof item.id === "string" && item.id.trim()) {
-      models.push(item.id.trim());
-    }
-  }
-  if (models.length === 0) {
-    const fallbackModels = await readCachedModels(cfg.preferredModel);
-    if (fallbackModels.length > 0) {
-      log(`models endpoint returned empty list, use cached/built-in models (${fallbackModels.length})`);
-      return fallbackModels;
-    }
-  } else {
-    await writeCachedModels(models);
-  }
-  return models;
-}
-
-function resolveModelName(preferred: string, allModels: string[]): string {
-  if (allModels.includes(preferred)) {
-    return preferred;
-  }
-
-  const lowerPreferred = preferred.toLowerCase();
-  const caseInsensitive = allModels.find((name) => name.toLowerCase() === lowerPreferred);
-  if (caseInsensitive) {
-    return caseInsensitive;
-  }
-
-  const visionModels = allModels.filter(isVisionLikeModel);
-  if (visionModels.length === 0) {
-    throw new Error("No vision/OCR models found in /models response");
-  }
-
-  const normalizedPreferred = normalizeModelName(preferred);
-  const normalizedExact = visionModels.find((name) => normalizeModelName(name) === normalizedPreferred);
-  if (normalizedExact) {
-    return normalizedExact;
-  }
-
-  let best: { name: string; dist: number } | null = null;
-  for (const name of visionModels) {
-    const dist = levenshtein(normalizedPreferred, normalizeModelName(name));
-    if (!best || dist < best.dist) {
-      best = { name, dist };
-    }
-  }
-
-  const maxAllowedDist = Math.max(2, Math.floor(normalizedPreferred.length * 0.25));
-  if (best && best.dist <= maxAllowedDist) {
-    return best.name;
-  }
-
-  const fallback = [...visionModels].sort((a, b) => rankVisionModel(b) - rankVisionModel(a) || a.localeCompare(b))[0];
-  if (fallback) {
-    log(
-      `MODEL_NAME fallback: requested=${preferred} unavailable, use vision model ${fallback} (candidates=${visionModels.length})`,
-    );
-    return fallback;
-  }
-
-  throw new Error(`no usable vision/OCR model found (requested=${preferred})`);
-}
-
-function resolveCaptchaModelCandidates(preferred: string, allModels: string[], maxCount = 4): string[] {
-  const selected = resolveModelName(preferred, allModels);
-  const limit = Math.max(1, maxCount);
-  const normalizedSelected = normalizeModelName(selected);
-  const visionModels = allModels.filter(isVisionLikeModel);
-  const rankedVision = [...visionModels].sort((a, b) => {
-    const scoreGap = rankVisionModel(b) - rankVisionModel(a);
-    if (scoreGap !== 0) return scoreGap;
-    const distGap =
-      levenshtein(normalizedSelected, normalizeModelName(a)) - levenshtein(normalizedSelected, normalizeModelName(b));
-    if (distGap !== 0) return distGap;
-    return a.localeCompare(b);
-  });
-
-  const candidates = [selected];
-  for (const model of rankedVision) {
-    if (candidates.includes(model)) continue;
-    candidates.push(model);
-    if (candidates.length >= limit) break;
-  }
-
-  if (candidates.length < limit) {
-    for (const model of allModels) {
-      if (candidates.includes(model)) continue;
-      candidates.push(model);
-      if (candidates.length >= limit) break;
-    }
-  }
-  return candidates.slice(0, limit);
-}
-
-class CaptchaSolver {
-  private readonly cfg: AppConfig;
-
-  private readonly models: string[];
-  private preferredModelIndex = 0;
-
-  constructor(cfg: AppConfig, models: string[]) {
-    this.cfg = cfg;
-    const deduped = Array.from(new Set(models.map((item) => item.trim()).filter((item) => item.length > 0)));
-    if (deduped.length === 0) {
-      throw new Error("captcha solver requires at least one model");
-    }
-    this.models = deduped;
-  }
-
-  modelList(): string[] {
-    return [...this.models];
-  }
-
-  rotatePreferredModel(reason: string): void {
-    if (this.models.length <= 1) return;
-    this.preferredModelIndex = (this.preferredModelIndex + 1) % this.models.length;
-    const next = this.models[this.preferredModelIndex]!;
-    log(`captcha solver switched model => ${next} (${reason})`);
-  }
-
-  private orderedModels(): string[] {
-    if (this.models.length <= 1) return [...this.models];
-    const ordered: string[] = [];
-    for (let i = 0; i < this.models.length; i += 1) {
-      ordered.push(this.models[(this.preferredModelIndex + i) % this.models.length]!);
-    }
-    return ordered;
-  }
-
-  private readonly promptVariants = [
-    "Read this captcha exactly. Return exactly 6 letters/digits, keep case, no spaces, no punctuation.",
-  ];
-
-  private extractTextFromResponses(payload: unknown): string {
-    if (!payload || typeof payload !== "object") return "";
-    const record = payload as JsonRecord;
-
-    const outputText = record.output_text;
-    if (typeof outputText === "string" && outputText.trim()) {
-      return outputText;
-    }
-
-    const output = record.output;
-    if (!Array.isArray(output)) return "";
-
-    for (const item of output) {
-      if (!item || typeof item !== "object") continue;
-      const content = (item as JsonRecord).content;
-      if (!Array.isArray(content)) continue;
-      for (const piece of content) {
-        if (!piece || typeof piece !== "object") continue;
-        const text = (piece as JsonRecord).text;
-        if (typeof text === "string" && text.trim()) {
-          return text;
-        }
-      }
-    }
-
-    return "";
-  }
-
-  private async callResponsesWithPrompt(model: string, pngData: Buffer, prompt: string): Promise<string> {
-    const dataUrl = `data:image/png;base64,${pngData.toString("base64")}`;
-    const payload = {
-      model,
-      temperature: 0,
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_text", text: prompt },
-            { type: "input_image", image_url: dataUrl },
-          ],
-        },
-      ],
-    };
-
-    const response = await httpJson("POST", `${this.cfg.openaiBaseUrl.replace(/\/+$/, "")}/responses`, {
-      headers: {
-        Authorization: `Bearer ${this.cfg.openaiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: payload,
-      timeoutMs: Math.max(10000, this.cfg.ocrRequestTimeoutMs),
-    });
-
-    return sanitizeCaptchaText(this.extractTextFromResponses(response));
-  }
-
-  private async callResponses(model: string, pngData: Buffer): Promise<string> {
-    const results: string[] = [];
-    let lastError: Error | null = null;
-
-    for (const prompt of this.promptVariants) {
-      try {
-        const text = await this.callResponsesWithPrompt(model, pngData, prompt);
-        if (!text) continue;
-        results.push(text);
-        if (text.length >= 5 && text.length <= 7) {
-          log(`captcha OCR result (${model}): ${text}`);
-          return text;
-        }
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-
-    if (results.length > 0) {
-      log(`captcha OCR raw results (${model}): ${results.join(", ")}`);
-    }
-    if (lastError) {
-      throw lastError;
-    }
-    throw new Error(`invalid_result:${results.join(",") || "empty"}`);
-  }
-
-  private isTransient(reason: string): boolean {
-    const lower = reason.toLowerCase();
-    return [":429:", ":500:", ":502:", ":503:", ":504:", ":520:", ":521:", ":522:", "timeout", "network", "temporarily unavailable", "rate limit"].some((k) =>
-      lower.includes(k),
-    );
-  }
-
-  async solve(pngData: Buffer): Promise<string> {
-    const deadline = Date.now() + this.cfg.ocrRetryWindowMs;
-    let cooldownMs = Math.max(500, this.cfg.ocrInitialCooldownMs);
-    const errors: string[] = [];
-    let round = 0;
-
-    while (Date.now() < deadline) {
-      round += 1;
-      let hasTransient = false;
-      const modelOrder = this.orderedModels();
-      for (const model of modelOrder) {
-        try {
-          const solved = await this.callResponses(model, pngData);
-          if (solved.length >= 5 && solved.length <= 7) {
-            return solved;
-          }
-          errors.push(`round${round}:${model}:invalid_length:${solved}`);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          errors.push(`round${round}:${model}:${reason}`);
-          if (this.isTransient(reason)) {
-            hasTransient = true;
-            continue;
-          }
-        }
-        await delay(100);
-      }
-
-      if (!hasTransient) {
-        break;
-      }
-
-      const adaptiveCooldownMs = Math.min(cooldownMs, 3200);
-      const waitMs = Math.min(adaptiveCooldownMs, Math.max(0, deadline - Date.now()));
-      if (waitMs <= 0) break;
-      log(`captcha OCR upstream transient (round=${round}, models=${this.models.length}), wait ${waitMs}ms`);
-      await delay(waitMs);
-      cooldownMs = Math.min(Math.floor(cooldownMs * 1.45), Math.max(3200, this.cfg.ocrMaxCooldownMs));
-    }
-
-    throw new Error(
-      `captcha OCR failed within retry window. models=${this.models.join(",")} last_errors=${errors
-        .slice(-10)
-        .join(" | ")}`,
-    );
-  }
-}
-
 function isMailboxTransientError(reason: string): boolean {
   const lower = reason.toLowerCase();
   return [
-    ":429:",
     ":500:",
     ":502:",
     ":503:",
@@ -2464,6 +2067,11 @@ function isMailboxTransientError(reason: string): boolean {
     "eai_again",
     "ecconn",
   ].some((needle) => lower.includes(needle));
+}
+
+function isMailboxRateLimitError(reason: string): boolean {
+  const lower = reason.toLowerCase();
+  return [":429:", "too many requests", "rate limit"].some((needle) => lower.includes(needle));
 }
 
 function normalizeVmailBaseUrl(raw: string): string {
@@ -2598,6 +2206,9 @@ async function createDuckmailSession(cfg: AppConfig, proxyUrl?: string): Promise
       break;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isMailboxRateLimitError(message)) {
+        throw new Error("mailbox_rate_limited");
+      }
       const retryable = isTransient(message) || isAddressConflict(message);
       if (!retryable || attempt === createAttempts) {
         throw error;
@@ -2710,6 +2321,10 @@ async function createVmailSession(cfg: AppConfig, proxyUrl?: string): Promise<Ma
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isMailboxRateLimitError(message)) {
+        lastError = new Error("mailbox_rate_limited");
+        break;
+      }
       const allowedDomains = parseVmailAllowedDomains(message);
       if (allowedDomains.length > 0) {
         domainCandidates = allowedDomains.filter((item, index, arr) => arr.indexOf(item) === index);
@@ -2762,10 +2377,19 @@ async function createGptmailSession(cfg: AppConfig, proxyUrl?: string): Promise<
   }
 
   const bootstrapAuth = extractGptmailBootstrapAuth(landingHtml);
-  const generated = await httpJson<JsonRecord>("GET", `${baseUrl}/api/generate-email`, {
-    headers: buildGptmailHeaders(gmSid, bootstrapAuth.token),
-    proxyUrl,
-  });
+  let generated: JsonRecord;
+  try {
+    generated = await httpJson<JsonRecord>("GET", `${baseUrl}/api/generate-email`, {
+      headers: buildGptmailHeaders(gmSid, bootstrapAuth.token),
+      proxyUrl,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isMailboxRateLimitError(message)) {
+      throw new Error("mailbox_rate_limited");
+    }
+    throw error;
+  }
   const generatedData =
     generated.data && typeof generated.data === "object" ? (generated.data as JsonRecord) : (generated as JsonRecord);
   const address = typeof generatedData.email === "string" ? generatedData.email.trim() : "";
@@ -2846,6 +2470,9 @@ async function waitForVerificationLink(
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (isMailboxRateLimitError(message)) {
+        throw new Error("mailbox_rate_limited");
+      }
       if (!isMailboxTransientError(message)) {
         throw error;
       }
@@ -2887,6 +2514,9 @@ async function waitForVerificationLink(
         if (fromDetail) return fromDetail;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        if (isMailboxRateLimitError(message)) {
+          throw new Error("mailbox_rate_limited");
+        }
         if (!isMailboxTransientError(message)) {
           throw error;
         }
@@ -4297,37 +3927,8 @@ async function solveCaptchaForm(
       }
     }
 
-    let previousCaptchaSrc = "";
     if (hasCaptcha) {
-      previousCaptchaSrc = await page.$eval('img[alt="captcha"]', (el: any) => String(el.src || ""));
-      const pngData = await getProcessedCaptchaPng(page);
-      const solved = await solver.solve(pngData);
-      const captchaCode = normalizeCaptchaForSubmit(solved);
-      if (solved.length !== captchaCode.length) {
-        log(`${formKind} captcha normalized from len=${solved.length} to len=${captchaCode.length}`);
-      }
-      if (captchaCode.length !== 6) {
-        log(`${formKind} captcha OCR len=${captchaCode.length} (expect=6), refresh and retry`);
-        solver.rotatePreferredModel(`${formKind}_ocr_len_${captchaCode.length}`);
-        let refreshed = false;
-        if (previousCaptchaSrc) {
-          refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
-        }
-        if (!refreshed && attempt < maxRounds) {
-          await safeGoto(page, page.url());
-          await page.waitForTimeout(randomInt(900, 1800));
-        }
-        await page.waitForTimeout(700);
-        continue;
-      }
-      const captchaInputCount = await page.locator('input[name="captcha"]').count();
-      if (captchaInputCount > 0) {
-        await fillInput(page, 'input[name="captcha"]', captchaCode);
-      } else {
-        log(`${formKind} captcha input missing after image load, retrying without submit`);
-        await page.waitForTimeout(900);
-        continue;
-      }
+      throw new Error(`${formKind}_image_captcha_not_supported`);
     }
 
     await fillInput(page, emailSelector, email);
@@ -4497,11 +4098,6 @@ async function solveCaptchaForm(
       }
     }
 
-    const currentCaptchaSrc = hasCaptcha
-      ? ((await page
-          .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
-          .catch(() => "")) || "")
-      : "";
     const formErrors = await collectVisibleFormErrors(page).catch(() => []);
     const errorCodes = await collectVisibleErrorCodes(page).catch(() => []);
     if (errorCodes.length > 0) {
@@ -4512,24 +4108,8 @@ async function solveCaptchaForm(
       throw new Error(explicitRejection);
     }
 
-    if (hasCaptcha && currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc) {
-      solver.rotatePreferredModel(`${formKind}_captcha_rejected`);
-      log(`${formKind} captcha refreshed after attempt ${attempt}, retrying`);
-      continue;
-    }
-
-    if (hasCaptcha && previousCaptchaSrc) {
-      const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
-      if (forcedRefresh) {
-        solver.rotatePreferredModel(`${formKind}_captcha_force_refresh`);
-        log(`${formKind} captcha force-refreshed after attempt ${attempt}, retrying`);
-        continue;
-      }
-    }
-
     if (hasCaptcha) {
-      solver.rotatePreferredModel(`${formKind}_captcha_retry`);
-      log(`${formKind} captcha rejected on attempt ${attempt}, retrying`);
+      log(`${formKind} image captcha rejected on attempt ${attempt}`);
     } else {
       log(`${formKind} challenge not satisfied on attempt ${attempt}, retrying`);
     }
@@ -4590,7 +4170,6 @@ async function completeSignup(
     let invalidCaptchaSeenCount = 0;
     let captchaMissingStreak = 0;
     for (let attempt = 1; attempt <= passwordAttemptMax; attempt += 1) {
-      let previousCaptchaSrc = "";
       if (attempt === 1) {
         const fingerprintSnapshot = await collectBrowserFingerprintSnapshot(page).catch(() => null);
         if (fingerprintSnapshot) {
@@ -4644,32 +4223,7 @@ async function completeSignup(
           throw new Error("signup_password_captcha_missing");
         }
         captchaMissingStreak = 0;
-        previousCaptchaSrc = await page
-          .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
-          .catch(() => "");
-        const pngData = await getProcessedCaptchaPng(page);
-        const solved = await solver.solve(pngData);
-        const code = normalizeCaptchaForSubmit(solved);
-        if (solved.length !== code.length) {
-          log(`signup password captcha normalized from len=${solved.length} to len=${code.length}`);
-        }
-        if (code.length !== 6) {
-          log(`signup password captcha OCR len=${code.length} (expect=6), refresh and retry`);
-          solver.rotatePreferredModel(`signup_password_ocr_len_${code.length}`);
-          let refreshed = false;
-          if (previousCaptchaSrc) {
-            refreshed = await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
-          }
-          if (!refreshed && attempt < passwordAttemptMax) {
-            await safeGoto(page, page.url());
-            await page.waitForTimeout(randomInt(900, 1800));
-          }
-          await page.waitForTimeout(700);
-          continue;
-        }
-        await fillInput(page, 'input[name="captcha"]', code);
-        solvedCaptchaCode = code;
-        challengeReadyForSubmit = true;
+        throw new Error("signup_password_image_captcha_not_supported");
       } else {
         const challengeHint = preSubmitSnapshot?.challengeHint || false;
         const hasCaptchaSignal =
@@ -4699,7 +4253,7 @@ async function completeSignup(
             await page.waitForSelector('input[name="captcha"]', { timeout: 1200 }).catch(() => {});
             const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
             if (lateCaptchaInput) {
-              log(`signup password captcha input appeared after network idle (attempt=${attempt}), retrying with OCR`);
+              log(`signup password captcha input appeared after network idle (attempt=${attempt}), image captcha unsupported`);
               continue;
             }
             log(
@@ -4717,7 +4271,7 @@ async function completeSignup(
           await page.waitForSelector('input[name="captcha"]', { timeout: 2600 }).catch(() => {});
           const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
           if (lateCaptchaInput) {
-            log(`signup password captcha input appeared after dwell (attempt=${attempt}), retrying with OCR`);
+            log(`signup password captcha input appeared after dwell (attempt=${attempt}), image captcha unsupported`);
             continue;
           }
           if (attempt >= passwordAttemptMax) {
@@ -4778,15 +4332,6 @@ async function completeSignup(
         if (!/\/u\/signup\/password/i.test(page.url())) {
           return workingPassword;
         }
-
-      const currentCaptchaSrc =
-        (await page
-          .$eval('img[alt="captcha"]', (el: any) => String(el.src || ""))
-          .catch(() => "")) || "";
-      const captchaRefreshed = !!previousCaptchaSrc && !!currentCaptchaSrc && currentCaptchaSrc !== previousCaptchaSrc;
-      if (captchaRefreshed) {
-        log(`signup password captcha refreshed after attempt ${attempt}, retrying`);
-      }
 
       const formErrors = await collectVisibleFormErrors(page).catch(() => []);
       const compactErrors = formErrors
@@ -4906,10 +4451,6 @@ async function completeSignup(
       );
       if (hasInvalidCaptchaCode) {
         invalidCaptchaSeenCount += 1;
-        solver.rotatePreferredModel("signup_password_invalid_captcha");
-        if (previousCaptchaSrc) {
-          await refreshCaptchaImage(page, previousCaptchaSrc).catch(() => false);
-        }
         if (invalidCaptchaSeenCount >= 2 || attempt >= passwordAttemptMax - 1) {
           log(`signup password invalid captcha repeated ${invalidCaptchaSeenCount} times, rotate mode attempt early`);
           throw new Error("invalid_captcha");
@@ -4919,18 +4460,6 @@ async function completeSignup(
         continue;
       }
       invalidCaptchaSeenCount = 0;
-      if (captchaRefreshed) {
-        solver.rotatePreferredModel("signup_password_captcha_refreshed");
-        continue;
-      }
-      if (previousCaptchaSrc) {
-        const forcedRefresh = await refreshCaptchaImage(page, previousCaptchaSrc);
-        if (forcedRefresh) {
-          solver.rotatePreferredModel("signup_password_captcha_force_refresh");
-          log(`signup password captcha force-refreshed after attempt ${attempt}, retrying`);
-          continue;
-        }
-      }
       if (attempt < passwordAttemptMax) {
         log(`signup password submission not accepted on attempt ${attempt}, retrying`);
         continue;
@@ -5222,11 +4751,6 @@ function loadConfig(): AppConfig {
   const defaultMixedPort = 49090 + randomInt(0, 2000);
 
   return {
-    openaiBaseUrl: mustEnv("OPENAI_BASE_URL"),
-    openaiKey: mustEnv("OPENAI_KEY"),
-    preferredModel: mustEnv("MODEL_NAME"),
-    captchaModelCandidateCount: Math.max(1, toInt(process.env.CAPTCHA_MODEL_CANDIDATE_COUNT, 5)),
-    strictPreferredModel: toBool(process.env.STRICT_PREFERRED_MODEL, false),
     runMode: envRunMode || fallbackRunMode,
     browserEngine: envBrowserEngine,
     inspectBrowserEngine: envInspectBrowserEngine,
@@ -5241,10 +4765,6 @@ function loadConfig(): AppConfig {
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
     maxCaptchaRounds: toInt(process.env.MAX_CAPTCHA_ROUNDS, 30),
-    ocrRetryWindowMs: toInt(process.env.OCR_RETRY_WINDOW_MS, 300_000),
-    ocrInitialCooldownMs: toInt(process.env.OCR_INITIAL_COOLDOWN_MS, 12_000),
-    ocrMaxCooldownMs: toInt(process.env.OCR_MAX_COOLDOWN_MS, 120_000),
-    ocrRequestTimeoutMs: toInt(process.env.OCR_REQUEST_TIMEOUT_MS, 25_000),
     allowPasswordSubmitWithoutCaptcha: toBool(process.env.ALLOW_PASSWORD_SUBMIT_WITHOUT_CAPTCHA, false),
     humanConfirmBeforeSignup: toBool(process.env.HUMAN_CONFIRM_BEFORE_SIGNUP, false),
     humanConfirmText: (process.env.HUMAN_CONFIRM_TEXT || "CONFIRM").trim() || "CONFIRM",
@@ -5338,7 +4858,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
+  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
     message,
   );
 }
@@ -7472,13 +6992,8 @@ async function run(): Promise<void> {
       `start mode=${requestedMode} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"} need=${args.need} parallel=${args.parallel}`,
     );
 
-    const allModels = await listModels(cfg);
-    const modelCandidates = cfg.strictPreferredModel
-      ? [cfg.preferredModel]
-      : resolveCaptchaModelCandidates(cfg.preferredModel, allModels, cfg.captchaModelCandidateCount);
-    const resolvedModel = modelCandidates[0]!;
-    log(`captcha model candidates: ${modelCandidates.join(", ")}`);
-    const solver = new CaptchaSolver(cfg, modelCandidates);
+    const resolvedModel = "disabled";
+    const solver = new CaptchaSolver();
 
     const results: ResultPayload[] = [];
     const failures: Array<{ runIndex: number; taskId?: string; error: string }> = [];
