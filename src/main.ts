@@ -11,6 +11,13 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import {
+  ensureVirtualDisplaySession,
+  getFingerprintChromiumArgs,
+  isFingerprintChromiumExecutable,
+  shouldFallbackToPersistentBrowser,
+  type VirtualDisplayBackend,
+} from "./browser/runtime.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js";
@@ -55,6 +62,11 @@ interface AppConfig {
   camoufoxGeoipEnabled: boolean;
   chromeProfileDir: string;
   chromeRemoteDebuggingPort: number;
+  virtualDisplayEnabled: boolean;
+  virtualDisplayExecutablePath?: string;
+  virtualDisplayDisplayNum: string;
+  virtualDisplayScreen: string;
+  virtualDisplayStartupTimeoutMs: number;
   slowMoMs: number;
   maxCaptchaRounds: number;
   ocrRetryWindowMs: number;
@@ -119,6 +131,7 @@ interface MailboxSession {
 
 interface ResultPayload {
   mode: "headed" | "headless";
+  displayBackend: VirtualDisplayBackend;
   email: string;
   password: string;
   verificationLink: string | null;
@@ -1406,6 +1419,7 @@ interface WebRtcProbeSnapshot {
 
 interface BrowserPrecheckReport {
   mode: "headed" | "headless";
+  displayBackend: VirtualDisplayBackend;
   checkedAt: string;
   expected: {
     ip?: string;
@@ -1709,6 +1723,7 @@ async function runBrowserPrecheck(
   page: any,
   cfg: AppConfig,
   mode: "headed" | "headless",
+  displayBackend: VirtualDisplayBackend,
   selectedProxy: NodeCheckResult,
   locale: string,
 ): Promise<BrowserPrecheckReport> {
@@ -1839,6 +1854,7 @@ async function runBrowserPrecheck(
 
   return {
     mode,
+    displayBackend,
     checkedAt: new Date().toISOString(),
     expected: {
       ip: expectedIp,
@@ -4343,6 +4359,11 @@ function loadConfig(): AppConfig {
     camoufoxGeoipEnabled: toBool(process.env.CAMOUFOX_GEOIP_ENABLED, process.platform !== "darwin"),
     chromeProfileDir: path.resolve(process.env.CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-profile")),
     chromeRemoteDebuggingPort: Math.max(0, toInt(process.env.CHROME_REMOTE_DEBUGGING_PORT, 0)),
+    virtualDisplayEnabled: toBool(process.env.VIRTUAL_DISPLAY_ENABLED, process.platform === "linux"),
+    virtualDisplayExecutablePath: (process.env.VIRTUAL_DISPLAY_EXECUTABLE_PATH || "").trim() || undefined,
+    virtualDisplayDisplayNum: (process.env.VIRTUAL_DISPLAY_DISPLAY_NUM || "auto").trim() || "auto",
+    virtualDisplayScreen: (process.env.VIRTUAL_DISPLAY_SCREEN || "1512x982x24").trim() || "1512x982x24",
+    virtualDisplayStartupTimeoutMs: Math.max(1000, toInt(process.env.VIRTUAL_DISPLAY_STARTUP_TIMEOUT_MS, 5000)),
     slowMoMs: toInt(process.env.SLOWMO_MS, 50),
     maxCaptchaRounds: toInt(process.env.MAX_CAPTCHA_ROUNDS, 30),
     ocrRetryWindowMs: toInt(process.env.OCR_RETRY_WINDOW_MS, 300_000),
@@ -4586,8 +4607,12 @@ async function launchBrowserWithEngine(
   proxyServer: string,
   locale: string,
   geoIp: string,
+  acceptLanguage: string,
+  timezoneId: string | undefined,
+  browserEnv?: NodeJS.ProcessEnv,
 ): Promise<Browser> {
   if (engine === "chrome") {
+    const profileDir = path.join(cfg.chromeProfileDir, `launch-${Date.now()}-${randomInt(1000, 9999)}`);
     const options: LaunchOptions = {
       headless: mode === "headless",
       slowMo: Math.max(0, cfg.slowMoMs),
@@ -4598,7 +4623,17 @@ async function launchBrowserWithEngine(
         `--lang=${locale}`,
         ...getChromeVisualArgs(),
         ...getChromeWebRtcPolicyArgs(cfg),
+        ...getFingerprintChromiumArgs({
+          platform: process.platform,
+          executablePath: cfg.chromeExecutablePath,
+          profileDir,
+          proxyServer,
+          locale,
+          acceptLanguage,
+          timezoneId,
+        }),
       ],
+      env: browserEnv,
       timeout: 180_000,
     };
     if (cfg.chromeExecutablePath) {
@@ -4606,7 +4641,7 @@ async function launchBrowserWithEngine(
     }
     const browser = await chromium.launch(options);
     if (process.platform === "darwin" && mode === "headed") {
-      await activateMacApp("Google Chrome");
+      await activateMacApp(isFingerprintChromiumExecutable(cfg.chromeExecutablePath) ? "Chromium" : "Google Chrome");
     }
     return browser;
   }
@@ -4630,11 +4665,28 @@ function createChildProcessStopper(child: ReturnType<typeof spawn>): () => Promi
     if (stopping) return;
     stopping = true;
     if (child.exitCode != null) return;
-    child.kill("SIGTERM");
+    const pid = child.pid;
+    if (pid && process.platform !== "win32") {
+      try {
+        process.kill(-pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
+    } else {
+      child.kill("SIGTERM");
+    }
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
       if (child.exitCode != null) return;
       await delay(150);
+    }
+    if (pid && process.platform !== "win32") {
+      try {
+        process.kill(-pid, "SIGKILL");
+        return;
+      } catch {
+        // fall through to direct child kill
+      }
     }
     child.kill("SIGKILL");
   };
@@ -4747,6 +4799,9 @@ async function launchNativeChromeCdp(
   cfg: AppConfig,
   proxyServer: string,
   locale: string,
+  acceptLanguage: string,
+  timezoneId?: string,
+  browserEnv?: NodeJS.ProcessEnv,
 ): Promise<{
   browser: Browser;
   context: any;
@@ -4776,12 +4831,35 @@ async function launchNativeChromeCdp(
       "--no-default-browser-check",
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
+      ...getFingerprintChromiumArgs({
+        platform: process.platform,
+        executablePath: cfg.chromeExecutablePath,
+        profileDir,
+        proxyServer,
+        locale,
+        acceptLanguage,
+        timezoneId,
+      }),
       "--new-window",
     ];
 
-    const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore" });
+    const child = spawn(cfg.chromeExecutablePath, args, {
+      stdio: "ignore",
+      detached: true,
+      env: browserEnv,
+    });
+    child.unref();
+    let spawnError: Error | null = null;
+    child.once("error", (error: Error) => {
+      spawnError = error;
+    });
     const stop = createChildProcessStopper(child);
     await delay(1800);
+    if (spawnError) {
+      lastError = spawnError;
+      await stop().catch(() => {});
+      continue;
+    }
     if (child.exitCode != null) {
       lastError = new Error(
         `native chrome exited early: ${child.exitCode}${usingBaseProfile ? " (base profile fallback)" : ""}`,
@@ -4790,7 +4868,7 @@ async function launchNativeChromeCdp(
     }
 
     try {
-      await activateMacApp("Google Chrome");
+      await activateMacApp(isFingerprintChromiumExecutable(cfg.chromeExecutablePath) ? "Chromium" : "Google Chrome");
       const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
       const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
@@ -4840,6 +4918,8 @@ async function launchChromePersistent(
   proxyServer: string,
   locale: string,
   contextOptions: BrowserContextOptions,
+  acceptLanguage: string,
+  browserEnv?: NodeJS.ProcessEnv,
 ): Promise<{
   browser: Browser;
   context: any;
@@ -4863,7 +4943,17 @@ async function launchChromePersistent(
           `--lang=${locale}`,
           ...getChromeVisualArgs(),
           ...getChromeWebRtcPolicyArgs(cfg),
+          ...getFingerprintChromiumArgs({
+            platform: process.platform,
+            executablePath: cfg.chromeExecutablePath,
+            profileDir,
+            proxyServer,
+            locale,
+            acceptLanguage,
+            timezoneId: contextOptions.timezoneId,
+          }),
         ],
+        env: browserEnv,
         locale: contextOptions.locale,
         timezoneId: contextOptions.timezoneId,
         viewport: contextOptions.viewport,
@@ -4960,6 +5050,9 @@ async function launchNativeChromeInspect(
   cfg: AppConfig,
   proxyServer: string,
   locale: string,
+  acceptLanguage: string,
+  timezoneId?: string,
+  browserEnv?: NodeJS.ProcessEnv,
 ): Promise<{
   stop: () => Promise<void>;
   details: { executablePath: string; profileDir: string; targets: string[] };
@@ -4976,18 +5069,38 @@ async function launchNativeChromeInspect(
     `--lang=${locale}`,
     ...getChromeVisualArgs(),
     ...getChromeWebRtcPolicyArgs(cfg),
+    ...getFingerprintChromiumArgs({
+      platform: process.platform,
+      executablePath: cfg.chromeExecutablePath,
+      profileDir: cfg.inspectChromeProfileDir,
+      proxyServer,
+      locale,
+      acceptLanguage,
+      timezoneId,
+    }),
     "--new-window",
     ...targets,
   ];
   const child = spawn(cfg.chromeExecutablePath, args, {
     stdio: "ignore",
+    detached: true,
+    env: browserEnv,
+  });
+  child.unref();
+  let spawnError: Error | null = null;
+  child.once("error", (error: Error) => {
+    spawnError = error;
   });
   const stop = createChildProcessStopper(child);
   await delay(1800);
+  if (spawnError) {
+    await stop().catch(() => {});
+    throw spawnError;
+  }
   if (child.exitCode != null) {
     throw new Error(`native chrome exited early: ${child.exitCode}`);
   }
-  await activateMacApp("Google Chrome");
+  await activateMacApp(isFingerprintChromiumExecutable(cfg.chromeExecutablePath) ? "Chromium" : "Google Chrome");
   return {
     stop,
     details: {
@@ -5248,6 +5361,9 @@ async function runSingleMode(
   const mihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
   const browserEngine = args.browserEngine || cfg.browserEngine;
   const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.chromeNativeAutomation);
+  let displaySession: Awaited<ReturnType<typeof ensureVirtualDisplaySession>> | null = null;
+  let displayBackend: VirtualDisplayBackend = "system";
+  let browserEnv: NodeJS.ProcessEnv | undefined;
   let browser: Browser | null = null;
   let context: any = null;
   let page: any = null;
@@ -5502,12 +5618,32 @@ async function runSingleMode(
 
     const locale = deriveLocale(geo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
+    failureStage = "display_setup";
+    displaySession = await ensureVirtualDisplaySession(
+      {
+        enabled: cfg.virtualDisplayEnabled,
+        executablePath: cfg.virtualDisplayExecutablePath,
+        displayNum: cfg.virtualDisplayDisplayNum,
+        screen: cfg.virtualDisplayScreen,
+        startupTimeoutMs: cfg.virtualDisplayStartupTimeoutMs,
+      },
+      {
+        platform: process.platform,
+        mode,
+        browserEngine,
+        displayEnv: process.env.DISPLAY,
+        waylandDisplayEnv: process.env.WAYLAND_DISPLAY,
+      },
+    );
+    displayBackend = displaySession.backend;
+    browserEnv = displaySession.env;
     notes.push(`proxy node: ${selectedProxy.name}`);
     if (geo.ip) {
       notes.push(`proxy ip: ${geo.ip}`);
     } else {
       notes.push("proxy ip: pending browser confirmation");
     }
+    notes.push(`display backend: ${displayBackend}${displaySession.display ? ` (${displaySession.display})` : ""}`);
     notes.push(`browser engine: ${useNativeChrome ? "chrome-native-cdp" : browserEngine}`);
     if (!useNativeChrome && browserEngine === "camoufox") {
       notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
@@ -5541,7 +5677,14 @@ async function runSingleMode(
     const launchBrowser = async (): Promise<Browser> => {
       if (useNativeChrome) {
         try {
-          const launched = await launchNativeChromeCdp(cfg, mihomoController.proxyServer, locale);
+          const launched = await launchNativeChromeCdp(
+            cfg,
+            mihomoController.proxyServer,
+            locale,
+            acceptLanguage,
+            geo.timezone,
+            browserEnv,
+          );
           nativeChromeMode = "cdp";
           nativeChromeStop = launched.stop;
           nativeChromeContext = launched.context;
@@ -5553,10 +5696,37 @@ async function runSingleMode(
           const message = error instanceof Error ? error.message : String(error);
           const compact = message.split("\n")[0] || "unknown";
           notes.push(`native chrome cdp unavailable: ${compact}`);
-          throw new Error(`native_cdp_unavailable: ${compact}`);
+          if (!shouldFallbackToPersistentBrowser(browserEngine, mode, cfg.chromeNativeAutomation)) {
+            throw new Error(`native_cdp_unavailable: ${compact}`);
+          }
+          const launched = await launchChromePersistent(
+            cfg,
+            mode,
+            mihomoController.proxyServer,
+            locale,
+            contextOptions,
+            acceptLanguage,
+            browserEnv,
+          );
+          nativeChromeMode = "persistent";
+          nativeChromeContext = launched.context;
+          notes.push("native chrome cdp unavailable, fell back to persistent chrome context");
+          notes.push(`persistent chrome executable: ${launched.details.executablePath}`);
+          notes.push(`persistent chrome profile: ${launched.details.profileDir}`);
+          return launched.browser;
         }
       }
-      return await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip || "");
+      return await launchBrowserWithEngine(
+        browserEngine,
+        cfg,
+        mode,
+        mihomoController.proxyServer,
+        locale,
+        geo.ip || "",
+        acceptLanguage,
+        geo.timezone,
+        browserEnv,
+      );
     };
 
     const closeBrowserSession = async (): Promise<void> => {
@@ -5719,14 +5889,34 @@ async function runSingleMode(
       preparedTask.ipEmailOrdinal = emailSet.size;
       notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
     }
-    precheckPassed = true;
+    if (!cfg.browserPrecheckEnabled || args.skipPrecheck) {
+      precheckPassed = true;
+      ledgerRecord.precheckPassed = true;
+    }
     notes.push(`browser observed ip: ${browserObservedIp}`);
-    ledgerRecord.precheckPassed = true;
     ledgerRecord.notesJson = safeJsonStringify(notes);
     ledgerRecord.detailsJson = safeJsonStringify({
       browserIpProbe,
     });
     persistLedgerRecord("after-browser-ip-probe");
+
+    if (cfg.browserPrecheckEnabled && !args.skipPrecheck) {
+      failureStage = "browser_precheck";
+      const precheckReport = await runBrowserPrecheck(page, cfg, mode, displayBackend, selectedProxy, locale);
+      await writeJson(new URL(`browser_precheck_${mode}.json`, diagOutputDir), precheckReport);
+      precheckPassed = precheckReport.passed;
+      notes.push(`browser precheck: ${precheckPassed ? "passed" : "failed"}`);
+      ledgerRecord.precheckPassed = precheckPassed;
+      ledgerRecord.notesJson = safeJsonStringify(notes);
+      ledgerRecord.detailsJson = safeJsonStringify({
+        browserIpProbe,
+        browserPrecheck: precheckReport,
+      });
+      persistLedgerRecord("after-browser-precheck");
+      if (!precheckPassed) {
+        throw new Error(`browser precheck failed: ${precheckReport.issues.join("; ") || "unknown issue"}`);
+      }
+    }
 
     if (cfg.existingEmail && cfg.existingPassword) {
       notes.push("skip signup (existing account)");
@@ -5911,6 +6101,7 @@ async function runSingleMode(
 
     return {
       mode,
+      displayBackend,
       email,
       password,
       verificationLink,
@@ -5935,6 +6126,7 @@ async function runSingleMode(
         url: page ? page.url() : null,
         email,
         browserEngine,
+        displayBackend,
         notes,
       });
       if (page) {
@@ -5997,16 +6189,22 @@ async function runSingleMode(
     if (nativeChromeStop != null) {
       await (nativeChromeStop as () => Promise<void>)().catch(() => {});
     }
+    if (displaySession) {
+      await displaySession.stop().catch(() => {});
+    }
     await mihomoController.stop();
   }
 }
 
-async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
+async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<VirtualDisplayBackend> {
   const mode: "headed" = "headed";
   const notes: string[] = [];
   const mihomoController = await startMihomo(buildMihomoConfig(cfg));
   const browserEngine = args.browserEngine || cfg.inspectBrowserEngine;
   const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.inspectChromeNative);
+  let displaySession: Awaited<ReturnType<typeof ensureVirtualDisplaySession>> | null = null;
+  let displayBackend: VirtualDisplayBackend = "system";
+  let browserEnv: NodeJS.ProcessEnv | undefined;
   let browser: Browser | null = null;
   let context: any = null;
   let nativeChromeStop: (() => Promise<void>) | null = null;
@@ -6017,15 +6215,41 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
 
     const locale = deriveLocale(geo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
+    displaySession = await ensureVirtualDisplaySession(
+      {
+        enabled: cfg.virtualDisplayEnabled,
+        executablePath: cfg.virtualDisplayExecutablePath,
+        displayNum: cfg.virtualDisplayDisplayNum,
+        screen: cfg.virtualDisplayScreen,
+        startupTimeoutMs: cfg.virtualDisplayStartupTimeoutMs,
+      },
+      {
+        platform: process.platform,
+        mode,
+        browserEngine,
+        displayEnv: process.env.DISPLAY,
+        waylandDisplayEnv: process.env.WAYLAND_DISPLAY,
+      },
+    );
+    displayBackend = displaySession.backend;
+    browserEnv = displaySession.env;
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip || "pending browser confirmation"}`);
+    notes.push(`display backend: ${displayBackend}${displaySession.display ? ` (${displaySession.display})` : ""}`);
     notes.push(`browser engine: ${browserEngine}`);
     if (browserEngine === "camoufox") {
       notes.push(`camoufox geoip: ${cfg.camoufoxGeoipEnabled ? "enabled" : `disabled (${process.platform})`}`);
     }
 
     if (useNativeChrome) {
-      const nativeChrome = await launchNativeChromeInspect(cfg, mihomoController.proxyServer, locale);
+      const nativeChrome = await launchNativeChromeInspect(
+        cfg,
+        mihomoController.proxyServer,
+        locale,
+        acceptLanguage,
+        geo.timezone,
+        browserEnv,
+      );
       nativeChromeStop = nativeChrome.stop;
       notes.push(`native chrome executable: ${nativeChrome.details.executablePath}`);
       notes.push(`native chrome profile: ${nativeChrome.details.profileDir}`);
@@ -6034,6 +6258,7 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
 
       await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
         mode: "inspect-sites-native-chrome",
+        displayBackend,
         openedAt: new Date().toISOString(),
         proxy: {
           node: selectedProxy.name,
@@ -6046,7 +6271,17 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
         notes,
       });
     } else {
-      browser = await launchBrowserWithEngine(browserEngine, cfg, mode, mihomoController.proxyServer, locale, geo.ip || "");
+      browser = await launchBrowserWithEngine(
+        browserEngine,
+        cfg,
+        mode,
+        mihomoController.proxyServer,
+        locale,
+        geo.ip || "",
+        acceptLanguage,
+        geo.timezone,
+        browserEnv,
+      );
 
       const contextOptions: BrowserContextOptions = {
         locale,
@@ -6079,6 +6314,7 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
 
       await writeJson(new URL("inspect_sites.json", OUTPUT_DIR), {
         mode: "inspect-sites",
+        displayBackend,
         openedAt: new Date().toISOString(),
         proxy: {
           node: selectedProxy.name,
@@ -6110,6 +6346,7 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
       log(`inspect mode no TTY, keep browser open for ${cfg.inspectKeepOpenMs}ms`);
       await delay(cfg.inspectKeepOpenMs);
     }
+    return displayBackend;
   } finally {
     if (context) {
       await context.close().catch(() => {});
@@ -6120,6 +6357,9 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     if (nativeChromeStop) {
       await nativeChromeStop().catch(() => {});
     }
+    if (displaySession) {
+      await displaySession.stop().catch(() => {});
+    }
     await mihomoController.stop();
   }
 }
@@ -6129,9 +6369,10 @@ async function run(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   if (args.inspectSites) {
     log("start inspect-sites mode (headed)");
-    await runInspectSites(cfg, args);
+    const displayBackend = await runInspectSites(cfg, args);
     await writeJson(new URL("result.json", OUTPUT_DIR), {
       mode: "inspect-sites",
+      displayBackend,
       completedAt: new Date().toISOString(),
       ok: true,
     });
