@@ -121,69 +121,6 @@ function computeMailboxPreloadTarget(need: number): number {
   return Math.max(1, Math.ceil(need * 0.25));
 }
 
-async function loadBlockedMailboxDomainsFromLedger(cfg: TaskLedgerConfig): Promise<string[]> {
-  if (!cfg.enabled) return [];
-  try {
-    if (typeof Bun !== "undefined") {
-      const { Database } = await import("bun:sqlite");
-      const db = new Database(cfg.dbPath, { create: false, strict: true });
-      try {
-        const rows = db
-          .prepare(
-            `
-            WITH stats AS (
-              SELECT
-                lower(email_domain) AS email_domain,
-                SUM(CASE WHEN error_code = 'risk_control_suspicious_activity' THEN 1 ELSE 0 END) AS suspicious_cnt,
-                SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS success_cnt
-              FROM signup_tasks
-              WHERE email_domain IS NOT NULL AND trim(email_domain) <> ''
-              GROUP BY lower(email_domain)
-            )
-            SELECT email_domain
-            FROM stats
-            WHERE suspicious_cnt >= 2
-              AND success_cnt = 0
-            `,
-          )
-          .all() as Array<{ email_domain?: string }>;
-        return rows.map((row) => String(row.email_domain || "").trim().toLowerCase()).filter(Boolean);
-      } finally {
-        db.close(false);
-      }
-    }
-
-    const { DatabaseSync } = await import("node:sqlite");
-    const db = new DatabaseSync(cfg.dbPath, { open: true, readOnly: true });
-    try {
-      const rows = db
-        .prepare(
-          `
-          WITH stats AS (
-            SELECT
-              lower(email_domain) AS email_domain,
-              SUM(CASE WHEN error_code = 'risk_control_suspicious_activity' THEN 1 ELSE 0 END) AS suspicious_cnt,
-              SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS success_cnt
-            FROM signup_tasks
-            WHERE email_domain IS NOT NULL AND trim(email_domain) <> ''
-            GROUP BY lower(email_domain)
-          )
-          SELECT email_domain
-          FROM stats
-          WHERE suspicious_cnt >= 2
-            AND success_cnt = 0
-          `,
-        )
-        .all() as Array<{ email_domain?: string }>;
-      return rows.map((row) => String(row.email_domain || "").trim().toLowerCase()).filter(Boolean);
-    } finally {
-      db.close();
-    }
-  } catch {
-    return [];
-  }
-}
-
 interface ResultPayload {
   mode: "headed" | "headless";
   email: string;
@@ -335,7 +272,6 @@ interface ModeRunContext {
   ipEmailUsage: Map<string, Set<string>>;
   activeProxyIps: Set<string>;
   blockedMailboxDomains: Set<string>;
-  mailboxDomainSuspiciousCounts: Map<string, number>;
 }
 
 interface PreparedSignupTask {
@@ -4572,7 +4508,10 @@ async function completeSignup(
       if (explicitRejection === "risk_control_ip_rate_limit" || hasIpRateLimitMarker) {
         throw new Error("risk_control_ip_rate_limit");
       }
-      if (explicitRejection === "auth0_extensibility_error" || hasSuspiciousMarker) {
+      if (explicitRejection === "auth0_extensibility_error") {
+        throw new Error("auth0_extensibility_error");
+      }
+      if (hasSuspiciousMarker) {
         throw new Error("risk_control_suspicious_activity");
       }
       const postSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
@@ -5070,11 +5009,6 @@ function loadConfig(): AppConfig {
         toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_COOLDOWN_MS, 12 * 60 * 60 * 1000),
       ),
       ipRateLimitMax: Math.max(1, toInt(process.env.TASK_LEDGER_IP_RATE_LIMIT_MAX, 64)),
-      suspiciousCooldownMs: Math.max(
-        60_000,
-        toInt(process.env.TASK_LEDGER_SUSPICIOUS_COOLDOWN_MS, 24 * 60 * 60 * 1000),
-      ),
-      suspiciousMax: Math.max(1, toInt(process.env.TASK_LEDGER_SUSPICIOUS_MAX, 128)),
       captchaMissingCooldownMs: Math.max(
         60_000,
         toInt(process.env.TASK_LEDGER_CAPTCHA_MISSING_COOLDOWN_MS, 12 * 60 * 60 * 1000),
@@ -5948,8 +5882,8 @@ function collectBlockedIpsFromLedger(taskLedger: TaskLedger | null): Set<string>
   const blockedIps = new Set<string>();
   if (!taskLedger) return blockedIps;
   try {
+    // Only keep IP-scoped failures here. Mailbox/account-side validation must not poison proxy rotation.
     for (const ip of taskLedger.listRecentRateLimitedIps()) blockedIps.add(ip);
-    for (const ip of taskLedger.listRecentSuspiciousIps()) blockedIps.add(ip);
     for (const ip of taskLedger.listRecentCaptchaMissingIps()) blockedIps.add(ip);
     for (const ip of taskLedger.listRecentInvalidCaptchaIps()) blockedIps.add(ip);
   } catch (error) {
@@ -7058,16 +6992,6 @@ async function runSingleMode(
     const risk = summarizeRiskSignals(requestLog, networkLog);
     localErrorCode = deriveErrorCode(message, failureStage, risk);
     localErrorMessage = message;
-    const { domain: failedEmailDomain } = splitEmail(email);
-    if (localErrorCode === "risk_control_suspicious_activity" && failedEmailDomain) {
-      const nextCount = (ctx.mailboxDomainSuspiciousCounts.get(failedEmailDomain) || 0) + 1;
-      ctx.mailboxDomainSuspiciousCounts.set(failedEmailDomain, nextCount);
-      if (nextCount >= 2 && !ctx.blockedMailboxDomains.has(failedEmailDomain)) {
-        ctx.blockedMailboxDomains.add(failedEmailDomain);
-        notes.push(`mailbox domain denylisted after suspicious repeats: ${failedEmailDomain}`);
-        log(`mailbox domain added to runtime denylist: ${failedEmailDomain} (count=${nextCount})`);
-      }
-    }
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, diagOutputDir), networkLog.slice(-180));
       await writeJson(new URL(`request_fail_${mode}.json`, diagOutputDir), requestLog.slice(-180));
@@ -7295,10 +7219,7 @@ async function run(): Promise<void> {
   }
   const batchId = `batch-${Date.now()}-${randomBytes(3).toString("hex")}`;
   const taskLedger = await TaskLedger.open(cfg.taskLedger);
-  const historicalBlockedMailboxDomains = new Set<string>([
-    ...cfg.blockedMailboxDomains,
-    ...(await loadBlockedMailboxDomainsFromLedger(cfg.taskLedger)),
-  ]);
+  const historicalBlockedMailboxDomains = new Set<string>(cfg.blockedMailboxDomains);
   if (taskLedger) {
     log(`task ledger enabled: ${taskLedger.dbPath()}`);
     const recovered = taskLedger.markStaleRunningAsFailed();
@@ -7331,7 +7252,6 @@ async function run(): Promise<void> {
     const activeProxyNames = new Set<string>();
     const activeProxyIps = new Set<string>();
     const blockedMailboxDomains = new Set<string>(historicalBlockedMailboxDomains);
-    const mailboxDomainSuspiciousCounts = new Map<string, number>();
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
       let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
@@ -7377,7 +7297,6 @@ async function run(): Promise<void> {
                 ipEmailUsage,
                 activeProxyIps,
                 blockedMailboxDomains,
-                mailboxDomainSuspiciousCounts,
               },
               preparedTask,
               taskMihomoController,
