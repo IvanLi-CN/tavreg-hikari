@@ -8,13 +8,14 @@ import { sep as pathSep } from "node:path";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
+import { release as osRelease } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
-import { buildAcceptLanguage, deriveLocale, type GeoInfo } from "./proxy/geo.js";
+import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -290,14 +291,17 @@ interface BrowserIdentityProfile {
   userAgent: string;
   navigatorPlatform: string;
   cdpPlatform: string;
+  cdpPlatformVersion: string;
+  cdpArchitecture: string;
+  cdpBitness: string;
   acceptLanguage: string;
   languages: string[];
   vendor: string;
   hardwareConcurrency: number;
   deviceMemory: number;
   maxTouchPoints: number;
-  webglVendor: string;
-  webglRenderer: string;
+  webglVendor?: string;
+  webglRenderer?: string;
 }
 
 interface ProxyNodeUsageEntry {
@@ -711,6 +715,42 @@ function compactGeo(geo: GeoInfo | undefined): GeoInfo | undefined {
     latitude: typeof geo.latitude === "number" && Number.isFinite(geo.latitude) ? geo.latitude : undefined,
     longitude: typeof geo.longitude === "number" && Number.isFinite(geo.longitude) ? geo.longitude : undefined,
   };
+}
+
+function resolveBrowserLocale(country?: string): string {
+  const derived = deriveLocale(country);
+  return /^(zh|ja|ko|ar|he|ru|uk|tr|th|vi|ms|id)\b/i.test(derived) ? "en-US" : derived;
+}
+
+function mergeGeoInfo(primary: GeoInfo | undefined, fallback: GeoInfo | undefined): GeoInfo | undefined {
+  const ip = normalizeIp(primary?.ip) || normalizeIp(fallback?.ip);
+  if (!ip) return undefined;
+  return {
+    ...(fallback || {}),
+    ...(primary || {}),
+    ip,
+    country: primary?.country || fallback?.country,
+    region: primary?.region || fallback?.region,
+    city: primary?.city || fallback?.city,
+    org: primary?.org || fallback?.org,
+    timezone: primary?.timezone || fallback?.timezone,
+    latitude: primary?.latitude ?? fallback?.latitude,
+    longitude: primary?.longitude ?? fallback?.longitude,
+    raw: primary?.raw ?? fallback?.raw,
+  };
+}
+
+function needsGeoEnrichment(geo: GeoInfo | undefined): boolean {
+  return Boolean(geo?.ip) && (!geo?.country || !geo?.timezone || !geo?.city);
+}
+
+async function enrichGeoInfo(geo: GeoInfo | undefined, ipinfoToken?: string): Promise<GeoInfo | undefined> {
+  if (!needsGeoEnrichment(geo) || !geo?.ip) return geo;
+  try {
+    return mergeGeoInfo(geo, await lookupIpInfo(geo.ip, ipinfoToken));
+  } catch {
+    return geo;
+  }
 }
 
 let proxyBootstrapQueue: Promise<void> = Promise.resolve();
@@ -2120,6 +2160,9 @@ function isMailboxTransientError(reason: string): boolean {
     "fetch failed",
     "eai_again",
     "ecconn",
+    "unexpectedeof",
+    "tls handshake eof",
+    "hyper_util::client::legacy::error",
   ].some((needle) => lower.includes(needle));
 }
 
@@ -3268,12 +3311,13 @@ function getChallengeTokenLength(snapshot: AuthChallengeSnapshot | null | undefi
 
 function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
   if (!snapshot) return false;
+  if (getChallengeTokenLength(snapshot) > 0) return true;
+  if (snapshot.hasChallengeCheckbox) {
+    return snapshot.challengeCheckboxChecked === true;
+  }
   return (
-    snapshot.challengeCheckboxChecked === true ||
-    snapshot.hasChallengeCheckbox ||
     snapshot.hasChallengeFrame ||
-    snapshot.hasTurnstileApi ||
-    getChallengeTokenLength(snapshot) > 0
+    snapshot.hasTurnstileApi
   );
 }
 
@@ -3810,6 +3854,35 @@ async function waitForManagedChallengeDismissal(
 }
 
 async function tryActivateManagedChallenge(page: any, formKind: "signup" | "login"): Promise<boolean> {
+  const challengeFrame =
+    typeof page.frames === "function"
+      ? page.frames().find((frame: any) => /challenges\.cloudflare\.com/i.test(String(frame?.url?.() || "")))
+      : null;
+  if (challengeFrame) {
+    const frameSelectors = [
+      '[role="checkbox"]',
+      'input[type="checkbox"]',
+      'label.ctp-checkbox-label',
+      'label',
+      'body',
+    ];
+    for (const selector of frameSelectors) {
+      try {
+        const locator = challengeFrame.locator(selector).first();
+        if ((await locator.count()) === 0) continue;
+        await locator.click({ timeout: 2_000, force: true });
+        await page.waitForTimeout(randomInt(400, 900));
+        const afterFrameClick = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+        if (afterFrameClick?.checkboxChecked === true) {
+          log(`${formKind} managed challenge checkbox checked via frame locator (${selector})`);
+          return true;
+        }
+      } catch {
+        // fall through to the next interaction strategy
+      }
+    }
+  }
+
   let cdpSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
   if (cdpSnapshot?.iframeBox && cdpSnapshot?.checkboxBox) {
     const clickAt = async (x: number, y: number): Promise<void> => {
@@ -3988,6 +4061,64 @@ async function waitForAuthFormPostResponse(page: any, pattern: RegExp, timeoutMs
   }
 }
 
+async function requestSubmitVisibleAuthForm(page: any): Promise<string | null> {
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (el: Element | null): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const submitter =
+        Array.from(
+          document.querySelectorAll(
+            'button[data-action-button-primary="true"], button[type="submit"], input[type="submit"], button[name="action"]',
+          ),
+        ).find(isVisible) || null;
+      const form =
+        (submitter instanceof HTMLElement ? submitter.closest("form") : null) ||
+        Array.from(document.querySelectorAll("form")).find(isVisible) ||
+        null;
+      if (!(form instanceof HTMLFormElement)) return null;
+      if (typeof form.requestSubmit === "function") {
+        if (submitter instanceof HTMLElement) {
+          form.requestSubmit(submitter as HTMLButtonElement);
+          return "form.requestSubmit(submitter)";
+        }
+        form.requestSubmit();
+        return "form.requestSubmit()";
+      }
+      if (submitter instanceof HTMLElement && typeof submitter.click === "function") {
+        submitter.click();
+        return "submitter.click()";
+      }
+      form.submit();
+      return "form.submit()";
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function submitAuthForm(page: any, postPattern: RegExp, logLabel: string): Promise<boolean> {
+  await clickSubmit(page);
+  if (await waitForAuthFormPostResponse(page, postPattern, 3_500)) {
+    return true;
+  }
+  const fallback = await requestSubmitVisibleAuthForm(page);
+  if (fallback) {
+    log(`${logLabel} submit fallback via ${fallback}`);
+    if (await waitForAuthFormPostResponse(page, postPattern, 4_500)) {
+      return true;
+    }
+  }
+  await dispatchEnterViaCdp(page).catch(() => {});
+  log(`${logLabel} submit fallback via cdp Enter`);
+  return await waitForAuthFormPostResponse(page, postPattern, 4_500);
+}
+
 async function clickSubmit(page: any): Promise<void> {
   await page.waitForTimeout(randomInt(220, 780));
   let point =
@@ -4074,6 +4205,7 @@ async function solveCaptchaForm(
     formKind === "signup"
       ? /\/u\/signup\/password|app\.tavily\.com\/home/i
       : /\/u\/login\/password|app\.tavily\.com\/home/i;
+  const submitPostPattern = formKind === "signup" ? /\/u\/signup\/identifier/i : /\/u\/login\/identifier/i;
   await ensureAuthIdentifierFieldReady(page, emailSelector, 12_000);
 
   for (let attempt = 1; attempt <= maxRounds; attempt += 1) {
@@ -4121,7 +4253,7 @@ async function solveCaptchaForm(
           }`,
         );
       }
-      await clickSubmit(page);
+      let submitTriggered = await submitAuthForm(page, submitPostPattern, `${formKind} identifier`);
 
       try {
         await page.waitForURL(successUrlPattern, { timeout: 10_000 });
@@ -4143,7 +4275,7 @@ async function solveCaptchaForm(
           return;
         }
         if (page.url() === previousUrl) {
-          await clickSubmit(page);
+          submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-challenge`)) || submitTriggered;
           try {
             await page.waitForURL(successUrlPattern, { timeout: 15_000 });
             return;
@@ -4154,6 +4286,9 @@ async function solveCaptchaForm(
             }
           }
         }
+      }
+      if (!submitTriggered && page.url() === previousUrl) {
+        log(`${formKind} identifier submit did not trigger POST (attempt=${attempt})`);
       }
       if (allowSubmitWithoutVisibleToken) {
         if (successUrlPattern.test(page.url())) {
@@ -4186,7 +4321,7 @@ async function solveCaptchaForm(
     }
 
     const previousUrl = page.url();
-    await clickSubmit(page);
+    let submitTriggered = await submitAuthForm(page, submitPostPattern, `${formKind} identifier`);
 
     try {
       await page.waitForURL(successUrlPattern, { timeout: 10000 });
@@ -4216,7 +4351,7 @@ async function solveCaptchaForm(
         }
       }
       if (managedOutcome.status === "token_ready") {
-        await clickSubmit(page);
+        submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-token`)) || submitTriggered;
         try {
           await page.waitForURL(successUrlPattern, { timeout: 15_000 });
           return;
@@ -4243,7 +4378,7 @@ async function solveCaptchaForm(
             throw new Error(postClickOutcome.rejection);
           }
           if (postClickOutcome.status === "token_ready") {
-            await clickSubmit(page);
+            submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-activate`)) || submitTriggered;
             try {
               await page.waitForURL(successUrlPattern, { timeout: 15_000 });
               return;
@@ -4255,6 +4390,9 @@ async function solveCaptchaForm(
             }
           }
         }
+      }
+      if (!submitTriggered && page.url() === previousUrl) {
+        log(`${formKind} identifier submit did not trigger POST (attempt=${attempt})`);
       }
     }
 
@@ -4886,6 +5024,12 @@ function buildFingerprintSeed(profileDir: string, proxyServer: string, locale: s
   return String(parseInt(digest.slice(0, 8), 16) || 1000);
 }
 
+function resolveFingerprintChromiumPlatform(): "linux" | "macos" | null {
+  if (process.platform === "linux") return "linux";
+  if (process.platform === "darwin") return "macos";
+  return null;
+}
+
 function getFingerprintChromiumArgs(
   executablePath: string | undefined,
   profileDir: string,
@@ -4898,12 +5042,15 @@ function getFingerprintChromiumArgs(
   const seed = buildFingerprintSeed(profileDir, proxyServer, locale);
   const args = [
     `--fingerprint=${seed}`,
-    '--fingerprint-platform=macos',
     '--fingerprint-brand=Chrome',
     `--lang=${locale}`,
     `--accept-lang=${acceptLanguage}`,
     '--disable-non-proxied-udp',
   ];
+  const platform = resolveFingerprintChromiumPlatform();
+  if (platform) {
+    args.splice(1, 0, `--fingerprint-platform=${platform}`);
+  }
   if (timezoneId?.trim()) {
     args.push(`--timezone=${timezoneId.trim()}`);
   }
@@ -5080,6 +5227,16 @@ function normalizeChromeVersion(raw: string): string {
   return "145.0.0.0";
 }
 
+function normalizePlatformVersion(raw: string, fallback = "0.0.0"): string {
+  const parts = String(raw || "")
+    .split(/[^0-9]+/)
+    .filter((item) => item.length > 0)
+    .slice(0, 3);
+  while (parts.length < 3) parts.push("0");
+  const normalized = parts.join(".");
+  return /^\d+\.\d+\.\d+$/.test(normalized) ? normalized : fallback;
+}
+
 function buildBrowserIdentityProfile(locale: string, browserVersion: string): BrowserIdentityProfile {
   const normalizedLocale = locale || "en-US";
   const langPrefix = (normalizedLocale.split("-")[0] || "en").toLowerCase();
@@ -5091,21 +5248,25 @@ function buildBrowserIdentityProfile(locale: string, browserVersion: string): Br
     .slice(0, 3);
   const acceptLanguage = `${languages[0]},${langPrefix};q=0.9,en;q=0.8`;
   const chromeVersion = normalizeChromeVersion(browserVersion);
-  const userAgent =
-    `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ` +
-    `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  const isLinux = process.platform === "linux";
+  const userAgent = isLinux
+    ? `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`
+    : `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
   return {
     userAgent,
-    navigatorPlatform: "MacIntel",
-    cdpPlatform: "macOS",
+    navigatorPlatform: isLinux ? "Linux x86_64" : "MacIntel",
+    cdpPlatform: isLinux ? "Linux" : "macOS",
+    cdpPlatformVersion: isLinux ? normalizePlatformVersion(osRelease(), "6.0.0") : "10.15.7",
+    cdpArchitecture: "x86",
+    cdpBitness: "64",
     acceptLanguage,
     languages,
     vendor: "Google Inc.",
     hardwareConcurrency: [4, 8, 10, 12][randomInt(0, 4)] || 8,
     deviceMemory: [4, 8, 16][randomInt(0, 3)] || 8,
     maxTouchPoints: 0,
-    webglVendor: "Intel Inc.",
-    webglRenderer: "Intel Iris OpenGL Engine",
+    webglVendor: isLinux ? undefined : "Intel Inc.",
+    webglRenderer: isLinux ? undefined : "Intel Iris OpenGL Engine",
   };
 }
 
@@ -5124,6 +5285,8 @@ async function applyPageIdentityOverrides(
     cdp = null;
   }
   if (!cdp) return;
+  const normalizedChromeVersion = normalizeChromeVersion(identity.userAgent);
+  const chromeMajorVersion = normalizedChromeVersion.split(".")[0] || "145";
 
   await cdp.send("Network.enable").catch(() => {});
   await cdp
@@ -5142,20 +5305,20 @@ async function applyPageIdentityOverrides(
       userAgentMetadata: {
         brands: [
           { brand: "Not:A-Brand", version: "99" },
-          { brand: "Google Chrome", version: "145" },
-          { brand: "Chromium", version: "145" },
+          { brand: "Google Chrome", version: chromeMajorVersion },
+          { brand: "Chromium", version: chromeMajorVersion },
         ],
         fullVersionList: [
           { brand: "Not:A-Brand", version: "99.0.0.0" },
-          { brand: "Google Chrome", version: normalizeChromeVersion(identity.userAgent) },
-          { brand: "Chromium", version: normalizeChromeVersion(identity.userAgent) },
+          { brand: "Google Chrome", version: normalizedChromeVersion },
+          { brand: "Chromium", version: normalizedChromeVersion },
         ],
         platform: identity.cdpPlatform,
-        platformVersion: "10.15.7",
-        architecture: "x86",
+        platformVersion: identity.cdpPlatformVersion,
+        architecture: identity.cdpArchitecture,
         model: "",
         mobile: false,
-        bitness: "64",
+        bitness: identity.cdpBitness,
         wow64: false,
       },
     })
@@ -5180,24 +5343,30 @@ async function applyBrowserIdentityToContext(
   if (injectNavigatorOverrides) {
     await context
       .addInitScript((profile: BrowserIdentityProfile) => {
-        const defineReadonly = (target: any, key: string, value: unknown): void => {
-          try {
-            Object.defineProperty(target, key, { get: () => value });
-          } catch {
-            // ignore sealed properties
+        const defineReadonly = (key: string, value: unknown): void => {
+          const targets = [navigator, (window as any).Navigator?.prototype].filter(Boolean);
+          for (const target of targets) {
+            try {
+              Object.defineProperty(target, key, {
+                configurable: true,
+                get: () => value,
+              });
+            } catch {
+              // ignore sealed properties
+            }
           }
         };
         const firstLanguage = profile.languages[0] || "en-US";
-        defineReadonly(navigator, "userAgent", profile.userAgent);
-        defineReadonly(navigator, "appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
-        defineReadonly(navigator, "platform", profile.navigatorPlatform);
-        defineReadonly(navigator, "vendor", profile.vendor);
-        defineReadonly(navigator, "language", firstLanguage);
-        defineReadonly(navigator, "languages", profile.languages);
-        defineReadonly(navigator, "hardwareConcurrency", profile.hardwareConcurrency);
-        defineReadonly(navigator, "deviceMemory", profile.deviceMemory);
-        defineReadonly(navigator, "maxTouchPoints", profile.maxTouchPoints);
-        defineReadonly(navigator, "pdfViewerEnabled", true);
+        defineReadonly("userAgent", profile.userAgent);
+        defineReadonly("appVersion", profile.userAgent.replace(/^Mozilla\//, ""));
+        defineReadonly("platform", profile.navigatorPlatform);
+        defineReadonly("vendor", profile.vendor);
+        defineReadonly("language", firstLanguage);
+        defineReadonly("languages", profile.languages);
+        defineReadonly("hardwareConcurrency", profile.hardwareConcurrency);
+        defineReadonly("deviceMemory", profile.deviceMemory);
+        defineReadonly("maxTouchPoints", profile.maxTouchPoints);
+        defineReadonly("pdfViewerEnabled", true);
 
         const pdfMimeType = {
           type: "application/pdf",
@@ -5234,15 +5403,15 @@ async function applyBrowserIdentityToContext(
             yield pdfMimeType;
           },
         };
-        defineReadonly(navigator, "plugins", plugins);
-        defineReadonly(navigator, "mimeTypes", mimeTypes);
+        defineReadonly("plugins", plugins);
+        defineReadonly("mimeTypes", mimeTypes);
 
         const patchWebgl = (Ctor: any): void => {
           if (!Ctor?.prototype?.getParameter) return;
           const originalGetParameter = Ctor.prototype.getParameter;
           Ctor.prototype.getParameter = function (param: number) {
-            if (param === 37445) return profile.webglVendor;
-            if (param === 37446) return profile.webglRenderer;
+            if (param === 37445 && profile.webglVendor) return profile.webglVendor;
+            if (param === 37446 && profile.webglRenderer) return profile.webglRenderer;
             return originalGetParameter.call(this, param);
           };
         };
@@ -6389,11 +6558,12 @@ async function runSingleMode(
         ctx.runtimeRecentProxyIps,
       );
     }
+    selectedProxy.geo = (await enrichGeoInfo((selectedProxy.geo || {}) as GeoInfo, cfg.ipinfoToken)) || selectedProxy.geo;
     const geo = (selectedProxy.geo || {}) as GeoInfo;
     selectedGeo = geo;
 
-    const locale = deriveLocale(geo.country);
-    const acceptLanguage = buildAcceptLanguage(locale);
+    let locale = resolveBrowserLocale(geo.country);
+    let acceptLanguage = buildAcceptLanguage(locale);
     notes.push(`proxy node: ${selectedProxy.name}`);
     if (geo.ip) {
       notes.push(`proxy ip: ${geo.ip}`);
@@ -6426,6 +6596,53 @@ async function runSingleMode(
       contextOptions.timezoneId = geo.timezone;
     }
 
+    const syncGeoDerivedBrowserProfile = async (reason: string): Promise<void> => {
+      if (!selectedProxy) return;
+      const nextGeo = (selectedProxy.geo || {}) as GeoInfo;
+      selectedGeo = nextGeo;
+      const nextLocale = resolveBrowserLocale(nextGeo.country);
+      const nextAcceptLanguage = buildAcceptLanguage(nextLocale);
+      const nextTimezone = nextGeo.timezone;
+      const changed =
+        nextLocale !== locale ||
+        nextAcceptLanguage !== acceptLanguage ||
+        (nextTimezone || "") !== (contextOptions.timezoneId || "");
+      if (!changed) return;
+
+      locale = nextLocale;
+      acceptLanguage = nextAcceptLanguage;
+      contextOptions.locale = locale;
+      contextOptions.extraHTTPHeaders = {
+        ...(contextOptions.extraHTTPHeaders || {}),
+        "Accept-Language": acceptLanguage,
+      };
+      if (nextTimezone) {
+        contextOptions.timezoneId = nextTimezone;
+      } else {
+        delete contextOptions.timezoneId;
+      }
+      ledgerRecord.proxyCountry = nextGeo.country;
+      ledgerRecord.proxyCity = nextGeo.city;
+      ledgerRecord.proxyTimezone = nextGeo.timezone;
+      ledgerRecord.browserLocale = locale;
+      ledgerRecord.browserTimezone = nextGeo.timezone;
+      notes.push(
+        `browser geo synced after ${reason}: locale=${locale}, timezone=${nextGeo.timezone || "unknown"}, country=${nextGeo.country || "unknown"}`,
+      );
+
+      if (context) {
+        if (browserEngine === "chrome" && cfg.chromeIdentityOverride && !isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
+          identity = buildBrowserIdentityProfile(locale, browser?.version?.() || "");
+          await applyBrowserIdentityToContext(context, identity, nextGeo.timezone, !useNativeChrome);
+          if (useNativeChrome && page && nativeChromeMode === "cdp") {
+            await configureNativeChromePage(context, page, identity, nextGeo.timezone);
+          }
+        } else if (nextGeo.timezone && page && identity) {
+          await applyPageIdentityOverrides(context, page, identity, nextGeo.timezone);
+        }
+      }
+    };
+
     failureStage = "browser_launch";
     const launchBrowser = async (): Promise<Browser> => {
       if (useNativeChrome) {
@@ -6436,7 +6653,7 @@ async function runSingleMode(
             mihomoController.proxyServer,
             locale,
             acceptLanguage,
-            geo.timezone,
+            selectedGeo?.timezone,
           );
           nativeChromeMode = "cdp";
           nativeChromeStop = launched.stop;
@@ -6522,7 +6739,7 @@ async function runSingleMode(
           throw new Error("native chrome context missing");
         }
         if (identity) {
-          await applyBrowserIdentityToContext(context, identity, geo.timezone, false);
+          await applyBrowserIdentityToContext(context, identity, selectedGeo?.timezone, false);
         }
         if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
           await applyEngineStealth(context, "chrome", locale, cfg.chromeStealthJsEnabled && !useNativeChrome);
@@ -6559,13 +6776,13 @@ async function runSingleMode(
             context,
             page,
             identity,
-            geo.timezone,
+            selectedGeo?.timezone,
           );
         }
       } else {
         context = await browser!.newContext(contextOptions);
         if (identity) {
-          await applyBrowserIdentityToContext(context, identity, geo.timezone);
+          await applyBrowserIdentityToContext(context, identity, selectedGeo?.timezone);
         }
         if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
           if (!isFingerprintChromiumExecutable(cfg.chromeExecutablePath)) {
@@ -6644,7 +6861,7 @@ async function runSingleMode(
     ledgerRecord.browserMode = useNativeChrome ? nativeChromeMode || "cdp" : browserEngine;
     ledgerRecord.browserUserAgent = (identity as BrowserIdentityProfile | null)?.userAgent;
     ledgerRecord.browserLocale = locale;
-    ledgerRecord.browserTimezone = geo.timezone;
+    ledgerRecord.browserTimezone = selectedGeo?.timezone;
     ledgerRecord.notesJson = safeJsonStringify(notes);
     persistLedgerRecord("after-browser-launch");
 
@@ -6682,8 +6899,12 @@ async function runSingleMode(
     if (expectedProxyIp && !sameIp(expectedProxyIp, browserObservedIp)) {
       notes.push(`browser ip superseded cached ip: expected=${expectedProxyIp} actual=${browserObservedIp}`);
     }
-    selectedProxy.geo = { ...(selectedProxy.geo || {}), ip: browserObservedIp } as GeoInfo;
+    selectedProxy.geo = mergeGeoInfo(
+      { ...(selectedProxy.geo || {}), ip: browserObservedIp } as GeoInfo,
+      await enrichGeoInfo({ ip: browserObservedIp } as GeoInfo, cfg.ipinfoToken),
+    ) as GeoInfo;
     selectedGeo = selectedProxy.geo;
+    await syncGeoDerivedBrowserProfile("browser ip probe");
     ledgerRecord.proxyIp = browserObservedIp;
     if (preparedTask) {
       const previousTaskIp = normalizeIp(preparedTask.proxyIp);
@@ -7085,7 +7306,7 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     const selectedProxy = await selectProxyNode(mihomoController, cfg, args.proxyNode);
     const geo = (selectedProxy.geo || {}) as GeoInfo;
 
-    const locale = deriveLocale(geo.country);
+    const locale = resolveBrowserLocale(geo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
     notes.push(`proxy node: ${selectedProxy.name}`);
     notes.push(`proxy ip: ${geo.ip || "pending browser confirmation"}`);
