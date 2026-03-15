@@ -54,6 +54,8 @@ const BROWSER_LIKE_SUBSCRIPTION_UA =
 // Avoid duplicate downloads when multiple runs start in parallel.
 const mihomoBinaryCache = new Map<string, Promise<string>>();
 const subscriptionInflight = new Map<string, Promise<Record<string, unknown>>>();
+const subscriptionSuccessCache = new Map<string, { fetchedAt: number; payload: Record<string, unknown> }>();
+const SUBSCRIPTION_SUCCESS_TTL_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -102,6 +104,29 @@ async function fetchRelease(url: string): Promise<{ tag: string; assets: Release
   const tag = payload.tag_name?.trim();
   if (!tag) throw new Error("mihomo_release_missing_tag");
   return { tag, assets: payload.assets || [] };
+}
+
+function cloneSubscriptionPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(payload)) as Record<string, unknown>;
+}
+
+function getFreshSuccessfulSubscription(url: string): Record<string, unknown> | null {
+  const cached = subscriptionSuccessCache.get(url);
+  if (!cached) return null;
+  if (Date.now() - cached.fetchedAt > SUBSCRIPTION_SUCCESS_TTL_MS) return null;
+  return cloneSubscriptionPayload(cached.payload);
+}
+
+function getLastSuccessfulSubscription(url: string): Record<string, unknown> | null {
+  const cached = subscriptionSuccessCache.get(url);
+  return cached ? cloneSubscriptionPayload(cached.payload) : null;
+}
+
+function rememberSuccessfulSubscription(url: string, payload: Record<string, unknown>): void {
+  subscriptionSuccessCache.set(url, {
+    fetchedAt: Date.now(),
+    payload: cloneSubscriptionPayload(payload),
+  });
 }
 
 function buildSubscriptionRequestHeaders(url: string): Record<string, string> {
@@ -597,6 +622,10 @@ function normalizeRuleProviders(
 }
 
 async function fetchSubscription(url: string): Promise<Record<string, unknown>> {
+  const fresh = getFreshSuccessfulSubscription(url);
+  if (fresh) {
+    return fresh;
+  }
   const inflight = subscriptionInflight.get(url);
   if (inflight) {
     return await inflight;
@@ -662,7 +691,8 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
     if (!subscriptionHasUsableNodes(subscription)) {
       throw new Error("mihomo_subscription_empty");
     }
-    return subscription;
+    rememberSuccessfulSubscription(url, subscription);
+    return cloneSubscriptionPayload(subscription);
   })();
 
   subscriptionInflight.set(url, pending);
@@ -918,14 +948,20 @@ async function writeConfig(cfg: MihomoConfig): Promise<{ configPath: string; pro
     await writeCachedSubscription(subscriptionCachePath, subscription);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const memoryCached = getLastSuccessfulSubscription(cfg.subscriptionUrl);
     if (/mihomo_subscription_failed:4\d\d|mihomo_subscription_empty/i.test(message)) {
-      throw error;
+      if (subscriptionHasUsableNodes(memoryCached)) {
+        subscription = memoryCached as Record<string, unknown>;
+      } else {
+        throw error;
+      }
+    } else {
+      const cached = await readCachedSubscription(subscriptionCachePath);
+      if (!subscriptionHasUsableNodes(cached)) {
+        throw error;
+      }
+      subscription = cached as Record<string, unknown>;
     }
-    const cached = await readCachedSubscription(subscriptionCachePath);
-    if (!subscriptionHasUsableNodes(cached)) {
-      throw error;
-    }
-    subscription = cached as Record<string, unknown>;
   }
   const { config, providerNames } = buildConfigObject(cfg, subscription);
   const yaml = yamlStringify(config);

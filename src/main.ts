@@ -779,6 +779,24 @@ function compactGeo(geo: GeoInfo | undefined): GeoInfo | undefined {
   };
 }
 
+let proxyBootstrapQueue: Promise<void> = Promise.resolve();
+
+function withProxyBootstrapLock<T>(task: () => Promise<T>): Promise<T> {
+  const previous = proxyBootstrapQueue;
+  let release!: () => void;
+  proxyBootstrapQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return (async () => {
+    await previous;
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  })();
+}
+
 function detectCfChallenge(title: string, body: string, url: string): string | null {
   const haystack = `${title}\n${body}`.toLowerCase();
   if (haystack.includes("__cf_chl_rt_tk")) return "cf_token";
@@ -895,6 +913,17 @@ function buildProxyIpUsageIndex(usage: ProxyNodeUsageState): Map<string, ProxyIp
     }
   }
   return byIp;
+}
+
+function resolveKnownNodeIp(
+  entry: ProxyNodeUsageEntry | undefined,
+  nowMs?: number,
+  ttlMs?: number,
+): string | undefined {
+  if (Number.isFinite(nowMs) && Number.isFinite(ttlMs) && !isUsageEntryFresh(entry, nowMs as number, ttlMs as number)) {
+    return undefined;
+  }
+  return normalizeIp(entry?.lastIp || entry?.lastGeo?.ip);
 }
 
 function nodeSelectionScore(
@@ -1052,10 +1081,24 @@ async function selectProxyNode(
   for (const name of names) {
     scoreByNode.set(name, nodeSelectionScore(name, usage, runtimeRecentSelectedIps, nowMs, cfg, ipUsageByIp));
   }
-  const prioritized = [...names].sort((a, b) => {
+  const sorted = [...names].sort((a, b) => {
     const diff = (scoreByNode.get(a) || 0) - (scoreByNode.get(b) || 0);
     return diff !== 0 ? diff : a.localeCompare(b);
   });
+  const seenKnownIps = new Set<string>();
+  const prioritized: string[] = [];
+  for (const name of sorted) {
+    const knownIp = resolveKnownNodeIp(usage.nodes[name], nowMs, cfg.nodeCheckCacheTtlMs);
+    if (!knownIp) {
+      prioritized.push(name);
+      continue;
+    }
+    if (seenKnownIps.has(knownIp)) {
+      continue;
+    }
+    seenKnownIps.add(knownIp);
+    prioritized.push(name);
+  }
   const cooldownBlockedIps = new Set<string>();
   for (const item of ipUsageByIp.values()) {
     if (!Number.isFinite(item.lastUsedMs)) continue;
@@ -1088,7 +1131,7 @@ async function selectProxyNode(
 
   for (const name of prioritized) {
     const previous = usage.nodes[name] || emptyUsageEntry;
-    const previousIp = normalizeIp(previous.lastGeo?.ip) || normalizeIp(previous.lastIp);
+    const previousIp = resolveKnownNodeIp(previous, nowMs, cfg.nodeCheckCacheTtlMs);
     if (previousIp && cooldownBlockedIps.has(previousIp)) {
       continue;
     }
@@ -5065,13 +5108,13 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
+  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
     message,
   );
 }
 
 function shouldAbortBatchFailure(message: string): boolean {
-  return /browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|proxy_node_inventory_empty|proxy_all_nodes_busy|mihomo_subscription_failed|mihomo_subscription_empty|Target page, context or browser has been closed|page has been closed|context has been closed|browser has been closed/i.test(
+  return /browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|Target page, context or browser has been closed|page has been closed|context has been closed|browser has been closed/i.test(
     message,
   );
 }
@@ -5430,13 +5473,33 @@ function commandMatchesProfileDir(command: string, profileDir: string): boolean 
   return command.includes(`--user-data-dir=${profileDir}`);
 }
 
+async function cleanupChromeProfileArtifacts(profileDir: string): Promise<void> {
+  const artifactNames = [
+    'SingletonLock',
+    'SingletonCookie',
+    'SingletonSocket',
+    'DevToolsActivePort',
+    'CrashpadMetrics-active.pma',
+  ];
+  for (const name of artifactNames) {
+    try {
+      await rm(path.join(profileDir, name), { force: true, recursive: true });
+    } catch {
+      // ignore stale artifact cleanup failures
+    }
+  }
+}
+
 async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> {
   const normalizedProfileDir = normalizeProfileDir(profileDir);
   const collectMatched = async () =>
     (await readPsTable()).filter((entry) => commandMatchesProfileDir(entry.command, normalizedProfileDir));
 
   let matched = await collectMatched();
-  if (matched.length === 0) return;
+  if (matched.length === 0) {
+    await cleanupChromeProfileArtifacts(normalizedProfileDir).catch(() => {});
+    return;
+  }
 
   const signalMatched = (signal: NodeJS.Signals, rows: Array<{ pid: number; pgid: number; command: string }>) => {
     const pgids = Array.from(new Set(rows.map((entry) => entry.pgid).filter((pgid) => pgid > 1)));
@@ -5469,8 +5532,12 @@ async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> 
   while (Date.now() < forceDeadline) {
     await delay(120);
     matched = await collectMatched();
-    if (matched.length === 0) return;
+    if (matched.length === 0) {
+      await cleanupChromeProfileArtifacts(normalizedProfileDir).catch(() => {});
+      return;
+    }
   }
+  await cleanupChromeProfileArtifacts(normalizedProfileDir).catch(() => {});
 }
 
 async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
@@ -5608,6 +5675,7 @@ async function launchNativeChromeCdp(
     const profileDir = profileCandidates[i]!;
     const usingBaseProfile = i > 0;
     await mkdir(profileDir, { recursive: true });
+    await cleanupChromeProfileArtifacts(profileDir).catch(() => {});
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
     const startupTargets = ["https://app.tavily.com/"];
     const args = [
@@ -5828,6 +5896,7 @@ async function launchNativeChromeInspect(
   }
   const targets = ["https://app.tavily.com/"];
   await mkdir(cfg.inspectChromeProfileDir, { recursive: true });
+  await cleanupChromeProfileArtifacts(cfg.inspectChromeProfileDir).catch(() => {});
 
   const args = [
     `--user-data-dir=${cfg.inspectChromeProfileDir}`,
@@ -6007,31 +6076,45 @@ async function prepareSignupTask(
   const taskId = `task-${taskOrdinal}-${randomBytes(2).toString("hex")}`;
   const proxyBootstrapAttempts = 6;
   let lastError: Error | null = null;
+  const distinctIpCapacityError = (detail: string): Error =>
+    new Error(`proxy_distinct_ip_capacity_exhausted:${detail}`);
 
   for (let attempt = 1; attempt <= proxyBootstrapAttempts; attempt += 1) {
-    const selectedProxy = await preselectTaskProxy(
-      cfg,
-      args,
-      batchId,
-      taskId,
-      taskLedger,
-      ipQuotaBlocked,
-      runtimeRecentProxyIps,
-      activeProxyNames,
-      activeProxyIps,
-      existingController,
-    );
-    const proxyIp = normalizeIp(selectedProxy.geo?.ip);
-    if (activeProxyNames.has(selectedProxy.name)) {
-      log(`task proxy bootstrap skipped busy node: ${selectedProxy.name}`);
-      continue;
+    let selectedProxy: NodeCheckResult;
+    let proxyIp: string | undefined;
+    try {
+      ({ selectedProxy, proxyIp } = await withProxyBootstrapLock(async () => {
+        const proxy = await preselectTaskProxy(
+          cfg,
+          args,
+          batchId,
+          taskId,
+          taskLedger,
+          ipQuotaBlocked,
+          runtimeRecentProxyIps,
+          activeProxyNames,
+          activeProxyIps,
+          existingController,
+        );
+        const ip = normalizeIp(proxy.geo?.ip);
+        if (activeProxyNames.has(proxy.name)) {
+          throw distinctIpCapacityError(`busy_node:${proxy.name}`);
+        }
+        if (ip && activeProxyIps.has(ip)) {
+          throw distinctIpCapacityError(`busy_ip:${proxy.name}->${ip}`);
+        }
+        activeProxyNames.add(proxy.name);
+        if (ip) activeProxyIps.add(ip);
+        return { selectedProxy: proxy, proxyIp: ip };
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastError = error instanceof Error ? error : new Error(message);
+      if (/proxy_no_available_node|proxy_all_nodes_busy/i.test(message)) {
+        throw distinctIpCapacityError(message.split("\n")[0] || message);
+      }
+      throw lastError;
     }
-    if (proxyIp && activeProxyIps.has(proxyIp)) {
-      log(`task proxy bootstrap skipped busy IP: ${selectedProxy.name} -> ${proxyIp}`);
-      continue;
-    }
-    activeProxyNames.add(selectedProxy.name);
-    if (proxyIp) activeProxyIps.add(proxyIp);
 
     try {
       const mailboxPromise =
@@ -7282,23 +7365,25 @@ async function run(): Promise<void> {
         workDir: path.join(OUTPUT_PATH, "mihomo", batchId, `task-${runIndex}`),
       };
       const taskMihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
-      const preparedTask = await prepareSignupTask(
-        cfg,
-        args,
-        batchId,
-        taskLedger,
-        taskMihomoController,
-        ipEmailUsage,
-        runtimeRecentProxyIps,
-        activeProxyNames,
-        activeProxyIps,
-        blockedMailboxDomains,
-        runIndex,
-        runIndex <= mailboxPreloadTarget,
-      );
+      let preparedTask: PreparedSignupTask | null = null;
       let lastError: Error | null = null;
 
       try {
+        preparedTask = await prepareSignupTask(
+          cfg,
+          args,
+          batchId,
+          taskLedger,
+          taskMihomoController,
+          ipEmailUsage,
+          runtimeRecentProxyIps,
+          activeProxyNames,
+          activeProxyIps,
+          blockedMailboxDomains,
+          runIndex,
+          runIndex <= mailboxPreloadTarget,
+        );
+
         for (let attempt = 1; attempt <= taskRetryMax; attempt += 1) {
           try {
             const result = await runSingleMode(
@@ -7342,8 +7427,10 @@ async function run(): Promise<void> {
           }
         }
       } finally {
-        activeProxyNames.delete(preparedTask.proxyName);
-        if (preparedTask.proxyIp) activeProxyIps.delete(preparedTask.proxyIp);
+        if (preparedTask) {
+          activeProxyNames.delete(preparedTask.proxyName);
+          if (preparedTask.proxyIp) activeProxyIps.delete(preparedTask.proxyIp);
+        }
         await taskMihomoController.stop().catch(() => {});
       }
 
