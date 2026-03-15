@@ -44,6 +44,7 @@ ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN'"
 rsync -az --delete \
   --exclude '.git/' \
   --exclude 'node_modules/' \
+  --exclude '.tools/' \
   --exclude 'output/' \
   --exclude 'downloads/' \
   --exclude 'dist/' \

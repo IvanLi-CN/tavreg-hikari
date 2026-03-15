@@ -4818,24 +4818,21 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
   for (let round = 1; round <= Math.max(1, maxRounds); round += 1) {
     await page.waitForTimeout(1200);
 
-    const fromDom = await page.evaluate(() => {
-      const pick = (value: unknown): string | null => {
+    const fromDom = await page.evaluate(`(() => {
+      const pick = (value) => {
         if (typeof value !== "string") return null;
         const match = value.match(/tvly-[A-Za-z0-9_-]{8,}/i);
         return match ? match[0] : null;
       };
 
       const selectOption = Array.from(document.querySelectorAll("option"))
-        .map((el) => (el as HTMLOptionElement).value || "")
+        .map((el) => el.value || "")
         .map((v) => pick(v))
         .find((v) => !!v);
       if (selectOption) return { key: selectOption, source: "dom-option" };
 
       const inputVal = Array.from(document.querySelectorAll("input,textarea"))
-        .map((el) => {
-          const node = el as HTMLInputElement | HTMLTextAreaElement;
-          return [node.value, node.getAttribute("value"), node.getAttribute("placeholder")];
-        })
+        .map((el) => [el.value, el.getAttribute("value"), el.getAttribute("placeholder")])
         .flat()
         .map((v) => pick(v))
         .find((v) => !!v);
@@ -4844,7 +4841,7 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
       const textMatch = pick(document.body?.innerText || "");
       if (textMatch) return { key: textMatch, source: "dom-text" };
       return { key: null, source: "none" };
-    });
+    })()`);
 
     if (fromDom?.key && isLikelyTavilyKey(fromDom.key)) {
       log(`default api key found from ${fromDom.source}`);
