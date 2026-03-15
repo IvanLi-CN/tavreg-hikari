@@ -18,6 +18,8 @@
   - `bun run start -- --need 5 --parallel 2`
 - 站点人工检查：
   - `bun run start -- --inspect-sites --browser-engine chrome`
+- 共享测试机 Linux 无 DE 复现：
+  - `./scripts/run_shared_testbox_signup.sh`
 
 ## 运行流水线
 
@@ -63,6 +65,9 @@
 4. API Key 未提取到：
    - 单次运行：查看 `output/network_headed.json` 与 `output/home_headed.html`。
    - 批量/并行：查看 `output/runs/<batchId>/<runId>/network_headed.json` 与 `output/runs/<batchId>/<runId>/home_headed.html`。
+5. 共享测试机结果判定冲突：
+   - 优先看远端运行目录下的 `remote-test-status.json` 与 `output/result.json`。
+   - 若 `output/error.json` 与成功结果同时存在，以最新 `remote-test.log` 末尾和 `result.json` 为准。
 
 ## 执行约束
 

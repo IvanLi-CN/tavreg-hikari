@@ -168,6 +168,22 @@ Script writes result to:
 
 In batch mode, `output/result.json` contains the **last** successful result; check `output/run_summary.json` for all results.
 
+## Shared Testbox
+
+To replay the Linux no-DE headed flow on `codex-testbox` with the same local config and task data:
+
+```bash
+./scripts/run_shared_testbox_signup.sh
+```
+
+The script creates an isolated remote run directory under `/srv/codex/workspaces/$USER/<repo>__<hash>/runs/<run_id>/`, syncs the repo plus local `.env.local` / ledger / proxy usage cache, runs Chromium inside `xvfb-run`, and writes:
+
+- `remote-test.log`
+- `remote-test-status.json`
+- `output/result.json` on success
+
+Treat `remote-test-status.json` or `output/result.json` as the source of truth for remote success. `output/error.json` may still contain an older failure from a previous attempt in the same synced workspace snapshot.
+
 Fields:
 
 - `mode`: run mode (`headed` or `headless`)

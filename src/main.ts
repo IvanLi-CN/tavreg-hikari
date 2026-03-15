@@ -4852,9 +4852,9 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
     }
 
     const pageResult = await page.evaluate(
-      async ({ keyName, keyLimit }: { keyName: string; keyLimit: number }) => {
-        const isLikelyKey = (value: string): boolean => /^tvly-[A-Za-z0-9_-]{8,}$/i.test((value || "").trim());
-        const extractKey = (node: any): string | null => {
+      `async ({ keyName, keyLimit }) => {
+        const isLikelyKey = (value) => /^tvly-[A-Za-z0-9_-]{8,}$/i.test((value || "").trim());
+        const extractKey = (node) => {
           if (!node) return null;
           if (typeof node === "string") return isLikelyKey(node) ? node.trim() : null;
           if (Array.isArray(node)) {
@@ -4877,9 +4877,9 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
           return null;
         };
 
-        const parse = async (res: Response) => {
+        const parse = async (res) => {
           const text = await res.text();
-          let body: unknown;
+          let body;
           try {
             body = JSON.parse(text);
           } catch {
@@ -4888,7 +4888,7 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
           return { ok: res.ok, status: res.status, body };
         };
 
-        const safeFetch = async (url: string, init?: RequestInit) => {
+        const safeFetch = async (url, init) => {
           try {
             const resp = await fetch(url, { credentials: "include", ...(init || {}) });
             return await parse(resp);
@@ -4897,8 +4897,8 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
           }
         };
 
-        const oidCandidates = new Set<string>();
-        const collectOidFromNode = (node: any) => {
+        const oidCandidates = new Set();
+        const collectOidFromNode = (node) => {
           if (!node) return;
           if (Array.isArray(node)) {
             node.forEach(collectOidFromNode);
@@ -4922,15 +4922,15 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
         const account = await safeFetch("/api/account");
         collectOidFromNode(account.body);
 
-        const endpoints: string[] = [];
-        for (const oid of oidCandidates) endpoints.push(`/api/keys?oid=${encodeURIComponent(oid)}`);
+        const endpoints = [];
+        for (const oid of oidCandidates) endpoints.push("/api/keys?oid=" + encodeURIComponent(oid));
         endpoints.push("/api/keys?oid=");
         endpoints.push("/api/keys");
 
-        const debug: Array<{ step: string; status: number }> = [];
+        const debug = [];
         for (const endpoint of endpoints) {
           const listed = await safeFetch(endpoint);
-          debug.push({ step: `list:${endpoint}`, status: listed.status });
+          debug.push({ step: "list:" + endpoint, status: listed.status });
           const existing = extractKey(listed.body);
           if (existing) return { key: existing, debug };
 
@@ -4945,18 +4945,18 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(createPayload),
           });
-          debug.push({ step: `create:${endpoint}`, status: created.status });
+          debug.push({ step: "create:" + endpoint, status: created.status });
           const createdKey = extractKey(created.body);
           if (createdKey) return { key: createdKey, debug };
 
           const listedAgain = await safeFetch(endpoint);
-          debug.push({ step: `list2:${endpoint}`, status: listedAgain.status });
+          debug.push({ step: "list2:" + endpoint, status: listedAgain.status });
           const listedAgainKey = extractKey(listedAgain.body);
           if (listedAgainKey) return { key: listedAgainKey, debug };
         }
 
         return { key: null, debug };
-      },
+      }`,
       { keyName: cfg.keyName, keyLimit: cfg.keyLimit },
     );
 
