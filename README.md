@@ -110,6 +110,22 @@ BROWSER_ENGINE=chrome CHROME_NATIVE_AUTOMATION=true bun run start -- --mode head
 
 `CHROME_NATIVE_AUTOMATION=true` first tries native Chrome CDP attach; if CDP handshake is unavailable in your environment, it automatically falls back to a persistent Chrome profile launched by Playwright.
 
+For Linux servers without a desktop environment, headed Chrome now auto-starts `Xvfb` when `DISPLAY` and `WAYLAND_DISPLAY` are both absent. Keep `RUN_MODE=headed`; do not switch to `headless` if you need the site to see a real headed browser session.
+
+```bash
+RUN_MODE=headed \
+BROWSER_ENGINE=chrome \
+CHROME_NATIVE_AUTOMATION=true \
+CHROME_EXECUTABLE_PATH=/opt/fingerprint-chromium/chromium \
+bun run start -- --mode headed
+```
+
+`output/result.json`, `output/browser_precheck_*.json`, and `output/inspect_sites.json` now include `displayBackend` (`system` or `xvfb`) so you can verify whether the run used a managed virtual display.
+
+If `Xvfb` is missing or fails to start in a Linux headed run, the command exits with `virtual_display_unavailable:*`. Install `Xvfb` or provide an existing `DISPLAY` before retrying.
+
+`headed + Xvfb` is the supported "no DE but headed-equivalent" path. Pure `headless` mode is still a real headless browser and is not treated as equivalent to headed for detection-sensitive sites.
+
 If you explicitly need UA/platform overrides (disabled by default for lower detection risk), set:
 
 ```bash

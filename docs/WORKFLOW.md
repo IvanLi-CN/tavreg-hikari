@@ -24,6 +24,8 @@
 1. 从 `.env.local` 加载配置。
 2. 选择代理节点（出口 IP 去重 + 本机出口保护）。
 3. 启动浏览器。
+   - Linux + `headed` + `chrome` 且没有 `DISPLAY/WAYLAND_DISPLAY` 时，程序会先自动拉起 `Xvfb`，并把 `displayBackend=xvfb` 写入诊断产物。
+   - 若已有系统显示环境，则记录 `displayBackend=system`。
 4. 浏览器预检：
    - 3 个国内 IP 站点 + 2 个国际 IP 站点（同一浏览器上下文并行多标签页）。
    - `fingerprint.goldenowl.ai` + WebRTC 探测。
@@ -53,14 +55,17 @@
 1. 预检因 WebRTC 或 IP 不一致失败：
    - 单次运行：查看 `output/browser_precheck_headed.json`。
    - 批量/并行：查看 `output/runs/<batchId>/<runId>/browser_precheck_headed.json`（`batchId/runId` 可从 `output/run_summary.json` 或 SQLite 台账中获取）。
-   - 对比“选中代理出口 IP”和“浏览器实际观测 IP”。
-2. 验证码反复失败：
+   - 对比“选中代理出口 IP”和“浏览器实际观测 IP”，并确认 `displayBackend` 是否符合预期。
+2. Linux 无桌面环境启动失败（`virtual_display_unavailable:*`）：
+   - 确认机器已安装 `Xvfb`，或设置可用的 `DISPLAY` / `WAYLAND_DISPLAY`。
+   - 如需指定 Xvfb 路径或显示号，设置 `VIRTUAL_DISPLAY_EXECUTABLE_PATH` / `VIRTUAL_DISPLAY_DISPLAY_NUM`。
+3. 验证码反复失败：
    - 提高 `MAX_CAPTCHA_ROUNDS`。
    - 检查 OCR 模型是否可用（`/models`）。
-3. 验证邮件超时：
+4. 验证邮件超时：
    - 提高 `EMAIL_WAIT_MS`。
    - 检查当前邮箱服务 API 可用性。
-4. API Key 未提取到：
+5. API Key 未提取到：
    - 单次运行：查看 `output/network_headed.json` 与 `output/home_headed.html`。
    - 批量/并行：查看 `output/runs/<batchId>/<runId>/network_headed.json` 与 `output/runs/<batchId>/<runId>/home_headed.html`。
 
