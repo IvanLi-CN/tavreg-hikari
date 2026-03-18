@@ -38,7 +38,7 @@ export function AccountsView({
   const failedCount = accounts.rows.filter((row) => row.lastResultStatus === "failed").length;
 
   return (
-    <section className="grid gap-4 xl:grid-cols-[0.92fr_1.08fr]">
+    <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.56fr)_minmax(0,1.44fr)]">
       <Card>
         <CardHeader>
           <CardTitle>导入微软账号</CardTitle>
