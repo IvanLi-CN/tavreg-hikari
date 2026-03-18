@@ -117,46 +117,85 @@ export function ProxiesView({
           <CardDescription>可以切换当前节点，也可以单独检查某一个节点。</CardDescription>
         </CardHeader>
         <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>节点</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>延迟</TableHead>
-                <TableHead>出口 IP</TableHead>
-                <TableHead>地理信息</TableHead>
-                <TableHead>24h 成功</TableHead>
-                <TableHead>操作</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {proxies.nodes.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-8 text-center text-slate-400">还没有代理节点。</TableCell>
-                </TableRow>
-              ) : (
-                proxies.nodes.map((node) => (
-                  <TableRow key={node.id}>
-                    <TableCell>
-                      <div className="font-medium text-white">{node.nodeName}</div>
-                      {node.isSelected ? <div className="mt-1 text-xs text-cyan-300">当前选中</div> : null}
-                    </TableCell>
-                    <TableCell><StatusBadge status={node.lastStatus} /></TableCell>
-                    <TableCell>{node.lastLatencyMs == null ? "—" : `${node.lastLatencyMs}ms`}</TableCell>
-                    <TableCell>{node.lastEgressIp || "—"}</TableCell>
-                    <TableCell>{formatLocation(node)}</TableCell>
-                    <TableCell>{node.success24h}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-2">
-                        <Button variant="secondary" size="sm" onClick={() => onSelectNode(node.nodeName)}>切换</Button>
-                        <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
+          {proxies.nodes.length === 0 ? (
+            <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+              还没有代理节点。
+            </div>
+          ) : (
+            <>
+              <div className="space-y-3 md:hidden">
+                {proxies.nodes.map((node) => (
+                  <article key={node.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="font-medium text-white">{node.nodeName}</div>
+                        {node.isSelected ? <div className="mt-1 text-xs text-cyan-300">当前选中</div> : null}
                       </div>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+                      <StatusBadge status={node.lastStatus} />
+                    </div>
+                    <dl className="mt-4 grid gap-3 text-sm text-slate-300">
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">延迟</dt>
+                        <dd>{node.lastLatencyMs == null ? "—" : `${node.lastLatencyMs}ms`}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">出口 IP</dt>
+                        <dd>{node.lastEgressIp || "—"}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">地理信息</dt>
+                        <dd className="text-right">{formatLocation(node)}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">24h 成功</dt>
+                        <dd>{node.success24h}</dd>
+                      </div>
+                    </dl>
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      <Button variant="secondary" size="sm" onClick={() => onSelectNode(node.nodeName)}>切换</Button>
+                      <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>节点</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>延迟</TableHead>
+                      <TableHead>出口 IP</TableHead>
+                      <TableHead>地理信息</TableHead>
+                      <TableHead>24h 成功</TableHead>
+                      <TableHead>操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {proxies.nodes.map((node) => (
+                      <TableRow key={node.id}>
+                        <TableCell>
+                          <div className="font-medium text-white">{node.nodeName}</div>
+                          {node.isSelected ? <div className="mt-1 text-xs text-cyan-300">当前选中</div> : null}
+                        </TableCell>
+                        <TableCell><StatusBadge status={node.lastStatus} /></TableCell>
+                        <TableCell>{node.lastLatencyMs == null ? "—" : `${node.lastLatencyMs}ms`}</TableCell>
+                        <TableCell>{node.lastEgressIp || "—"}</TableCell>
+                        <TableCell>{formatLocation(node)}</TableCell>
+                        <TableCell>{node.success24h}</TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-2">
+                            <Button variant="secondary" size="sm" onClick={() => onSelectNode(node.nodeName)}>切换</Button>
+                            <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
     </section>

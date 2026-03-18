@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -32,6 +33,10 @@ export function AccountsView({
   onImport: () => void;
   onQueryChange: (value: AccountQuery) => void;
 }) {
+  const readyCount = accounts.rows.filter((row) => row.lastResultStatus === "ready").length;
+  const linkedCount = accounts.rows.filter((row) => row.hasApiKey).length;
+  const failedCount = accounts.rows.filter((row) => row.lastResultStatus === "failed").length;
+
   return (
     <section className="grid gap-4 xl:grid-cols-[0.92fr_1.08fr]">
       <Card>
@@ -59,6 +64,11 @@ export function AccountsView({
           <CardDescription>共 {accounts.total} 条记录。已有关联 API key 的账号会被标记并跳过调度。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="info">ready · {readyCount}</Badge>
+            <Badge variant="success">linked · {linkedCount}</Badge>
+            <Badge variant="danger">failed · {failedCount}</Badge>
+          </div>
           <div className="grid gap-3 lg:grid-cols-3">
             <FilterField label="搜索">
               <Input
@@ -97,38 +107,73 @@ export function AccountsView({
             </FilterField>
           </div>
 
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>邮箱</TableHead>
-                <TableHead>密码</TableHead>
-                <TableHead>Has Key</TableHead>
-                <TableHead>最近状态</TableHead>
-                <TableHead>导入时间</TableHead>
-                <TableHead>最近使用</TableHead>
-                <TableHead>跳过原因</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {accounts.rows.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={7} className="py-8 text-center text-slate-400">还没有账号记录。</TableCell>
-                </TableRow>
-              ) : (
-                accounts.rows.map((row) => (
-                  <TableRow key={row.id}>
-                    <TableCell className="max-w-[16rem] break-all">{row.microsoftEmail}</TableCell>
-                    <TableCell>{row.passwordMasked}</TableCell>
-                    <TableCell>{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
-                    <TableCell><StatusBadge status={row.lastResultStatus} /></TableCell>
-                    <TableCell>{formatDate(row.importedAt)}</TableCell>
-                    <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
-                    <TableCell>{row.skipReason || "—"}</TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
+          {accounts.rows.length === 0 ? (
+            <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+              还没有账号记录。
+            </div>
+          ) : (
+            <>
+              <div className="space-y-3 md:hidden">
+                {accounts.rows.map((row) => (
+                  <article key={row.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
+                        <div className="mt-1 text-sm text-slate-400">{row.passwordMasked}</div>
+                      </div>
+                      {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
+                    </div>
+                    <dl className="mt-4 grid gap-3 text-sm text-slate-300">
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">最近状态</dt>
+                        <dd><StatusBadge status={row.lastResultStatus} /></dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">导入时间</dt>
+                        <dd>{formatDate(row.importedAt)}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">最近使用</dt>
+                        <dd>{formatDate(row.lastUsedAt)}</dd>
+                      </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <dt className="text-slate-500">跳过原因</dt>
+                        <dd>{row.skipReason || "—"}</dd>
+                      </div>
+                    </dl>
+                  </article>
+                ))}
+              </div>
+              <div className="hidden md:block">
+                <Table className="min-w-[920px]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>邮箱</TableHead>
+                      <TableHead>密码</TableHead>
+                      <TableHead>Has Key</TableHead>
+                      <TableHead>最近状态</TableHead>
+                      <TableHead>导入时间</TableHead>
+                      <TableHead>最近使用</TableHead>
+                      <TableHead>跳过原因</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {accounts.rows.map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
+                        <TableCell>{row.passwordMasked}</TableCell>
+                        <TableCell>{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
+                        <TableCell><StatusBadge status={row.lastResultStatus} /></TableCell>
+                        <TableCell>{formatDate(row.importedAt)}</TableCell>
+                        <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
+                        <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </>
+          )}
         </CardContent>
       </Card>
     </section>

@@ -5,7 +5,7 @@ function Card({ className, ...props }: React.ComponentProps<"section">) {
   return (
     <section
       className={cn(
-        "rounded-[28px] border border-white/10 bg-[#09111f]/85 shadow-[0_20px_60px_rgba(0,0,0,0.28)] backdrop-blur",
+        "relative overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,23,42,0.92),rgba(9,17,31,0.86))] shadow-[0_20px_60px_rgba(0,0,0,0.28)] backdrop-blur before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-sky-300/40 before:to-transparent",
         className,
       )}
       {...props}

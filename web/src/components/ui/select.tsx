@@ -11,7 +11,7 @@ function SelectTrigger({ className, children, ...props }: React.ComponentProps<t
   return (
     <SelectPrimitive.Trigger
       className={cn(
-        "flex h-11 w-full items-center justify-between gap-2 rounded-2xl border border-white/12 bg-[#0d1728] px-4 text-sm text-slate-50 outline-none transition focus-visible:border-cyan-300/60 focus-visible:ring-2 focus-visible:ring-cyan-300/30 data-[placeholder]:text-slate-500",
+        "flex h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-2xl border border-white/12 bg-[rgba(15,23,42,0.7)] px-4 text-sm text-slate-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] outline-none transition duration-200 focus-visible:border-emerald-300/50 focus-visible:ring-2 focus-visible:ring-emerald-300/20 data-[placeholder]:text-slate-500",
         className,
       )}
       {...props}
@@ -30,7 +30,7 @@ function SelectContent({ className, children, position = "popper", ...props }: R
       <SelectPrimitive.Content
         position={position}
         className={cn(
-          "z-50 overflow-hidden rounded-2xl border border-white/12 bg-[#0c1626] p-1 shadow-2xl",
+          "z-50 overflow-hidden rounded-2xl border border-white/12 bg-[#0c1626] p-1 shadow-[0_24px_60px_rgba(2,6,23,0.6)]",
           className,
         )}
         {...props}
@@ -45,7 +45,7 @@ function SelectItem({ className, children, ...props }: React.ComponentProps<type
   return (
     <SelectPrimitive.Item
       className={cn(
-        "relative flex cursor-default select-none items-center rounded-xl py-2 pr-8 pl-3 text-sm text-slate-100 outline-none transition focus:bg-white/10",
+        "relative flex cursor-pointer select-none items-center rounded-xl py-2 pr-8 pl-3 text-sm text-slate-100 outline-none transition duration-150 focus:bg-white/10",
         className,
       )}
       {...props}

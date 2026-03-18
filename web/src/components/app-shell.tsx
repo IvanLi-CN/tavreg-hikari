@@ -1,5 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import type { ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { PageKey } from "@/lib/app-types";
 
@@ -23,8 +24,14 @@ export function AppShell({
 }) {
   return (
     <div className="min-h-dvh text-slate-100">
+      <a
+        href="#app-main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-full focus:bg-slate-50 focus:px-4 focus:py-2 focus:text-slate-950"
+      >
+        跳到主内容
+      </a>
       <div className="mx-auto flex min-h-dvh w-full max-w-screen-2xl flex-col px-4 py-6 sm:px-6 lg:px-8">
-        <header className="mb-6 rounded-[32px] border border-white/10 bg-[#081120]/80 px-5 py-5 shadow-[0_18px_60px_rgba(0,0,0,0.32)] backdrop-blur md:px-7">
+        <header className="mb-6 rounded-[32px] border border-white/10 bg-[linear-gradient(180deg,rgba(8,17,32,0.92),rgba(8,17,32,0.78))] px-5 py-5 shadow-[0_18px_60px_rgba(0,0,0,0.32)] backdrop-blur md:px-7">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
             <div className="max-w-2xl">
               <div className="text-xs uppercase tracking-[0.3em] text-cyan-300/80">Tavreg Hikari</div>
@@ -32,6 +39,11 @@ export function AppShell({
               <p className="mt-2 text-sm text-slate-400">
                 账号池、主流程、代理状态统一在一个本机控制面里。
               </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <Badge variant="success">localhost only</Badge>
+                <Badge variant="info">realtime socket</Badge>
+                <Badge variant="neutral">sqlite ledger</Badge>
+              </div>
             </div>
             <Tabs value={activePage} onValueChange={(value) => onNavigate(value as PageKey)}>
               <TabsList className="w-full justify-start overflow-x-auto md:w-auto">
@@ -46,13 +58,13 @@ export function AppShell({
         </header>
 
         {error ? (
-          <div className="mb-4 flex items-start gap-3 rounded-3xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+          <div role="alert" className="mb-4 flex items-start gap-3 rounded-3xl border border-rose-400/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
             <AlertTriangle className="mt-0.5 size-4 shrink-0" />
             <span>{error}</span>
           </div>
         ) : null}
 
-        <main className="flex-1">{children}</main>
+        <main id="app-main" className="flex-1">{children}</main>
       </div>
     </div>
   );

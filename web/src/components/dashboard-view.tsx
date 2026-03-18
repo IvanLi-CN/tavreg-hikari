@@ -89,38 +89,73 @@ export function DashboardView({
             <CardDescription>这里显示当前正在处理的账号与代理节点。</CardDescription>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>ID</TableHead>
-                  <TableHead>账号</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>阶段</TableHead>
-                  <TableHead>代理节点</TableHead>
-                  <TableHead>出口 IP</TableHead>
-                  <TableHead>开始时间</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {job.activeAttempts.length === 0 ? (
-                  <TableRow>
-                    <TableCell colSpan={7} className="py-8 text-center text-slate-400">当前没有运行中的 attempt。</TableCell>
-                  </TableRow>
-                ) : (
-                  job.activeAttempts.map((attempt) => (
-                    <TableRow key={attempt.id}>
-                      <TableCell>#{attempt.id}</TableCell>
-                      <TableCell className="break-all">{attempt.accountEmail || `#${attempt.accountId}`}</TableCell>
-                      <TableCell><StatusBadge status={attempt.status} /></TableCell>
-                      <TableCell>{attempt.stage}</TableCell>
-                      <TableCell>{attempt.proxyNode || "—"}</TableCell>
-                      <TableCell>{attempt.proxyIp || "—"}</TableCell>
-                      <TableCell>{formatDate(attempt.startedAt)}</TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
+            {job.activeAttempts.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+                当前没有运行中的 attempt。
+              </div>
+            ) : (
+              <>
+                <div className="space-y-3 md:hidden">
+                  {job.activeAttempts.map((attempt) => (
+                    <article key={attempt.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="text-sm font-medium text-white">Attempt #{attempt.id}</div>
+                          <div className="mt-1 break-all text-sm text-slate-300">{attempt.accountEmail || `#${attempt.accountId}`}</div>
+                        </div>
+                        <StatusBadge status={attempt.status} />
+                      </div>
+                      <dl className="mt-4 grid gap-3 text-sm text-slate-300">
+                        <div className="flex items-center justify-between gap-3">
+                          <dt className="text-slate-500">阶段</dt>
+                          <dd>{attempt.stage}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <dt className="text-slate-500">代理节点</dt>
+                          <dd>{attempt.proxyNode || "—"}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <dt className="text-slate-500">出口 IP</dt>
+                          <dd>{attempt.proxyIp || "—"}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <dt className="text-slate-500">开始时间</dt>
+                          <dd>{formatDate(attempt.startedAt)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <div className="hidden md:block">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>ID</TableHead>
+                        <TableHead>账号</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead>阶段</TableHead>
+                        <TableHead>代理节点</TableHead>
+                        <TableHead>出口 IP</TableHead>
+                        <TableHead>开始时间</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {job.activeAttempts.map((attempt) => (
+                        <TableRow key={attempt.id}>
+                          <TableCell>#{attempt.id}</TableCell>
+                          <TableCell className="break-all">{attempt.accountEmail || `#${attempt.accountId}`}</TableCell>
+                          <TableCell><StatusBadge status={attempt.status} /></TableCell>
+                          <TableCell>{attempt.stage}</TableCell>
+                          <TableCell>{attempt.proxyNode || "—"}</TableCell>
+                          <TableCell>{attempt.proxyIp || "—"}</TableCell>
+                          <TableCell>{formatDate(attempt.startedAt)}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </>
+            )}
           </CardContent>
         </Card>
       </div>

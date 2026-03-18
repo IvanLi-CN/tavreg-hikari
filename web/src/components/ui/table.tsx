@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
-    <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[#0d1728]/70">
+    <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
       <table className={cn("w-full min-w-[720px] text-sm", className)} {...props} />
     </div>
   );
@@ -18,7 +18,7 @@ function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
 }
 
 function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
-  return <tr className={cn("border-b border-white/8 transition hover:bg-white/[0.02]", className)} {...props} />;
+  return <tr className={cn("border-b border-white/8 transition duration-200 hover:bg-white/[0.03]", className)} {...props} />;
 }
 
 function TableHead({ className, ...props }: React.ComponentProps<"th">) {
