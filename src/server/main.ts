@@ -4,6 +4,7 @@ import process from "node:process";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import { parseAccountImportContent } from "./account-import.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
@@ -247,15 +248,7 @@ async function main(): Promise<void> {
       if (pathname === "/api/accounts/import" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { content?: string } | null;
         const content = String(body?.content || "");
-        const parsed = content
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter(Boolean)
-          .map((line) => {
-            const [email, ...rest] = line.split(",");
-            return { email: (email || "").trim(), password: rest.join(",").trim() };
-          })
-          .filter((item) => item.email && item.password);
+        const parsed = parseAccountImportContent(content);
         const summary = db.importAccounts(parsed);
         return json({ ok: true, summary });
       }

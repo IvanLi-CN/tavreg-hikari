@@ -12,7 +12,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "微软账号导入与查询页，必须支持导入文本、状态筛选和去重后的台账列表。",
+        component: "微软账号导入与查询页，必须支持 `,`、`:`、`|` 和空白分隔的导入文本、状态筛选和去重后的台账列表。",
       },
     },
   },
@@ -84,7 +84,7 @@ export const ImportPlay: Story = {
     const canvas = within(canvasElement);
     const submit = canvas.getByRole("button", { name: "导入并去重" });
     await expect(submit).toBeDisabled();
-    await userEvent.type(canvas.getByRole("textbox", { name: "account-import" }), "new@outlook.com,password321");
+    await userEvent.type(canvas.getByRole("textbox", { name: "account-import" }), "new@outlook.com | password321");
     await expect(submit).toBeEnabled();
     await userEvent.click(submit);
     await expect(args.onImport).toHaveBeenCalled();

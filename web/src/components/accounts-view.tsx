@@ -42,13 +42,15 @@ export function AccountsView({
       <Card>
         <CardHeader>
           <CardTitle>导入微软账号</CardTitle>
-          <CardDescription>每行一个账号，格式固定为 <code>email,password</code>。</CardDescription>
+          <CardDescription>
+            每行一个账号，支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code> 或 <code>email password</code>。
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <Textarea
             name="account-import"
             className="min-h-72"
-            placeholder="example@outlook.com,password123"
+            placeholder={"example@outlook.com,password123\nexample@outlook.com:password123\nexample@outlook.com | password123"}
             value={importContent}
             onChange={(event) => onImportContentChange(event.target.value)}
           />
