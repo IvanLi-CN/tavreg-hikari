@@ -206,7 +206,7 @@ async function main(): Promise<void> {
   const defaults = db.ensureSettings(getDefaultSettings());
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
-  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, (event) => {
+  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, () => db.getSettings(getDefaultSettings()), (event) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
       ws.send(message);

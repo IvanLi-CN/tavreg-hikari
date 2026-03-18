@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { buildAttemptRuntimeSpec } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -188,5 +189,66 @@ describe("static asset path resolution", () => {
     expect(resolveStaticAssetPath("/repo/web/dist", "/assets/index.js")).toBe("/repo/web/dist/assets/index.js");
     expect(resolveStaticAssetPath("/repo/web/dist", "/../../package.json")).toBeNull();
     expect(resolveStaticAssetPath("/repo/web/dist", "/..%2F..%2F.env.local")).toBeNull();
+  });
+});
+
+describe("scheduler runtime spec", () => {
+  test("forwards proxy settings, selected node, and isolated mihomo ports to child attempts", () => {
+    const runtime = buildAttemptRuntimeSpec({
+      job: { id: 8, runMode: "headed" },
+      account: {
+        id: 21,
+        microsoftEmail: "worker@outlook.com",
+        passwordPlaintext: "worker-pass",
+      },
+      outputDir: "/tmp/tavreg/job-8/attempt-21",
+      sharedLedgerPath: "/tmp/tavreg/app.sqlite",
+      settings: {
+        subscriptionUrl: "https://example.com/sub.yaml",
+        groupName: "WEB_AUTO",
+        routeGroupName: "WEB_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 4321,
+        maxLatencyMs: 987,
+      },
+      reservedPorts: {
+        apiPort: 40123,
+        mixedPort: 40124,
+      },
+      selectedProxyNode: "Tokyo-01",
+      baseEnv: { PATH: process.env.PATH },
+    });
+
+    expect(runtime.args).toEqual([
+      "--import",
+      "tsx",
+      "src/main.ts",
+      "--mode",
+      "headed",
+      "--parallel",
+      "1",
+      "--need",
+      "1",
+      "--proxy-node",
+      "Tokyo-01",
+    ]);
+    expect(runtime.env).toMatchObject({
+      MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
+      MIHOMO_GROUP_NAME: "WEB_AUTO",
+      MIHOMO_ROUTE_GROUP_NAME: "WEB_ROUTE",
+      MIHOMO_API_PORT: "40123",
+      MIHOMO_MIXED_PORT: "40124",
+      PROXY_CHECK_URL: "https://example.com/trace",
+      PROXY_CHECK_TIMEOUT_MS: "4321",
+      PROXY_LATENCY_MAX_MS: "987",
+      MICROSOFT_ACCOUNT_EMAIL: "worker@outlook.com",
+      MICROSOFT_ACCOUNT_PASSWORD: "worker-pass",
+      TASK_LEDGER_JOB_ID: "8",
+      TASK_LEDGER_ACCOUNT_ID: "21",
+      TASK_LEDGER_DB_PATH: "/tmp/tavreg/app.sqlite",
+      OUTPUT_ROOT_DIR: "/tmp/tavreg/job-8/attempt-21",
+      CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-profile",
+      INSPECT_CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-inspect-profile",
+    });
   });
 });

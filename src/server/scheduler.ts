@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createServer } from "node:net";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import { AppDatabase, computeLaunchCapacity, type AppSettings, type JobAttemptRecord, type JobRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
@@ -14,7 +15,49 @@ interface ActiveAttempt {
   attempt: JobAttemptRecord;
   account: MicrosoftAccountRecord;
   outputDir: string;
+  reservedPorts: { apiPort: number; mixedPort: number };
   tail: string[];
+}
+
+const RESERVED_LOCAL_PORTS = new Set<number>();
+
+export function buildAttemptRuntimeSpec(input: {
+  job: Pick<JobRecord, "id" | "runMode">;
+  account: Pick<MicrosoftAccountRecord, "id" | "microsoftEmail" | "passwordPlaintext">;
+  outputDir: string;
+  sharedLedgerPath: string;
+  settings: Pick<AppSettings, "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs">;
+  reservedPorts: { apiPort: number; mixedPort: number };
+  selectedProxyNode?: string | null;
+  baseEnv?: NodeJS.ProcessEnv;
+}): { args: string[]; env: NodeJS.ProcessEnv } {
+  const args = ["--import", "tsx", "src/main.ts", "--mode", input.job.runMode, "--parallel", "1", "--need", "1"];
+  if (input.selectedProxyNode?.trim()) {
+    args.push("--proxy-node", input.selectedProxyNode.trim());
+  }
+  return {
+    args,
+    env: {
+      ...(input.baseEnv || process.env),
+      RUN_MODE: input.job.runMode,
+      MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
+      MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
+      MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
+      MIHOMO_GROUP_NAME: input.settings.groupName,
+      MIHOMO_ROUTE_GROUP_NAME: input.settings.routeGroupName,
+      MIHOMO_API_PORT: String(input.reservedPorts.apiPort),
+      MIHOMO_MIXED_PORT: String(input.reservedPorts.mixedPort),
+      PROXY_CHECK_URL: input.settings.checkUrl,
+      PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
+      PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
+      TASK_LEDGER_JOB_ID: String(input.job.id),
+      TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
+      TASK_LEDGER_DB_PATH: input.sharedLedgerPath,
+      OUTPUT_ROOT_DIR: input.outputDir,
+      CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-profile"),
+      INSPECT_CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-inspect-profile"),
+    },
+  };
 }
 
 function nowIso(): string {
@@ -23,6 +66,48 @@ function nowIso(): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function reserveLocalPort(): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (!port || port <= 0) {
+          reject(new Error("failed to reserve local port"));
+          return;
+        }
+        resolve(port);
+      });
+    });
+  });
+}
+
+async function reserveUniqueLocalPort(): Promise<number> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const port = await reserveLocalPort();
+    if (RESERVED_LOCAL_PORTS.has(port)) continue;
+    RESERVED_LOCAL_PORTS.add(port);
+    return port;
+  }
+  throw new Error("failed to reserve a unique local port");
+}
+
+async function reserveMihomoPorts(): Promise<{ apiPort: number; mixedPort: number }> {
+  const apiPort = await reserveUniqueLocalPort();
+  let mixedPort = await reserveUniqueLocalPort();
+  while (mixedPort === apiPort) {
+    RESERVED_LOCAL_PORTS.delete(mixedPort);
+    mixedPort = await reserveUniqueLocalPort();
+  }
+  return { apiPort, mixedPort };
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -42,6 +127,7 @@ export class JobScheduler {
     private readonly db: AppDatabase,
     private readonly repoRoot: string,
     private readonly sharedLedgerPath: string,
+    private readonly getSettings: () => AppSettings,
     private readonly publish: (event: ServerEvent) => void,
   ) {}
 
@@ -188,21 +274,21 @@ export class JobScheduler {
 
   private async spawnAttempt(job: JobRecord, account: MicrosoftAccountRecord, attempt: JobAttemptRecord, outputDir: string): Promise<void> {
     await mkdir(outputDir, { recursive: true });
-    const env = {
-      ...process.env,
-      RUN_MODE: job.runMode,
-      MICROSOFT_ACCOUNT_EMAIL: account.microsoftEmail,
-      MICROSOFT_ACCOUNT_PASSWORD: account.passwordPlaintext,
-      TASK_LEDGER_JOB_ID: String(job.id),
-      TASK_LEDGER_ACCOUNT_ID: String(account.id),
-      TASK_LEDGER_DB_PATH: this.sharedLedgerPath,
-      OUTPUT_ROOT_DIR: outputDir,
-      CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
-      INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-    };
-    const child = spawn("node", ["--import", "tsx", "src/main.ts", "--mode", job.runMode, "--parallel", "1", "--need", "1"], {
+    const settings = this.getSettings();
+    const reservedPorts = await reserveMihomoPorts();
+    const selectedProxyNode = this.db.getSelectedProxyName();
+    const runtimeSpec = buildAttemptRuntimeSpec({
+      job,
+      account,
+      outputDir,
+      sharedLedgerPath: this.sharedLedgerPath,
+      settings,
+      reservedPorts,
+      selectedProxyNode,
+    });
+    const child = spawn("node", runtimeSpec.args, {
       cwd: this.repoRoot,
-      env,
+      env: runtimeSpec.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin.end();
@@ -211,6 +297,7 @@ export class JobScheduler {
       attempt,
       account,
       outputDir,
+      reservedPorts,
       tail: [],
     };
     this.activeAttempts.set(attempt.id, active);
@@ -237,6 +324,8 @@ export class JobScheduler {
         await this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal);
       } finally {
         this.activeAttempts.delete(attempt.id);
+        RESERVED_LOCAL_PORTS.delete(reservedPorts.apiPort);
+        RESERVED_LOCAL_PORTS.delete(reservedPorts.mixedPort);
       }
     });
   }

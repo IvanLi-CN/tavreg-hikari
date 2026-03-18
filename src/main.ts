@@ -77,6 +77,8 @@ interface AppConfig {
   microsoftAccountPassword?: string;
   microsoftKeepSignedIn: boolean;
   mihomoSubscriptionUrl: string;
+  mihomoGroupName: string;
+  mihomoRouteGroupName: string;
   mihomoApiPort: number;
   mihomoMixedPort: number;
   proxyCheckUrl: string;
@@ -998,8 +1000,8 @@ function buildMihomoConfig(
     subscriptionUrl: cfg.mihomoSubscriptionUrl,
     apiPort: overrides?.apiPort ?? cfg.mihomoApiPort,
     mixedPort: overrides?.mixedPort ?? cfg.mihomoMixedPort,
-    groupName: "CODEX_AUTO",
-    routeGroupName: "CODEX_ROUTE",
+    groupName: cfg.mihomoGroupName,
+    routeGroupName: cfg.mihomoRouteGroupName,
     checkUrl: cfg.proxyCheckUrl,
     workDir: overrides?.workDir ?? path.join(OUTPUT_PATH, "mihomo"),
     downloadDir: path.resolve("downloads", "mihomo"),
@@ -6192,6 +6194,8 @@ function loadConfig(): AppConfig {
     microsoftAccountPassword,
     microsoftKeepSignedIn: toBool(process.env.MICROSOFT_KEEP_SIGNED_IN, true),
     mihomoSubscriptionUrl: mustEnv("MIHOMO_SUBSCRIPTION_URL"),
+    mihomoGroupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
+    mihomoRouteGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
     mihomoApiPort: toInt(process.env.MIHOMO_API_PORT, defaultApiPort),
     mihomoMixedPort: toInt(process.env.MIHOMO_MIXED_PORT, defaultMixedPort),
     proxyCheckUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
