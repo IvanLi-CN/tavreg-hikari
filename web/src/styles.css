@@ -3,10 +3,24 @@
 :root {
   color-scheme: dark;
   font-family: "SF Pro Display", "PingFang SC", "Noto Sans SC", sans-serif;
+  background-color: #07111f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background:
+    radial-gradient(circle at top, rgba(34, 211, 238, 0.18), transparent 30%),
+    linear-gradient(180deg, #07111f 0%, #0d1830 56%, #08101c 100%);
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
+  color: #e2e8f0;
+  background: transparent;
 }
 
 button,
@@ -16,48 +30,16 @@ textarea {
   font: inherit;
 }
 
-.card {
-  @apply rounded-[28px] border border-white/10 bg-slate-950/70 p-5 shadow-2xl shadow-slate-950/40 backdrop-blur;
+code,
+pre {
+  font-family: "SF Mono", "JetBrains Mono", "Fira Code", monospace;
 }
 
-.field {
-  @apply flex min-w-0 flex-1 flex-col gap-2 text-sm text-slate-300;
+#root {
+  min-height: 100vh;
 }
 
-.field > span {
-  @apply text-xs uppercase tracking-[0.18em] text-slate-500;
-}
-
-.field > input,
-.field > select {
-  @apply rounded-2xl border border-white/10 bg-slate-900/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400;
-}
-
-.primary-button {
-  @apply inline-flex items-center justify-center rounded-full bg-cyan-400 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300;
-}
-
-.secondary-button {
-  @apply inline-flex items-center justify-center rounded-full border border-white/10 bg-slate-900/80 px-5 py-3 text-sm font-medium text-slate-200 transition hover:border-cyan-400/50 hover:text-white;
-}
-
-.section-title {
-  @apply text-lg font-semibold text-white;
-}
-
-.data-table {
-  @apply min-w-full border-separate border-spacing-y-2 text-left text-sm;
-}
-
-.data-table th {
-  @apply px-3 pb-2 text-xs font-medium uppercase tracking-[0.16em] text-slate-500;
-}
-
-.data-table td {
-  @apply rounded-2xl border border-white/8 bg-slate-900/70 px-3 py-3 text-slate-200;
-}
-
-.empty-cell,
-.empty-panel {
-  @apply rounded-2xl border border-dashed border-white/10 bg-slate-900/50 px-4 py-6 text-center text-sm text-slate-500;
+::selection {
+  background: rgba(34, 211, 238, 0.32);
+  color: white;
 }

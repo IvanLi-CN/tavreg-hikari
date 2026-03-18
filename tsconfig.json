@@ -13,6 +13,10 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["web/src/*"]
+    },
 
     // Best practices
     "strict": true,
@@ -32,6 +36,7 @@
     "test/**/*.ts",
     "web/**/*.ts",
     "web/**/*.tsx",
+    ".storybook/**/*.ts",
     "vite.config.ts"
   ],
   "exclude": [
