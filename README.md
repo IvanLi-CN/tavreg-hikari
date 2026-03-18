@@ -1,260 +1,38 @@
-# tavreg-hikari
+# Tavreg Hikari
 
-Automate Tavily registration + email verification + API key generation with Bun and TypeScript.
+本项目用于通过 Microsoft 账号完成 Tavily 第三方登录流程，并提取 API key。现在同时提供 CLI 和本机 Web 管理台两种入口。
 
-Workflow document: `docs/WORKFLOW.md`
+## 入口
 
-## Prerequisites
+- `bun run start`
+  - 保留原有 CLI 流程，适合单次调试或兼容旧脚本。
+- `bun run web:build && bun run web:start`
+  - 启动 `localhost` Web 管理台，提供账号导入、主流程控制、API key 查询和代理节点面板。
 
-1. Copy `.env.example` to `.env.local` in project root (already ignored by git), then fill required values:
+## Web 管理台
 
-```bash
-cp .env.example .env.local
-```
+- 主流程页：启动任务、暂停、恢复、动态调整 `parallel / need / maxAttempts`，并查看实时 attempts 与事件流。
+- 微软账号页：批量导入 `email,password`，按邮箱去重，查看是否已有 API key、最近状态、导入时间与跳过原因。
+- API Keys 页：查询已提取的 key 前缀、状态、账号归属与时间信息。
+- 代理节点页：修改 Mihomo 订阅设置、同步节点、检查当前节点/全部节点/单节点，并查看出口 IP、地理信息和 24 小时成功提取数量。
 
-Minimal required values:
+## 运行前准备
 
-```env
-OPENAI_KEY=...
-OPENAI_BASE_URL=...
-MODEL_NAME=...
-MIHOMO_SUBSCRIPTION_URL=...
-VMAIL_BASE_URL=...
-VMAIL_API_KEY=...
-```
+- 复制 `.env.example` 为 `.env.local` 并填写必要配置。
+- 至少需要：
+  - OCR/OpenAI 兼容接口配置
+  - `MIHOMO_SUBSCRIPTION_URL`
+  - 浏览器与邮箱相关配置（按当前运行模式选择）
 
-Optional settings (browser/proxy/retry/inspect) are maintained in `.env.example`.
+## 常用脚本
 
-2. Install dependencies:
+- `bun run typecheck`
+- `bun test`
+- `bun run web:build`
+- `bun run web:start`
+- `bun run ledger:query`
+- `bun run proxy:check-all`
 
-```bash
-bun install
-```
+## 关联项目
 
-3. Install Camoufox (from official Python docs):
-
-```bash
-pip install -U camoufox[geoip]
-python3 -m camoufox fetch
-```
-
-4. Mihomo core is downloaded automatically on first run.
-
-## Run
-
-```bash
-bun run start
-```
-
-Optional env flags:
-
-```bash
-RUN_MODE=headed SLOWMO_MS=50 MAX_CAPTCHA_ROUNDS=6 EMAIL_WAIT_MS=180000 MAIL_POLL_MS=2500 bun run start
-```
-
-Select a specific proxy node by name:
-
-```bash
-bun run start -- --proxy-node "US-1"
-```
-
-Run in headless mode:
-
-```bash
-bun run start -- --mode headless
-```
-
-Run in headed mode:
-
-```bash
-bun run start -- --mode headed
-```
-
-`--mode` only supports `headed` and `headless`.
-
-Print secrets to terminal summary (disabled by default):
-
-```bash
-bun run start -- --print-secrets
-```
-
-Batch run (need N successful accounts, run up to P in parallel; defaults: `--need 1 --parallel 1`):
-
-```bash
-bun run start -- --need 5 --parallel 2
-```
-
-Skip browser precheck temporarily (debug only):
-
-```bash
-bun run start -- --skip-precheck
-```
-
-Open headed browser for manual transparency inspection (`fingerprint.goldenowl.ai` + `ip.skk.moe`):
-
-```bash
-bun run start -- --inspect-sites
-```
-
-Force inspect mode to use system Chrome engine:
-
-```bash
-bun run start -- --inspect-sites --browser-engine chrome
-```
-
-For headed registration with native Chrome profile (lower automation fingerprint surface):
-
-```bash
-BROWSER_ENGINE=chrome CHROME_NATIVE_AUTOMATION=true bun run start -- --mode headed
-```
-
-`CHROME_NATIVE_AUTOMATION=true` first tries native Chrome CDP attach; if CDP handshake is unavailable in your environment, it automatically falls back to a persistent Chrome profile launched by Playwright.
-
-If you explicitly need UA/platform overrides (disabled by default for lower detection risk), set:
-
-```bash
-CHROME_IDENTITY_OVERRIDE=true bun run start -- --mode headed
-```
-
-If your Python binary is not `python3`, set:
-
-```bash
-CAMOUFOX_PYTHON=python bun run start
-```
-
-On macOS, Camoufox `geoip` is disabled by default to avoid known browser crashes; re-enable only if you need it:
-
-```bash
-CAMOUFOX_GEOIP_ENABLED=true bun run start -- --browser-engine camoufox
-```
-
-OCR retry tuning (useful when gateway is throttling):
-
-```bash
-OCR_RETRY_WINDOW_MS=300000 \
-OCR_INITIAL_COOLDOWN_MS=12000 \
-OCR_MAX_COOLDOWN_MS=120000 \
-OCR_REQUEST_TIMEOUT_MS=25000 \
-bun run start
-```
-
-Optional OCR fallback (disabled by default):
-
-```bash
-OCRSPACE_FALLBACK=true OCRSPACE_API_KEY=helloworld bun run start
-```
-
-If your LLM gateway is completely unavailable, you can skip LLM OCR attempts:
-
-```bash
-OCRSPACE_FALLBACK=true OCRSPACE_ONLY=true bun run start
-```
-
-`helloworld` is heavily rate-limited (about 10 requests / 600s). Use your own OCR.space key for stable fallback runs.
-
-## Local Route Check
-
-```bash
-curl -v --resolve app.tavily.com:443:198.18.1.2 https://app.tavily.com -o /dev/null
-```
-
-You should see `Trying 198.18.1.2:443` and `Connected to app.tavily.com (198.18.1.2)`.
-
-## Output
-
-Script writes result to:
-
-- `output/result.json`
-
-In batch mode, `output/result.json` contains the **last** successful result; check `output/run_summary.json` for all results.
-
-## Shared Testbox
-
-To replay the Linux no-DE headed flow on `codex-testbox` with the same local config and task data:
-
-```bash
-./scripts/run_shared_testbox_signup.sh
-```
-
-The script creates an isolated remote run directory under `/srv/codex/workspaces/$USER/<repo>__<hash>/runs/<run_id>/`, syncs the repo plus local `.env.local` / ledger / proxy usage cache, runs Chromium inside `xvfb-run`, and writes:
-
-- `remote-test.log`
-- `remote-test-status.json`
-- `output/result.json` on success
-
-Treat `remote-test-status.json` or `output/result.json` as the source of truth for remote success. `output/error.json` may still contain an older failure from a previous attempt in the same synced workspace snapshot.
-
-Fields:
-
-- `mode`: run mode (`headed` or `headless`)
-- `email`: temporary mailbox used for signup
-- `password`: generated password
-- `verificationLink`: verification URL
-- `apiKey`: generated Tavily key (if creation succeeded)
-- `precheckPassed`: browser transparency precheck status
-- `verifyPassed`: email verification status
-- `notes`: step-by-step status notes
-
-Additional artifacts:
-
-- `output/run_summary.json`: summary payload (includes `results` array; batch mode may contain multiple entries)
-- Single-run mode (default `--need 1 --parallel 1`):
-  - `output/browser_precheck.json`: latest browser precheck report
-  - `output/browser_precheck_headed.json`: headed precheck report
-  - `output/browser_precheck_headless.json`: headless precheck report
-- Batch mode (`--need > 1` and/or `--parallel > 1`):
-  - Per-run artifacts are stored under `output/runs/<batchId>/<runId>/`
-- `output/proxy/node-usage.json`: proxy node usage history and recent selection window
-- `output/registry/signup-tasks.sqlite`: SQLite task ledger (run status, risk signals, proxy IP history)
-
-## Notes
-
-- Registration flow includes image captcha; OCR is done via OpenAI-compatible API in `.env.local`.
-- OCR retries now use a long backoff window, so short-term `429/503` bursts do not fail immediately.
-- Captcha OCR uses `/models`-driven fallback candidates (no voting), and rotates model preference when upstream errors or repeated captcha rejections are observed.
-- Mailbox provider defaults to `gptmail` (`https://mail.chatgpt.org.uk`); set `MAIL_PROVIDER=vmail` or `MAIL_PROVIDER=duckmail` to switch provider.
-- Browser automation is executed by Python Camoufox (`camoufox.sync_api.Camoufox`) launched from Bun/TypeScript.
-- Signup requires email verification success; missing verification link is treated as failure.
-- Browser precheck visits 3 domestic IP sites (`myip.ipip.net`, `cip.cc`, `ip.3322.net`) + 2 global IP sites (`api.ip.sb/geoip`, `ipinfo.io/json`) + `fingerprint.goldenowl.ai`; all observed IPs must be fully consistent, otherwise the run is blocked.
-- Proxy node selection is availability-first with anti-reuse scoring centered on egress IPs (recent egress IPs + cooldown + historical success/failure + latency), persisted in `output/proxy/node-usage.json`.
-- SQLite ledger is initialized with WAL + busy_timeout to support concurrent readers/writers; recent rate-limit/captcha-anomaly history is used to avoid risky egress IP reuse, while mailbox-side validation signals remain diagnostic only.
-- Successful runs are persisted with `password`, `api_key_prefix`, and full `api_key` in SQLite ledger (treat ledger file as sensitive data).
-- Terminal summary hides password and API key by default; pass `--print-secrets` only when you explicitly need them.
-
-Quick query examples (built-in CLI):
-
-```bash
-bun run ledger:query
-```
-
-```bash
-bun run ledger:query -- --status failed --limit 20
-```
-
-```bash
-bun run ledger:query -- --json --include-json-fields --has-ip-rate-limit true --limit 5
-```
-
-```bash
-bun run ledger:query -- --status succeeded --include-api-key --limit 10
-```
-
-## Proxy Tools
-
-Batch check all nodes:
-
-```bash
-bun run proxy:check-all
-```
-
-Check a single node:
-
-```bash
-bun run proxy:check --node "US-1"
-```
-
-Switch active node:
-
-```bash
-bun run proxy:set --node "US-1"
-```
+- [Tavily Hikari](https://github.com/IvanLi-CN/tavily-hikari)：号池相关项目

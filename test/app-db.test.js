@@ -1,0 +1,135 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
+import { TaskLedger } from "../src/storage/task-ledger.ts";
+
+const tempDirs = [];
+
+async function createTempDb() {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-"));
+  tempDirs.push(tempDir);
+  const dbPath = path.join(tempDir, "app.sqlite");
+  const appDb = await AppDatabase.open(dbPath);
+  return { dbPath, appDb };
+}
+
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const target = tempDirs.pop();
+    if (!target) continue;
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+describe("AppDatabase account import", () => {
+  test("dedupes by email and preserves skip marker after API key exists", async () => {
+    const { appDb } = await createTempDb();
+    appDb.importAccounts([
+      { email: "demo@outlook.com", password: "first-pass" },
+      { email: "demo@outlook.com", password: "second-pass" },
+    ]);
+    let accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.passwordPlaintext).toBe("second-pass");
+
+    const accountId = accounts[0].id;
+    const apiKey = appDb.recordApiKey(accountId, "tvly-abcdef1234567890");
+    expect(apiKey.apiKeyPrefix).toBe("tvly-abcdef1");
+
+    appDb.importAccounts([{ email: "demo@outlook.com", password: "third-pass" }]);
+    accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts[0]?.passwordPlaintext).toBe("third-pass");
+    expect(accounts[0]?.hasApiKey).toBe(true);
+    expect(accounts[0]?.skipReason).toBe("has_api_key");
+
+    appDb.close();
+  });
+});
+
+describe("scheduler helpers", () => {
+  test("computes launch capacity and completing state", () => {
+    expect(
+      computeLaunchCapacity(
+        {
+          status: "running",
+          parallel: 3,
+          need: 5,
+          successCount: 1,
+          maxAttempts: 7,
+          launchedCount: 2,
+        },
+        1,
+      ),
+    ).toBe(2);
+    expect(
+      computeLaunchCapacity(
+        {
+          status: "paused",
+          parallel: 3,
+          need: 5,
+          successCount: 1,
+          maxAttempts: 7,
+          launchedCount: 2,
+        },
+        1,
+      ),
+    ).toBe(0);
+    expect(
+      shouldEnterCompleting({
+        need: 2,
+        successCount: 2,
+        maxAttempts: 6,
+        launchedCount: 2,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("proxy aggregation", () => {
+  test("derives 24h success counts from signup_tasks", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    appDb.importAccounts([{ email: "proxy@outlook.com", password: "proxy-pass" }]);
+    const accountId = appDb.listAccounts({ page: 1, pageSize: 10 }).rows[0].id;
+    appDb.upsertProxyInventory(["node-a"], "node-a");
+    const ledger = await TaskLedger.open({
+      enabled: true,
+      dbPath,
+      busyTimeoutMs: 5000,
+      ipRateLimitCooldownMs: 60_000,
+      ipRateLimitMax: 64,
+      captchaMissingCooldownMs: 60_000,
+      captchaMissingMax: 64,
+      captchaMissingThreshold: 2,
+      invalidCaptchaCooldownMs: 60_000,
+      invalidCaptchaMax: 64,
+      invalidCaptchaThreshold: 3,
+      allowRateLimitedIpFallback: false,
+    });
+
+    ledger.upsertTask({
+      runId: "run-success",
+      jobId: 1,
+      accountId,
+      batchId: "batch-1",
+      mode: "headed",
+      attemptIndex: 1,
+      modeRetryMax: 1,
+      status: "succeeded",
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      proxyNode: "node-a",
+      proxyIp: "1.1.1.1",
+      apiKey: "tvly-abcdef1234567890",
+      apiKeyPrefix: "tvly-abcdef1",
+    });
+
+    const nodes = appDb.listProxyNodes();
+    expect(nodes[0]?.nodeName).toBe("node-a");
+    expect(nodes[0]?.success24h).toBe(1);
+
+    ledger.close();
+    appDb.close();
+  });
+});
