@@ -9,6 +9,22 @@ function normalizeVariant(status: string | null | undefined): "neutral" | "succe
   return "neutral";
 }
 
+function formatLabel(status: string | null | undefined) {
+  if (!status) return "unknown";
+
+  const labels: Record<string, string> = {
+    "no-key": "no key",
+    skipped_has_key: "linked",
+    extract_api_key: "extract api key",
+  };
+
+  return labels[status] ?? status;
+}
+
 export function StatusBadge({ status }: { status: string | null | undefined }) {
-  return <Badge variant={normalizeVariant(status)}>{status || "unknown"}</Badge>;
+  return (
+    <Badge variant={normalizeVariant(status)} className="min-w-fit shrink-0">
+      {formatLabel(status)}
+    </Badge>
+  );
 }

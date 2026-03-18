@@ -162,8 +162,8 @@ export function AccountsView({
                       <TableRow key={row.id}>
                         <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
                         <TableCell>{row.passwordMasked}</TableCell>
-                        <TableCell>{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
-                        <TableCell><StatusBadge status={row.lastResultStatus} /></TableCell>
+                        <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
+                        <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
                         <TableCell>{formatDate(row.importedAt)}</TableCell>
                         <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                         <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>
