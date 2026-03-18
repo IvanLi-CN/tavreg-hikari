@@ -90,12 +90,16 @@ export const sampleEvents: EventRecord[] = [
   },
 ];
 
-export const sampleAccounts: { rows: AccountRecord[]; total: number } = {
+export const sampleAccounts = {
   total: 3,
+  page: 1,
+  pageSize: 20,
+  groups: ["default", "linked", "failed-pool"],
   rows: [
     {
       id: 1,
       microsoftEmail: "alpha@outlook.com",
+      passwordPlaintext: "pass-456",
       passwordMasked: "****s456",
       hasApiKey: false,
       importedAt: "2026-03-18T07:00:00.000Z",
@@ -106,11 +110,13 @@ export const sampleAccounts: { rows: AccountRecord[]; total: number } = {
       lastResultAt: null,
       lastErrorCode: null,
       skipReason: null,
+      groupName: "default",
       disabledAt: null,
     },
     {
       id: 2,
       microsoftEmail: "beta@outlook.com",
+      passwordPlaintext: "pass-789",
       passwordMasked: "****s789",
       hasApiKey: true,
       importedAt: "2026-03-18T06:55:00.000Z",
@@ -121,11 +127,13 @@ export const sampleAccounts: { rows: AccountRecord[]; total: number } = {
       lastResultAt: "2026-03-18T07:14:00.000Z",
       lastErrorCode: null,
       skipReason: "linked_api_key",
+      groupName: "linked",
       disabledAt: null,
     },
     {
       id: 3,
       microsoftEmail: "gamma@outlook.com",
+      passwordPlaintext: "pass-111",
       passwordMasked: "****x111",
       hasApiKey: false,
       importedAt: "2026-03-18T06:30:00.000Z",
@@ -136,10 +144,11 @@ export const sampleAccounts: { rows: AccountRecord[]; total: number } = {
       lastResultAt: "2026-03-18T07:01:00.000Z",
       lastErrorCode: "password-invalid",
       skipReason: null,
+      groupName: "failed-pool",
       disabledAt: null,
     },
   ],
-};
+} satisfies { rows: AccountRecord[]; total: number; page: number; pageSize: number; groups: string[] };
 
 export const sampleApiKeys: { rows: ApiKeyRecord[]; total: number } = {
   total: 2,

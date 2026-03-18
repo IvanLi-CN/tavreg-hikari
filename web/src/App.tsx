@@ -4,9 +4,12 @@ import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProxiesView } from "@/components/proxies-view";
+import { parseImportContent } from "@/lib/account-import";
 import type {
+  AccountImportPayload,
+  AccountImportPreviewPayload,
   AccountQuery,
-  AccountRecord,
+  AccountsPayload,
   ApiKeyQuery,
   ApiKeyRecord,
   EventRecord,
@@ -52,20 +55,32 @@ function usePathname() {
   };
 }
 
+function mergeIds(current: number[], next: number[]): number[] {
+  return Array.from(new Set([...current, ...next]));
+}
+
 export function App() {
   const { pathname, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>({ job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 });
-  const [accounts, setAccounts] = useState<{ rows: AccountRecord[]; total: number }>({ rows: [], total: 0 });
+  const [accounts, setAccounts] = useState<AccountsPayload>({ rows: [], total: 0, page: 1, pageSize: 20, groups: [] });
   const [apiKeys, setApiKeys] = useState<{ rows: ApiKeyRecord[]; total: number }>({ rows: [], total: 0 });
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [importContent, setImportContent] = useState("");
+  const [importGroupName, setImportGroupName] = useState("");
+  const [batchGroupName, setBatchGroupName] = useState("");
+  const [importPreview, setImportPreview] = useState<AccountImportPreviewPayload | null>(null);
+  const [importPreviewOpen, setImportPreviewOpen] = useState(false);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
-  const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "" });
+  const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
   const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "" });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
 
   const activePage = useMemo<PageKey>(() => {
     if (pathname === "/accounts") return "accounts";
@@ -79,13 +94,26 @@ export function App() {
     [proxies],
   );
 
+  const currentPageIds = accounts.rows.map((row) => row.id);
+  const selectedOnCurrentPageCount = currentPageIds.filter((id) => selectedAccountIds.includes(id)).length;
+  const allCurrentPageSelected = currentPageIds.length > 0 && selectedOnCurrentPageCount === currentPageIds.length;
+
   const refreshJob = async () => setJob(await api<JobSnapshot>("/api/jobs/current"));
-  const refreshAccounts = async () => {
+  const refreshAccounts = async (nextQuery = accountQuery) => {
     const params = new URLSearchParams();
-    if (accountQuery.q) params.set("q", accountQuery.q);
-    if (accountQuery.status) params.set("status", accountQuery.status);
-    if (accountQuery.hasApiKey) params.set("hasApiKey", accountQuery.hasApiKey);
-    setAccounts(await api<{ rows: AccountRecord[]; total: number }>(`/api/accounts?${params.toString()}`));
+    if (nextQuery.q) params.set("q", nextQuery.q);
+    if (nextQuery.status) params.set("status", nextQuery.status);
+    if (nextQuery.hasApiKey) params.set("hasApiKey", nextQuery.hasApiKey);
+    if (nextQuery.groupName) params.set("groupName", nextQuery.groupName);
+    params.set("page", String(nextQuery.page));
+    params.set("pageSize", String(nextQuery.pageSize));
+
+    const payload = await api<AccountsPayload>(`/api/accounts?${params.toString()}`);
+    if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
+      setAccountQuery((current) => ({ ...current, page: current.page - 1 }));
+      return;
+    }
+    setAccounts(payload);
   };
   const refreshApiKeys = async () => {
     const params = new URLSearchParams();
@@ -128,27 +156,61 @@ export function App() {
     };
     socket.onerror = () => setError("WebSocket disconnected");
     return () => socket.close();
-  }, [accountQuery.hasApiKey, accountQuery.q, accountQuery.status, apiKeyQuery.q, apiKeyQuery.status]);
+  }, [accountQuery, apiKeyQuery]);
 
   useEffect(() => {
-    void refreshAccounts().catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void refreshAccounts(accountQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [accountQuery]);
 
   useEffect(() => {
     void refreshApiKeys().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [apiKeyQuery]);
 
-  const handleImport = async () => {
+  const handleOpenImportPreview = async () => {
+    const parsed = parseImportContent(importContent);
+    if (parsed.entries.length === 0 && parsed.invalidRows.length === 0) {
+      setError("没有识别到可导入的账号数据");
+      return;
+    }
+
     try {
+      setPreviewBusy(true);
       setError(null);
-      await api("/api/accounts/import", {
+      const preview = await api<AccountImportPreviewPayload>("/api/accounts/import-preview", {
         method: "POST",
-        body: JSON.stringify({ content: importContent }),
+        body: JSON.stringify(parsed),
       });
-      setImportContent("");
-      await refreshAccounts();
+      setImportPreview(preview);
+      setImportPreviewOpen(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPreviewBusy(false);
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    if (!importPreview) return;
+    try {
+      setImportBusy(true);
+      setError(null);
+      setAccountQuery((current) => ({ ...current, page: 1 }));
+      const payload = await api<AccountImportPayload>("/api/accounts/import", {
+        method: "POST",
+        body: JSON.stringify({
+          entries: importPreview.effectiveEntries,
+          groupName: importGroupName || null,
+        }),
+      });
+      setSelectedAccountIds((current) => mergeIds(current, payload.affectedIds));
+      setImportContent("");
+      setImportPreviewOpen(false);
+      setImportPreview(null);
+      await refreshAccounts({ ...accountQuery, page: 1 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -230,6 +292,58 @@ export function App() {
     setProxies((current) => (current ? { ...current, settings: { ...current.settings, [key]: value } } : current));
   };
 
+  const handleAccountQueryChange = (next: AccountQuery) => {
+    setAccountQuery(next);
+  };
+
+  const handleToggleSelection = (accountId: number, checked: boolean) => {
+    setSelectedAccountIds((current) => (checked ? mergeIds(current, [accountId]) : current.filter((id) => id !== accountId)));
+  };
+
+  const handleTogglePageSelection = (checked: boolean) => {
+    if (checked) {
+      setSelectedAccountIds((current) => mergeIds(current, currentPageIds));
+      return;
+    }
+    setSelectedAccountIds((current) => current.filter((id) => !currentPageIds.includes(id)));
+  };
+
+  const handleApplyBatchGroup = async () => {
+    if (selectedAccountIds.length === 0) return;
+    try {
+      setBatchBusy(true);
+      setError(null);
+      await api("/api/accounts/group", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedAccountIds, groupName: batchGroupName || null }),
+      });
+      await refreshAccounts();
+      setBatchGroupName("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedAccountIds.length === 0) return;
+    try {
+      setBatchBusy(true);
+      setError(null);
+      await api<{ deleted: number; blockedIds: number[] }>("/api/accounts", {
+        method: "DELETE",
+        body: JSON.stringify({ ids: selectedAccountIds }),
+      });
+      setSelectedAccountIds([]);
+      await refreshAccounts();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBatchBusy(false);
+    }
+  };
+
   return (
     <AppShell activePage={activePage} error={error} onNavigate={(page) => navigate(page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`)}>
       {activePage === "dashboard" ? (
@@ -246,10 +360,31 @@ export function App() {
         <AccountsView
           accounts={accounts}
           importContent={importContent}
+          importGroupName={importGroupName}
+          batchGroupName={batchGroupName}
+          preview={importPreview}
+          previewOpen={importPreviewOpen}
           query={accountQuery}
+          selectedIds={selectedAccountIds}
+          importBusy={importBusy}
+          previewBusy={previewBusy}
+          batchBusy={batchBusy}
+          allCurrentPageSelected={allCurrentPageSelected}
           onImportContentChange={setImportContent}
-          onImport={handleImport}
-          onQueryChange={setAccountQuery}
+          onImportGroupChange={setImportGroupName}
+          onBatchGroupNameChange={setBatchGroupName}
+          onOpenPreview={handleOpenImportPreview}
+          onPreviewOpenChange={(open) => {
+            setImportPreviewOpen(open);
+            if (!open) setImportPreview(null);
+          }}
+          onConfirmImport={handleConfirmImport}
+          onQueryChange={handleAccountQueryChange}
+          onToggleSelection={handleToggleSelection}
+          onTogglePageSelection={handleTogglePageSelection}
+          onApplyBatchGroup={handleApplyBatchGroup}
+          onDeleteSelected={handleDeleteSelected}
+          onClearSelection={() => setSelectedAccountIds([])}
         />
       ) : null}
 

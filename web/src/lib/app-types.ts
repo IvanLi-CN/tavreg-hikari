@@ -5,6 +5,7 @@ export type JobStatus = "idle" | "running" | "paused" | "completing" | "complete
 export type AccountRecord = {
   id: number;
   microsoftEmail: string;
+  passwordPlaintext: string;
   passwordMasked: string;
   hasApiKey: boolean;
   importedAt: string;
@@ -15,7 +16,55 @@ export type AccountRecord = {
   lastResultAt: string | null;
   lastErrorCode: string | null;
   skipReason: string | null;
+  groupName: string | null;
   disabledAt: string | null;
+};
+
+export type AccountsPayload = {
+  rows: AccountRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  groups: string[];
+};
+
+export type ImportDecision = "create" | "update_password" | "keep_existing" | "input_duplicate" | "invalid";
+
+export type AccountImportPreviewItem = {
+  lineNumber: number;
+  rawLine: string;
+  email: string;
+  normalizedEmail: string;
+  password: string;
+  decision: ImportDecision;
+  note: string;
+  duplicateOfLine?: number;
+  existingAccountId?: number;
+  existingHasApiKey?: boolean;
+  existingPassword?: string;
+  groupName?: string | null;
+};
+
+export type AccountImportPreviewPayload = {
+  items: AccountImportPreviewItem[];
+  effectiveEntries: Array<{ email: string; password: string }>;
+  summary: {
+    parsed: number;
+    invalid: number;
+    create: number;
+    updatePassword: number;
+    keepExisting: number;
+    inputDuplicate: number;
+  };
+};
+
+export type AccountImportPayload = {
+  summary: {
+    created: number;
+    updated: number;
+    total: number;
+  };
+  affectedIds: number[];
 };
 
 export type ApiKeyRecord = {
@@ -120,6 +169,9 @@ export type AccountQuery = {
   q: string;
   status: string;
   hasApiKey: string;
+  groupName: string;
+  page: number;
+  pageSize: number;
 };
 
 export type ApiKeyQuery = {

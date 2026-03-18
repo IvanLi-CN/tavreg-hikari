@@ -4,7 +4,7 @@ import process from "node:process";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
-import { parseAccountImportContent } from "./account-import.js";
+import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
@@ -103,6 +103,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
+    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     hasApiKey: row.hasApiKey,
     apiKeyId: row.apiKeyId,
@@ -114,6 +115,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     lastResultAt: row.lastResultAt,
     lastErrorCode: row.lastErrorCode,
     skipReason: row.skipReason,
+    groupName: row.groupName,
     disabledAt: row.disabledAt,
   };
 }
@@ -209,6 +211,13 @@ async function main(): Promise<void> {
     }
   });
 
+  const broadcast = (event: ServerEvent) => {
+    const message = toEventMessage(event);
+    for (const ws of clients) {
+      ws.send(message);
+    }
+  };
+
   await syncProxyInventory(db, defaults).catch(() => {});
 
   const server = Bun.serve({
@@ -245,24 +254,110 @@ async function main(): Promise<void> {
         return json({ ok: true, now: nowIso() });
       }
 
+      if (pathname === "/api/accounts/import-preview" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as {
+          entries?: ParsedImportEntry[];
+          invalidRows?: InvalidImportRow[];
+        } | null;
+        const entries = Array.isArray(body?.entries) ? body.entries : [];
+        const invalidRows = Array.isArray(body?.invalidRows) ? body.invalidRows : [];
+        const existingAccounts = db.getAccountsByEmails(entries.map((entry) => String(entry?.email || "")));
+        const preview = buildImportPreview(
+          entries.map((entry, index) => ({
+            lineNumber: Number(entry.lineNumber || index + 1),
+            rawLine: String(entry.rawLine || ""),
+            email: String(entry.email || "").trim(),
+            normalizedEmail: String(entry.normalizedEmail || String(entry.email || "").trim().toLowerCase()),
+            password: String(entry.password || ""),
+          })),
+          invalidRows.map((row, index) => ({
+            lineNumber: Number(row.lineNumber || index + 1),
+            rawLine: String(row.rawLine || ""),
+            reason: String(row.reason || "invalid"),
+          })),
+          existingAccounts.map((account) => ({
+            id: account.id,
+            microsoftEmail: account.microsoftEmail,
+            passwordPlaintext: account.passwordPlaintext,
+            hasApiKey: account.hasApiKey,
+            groupName: account.groupName,
+          })),
+        );
+        return json(preview);
+      }
+
       if (pathname === "/api/accounts/import" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as { content?: string } | null;
+        const body = (await req.json().catch(() => null)) as {
+          content?: string;
+          entries?: Array<{ email?: string; password?: string }>;
+          groupName?: string | null;
+        } | null;
         const content = String(body?.content || "");
-        const parsed = parseAccountImportContent(content);
-        const summary = db.importAccounts(parsed);
-        return json({ ok: true, summary });
+        const parsedEntries = Array.isArray(body?.entries)
+          ? body.entries.map((entry) => ({
+              email: String(entry?.email || "").trim(),
+              password: String(entry?.password || ""),
+            }))
+          : parseImportContent(content).entries.map((entry) => ({ email: entry.email, password: entry.password }));
+        const effectiveEntries = parsedEntries.filter((entry) => entry.email && entry.password);
+        if (effectiveEntries.length === 0) {
+          return badRequest("no valid account entries to import");
+        }
+        const summary = db.importAccounts(effectiveEntries, {
+          source: "manual",
+          groupName: body?.groupName ?? null,
+        });
+        broadcast({
+          type: "account.updated",
+          payload: { affectedIds: summary.affectedIds, action: "import" },
+          timestamp: nowIso(),
+        });
+        return json({ ok: true, summary: { created: summary.created, updated: summary.updated, total: summary.total }, affectedIds: summary.affectedIds });
       }
 
       if (pathname === "/api/accounts" && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
           hasApiKey: parseBool(url.searchParams.get("hasApiKey")),
           skipReason: url.searchParams.get("skipReason") || undefined,
-          page: toInt(url.searchParams.get("page") || undefined, 1),
-          pageSize: toInt(url.searchParams.get("pageSize") || undefined, 20),
+          groupName: url.searchParams.get("groupName") || undefined,
+          page,
+          pageSize,
         });
-        return json({ total: data.total, rows: data.rows.map((row) => serializeAccount(row)) });
+        return json({
+          total: data.total,
+          page,
+          pageSize,
+          groups: db.listAccountGroups(),
+          rows: data.rows.map((row) => serializeAccount(row)),
+        });
+      }
+
+      if (pathname === "/api/accounts/group" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: number[]; groupName?: string | null } | null;
+        const ids = Array.isArray(body?.ids) ? body.ids.map((id) => Number(id)) : [];
+        const result = db.updateAccountsGroup(ids, body?.groupName ?? null);
+        broadcast({
+          type: "account.updated",
+          payload: { ids, action: "group", groupName: result.groupName },
+          timestamp: nowIso(),
+        });
+        return json({ ok: true, ...result });
+      }
+
+      if (pathname === "/api/accounts" && req.method === "DELETE") {
+        const body = (await req.json().catch(() => null)) as { ids?: number[] } | null;
+        const ids = Array.isArray(body?.ids) ? body.ids.map((id) => Number(id)) : [];
+        const result = db.deleteAccounts(ids);
+        broadcast({
+          type: "account.updated",
+          payload: { ids, action: "delete", blockedIds: result.blockedIds },
+          timestamp: nowIso(),
+        });
+        return json({ ok: true, ...result });
       }
 
       if (pathname === "/api/api-keys" && req.method === "GET") {
@@ -405,10 +500,7 @@ async function main(): Promise<void> {
             payload,
             timestamp: nowIso(),
           };
-          const message = toEventMessage(event);
-          for (const ws of clients) {
-            ws.send(message);
-          }
+          broadcast(event);
           return json(payload);
         } finally {
           await controller.stop().catch(() => {});

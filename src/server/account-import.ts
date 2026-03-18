@@ -1,34 +1,237 @@
-export interface ImportedAccountEntry {
+export interface ParsedImportEntry {
+  lineNumber: number;
+  rawLine: string;
   email: string;
+  normalizedEmail: string;
   password: string;
 }
 
-const ACCOUNT_LINE_PATTERN = /^\s*(\S+@\S+?)\s*(?:[,|:：]|\s+)\s*(.+?)\s*$/;
+export interface InvalidImportRow {
+  lineNumber: number;
+  rawLine: string;
+  reason: string;
+}
 
-export function parseAccountImportLine(line: string): ImportedAccountEntry | null {
-  const normalized = line.trim();
-  if (!normalized) return null;
+export interface ExistingImportAccount {
+  id: number;
+  microsoftEmail: string;
+  passwordPlaintext: string;
+  hasApiKey: boolean;
+  groupName: string | null;
+}
 
-  const match = normalized.match(ACCOUNT_LINE_PATTERN);
-  if (!match) return null;
+export type ImportDecision = "create" | "update_password" | "keep_existing" | "input_duplicate" | "invalid";
 
-  const email = match[1];
-  const password = match[2];
-  if (typeof email !== "string" || typeof password !== "string") return null;
+export interface ImportPreviewItem {
+  lineNumber: number;
+  rawLine: string;
+  email: string;
+  normalizedEmail: string;
+  password: string;
+  decision: ImportDecision;
+  note: string;
+  duplicateOfLine?: number;
+  existingAccountId?: number;
+  existingHasApiKey?: boolean;
+  existingPassword?: string;
+  groupName?: string | null;
+}
 
-  const nextEmail = email.trim();
-  const nextPassword = password.trim();
-  if (!nextEmail || !nextPassword) return null;
+export interface ImportPreviewSummary {
+  parsed: number;
+  invalid: number;
+  create: number;
+  updatePassword: number;
+  keepExisting: number;
+  inputDuplicate: number;
+}
+
+export interface ImportPreviewResult {
+  items: ImportPreviewItem[];
+  effectiveEntries: Array<{ email: string; password: string }>;
+  summary: ImportPreviewSummary;
+}
+
+const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const EDGE_SEPARATOR_PATTERN = /^[\s,|:：;；\-—–_=]+|[\s,|:：;；\-—–_=]+$/g;
+
+function normalizeLine(rawLine: string): string {
+  return rawLine
+    .replace(/\u3000/g, " ")
+    .replace(/[，]/g, ",")
+    .replace(/[｜]/g, "|")
+    .trim();
+}
+
+function trimSeparators(value: string): string {
+  return value.replace(EDGE_SEPARATOR_PATTERN, "").trim();
+}
+
+export function parseImportLine(rawLine: string, lineNumber: number): ParsedImportEntry | InvalidImportRow {
+  const normalizedLine = normalizeLine(rawLine);
+  if (!normalizedLine) {
+    return {
+      lineNumber,
+      rawLine,
+      reason: "empty_line",
+    };
+  }
+
+  const emailMatch = normalizedLine.match(EMAIL_PATTERN);
+  if (!emailMatch || typeof emailMatch.index !== "number") {
+    return {
+      lineNumber,
+      rawLine,
+      reason: "email_not_found",
+    };
+  }
+
+  const email = emailMatch[0].trim();
+  const normalizedEmail = email.toLowerCase();
+  const before = trimSeparators(normalizedLine.slice(0, emailMatch.index));
+  const after = trimSeparators(normalizedLine.slice(emailMatch.index + email.length));
+  const password = after || before;
+
+  if (!password) {
+    return {
+      lineNumber,
+      rawLine,
+      reason: "password_not_found",
+    };
+  }
 
   return {
-    email: nextEmail,
-    password: nextPassword,
+    lineNumber,
+    rawLine,
+    email,
+    normalizedEmail,
+    password,
   };
 }
 
-export function parseAccountImportContent(content: string): ImportedAccountEntry[] {
-  return content
-    .split(/\r?\n/)
-    .map((line) => parseAccountImportLine(line))
-    .filter((entry): entry is ImportedAccountEntry => entry != null);
+export function parseImportContent(content: string): { entries: ParsedImportEntry[]; invalidRows: InvalidImportRow[] } {
+  const entries: ParsedImportEntry[] = [];
+  const invalidRows: InvalidImportRow[] = [];
+
+  for (const [index, rawLine] of content.split(/\r?\n/).entries()) {
+    const result = parseImportLine(rawLine, index + 1);
+    if ("reason" in result) {
+      if (normalizeLine(rawLine)) {
+        invalidRows.push(result);
+      }
+      continue;
+    }
+    entries.push(result);
+  }
+
+  return { entries, invalidRows };
+}
+
+export function buildImportPreview(entries: ParsedImportEntry[], invalidRows: InvalidImportRow[], existingAccounts: ExistingImportAccount[]): ImportPreviewResult {
+  const lastIndexByEmail = new Map<string, number>();
+  const lineByIndex = new Map<number, number>();
+  for (const [index, entry] of entries.entries()) {
+    lastIndexByEmail.set(entry.normalizedEmail, index);
+    lineByIndex.set(index, entry.lineNumber);
+  }
+
+  const existingByEmail = new Map(existingAccounts.map((account) => [account.microsoftEmail.toLowerCase(), account]));
+  const items: ImportPreviewItem[] = [];
+  const effectiveEntries: Array<{ email: string; password: string }> = [];
+  const firstLineByEmail = new Map<string, number>();
+  const summary: ImportPreviewSummary = {
+    parsed: entries.length,
+    invalid: invalidRows.length,
+    create: 0,
+    updatePassword: 0,
+    keepExisting: 0,
+    inputDuplicate: 0,
+  };
+
+  for (const [index, entry] of entries.entries()) {
+    const firstLine = firstLineByEmail.get(entry.normalizedEmail);
+    if (firstLine == null) {
+      firstLineByEmail.set(entry.normalizedEmail, entry.lineNumber);
+    }
+
+    const isEffective = lastIndexByEmail.get(entry.normalizedEmail) === index;
+    if (!isEffective) {
+      const effectiveLine = lineByIndex.get(lastIndexByEmail.get(entry.normalizedEmail) ?? -1);
+      items.push({
+        lineNumber: entry.lineNumber,
+        rawLine: entry.rawLine,
+        email: entry.email,
+        normalizedEmail: entry.normalizedEmail,
+        password: entry.password,
+        decision: "input_duplicate",
+        note: "同一批导入中邮箱重复，已以后出现的记录为准",
+        duplicateOfLine: effectiveLine ?? firstLine,
+      });
+      summary.inputDuplicate += 1;
+      continue;
+    }
+
+    const existing = existingByEmail.get(entry.normalizedEmail);
+    if (!existing) {
+      items.push({
+        lineNumber: entry.lineNumber,
+        rawLine: entry.rawLine,
+        email: entry.email,
+        normalizedEmail: entry.normalizedEmail,
+        password: entry.password,
+        decision: "create",
+        note: "新增账号",
+      });
+      effectiveEntries.push({ email: entry.email, password: entry.password });
+      summary.create += 1;
+      continue;
+    }
+
+    const shouldUpdatePassword = existing.passwordPlaintext !== entry.password;
+    items.push({
+      lineNumber: entry.lineNumber,
+      rawLine: entry.rawLine,
+      email: entry.email,
+      normalizedEmail: entry.normalizedEmail,
+      password: entry.password,
+      decision: shouldUpdatePassword ? "update_password" : "keep_existing",
+      note: shouldUpdatePassword
+        ? existing.hasApiKey
+          ? "已有账号，密码会更新；该账号已有 API key，后续调度仍会跳过"
+          : "已有账号，密码会更新"
+        : existing.hasApiKey
+          ? "已有账号且密码未变；该账号已有 API key，后续调度会跳过"
+          : "已有账号且密码未变",
+      existingAccountId: existing.id,
+      existingHasApiKey: existing.hasApiKey,
+      existingPassword: existing.passwordPlaintext,
+      groupName: existing.groupName,
+    });
+    effectiveEntries.push({ email: entry.email, password: entry.password });
+    if (shouldUpdatePassword) {
+      summary.updatePassword += 1;
+    } else {
+      summary.keepExisting += 1;
+    }
+  }
+
+  for (const invalidRow of invalidRows) {
+    items.push({
+      lineNumber: invalidRow.lineNumber,
+      rawLine: invalidRow.rawLine,
+      email: "",
+      normalizedEmail: "",
+      password: "",
+      decision: "invalid",
+      note: invalidRow.reason === "password_not_found" ? "未识别到密码" : "未识别到邮箱",
+    });
+  }
+
+  items.sort((left, right) => left.lineNumber - right.lineNumber);
+
+  return {
+    items,
+    effectiveEntries,
+    summary,
+  };
 }

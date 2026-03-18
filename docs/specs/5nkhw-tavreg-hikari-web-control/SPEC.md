@@ -4,7 +4,7 @@
 
 - Status: 已实现
 - Created: 2026-03-18
-- Last: 2026-03-18
+- Last: 2026-03-19
 
 ## 背景 / 问题陈述
 
@@ -21,6 +21,7 @@
 - 将主流程改造成单活任务编排器，支持软暂停、动态调整 `parallel` / `need` / `maxAttempts`，并实时回传运行状态。
 - 复用现有自动化逻辑完成 Microsoft 第三方登录与 Tavily API key 提取，不做人工接管流程。
 - 将“已有 API key 的账号跳过”“账号去重导入”“代理节点 24h 成功统计”等业务规则做成结构化数据与可查询界面。
+- 账号页支持导入前预解析确认、账号分组、跨分页勾选与批量操作，避免误导入与误删。
 
 ### Non-goals
 
@@ -78,6 +79,7 @@
 - `last_error_code`
 - `skip_reason`
 - `disabled_at`
+- `group_name`
 
 ### api_keys
 
@@ -157,6 +159,9 @@
 ## API 合约
 
 - `POST /api/accounts/import`
+- `POST /api/accounts/import-preview`
+- `POST /api/accounts/group`
+- `DELETE /api/accounts`
 - `GET /api/accounts`
 - `GET /api/api-keys`
 - `GET /api/proxies`
@@ -171,11 +176,23 @@
 
 ### 账号导入
 
-- 前端导入格式支持 `email,password`、`email:password`、`email|password` 与 `email password`
+- 前端点击导入后先在浏览器侧解析内容，再调用预览接口展示确认弹窗
+- 前端导入格式支持 `email,password`、`email:password`、`email|password`、`email password`、`email----password`
+- 支持“密码在前、邮箱在后”的格式纠正
 - 空行忽略
 - 同一批次重复邮箱以最后一条为准
+- 预览弹窗需要标记：新增、更新密码、保持原值、输入重复、无效行
 - 落库时按邮箱唯一 upsert
+- 导入时可同时指定分组；若指定分组，则新导入账号归入该分组
 - 若账号已有有效 API key，则保留 `has_api_key=true` 与 `skip_reason=has_api_key`
+
+### 账号页交互
+
+- 密码默认以明文显示，便于人工校验
+- 支持跨分页勾选账号，并展示总记录数与已勾选数量
+- 支持批量设置分组与批量删除
+- 导入成功后自动勾选刚刚新增或更新的账号
+- 分组选择器使用可搜索、可直接新建的组合框
 
 ### 主流程调度
 
@@ -195,7 +212,9 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 导入同一微软邮箱多次，When 导入完成，Then 数据库中仅保留一条账号记录并更新密码、导入时间和最近来源。
+- Given 用户输入多行账号后点击导入，When 预览弹窗打开，Then 界面先展示解析出的邮箱密码、输入重复、与已有账号冲突和最终导入决策。
 - Given 某账号已有有效 API key，When 创建主流程任务，Then 调度器不会派发该账号，并在账号页标记为跳过。
+- Given 用户在账号页跨分页勾选若干账号，When 执行批量分组或批量删除，Then 操作作用于完整勾选集而不是仅当前页。
 - Given 主流程正在运行，When 用户点击暂停，Then 不再派发新账号，已运行账号继续完成。
 - Given 主流程正在运行，When 用户修改 `parallel` / `need` / `maxAttempts`，Then 修改立即作用于后续派发，不中断当前账号。
 - Given 任务成功完成 Microsoft 登录与 Tavily Home 流程，When 成功提取 API key，Then 账号状态、API key 记录、job attempt 与 `signup_tasks` 都正确关联更新。
@@ -221,3 +240,4 @@
 
 - 2026-03-18: 初始化 Web 管理台规格，锁定 Bun 单体 + React/Vite + SQLite + WebSocket 方案。
 - 2026-03-18: 完成 Web 管理台实现，补齐业务表、调度器、REST/WebSocket、React 控制台、测试入口与文档同步。
+- 2026-03-19: 扩展账号页导入预解析弹窗、账号分组、跨分页勾选、批量分组/删除与更宽松的账号密码分隔格式解析。

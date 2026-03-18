@@ -12,4 +12,4 @@
 | 6sfgt | 隐私数据与项目定位内容联合清理（含 main 历史重写） | 已完成 | `6sfgt-privacy-scrub/SPEC.md` | 2026-02-26 | 已落地 |
 | 8v2kp | 注册任务 SQLite 台账与风控可筛选记录 | 已完成 | `8v2kp-signup-task-sqlite-ledger/SPEC.md` | 2026-02-25 | 已落地 |
 | 2njxq | 增加 env 模板并提供本地初始化指引 | 已完成 | `2njxq-env-example-bootstrap/SPEC.md` | 2026-02-25 | PR #1 |
-| 5nkhw | Tavreg Hikari Web 管理台 | 已实现 | `5nkhw-tavreg-hikari-web-control/SPEC.md` | 2026-03-18 | Web 控制台、调度器与查询页已落地 |
+| 5nkhw | Tavreg Hikari Web 管理台 | 已实现 | `5nkhw-tavreg-hikari-web-control/SPEC.md` | 2026-03-19 | Web 控制台、调度器、预解析导入与账号分组已落地 |

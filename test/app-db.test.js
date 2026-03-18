@@ -46,6 +46,38 @@ describe("AppDatabase account import", () => {
 
     appDb.close();
   });
+
+  test("stores groups and supports batch group updates and deletes", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      [
+        { email: "group-a@outlook.com", password: "pass-a" },
+        { email: "group-b@outlook.com", password: "pass-b" },
+      ],
+      { groupName: "batch-a" },
+    );
+
+    expect(imported.affectedIds).toHaveLength(2);
+    expect(appDb.listAccountGroups()).toEqual(["batch-a"]);
+
+    let accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts.map((account) => account.groupName)).toEqual(["batch-a", "batch-a"]);
+
+    const updated = appDb.updateAccountsGroup(imported.affectedIds, "batch-b");
+    expect(updated.updated).toBe(2);
+    expect(updated.groupName).toBe("batch-b");
+    expect(appDb.listAccountGroups()).toEqual(["batch-b"]);
+
+    accounts = appDb.listAccounts({ page: 1, pageSize: 10, groupName: "batch-b" }).rows;
+    expect(accounts).toHaveLength(2);
+
+    const deleted = appDb.deleteAccounts([imported.affectedIds[0]]);
+    expect(deleted.deleted).toBe(1);
+    expect(deleted.blockedIds).toEqual([]);
+    expect(appDb.listAccounts({ page: 1, pageSize: 10 }).total).toBe(1);
+
+    appDb.close();
+  });
 });
 
 describe("scheduler helpers", () => {

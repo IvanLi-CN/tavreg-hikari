@@ -45,9 +45,17 @@ export interface MicrosoftAccountRecord {
   lastResultAt: string | null;
   lastErrorCode: string | null;
   skipReason: string | null;
+  groupName: string | null;
   disabledAt: string | null;
   leaseJobId: number | null;
   leaseStartedAt: string | null;
+}
+
+export interface ImportAccountsResult {
+  created: number;
+  updated: number;
+  total: number;
+  affectedIds: number[];
 }
 
 export interface ApiKeyRecord {
@@ -153,6 +161,7 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     lastResultAt: row.last_result_at == null ? null : String(row.last_result_at),
     lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
     skipReason: row.skip_reason == null ? null : String(row.skip_reason),
+    groupName: row.group_name == null ? null : String(row.group_name),
     disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
     leaseJobId: row.lease_job_id == null ? null : Number(row.lease_job_id),
     leaseStartedAt: row.lease_started_at == null ? null : String(row.lease_started_at),
@@ -278,6 +287,7 @@ export class AppDatabase {
         last_result_at TEXT,
         last_error_code TEXT,
         skip_reason TEXT,
+        group_name TEXT,
         disabled_at TEXT,
         lease_job_id INTEGER,
         lease_started_at TEXT
@@ -374,8 +384,15 @@ export class AppDatabase {
       }
     }
 
+    const accountTableInfo = this.db.query("PRAGMA table_info(microsoft_accounts);").all() as Array<Record<string, unknown>>;
+    const accountColumns = new Set(accountTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!accountColumns.has("group_name")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN group_name TEXT;");
+    }
+
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_result ON microsoft_accounts(last_result_status, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_skip_reason ON microsoft_accounts(skip_reason, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_group_name ON microsoft_accounts(group_name, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_attempts_job_status ON job_attempts(job_id, status, started_at DESC);");
@@ -499,7 +516,10 @@ export class AppDatabase {
     }
   }
 
-  importAccounts(entries: Array<{ email: string; password: string }>, source = "manual"): { created: number; updated: number; total: number } {
+  importAccounts(
+    entries: Array<{ email: string; password: string }>,
+    options?: { source?: string; groupName?: string | null },
+  ): ImportAccountsResult {
     const deduped = new Map<string, string>();
     for (const entry of entries) {
       const email = entry.email.trim().toLowerCase();
@@ -509,14 +529,17 @@ export class AppDatabase {
     }
 
     const now = nowIso();
+    const source = options?.source || "manual";
+    const normalizedGroupName = options?.groupName?.trim() ? options.groupName.trim() : null;
     let created = 0;
     let updated = 0;
+    const affectedIds: number[] = [];
     const selectStmt = this.db.query("SELECT * FROM microsoft_accounts WHERE microsoft_email = ?");
     const insertStmt = this.db.query(`
       INSERT INTO microsoft_accounts (
-        microsoft_email, password_plaintext, has_api_key, api_key_id, imported_at, updated_at, import_source,
+        microsoft_email, password_plaintext, has_api_key, api_key_id, imported_at, updated_at, import_source, group_name,
         last_result_status, skip_reason
-      ) VALUES (?, ?, 0, NULL, ?, ?, ?, 'ready', NULL)
+      ) VALUES (?, ?, 0, NULL, ?, ?, ?, ?, 'ready', NULL)
     `);
     const updateStmt = this.db.query(`
       UPDATE microsoft_accounts
@@ -524,6 +547,7 @@ export class AppDatabase {
           imported_at = ?,
           updated_at = ?,
           import_source = ?,
+          group_name = COALESCE(?, group_name),
           skip_reason = CASE WHEN has_api_key = 1 THEN 'has_api_key' ELSE NULL END,
           last_result_status = CASE
             WHEN disabled_at IS NOT NULL THEN 'disabled'
@@ -539,11 +563,16 @@ export class AppDatabase {
       for (const [email, password] of deduped.entries()) {
         const existing = selectStmt.get(email) as Record<string, unknown> | null;
         if (!existing) {
-          insertStmt.run(email, password, now, now, source);
+          insertStmt.run(email, password, now, now, source, normalizedGroupName);
+          const inserted = selectStmt.get(email) as Record<string, unknown> | null;
+          if (inserted?.id != null) {
+            affectedIds.push(Number(inserted.id));
+          }
           created += 1;
           continue;
         }
-        updateStmt.run(password, now, now, source, Number(existing.id));
+        updateStmt.run(password, now, now, source, normalizedGroupName, Number(existing.id));
+        affectedIds.push(Number(existing.id));
         updated += 1;
       }
       this.db.exec("COMMIT;");
@@ -552,7 +581,7 @@ export class AppDatabase {
       throw error;
     }
 
-    return { created, updated, total: deduped.size };
+    return { created, updated, total: deduped.size, affectedIds };
   }
 
   listAccounts(filters: {
@@ -560,6 +589,7 @@ export class AppDatabase {
     status?: string;
     hasApiKey?: boolean;
     skipReason?: string;
+    groupName?: string;
     page?: number;
     pageSize?: number;
   }): { rows: MicrosoftAccountRecord[]; total: number } {
@@ -583,12 +613,82 @@ export class AppDatabase {
       where.push("skip_reason = ?");
       params.push(filters.skipReason.trim());
     }
+    if (filters.groupName?.trim()) {
+      where.push("group_name = ?");
+      params.push(filters.groupName.trim());
+    }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const total = Number((this.db.query(`SELECT COUNT(*) AS count FROM microsoft_accounts ${whereSql}`).get(...(params as any[])) as { count?: number })?.count || 0);
     const rows = this.db
       .query(`SELECT * FROM microsoft_accounts ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
     return { rows: rows.map(mapAccountRow), total };
+  }
+
+  listAccountGroups(): string[] {
+    const rows = this.db
+      .query(`
+        SELECT DISTINCT group_name
+        FROM microsoft_accounts
+        WHERE group_name IS NOT NULL AND TRIM(group_name) <> ''
+        ORDER BY group_name COLLATE NOCASE ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows
+      .map((row) => String(row.group_name || "").trim())
+      .filter(Boolean);
+  }
+
+  getAccountsByEmails(emails: string[]): MicrosoftAccountRecord[] {
+    const normalizedEmails = Array.from(new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean)));
+    if (normalizedEmails.length === 0) return [];
+    const placeholders = normalizedEmails.map(() => "?").join(", ");
+    const rows = this.db
+      .query(`SELECT * FROM microsoft_accounts WHERE microsoft_email IN (${placeholders})`)
+      .all(...normalizedEmails) as Array<Record<string, unknown>>;
+    return rows.map(mapAccountRow);
+  }
+
+  updateAccountsGroup(ids: number[], groupName: string | null): { updated: number; groupName: string | null } {
+    const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+    if (uniqueIds.length === 0) {
+      return { updated: 0, groupName: groupName?.trim() || null };
+    }
+    const normalizedGroupName = groupName?.trim() ? groupName.trim() : null;
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    this.db
+      .query(
+        `UPDATE microsoft_accounts SET group_name = ?, updated_at = ? WHERE id IN (${placeholders})`,
+      )
+      .run(normalizedGroupName, nowIso(), ...uniqueIds);
+    const changesRow = this.db.query("SELECT changes() AS count").get() as { count?: number } | null;
+    return {
+      updated: Number(changesRow?.count || 0),
+      groupName: normalizedGroupName,
+    };
+  }
+
+  deleteAccounts(ids: number[]): { deleted: number; blockedIds: number[] } {
+    const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+    if (uniqueIds.length === 0) {
+      return { deleted: 0, blockedIds: [] };
+    }
+
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const blockedRows = this.db
+      .query(`SELECT id FROM microsoft_accounts WHERE id IN (${placeholders}) AND lease_job_id IS NOT NULL`)
+      .all(...uniqueIds) as Array<Record<string, unknown>>;
+    const blockedIds = blockedRows.map((row) => Number(row.id));
+    const deletableIds = uniqueIds.filter((id) => !blockedIds.includes(id));
+
+    if (deletableIds.length === 0) {
+      return { deleted: 0, blockedIds };
+    }
+
+    const deletePlaceholders = deletableIds.map(() => "?").join(", ");
+    this.db.query(`DELETE FROM microsoft_accounts WHERE id IN (${deletePlaceholders})`).run(...deletableIds);
+    const deleted = Number((this.db.query("SELECT changes() AS count").get() as { count?: number } | null)?.count || 0);
+    return { deleted, blockedIds };
   }
 
   listApiKeys(filters: { q?: string; status?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number } {
