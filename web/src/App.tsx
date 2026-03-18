@@ -149,6 +149,7 @@ export function App() {
       }
       if (next.type === "account.updated") {
         void refreshAccounts();
+        void refreshApiKeys();
       }
       if (next.type === "proxy.updated" || next.type === "proxy.check.completed") {
         void refreshProxies();

@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
+import { resolveStaticAssetPath } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
@@ -120,6 +121,21 @@ describe("scheduler helpers", () => {
 });
 
 describe("proxy aggregation", () => {
+  test("lists proxy nodes on a fresh database without signup_tasks", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["node-a"], "node-a");
+
+    expect(appDb.listProxyNodes()).toEqual([
+      expect.objectContaining({
+        nodeName: "node-a",
+        isSelected: true,
+        success24h: 0,
+      }),
+    ]);
+
+    appDb.close();
+  });
+
   test("derives 24h success counts from signup_tasks", async () => {
     const { dbPath, appDb } = await createTempDb();
     appDb.importAccounts([{ email: "proxy@outlook.com", password: "proxy-pass" }]);
@@ -163,5 +179,14 @@ describe("proxy aggregation", () => {
 
     ledger.close();
     appDb.close();
+  });
+});
+
+describe("static asset path resolution", () => {
+  test("rejects path traversal while allowing normal routes", () => {
+    expect(resolveStaticAssetPath("/repo/web/dist", "/")).toBe("/repo/web/dist/index.html");
+    expect(resolveStaticAssetPath("/repo/web/dist", "/assets/index.js")).toBe("/repo/web/dist/assets/index.js");
+    expect(resolveStaticAssetPath("/repo/web/dist", "/../../package.json")).toBeNull();
+    expect(resolveStaticAssetPath("/repo/web/dist", "/..%2F..%2F.env.local")).toBeNull();
   });
 });

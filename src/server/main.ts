@@ -6,6 +6,7 @@ import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.j
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
+import { resolveStaticAssetPath } from "./static-assets.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -185,9 +186,10 @@ async function syncProxyInventory(db: AppDatabase, settings: AppSettings) {
 
 async function serveStatic(req: Request): Promise<Response> {
   const url = new URL(req.url);
-  let assetPath = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-  if (!assetPath) assetPath = "index.html";
-  const targetPath = path.join(WEB_DIST_DIR, assetPath);
+  const targetPath = resolveStaticAssetPath(WEB_DIST_DIR, url.pathname);
+  if (!targetPath) {
+    return new Response("Not found", { status: 404 });
+  }
   const file = Bun.file(targetPath);
   if (await file.exists()) {
     return new Response(file);

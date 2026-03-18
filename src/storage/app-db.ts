@@ -264,6 +264,16 @@ export class AppDatabase {
     this.db.close(false);
   }
 
+  private hasSignupTasksTable(): boolean {
+    return Boolean(
+      (
+        this.db
+          .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'signup_tasks' LIMIT 1")
+          .get() as { ok?: number } | null
+      )?.ok,
+    );
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS app_settings (
@@ -366,13 +376,7 @@ export class AppDatabase {
       );
     `);
 
-    const signupTaskTableExists = Boolean(
-      (
-        this.db
-          .query("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'signup_tasks' LIMIT 1")
-          .get() as { ok?: number } | null
-      )?.ok,
-    );
+    const signupTaskTableExists = this.hasSignupTasksTable();
     if (signupTaskTableExists) {
       const tableInfo = this.db.query("PRAGMA table_info(signup_tasks);").all() as Array<Record<string, unknown>>;
       const existingColumns = new Set(tableInfo.map((item) => String(item.name || "").toLowerCase()));
@@ -909,6 +913,7 @@ export class AppDatabase {
   }
 
   getLatestSignupTask(jobId: number, accountId: number): Record<string, unknown> | null {
+    if (!this.hasSignupTasksTable()) return null;
     const row = this.db
       .query(`
         SELECT *
@@ -1052,22 +1057,31 @@ export class AppDatabase {
   }
 
   listProxyNodes(): ProxyNodeRecord[] {
-    const sinceIso = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-    const rows = this.db
-      .query(`
-        SELECT
-          p.*,
-          COALESCE((
-            SELECT COUNT(*)
-            FROM signup_tasks s
-            WHERE s.proxy_node = p.node_name
-              AND s.status = 'succeeded'
-              AND COALESCE(s.completed_at, s.started_at) >= ?
-          ), 0) AS success24h
-        FROM proxy_nodes p
-        ORDER BY p.is_selected DESC, p.node_name ASC
-      `)
-      .all(sinceIso) as Record<string, unknown>[];
+    const rows = this.hasSignupTasksTable()
+      ? (this.db
+          .query(`
+            SELECT
+              p.*,
+              COALESCE((
+                SELECT COUNT(*)
+                FROM signup_tasks s
+                WHERE s.proxy_node = p.node_name
+                  AND s.status = 'succeeded'
+                  AND COALESCE(s.completed_at, s.started_at) >= ?
+              ), 0) AS success24h
+            FROM proxy_nodes p
+            ORDER BY p.is_selected DESC, p.node_name ASC
+          `)
+          .all(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()) as Record<string, unknown>[])
+      : (this.db
+          .query(`
+            SELECT
+              p.*,
+              0 AS success24h
+            FROM proxy_nodes p
+            ORDER BY p.is_selected DESC, p.node_name ASC
+          `)
+          .all() as Record<string, unknown>[]);
     return rows.map((row) => ({
       id: Number(row.id),
       nodeName: String(row.node_name),
