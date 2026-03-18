@@ -12,7 +12,7 @@
 ## Web 管理台
 
 - 主流程页：启动任务、暂停、恢复、动态调整 `parallel / need / maxAttempts`，并查看实时 attempts 与事件流。
-- 微软账号页：批量导入 `email,password`，按邮箱去重，查看是否已有 API key、最近状态、导入时间与跳过原因。
+- 微软账号页：支持 `email,password`、`email:password`、`email|password` 或 `email password` 的批量导入，按邮箱去重，查看是否已有 API key、最近状态、导入时间与跳过原因。
 - API Keys 页：查询已提取的 key 前缀、状态、账号归属与时间信息。
 - 代理节点页：修改 Mihomo 订阅设置、同步节点、检查当前节点/全部节点/单节点，并查看出口 IP、地理信息和 24 小时成功提取数量。
 

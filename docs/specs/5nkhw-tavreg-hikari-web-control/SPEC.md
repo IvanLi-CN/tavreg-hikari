@@ -171,7 +171,7 @@
 
 ### 账号导入
 
-- 前端导入格式固定为 `email,password`
+- 前端导入格式支持 `email,password`、`email:password`、`email|password` 与 `email password`
 - 空行忽略
 - 同一批次重复邮箱以最后一条为准
 - 落库时按邮箱唯一 upsert
