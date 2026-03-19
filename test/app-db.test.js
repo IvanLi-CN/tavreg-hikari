@@ -147,6 +147,21 @@ describe("AppDatabase account import", () => {
 
     appDb.close();
   });
+
+  test("fails paused jobs during stale-state recovery", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    appDb.updateJobState(job.id, { status: "paused", pausedAt: new Date().toISOString() });
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    expect(reopened.getJob(job.id)).toMatchObject({
+      status: "failed",
+      lastError: "server_restart",
+    });
+
+    reopened.close();
+  });
 });
 
 describe("scheduler helpers", () => {

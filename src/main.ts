@@ -8825,7 +8825,12 @@ async function run(): Promise<void> {
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
       let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
-      const ports = await reserveMihomoPorts();
+      const ports = batchEnabled
+        ? await reserveMihomoPorts()
+        : {
+            apiPort: cfg.mihomoApiPort,
+            mixedPort: cfg.mihomoMixedPort,
+          };
       mihomoOverrides = {
         apiPort: ports.apiPort,
         mixedPort: ports.mixedPort,
