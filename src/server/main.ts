@@ -441,8 +441,8 @@ async function main(): Promise<void> {
         if (!settings.subscriptionUrl.trim()) {
           return json({
             settings,
-            selectedName: db.getSelectedProxyName(),
-            nodes: db.listProxyNodes(),
+            selectedName: null,
+            nodes: [],
             syncError: null,
           });
         }
@@ -470,11 +470,12 @@ async function main(): Promise<void> {
         const optimisticNext = buildNextSettings(current, body);
         if (!optimisticNext.subscriptionUrl.trim()) {
           db.setSettings(optimisticNext);
+          db.upsertProxyInventory([], null);
           return json({
             ok: true,
             settings: optimisticNext,
-            selectedName: db.getSelectedProxyName(),
-            nodes: db.listProxyNodes(),
+            selectedName: null,
+            nodes: [],
             syncError: null,
           });
         }

@@ -230,6 +230,17 @@ describe("proxy aggregation", () => {
 
     appDb.close();
   });
+
+  test("clears cached proxy nodes when inventory is disabled", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["node-a", "node-b"], "node-a");
+    appDb.upsertProxyInventory([], null);
+
+    expect(appDb.listProxyNodes()).toEqual([]);
+    expect(appDb.getSelectedProxyName()).toBeNull();
+
+    appDb.close();
+  });
 });
 
 describe("static asset path resolution", () => {
@@ -353,7 +364,12 @@ describe("scheduler runtime spec", () => {
         mixedPort: 40124,
       },
       selectedProxyNode: "Tokyo-01",
-      baseEnv: { PATH: process.env.PATH },
+      baseEnv: {
+        PATH: process.env.PATH,
+        EXISTING_EMAIL: "legacy@example.com",
+        EXISTING_PASSWORD: "legacy-pass",
+        CHROME_REMOTE_DEBUGGING_PORT: "9222",
+      },
     });
 
     expect(runtime.args).toEqual([
@@ -387,5 +403,8 @@ describe("scheduler runtime spec", () => {
       CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-profile",
       INSPECT_CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-inspect-profile",
     });
+    expect(runtime.env.EXISTING_EMAIL).toBeUndefined();
+    expect(runtime.env.EXISTING_PASSWORD).toBeUndefined();
+    expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
   });
 });

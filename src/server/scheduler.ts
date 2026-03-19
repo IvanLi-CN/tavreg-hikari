@@ -20,6 +20,21 @@ interface ActiveAttempt {
 }
 
 const RESERVED_LOCAL_PORTS = new Set<number>();
+const STRIPPED_ATTEMPT_ENV_KEYS = [
+  "EXISTING_EMAIL",
+  "EXISTING_PASSWORD",
+  "MICROSOFT_ACCOUNT_EMAIL",
+  "MICROSOFT_ACCOUNT_PASSWORD",
+  "CHROME_REMOTE_DEBUGGING_PORT",
+] as const;
+
+function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...(baseEnv || process.env) };
+  for (const key of STRIPPED_ATTEMPT_ENV_KEYS) {
+    delete next[key];
+  }
+  return next;
+}
 
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
@@ -35,10 +50,11 @@ export function buildAttemptRuntimeSpec(input: {
   if (input.selectedProxyNode?.trim()) {
     args.push("--proxy-node", input.selectedProxyNode.trim());
   }
+  const inheritedEnv = buildAttemptBaseEnv(input.baseEnv);
   return {
     args,
     env: {
-      ...(input.baseEnv || process.env),
+      ...inheritedEnv,
       RUN_MODE: input.job.runMode,
       MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
       MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
