@@ -6,6 +6,7 @@ import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.j
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
+import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
@@ -120,13 +121,6 @@ function serializeImportedAccount(row: MicrosoftAccountRecord): Record<string, u
   };
 }
 
-function serializeAttempt(db: AppDatabase, row: JobAttemptRecord): Record<string, unknown> {
-  return {
-    ...row,
-    accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
-  };
-}
-
 function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
   const job = db.getCurrentJob();
   if (!job) {
@@ -139,11 +133,11 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
   }
   return {
     job,
-    activeAttempts: scheduler.activeAttemptRows().map((row) => serializeAttempt(db, row)),
+    activeAttempts: scheduler.activeAttemptRows().map((row) => serializeAttemptForApi(db, row)),
     recentAttempts: db
       .listAttempts(job.id, false)
       .slice(0, 20)
-      .map((row) => serializeAttempt(db, row)),
+      .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: db.countEligibleAccounts(job.id),
   };
 }

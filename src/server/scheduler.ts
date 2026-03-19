@@ -128,7 +128,9 @@ export class JobScheduler {
   }
 
   activeAttemptRows(): JobAttemptRecord[] {
-    return Array.from(this.activeAttempts.values()).map((item) => item.attempt);
+    return Array.from(this.activeAttempts.values())
+      .map((item) => this.db.getAttempt(item.attempt.id) || item.attempt)
+      .filter(Boolean);
   }
 
   async startJob(params: {

@@ -21,6 +21,7 @@ import type {
   ProxyPayload,
   ProxySettings,
 } from "@/lib/app-types";
+import { getPageFromPathname, normalizeAppPath } from "@/lib/routes";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -38,10 +39,10 @@ async function api<T>(input: string, init?: RequestInit): Promise<T> {
 }
 
 function usePathname() {
-  const [pathname, setPathname] = useState(window.location.pathname);
+  const [pathname, setPathname] = useState(() => normalizeAppPath(window.location.pathname));
 
   useEffect(() => {
-    const handlePopstate = () => setPathname(window.location.pathname);
+    const handlePopstate = () => setPathname(normalizeAppPath(window.location.pathname));
     window.addEventListener("popstate", handlePopstate);
     return () => window.removeEventListener("popstate", handlePopstate);
   }, []);
@@ -49,9 +50,10 @@ function usePathname() {
   return {
     pathname,
     navigate(next: string) {
-      if (next === pathname) return;
-      window.history.pushState({}, "", next);
-      setPathname(next);
+      const normalized = normalizeAppPath(next);
+      if (normalized === pathname) return;
+      window.history.pushState({}, "", normalized);
+      setPathname(normalized);
     },
   };
 }
@@ -97,12 +99,7 @@ export function App() {
   const [previewBusy, setPreviewBusy] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
 
-  const activePage = useMemo<PageKey>(() => {
-    if (pathname === "/accounts") return "accounts";
-    if (pathname === "/api-keys") return "apiKeys";
-    if (pathname === "/proxies") return "proxies";
-    return "dashboard";
-  }, [pathname]);
+  const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
 
   const selectedProxy = useMemo(
     () => proxies?.nodes.find((node) => node.isSelected) || null,
