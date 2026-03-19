@@ -98,6 +98,9 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     id: row.id,
     microsoftEmail: row.microsoftEmail,
     passwordMasked: maskSecret(row.passwordPlaintext),
+    proofMailboxProvider: row.proofMailboxProvider,
+    proofMailboxAddress: row.proofMailboxAddress,
+    proofMailboxId: row.proofMailboxId,
     hasApiKey: row.hasApiKey,
     apiKeyId: row.apiKeyId,
     importedAt: row.importedAt,
@@ -247,6 +250,7 @@ async function main(): Promise<void> {
     async fetch(req, server) {
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
 
       if (pathname === "/api/events/ws") {
         if (server.upgrade(req)) {
@@ -360,6 +364,46 @@ async function main(): Promise<void> {
           timestamp: nowIso(),
         });
         return json({ ok: true, ...result });
+      }
+
+      if (accountDetailMatch && req.method === "PATCH") {
+        const accountId = Number.parseInt(accountDetailMatch[1] || "", 10);
+        if (!Number.isInteger(accountId) || accountId < 1) {
+          return badRequest("invalid account id");
+        }
+        const body = (await req.json().catch(() => null)) as {
+          proofMailboxProvider?: string | null;
+          proofMailboxAddress?: string | null;
+          proofMailboxId?: string | null;
+        } | null;
+        const proofMailboxAddress = body?.proofMailboxAddress == null ? undefined : String(body.proofMailboxAddress).trim() || null;
+        const proofMailboxId = body?.proofMailboxId == null ? undefined : String(body.proofMailboxId).trim() || null;
+        const rawProvider = body?.proofMailboxProvider == null ? undefined : String(body.proofMailboxProvider).trim().toLowerCase() || null;
+        if (rawProvider != null && rawProvider !== "moemail") {
+          return badRequest("unsupported proof mailbox provider");
+        }
+        if (proofMailboxAddress && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(proofMailboxAddress)) {
+          return badRequest("invalid proof mailbox address");
+        }
+        try {
+          const account = db.updateAccountProofMailbox(accountId, {
+            provider: rawProvider === undefined ? undefined : rawProvider,
+            address: proofMailboxAddress,
+            mailboxId: proofMailboxId,
+          });
+          broadcast({
+            type: "account.updated",
+            payload: { ids: [accountId], action: "proof_mailbox" },
+            timestamp: nowIso(),
+          });
+          return json({ ok: true, account: serializeAccount(account) });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/account not found/i.test(message)) {
+            return badRequest(message, 404);
+          }
+          return badRequest(message);
+        }
       }
 
       if (pathname === "/api/accounts" && req.method === "DELETE") {

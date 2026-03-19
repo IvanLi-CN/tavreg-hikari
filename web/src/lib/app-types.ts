@@ -7,6 +7,9 @@ export type AccountRecord = {
   microsoftEmail: string;
   passwordPlaintext?: string | null;
   passwordMasked: string;
+  proofMailboxProvider: "moemail" | null;
+  proofMailboxAddress: string | null;
+  proofMailboxId: string | null;
   hasApiKey: boolean;
   importedAt: string;
   updatedAt: string;
@@ -75,6 +78,11 @@ export type AccountImportPayload = {
     passwordPlaintext: string;
     passwordMasked: string;
   }>;
+};
+
+export type AccountProofMailboxUpdatePayload = {
+  ok: true;
+  account: AccountRecord;
 };
 
 export type ApiKeyRecord = {

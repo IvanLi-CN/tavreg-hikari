@@ -69,6 +69,9 @@
 - `id`
 - `microsoft_email`（唯一）
 - `password_plaintext`
+- `proof_mailbox_provider`
+- `proof_mailbox_address`
+- `proof_mailbox_id`
 - `has_api_key`
 - `api_key_id`
 - `imported_at`
@@ -161,6 +164,7 @@
 - `POST /api/accounts/import`
 - `POST /api/accounts/import-preview`
 - `POST /api/accounts/group`
+- `PATCH /api/accounts/:id`
 - `DELETE /api/accounts`
 - `GET /api/accounts`
 - `GET /api/api-keys`
@@ -178,6 +182,8 @@
 
 - 前端点击导入后先在浏览器侧解析内容，再调用预览接口展示确认弹窗
 - 前端导入格式支持 `email,password`、`email:password`、`email|password`、`email password`、`email----password`
+- 账号池列表返回 proof 邮箱映射字段，支持单账号设置或清空 Microsoft proof 备用邮箱
+- proof 邮箱映射只支持 `moemail`，地址与已缓存的 mailbox id 一并持久化到数据库
 - 支持“密码在前、邮箱在后”的格式纠正
 - 空行忽略
 - 同一批次重复邮箱以最后一条为准

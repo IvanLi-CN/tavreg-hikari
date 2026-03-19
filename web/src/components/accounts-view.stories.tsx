@@ -106,6 +106,7 @@ const baseArgs = {
   onApplyBatchGroup: fn(),
   onDeleteSelected: fn(),
   onClearSelection: fn(),
+  onSaveProofMailbox: fn(async () => undefined),
 };
 
 function AccountsStorySurface(props: {
@@ -151,6 +152,7 @@ function AccountsStorySurface(props: {
       onApplyBatchGroup={() => undefined}
       onDeleteSelected={() => undefined}
       onClearSelection={() => setSelectedIds([])}
+      onSaveProofMailbox={async () => undefined}
     />
   );
 }
