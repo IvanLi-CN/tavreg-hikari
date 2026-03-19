@@ -87,6 +87,7 @@ const baseArgs = {
   previewOpen: false,
   query: createDefaultQuery(),
   selectedIds: [],
+  revealedPasswordsById: {},
   importBusy: false,
   previewBusy: false,
   batchBusy: false,
@@ -130,6 +131,7 @@ function AccountsStorySurface(props: {
       previewOpen={previewOpen}
       query={query}
       selectedIds={selectedIds}
+      revealedPasswordsById={{ 2: "password789" }}
       importBusy={Boolean(props.importBusy)}
       previewBusy={Boolean(props.previewBusy)}
       batchBusy={Boolean(props.batchBusy)}

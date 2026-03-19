@@ -73,6 +73,7 @@ export function App() {
   const [importPreview, setImportPreview] = useState<AccountImportPreviewPayload | null>(null);
   const [importPreviewOpen, setImportPreviewOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
+  const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
   const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "" });
@@ -121,7 +122,10 @@ export function App() {
     if (apiKeyQuery.status) params.set("status", apiKeyQuery.status);
     setApiKeys(await api<{ rows: ApiKeyRecord[]; total: number }>(`/api/api-keys?${params.toString()}`));
   };
-  const refreshProxies = async () => setProxies(await api<ProxyPayload>("/api/proxies"));
+  const refreshProxies = async () => {
+    const payload = await api<ProxyPayload>("/api/proxies");
+    setProxies(payload);
+  };
 
   useEffect(() => {
     void Promise.all([refreshJob(), refreshAccounts(), refreshApiKeys(), refreshProxies()]).catch((err) => {
@@ -204,6 +208,13 @@ export function App() {
         }),
       });
       setSelectedAccountIds((current) => mergeIds(current, payload.affectedIds));
+      setRevealedPasswordsById((current) => {
+        const next = { ...current };
+        for (const account of payload.revealedAccounts) {
+          next[account.id] = account.passwordPlaintext;
+        }
+        return next;
+      });
       setImportContent("");
       setImportPreviewOpen(false);
       setImportPreview(null);
@@ -332,11 +343,21 @@ export function App() {
     try {
       setBatchBusy(true);
       setError(null);
-      await api<{ deleted: number; blockedIds: number[] }>("/api/accounts", {
+      const payload = await api<{ deleted: number; blockedIds: number[] }>("/api/accounts", {
         method: "DELETE",
         body: JSON.stringify({ ids: selectedAccountIds }),
       });
-      setSelectedAccountIds([]);
+      setRevealedPasswordsById((current) => {
+        const next = { ...current };
+        for (const accountId of selectedAccountIds.filter((id) => !payload.blockedIds.includes(id))) {
+          delete next[accountId];
+        }
+        return next;
+      });
+      setSelectedAccountIds(payload.blockedIds);
+      if (payload.blockedIds.length > 0) {
+        setError("部分账号无法删除：这些账号正在运行中或已经关联 API key。");
+      }
       await refreshAccounts();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -367,6 +388,7 @@ export function App() {
           previewOpen={importPreviewOpen}
           query={accountQuery}
           selectedIds={selectedAccountIds}
+          revealedPasswordsById={revealedPasswordsById}
           importBusy={importBusy}
           previewBusy={previewBusy}
           batchBusy={batchBusy}

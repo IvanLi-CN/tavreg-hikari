@@ -4,9 +4,10 @@ import process from "node:process";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import { validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
-import { resolveStaticAssetPath } from "./static-assets.js";
+import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -53,25 +54,6 @@ function maskSecret(secret: string, visible = 4): string {
   return `${"*".repeat(Math.max(4, secret.length - visible))}${secret.slice(-visible)}`;
 }
 
-function normalizeSettings(input: Partial<AppSettings>): Partial<AppSettings> {
-  const next: Partial<AppSettings> = {};
-  if (typeof input.subscriptionUrl === "string") next.subscriptionUrl = input.subscriptionUrl.trim();
-  if (typeof input.groupName === "string") next.groupName = input.groupName.trim();
-  if (typeof input.routeGroupName === "string") next.routeGroupName = input.routeGroupName.trim();
-  if (typeof input.checkUrl === "string") next.checkUrl = input.checkUrl.trim();
-  if (typeof input.timeoutMs === "number" && Number.isFinite(input.timeoutMs)) next.timeoutMs = Math.max(1000, input.timeoutMs);
-  if (typeof input.maxLatencyMs === "number" && Number.isFinite(input.maxLatencyMs)) next.maxLatencyMs = Math.max(100, input.maxLatencyMs);
-  if (typeof input.apiPort === "number" && Number.isFinite(input.apiPort)) next.apiPort = Math.max(1, input.apiPort);
-  if (typeof input.mixedPort === "number" && Number.isFinite(input.mixedPort)) next.mixedPort = Math.max(1, input.mixedPort);
-  if (typeof input.serverHost === "string") next.serverHost = input.serverHost.trim();
-  if (typeof input.serverPort === "number" && Number.isFinite(input.serverPort)) next.serverPort = Math.max(1, input.serverPort);
-  if (input.defaultRunMode === "headed" || input.defaultRunMode === "headless") next.defaultRunMode = input.defaultRunMode;
-  if (typeof input.defaultNeed === "number" && Number.isFinite(input.defaultNeed)) next.defaultNeed = Math.max(1, input.defaultNeed);
-  if (typeof input.defaultParallel === "number" && Number.isFinite(input.defaultParallel)) next.defaultParallel = Math.max(1, input.defaultParallel);
-  if (typeof input.defaultMaxAttempts === "number" && Number.isFinite(input.defaultMaxAttempts)) next.defaultMaxAttempts = Math.max(1, input.defaultMaxAttempts);
-  return next;
-}
-
 function getDefaultSettings(): AppSettings {
   return {
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
@@ -104,7 +86,6 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
-    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     hasApiKey: row.hasApiKey,
     apiKeyId: row.apiKeyId,
@@ -118,6 +99,15 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     skipReason: row.skipReason,
     groupName: row.groupName,
     disabledAt: row.disabledAt,
+  };
+}
+
+function serializeImportedAccount(row: MicrosoftAccountRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    microsoftEmail: row.microsoftEmail,
+    passwordPlaintext: row.passwordPlaintext,
+    passwordMasked: maskSecret(row.passwordPlaintext),
   };
 }
 
@@ -169,19 +159,24 @@ async function createProxyController(settings: AppSettings) {
   });
 }
 
-async function syncProxyInventory(db: AppDatabase, settings: AppSettings) {
+async function fetchProxyInventory(settings: AppSettings): Promise<{ selected: string | null; nodeNames: string[] }> {
   const controller = await createProxyController(settings);
   try {
     const nodes = await controller.listGroupNodes();
     const selected = await controller.getGroupSelection();
-    db.upsertProxyInventory(
-      nodes.map((item) => item.name),
+    return {
       selected,
-    );
-    return { selected, nodes: db.listProxyNodes() };
+      nodeNames: nodes.map((item) => item.name),
+    };
   } finally {
     await controller.stop().catch(() => {});
   }
+}
+
+async function syncProxyInventory(db: AppDatabase, settings: AppSettings) {
+  const inventory = await fetchProxyInventory(settings);
+  db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
+  return { selected: inventory.selected, nodes: db.listProxyNodes() };
 }
 
 async function serveStatic(req: Request): Promise<Response> {
@@ -193,6 +188,9 @@ async function serveStatic(req: Request): Promise<Response> {
   const file = Bun.file(targetPath);
   if (await file.exists()) {
     return new Response(file);
+  }
+  if (!shouldServeSpaFallback(url.pathname)) {
+    return new Response("Not found", { status: 404 });
   }
   const indexFile = Bun.file(path.join(WEB_DIST_DIR, "index.html"));
   if (await indexFile.exists()) {
@@ -314,7 +312,15 @@ async function main(): Promise<void> {
           payload: { affectedIds: summary.affectedIds, action: "import" },
           timestamp: nowIso(),
         });
-        return json({ ok: true, summary: { created: summary.created, updated: summary.updated, total: summary.total }, affectedIds: summary.affectedIds });
+        return json({
+          ok: true,
+          summary: { created: summary.created, updated: summary.updated, total: summary.total },
+          affectedIds: summary.affectedIds,
+          revealedAccounts: summary.affectedIds
+            .map((accountId) => db.getAccount(accountId))
+            .filter((account): account is MicrosoftAccountRecord => account != null)
+            .map((account) => serializeImportedAccount(account)),
+        });
       }
 
       if (pathname === "/api/accounts" && req.method === "GET") {
@@ -420,23 +426,42 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/proxies" && req.method === "GET") {
         const settings = db.getSettings(getDefaultSettings());
-        const inventory = await syncProxyInventory(db, settings);
-        return json({
-          settings,
-          selectedName: inventory.selected,
-          nodes: inventory.nodes,
-        });
+        if (!settings.subscriptionUrl.trim()) {
+          return json({
+            settings,
+            selectedName: db.getSelectedProxyName(),
+            nodes: db.listProxyNodes(),
+            syncError: null,
+          });
+        }
+        try {
+          const inventory = await syncProxyInventory(db, settings);
+          return json({
+            settings,
+            selectedName: inventory.selected,
+            nodes: inventory.nodes,
+            syncError: null,
+          });
+        } catch (error) {
+          return json({
+            settings,
+            selectedName: db.getSelectedProxyName(),
+            nodes: db.listProxyNodes(),
+            syncError: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
 
       if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
-        const next: AppSettings = {
-          ...db.getSettings(getDefaultSettings()),
-          ...normalizeSettings(body || {}),
-        } as AppSettings;
-        db.setSettings(next);
-        const inventory = await syncProxyInventory(db, next);
-        return json({ ok: true, settings: next, selectedName: inventory.selected, nodes: inventory.nodes });
+        const { settings: next, result: inventory } = await validateBeforePersist({
+          current: db.getSettings(getDefaultSettings()),
+          input: body,
+          sync: fetchProxyInventory,
+          persist: (validatedSettings) => db.setSettings(validatedSettings),
+        });
+        db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
+        return json({ ok: true, settings: next, selectedName: inventory.selected, nodes: db.listProxyNodes() });
       }
 
       if (pathname === "/api/proxies/select" && req.method === "POST") {

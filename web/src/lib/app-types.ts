@@ -5,7 +5,7 @@ export type JobStatus = "idle" | "running" | "paused" | "completing" | "complete
 export type AccountRecord = {
   id: number;
   microsoftEmail: string;
-  passwordPlaintext: string;
+  passwordPlaintext?: string | null;
   passwordMasked: string;
   hasApiKey: boolean;
   importedAt: string;
@@ -65,6 +65,12 @@ export type AccountImportPayload = {
     total: number;
   };
   affectedIds: number[];
+  revealedAccounts: Array<{
+    id: number;
+    microsoftEmail: string;
+    passwordPlaintext: string;
+    passwordMasked: string;
+  }>;
 };
 
 export type ApiKeyRecord = {
@@ -150,6 +156,7 @@ export type ProxyPayload = {
   settings: ProxySettings;
   selectedName: string | null;
   nodes: ProxyNode[];
+  syncError?: string | null;
 };
 
 export type EventRecord = {

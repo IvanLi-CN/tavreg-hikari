@@ -47,6 +47,11 @@ export function ProxiesView({
             <CardDescription>保存后会同步节点列表，并按当前范围执行检查。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {proxies.syncError ? (
+              <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
+                当前展示的是缓存设置/节点，最近一次同步失败：{proxies.syncError}
+              </div>
+            ) : null}
             <Field label="Subscription URL">
               <Input value={proxies.settings.subscriptionUrl} onChange={(event) => onProxySettingsChange("subscriptionUrl", event.target.value)} />
             </Field>

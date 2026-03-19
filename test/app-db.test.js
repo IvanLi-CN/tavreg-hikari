@@ -2,9 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
 import { buildAttemptRuntimeSpec } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
-import { resolveStaticAssetPath } from "../src/server/static-assets.ts";
+import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
@@ -77,6 +78,21 @@ describe("AppDatabase account import", () => {
     expect(deleted.deleted).toBe(1);
     expect(deleted.blockedIds).toEqual([]);
     expect(appDb.listAccounts({ page: 1, pageSize: 10 }).total).toBe(1);
+
+    appDb.close();
+  });
+
+  test("blocks deleting accounts that already own extracted api keys", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "linked@outlook.com", password: "linked-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.recordApiKey(accountId, "tvly-abcdef1234567890");
+
+    const deleted = appDb.deleteAccounts([accountId]);
+    expect(deleted.deleted).toBe(0);
+    expect(deleted.blockedIds).toEqual([accountId]);
+    expect(appDb.listApiKeys({ page: 1, pageSize: 10 }).total).toBe(1);
+    expect(appDb.getAccount(accountId)?.hasApiKey).toBe(true);
 
     appDb.close();
   });
@@ -181,6 +197,21 @@ describe("proxy aggregation", () => {
     ledger.close();
     appDb.close();
   });
+
+  test("drops stale proxy nodes when subscription inventory changes", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["node-a", "node-b"], "node-a");
+    appDb.upsertProxyInventory(["node-b"], "node-b");
+
+    expect(appDb.listProxyNodes()).toEqual([
+      expect.objectContaining({
+        nodeName: "node-b",
+        isSelected: true,
+      }),
+    ]);
+
+    appDb.close();
+  });
 });
 
 describe("static asset path resolution", () => {
@@ -189,6 +220,69 @@ describe("static asset path resolution", () => {
     expect(resolveStaticAssetPath("/repo/web/dist", "/assets/index.js")).toBe("/repo/web/dist/assets/index.js");
     expect(resolveStaticAssetPath("/repo/web/dist", "/../../package.json")).toBeNull();
     expect(resolveStaticAssetPath("/repo/web/dist", "/..%2F..%2F.env.local")).toBeNull();
+  });
+
+  test("only falls back to the SPA shell for route-like paths", () => {
+    expect(shouldServeSpaFallback("/")).toBe(true);
+    expect(shouldServeSpaFallback("/accounts")).toBe(true);
+    expect(shouldServeSpaFallback("/jobs/current")).toBe(true);
+    expect(shouldServeSpaFallback("/assets/missing.js")).toBe(false);
+    expect(shouldServeSpaFallback("/favicon.ico")).toBe(false);
+    expect(shouldServeSpaFallback("/api/proxies")).toBe(false);
+  });
+});
+
+describe("settings updates", () => {
+  const currentSettings = {
+    subscriptionUrl: "https://example.com/sub.yaml",
+    groupName: "CODEX_AUTO",
+    routeGroupName: "CODEX_ROUTE",
+    checkUrl: "https://example.com/trace",
+    timeoutMs: 8000,
+    maxLatencyMs: 3000,
+    apiPort: 39090,
+    mixedPort: 49090,
+    serverHost: "127.0.0.1",
+    serverPort: 3717,
+    defaultRunMode: "headed",
+    defaultNeed: 1,
+    defaultParallel: 1,
+    defaultMaxAttempts: 5,
+  };
+
+  test("normalizes incoming values before persisting", () => {
+    expect(
+      buildNextSettings(currentSettings, {
+        subscriptionUrl: "  https://next.example/sub.yaml  ",
+        groupName: "  WEB_AUTO  ",
+        timeoutMs: 500,
+      }),
+    ).toMatchObject({
+      subscriptionUrl: "https://next.example/sub.yaml",
+      groupName: "WEB_AUTO",
+      timeoutMs: 1000,
+    });
+  });
+
+  test("persists only after sync succeeds", async () => {
+    let persisted = null;
+
+    await expect(
+      validateBeforePersist({
+        current: currentSettings,
+        input: {
+          subscriptionUrl: " https://broken.example/sub.yaml ",
+        },
+        sync: async () => {
+          throw new Error("invalid proxy config");
+        },
+        persist: (settings) => {
+          persisted = settings;
+        },
+      }),
+    ).rejects.toThrow("invalid proxy config");
+
+    expect(persisted).toBeNull();
   });
 });
 

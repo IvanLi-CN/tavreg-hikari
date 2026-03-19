@@ -680,7 +680,7 @@ export class AppDatabase {
 
     const placeholders = uniqueIds.map(() => "?").join(", ");
     const blockedRows = this.db
-      .query(`SELECT id FROM microsoft_accounts WHERE id IN (${placeholders}) AND lease_job_id IS NOT NULL`)
+      .query(`SELECT id FROM microsoft_accounts WHERE id IN (${placeholders}) AND (lease_job_id IS NOT NULL OR has_api_key = 1)`)
       .all(...uniqueIds) as Array<Record<string, unknown>>;
     const blockedIds = blockedRows.map((row) => Number(row.id));
     const deletableIds = uniqueIds.filter((id) => !blockedIds.includes(id));
@@ -1100,6 +1100,9 @@ export class AppDatabase {
 
   upsertProxyInventory(nodes: string[], selectedName?: string | null): void {
     const now = nowIso();
+    const normalizedNodes = [...new Set(nodes.map((name) => name.trim()).filter(Boolean))];
+    const normalizedSelectedName =
+      typeof selectedName === "string" && normalizedNodes.includes(selectedName.trim()) ? selectedName.trim() : null;
     const stmt = this.db.query(`
       INSERT INTO proxy_nodes (node_name, is_selected, last_selected_at)
       VALUES (?, ?, ?)
@@ -1109,9 +1112,15 @@ export class AppDatabase {
     `);
     this.db.exec("BEGIN IMMEDIATE;");
     try {
+      if (normalizedNodes.length > 0) {
+        const placeholders = normalizedNodes.map(() => "?").join(", ");
+        this.db.query(`DELETE FROM proxy_nodes WHERE node_name NOT IN (${placeholders})`).run(...normalizedNodes);
+      } else {
+        this.db.query("DELETE FROM proxy_nodes").run();
+      }
       this.db.query("UPDATE proxy_nodes SET is_selected = 0").run();
-      for (const name of nodes) {
-        stmt.run(name, name === selectedName ? 1 : 0, name === selectedName ? now : null);
+      for (const name of normalizedNodes) {
+        stmt.run(name, name === normalizedSelectedName ? 1 : 0, name === normalizedSelectedName ? now : null);
       }
       this.db.exec("COMMIT;");
     } catch (error) {

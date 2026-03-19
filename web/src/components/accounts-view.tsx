@@ -47,6 +47,7 @@ export function AccountsView({
   previewOpen,
   query,
   selectedIds,
+  revealedPasswordsById,
   importBusy,
   previewBusy,
   batchBusy,
@@ -72,6 +73,7 @@ export function AccountsView({
   previewOpen: boolean;
   query: AccountQuery;
   selectedIds: number[];
+  revealedPasswordsById: Record<number, string>;
   importBusy: boolean;
   previewBusy: boolean;
   batchBusy: boolean;
@@ -94,6 +96,8 @@ export function AccountsView({
   const failedCount = accounts.rows.filter((row) => row.lastResultStatus === "failed").length;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
+  const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>
+    plaintext || revealedPasswordsById[accountId] || fallbackMasked;
 
   return (
     <>
@@ -251,7 +255,9 @@ export function AccountsView({
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0">
                               <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
-                              <div className="mt-1 break-all font-mono text-sm text-slate-300">{row.passwordPlaintext}</div>
+                              <div className="mt-1 break-all font-mono text-sm text-slate-300">
+                                {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                              </div>
                             </div>
                             {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
                           </div>
@@ -315,7 +321,9 @@ export function AccountsView({
                             />
                           </TableCell>
                           <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
-                          <TableCell className="font-mono text-sm text-slate-200">{row.passwordPlaintext}</TableCell>
+                          <TableCell className="font-mono text-sm text-slate-200">
+                            {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                          </TableCell>
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
