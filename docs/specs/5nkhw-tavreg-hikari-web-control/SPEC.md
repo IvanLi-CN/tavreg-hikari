@@ -203,6 +203,7 @@
 - 完成条件：成功提取到 API key 的账号数达到 `need`
 - 软暂停：停止新派发，已启动账号继续完成
 - 动态调参：仅影响未派发部分
+- 主流程页的所有内容必须被 shell 最大宽度约束住；超长日志、表格与状态文本只能在组件内部滚动、换行或截断，不得把页面整体撑出横向溢出
 
 ### 代理页
 
@@ -218,6 +219,7 @@
 - Given 用户在账号页跨分页勾选若干账号，When 执行批量分组或批量删除，Then 操作作用于完整勾选集而不是仅当前页。
 - Given 主流程正在运行，When 用户点击暂停，Then 不再派发新账号，已运行账号继续完成。
 - Given 主流程正在运行，When 用户修改 `parallel` / `need` / `maxAttempts`，Then 修改立即作用于后续派发，不中断当前账号。
+- Given 主流程页包含长 JSON 日志、长邮箱或较窄视口，When 页面渲染完成，Then 内容仍保持在 shell 宽度内，且只允许卡片或表格自身出现内部滚动。
 - Given 任务成功完成 Microsoft 登录与 Tavily Home 流程，When 成功提取 API key，Then 账号状态、API key 记录、job attempt 与 `signup_tasks` 都正确关联更新。
 - Given 用户打开代理页并执行节点检查，When 检查完成，Then 界面显示节点延迟、出口 IP、地理信息和检查结果。
 - Given 当前实现完成，When 执行 `bun run typecheck`、`bun test` 与前端构建，Then 全部通过。

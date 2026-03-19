@@ -53,6 +53,53 @@ export const Empty: Story = {
   },
 };
 
+export const OverflowGuard: Story = {
+  args: {
+    job: {
+      ...sampleJob,
+      recentAttempts: Array.from({ length: 3 }, (_, index) => ({
+        id: 300 + index,
+        accountId: 50 + index,
+        accountEmail: `very-long-account-${index}-with-an-extremely-wide-identifier-to-force-wrap-and-overflow-checks@subdomain.example-outlook-account.test`,
+        status: index === 0 ? "running" : "failed",
+        stage: "spawned",
+        proxyNode: "Tokyo-01-long-node-name-for-overflow-guard",
+        proxyIp: "203.0.113.24",
+        errorCode: index === 0 ? null : "proxy-check-timeout-with-verbose-diagnostic-code",
+        errorMessage: null,
+        startedAt: "2026-03-18T07:18:00.000Z",
+        completedAt: index === 0 ? null : "2026-03-18T07:19:00.000Z",
+      })),
+    },
+    events: [
+      {
+        type: "job.updated.with-extra-debug-context.for-layout-guard",
+        timestamp: "2026-03-18T07:24:20.000Z",
+        payload: {
+          detail:
+            "This payload intentionally contains a very long line to verify the dashboard keeps overflow inside the card instead of pushing the whole page wider than the shell container.",
+          nested: {
+            accountEmail:
+              "overflow-check-account-with-a-very-very-long-address@subdomain.example-outlook-account.test",
+            diagnosticCode: "proxy-node-timeout-after-retrying-connection-through-multiple-fallback-routes",
+          },
+        },
+      },
+      ...sampleEvents,
+    ],
+    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-full max-w-[1080px] overflow-hidden">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
 export const ControlPlay: Story = {
   args: {
     job: sampleJob,

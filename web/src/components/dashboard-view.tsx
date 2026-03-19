@@ -33,8 +33,8 @@ export function DashboardView({
   onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
 }) {
   return (
-    <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-      <div className="space-y-4">
+    <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+      <div className="min-w-0 space-y-4">
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard
             label="Job 状态"
@@ -160,55 +160,57 @@ export function DashboardView({
         </Card>
       </div>
 
-      <div className="space-y-4">
-        <Card>
+      <div className="min-w-0 space-y-4">
+        <Card className="min-w-0">
           <CardHeader>
             <CardTitle>最近 Attempts</CardTitle>
             <CardDescription>快速确认最近成功、失败与代理分布。</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="min-w-0 space-y-3">
             {job.recentAttempts.length === 0 ? (
               <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
                 还没有历史 attempt。
               </div>
             ) : (
               job.recentAttempts.slice(0, 8).map((attempt) => (
-                <article key={attempt.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="font-medium text-white">Attempt #{attempt.id}</div>
+                <article key={attempt.id} className="min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                  <div className="flex min-w-0 items-start justify-between gap-4">
+                    <div className="min-w-0 font-medium text-white">Attempt #{attempt.id}</div>
                     <StatusBadge status={attempt.status} />
                   </div>
-                  <div className="mt-3 text-sm text-slate-300">
+                  <div className="mt-3 break-all text-sm text-slate-300">
                     {attempt.accountEmail || `账号 #${attempt.accountId}`} · {attempt.proxyNode || "未绑定代理"}
                   </div>
-                  <div className="mt-2 text-xs text-slate-500">{attempt.errorCode || attempt.stage}</div>
+                  <div className="mt-2 break-all text-xs text-slate-500">{attempt.errorCode || attempt.stage}</div>
                 </article>
               ))
             )}
           </CardContent>
         </Card>
 
-        <Card className="overflow-hidden">
+        <Card className="min-w-0 overflow-hidden">
           <CardHeader>
             <CardTitle>实时事件日志</CardTitle>
             <CardDescription>WebSocket 推送的主流程、账号与代理事件。</CardDescription>
           </CardHeader>
           <Separator />
-          <CardContent className="pt-4">
-            <ScrollArea className="h-[32rem] pr-2">
-              <div className="space-y-3">
+          <CardContent className="min-w-0 pt-4">
+            <ScrollArea className="h-[32rem] min-w-0 pr-2">
+              <div className="min-w-0 space-y-3">
                 {events.length === 0 ? (
                   <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
                     WebSocket 事件会显示在这里。
                   </div>
                 ) : (
                   events.map((event, index) => (
-                    <article key={`${event.timestamp}-${index}`} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4 text-sm">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-medium text-cyan-200">{event.type}</span>
-                        <span className="text-xs text-slate-500">{formatDate(event.timestamp)}</span>
+                    <article key={`${event.timestamp}-${index}`} className="min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4 text-sm">
+                      <div className="flex min-w-0 items-start justify-between gap-3">
+                        <span className="min-w-0 break-all font-medium text-cyan-200">{event.type}</span>
+                        <span className="shrink-0 text-xs text-slate-500">{formatDate(event.timestamp)}</span>
                       </div>
-                      <pre className="mt-3 overflow-x-auto text-xs leading-5 text-slate-400">{JSON.stringify(event.payload, null, 2)}</pre>
+                      <pre className="mt-3 max-w-full overflow-x-auto whitespace-pre-wrap break-words text-xs leading-5 text-slate-400">
+                        {JSON.stringify(event.payload, null, 2)}
+                      </pre>
                     </article>
                   ))
                 )}
