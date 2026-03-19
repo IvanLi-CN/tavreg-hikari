@@ -126,8 +126,25 @@ describe("Microsoft proof code extraction", () => {
         },
       ],
     };
+    const repeatedFreshPayload = {
+      messages: [
+        {
+          id: "msg-fresh-older",
+          subject: "Microsoft account security code",
+          content: "Use security code 333333 to verify your identity.",
+          received_at: now - 8_000,
+        },
+        {
+          id: "msg-fresh-newer",
+          subject: "Microsoft account security code",
+          content: "Use security code 444444 to verify your identity.",
+          received_at: now - 1_000,
+        },
+      ],
+    };
 
     expect(extractFreshMicrosoftProofCodeFromMoeMailResponse(payload, now - 15_000)).toBe("222222");
+    expect(extractFreshMicrosoftProofCodeFromMoeMailResponse(repeatedFreshPayload, now - 15_000)).toBe("444444");
     expect(
       extractFreshMicrosoftProofCodeFromMoeMailResponse(
         {
