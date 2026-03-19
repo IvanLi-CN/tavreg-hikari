@@ -132,6 +132,21 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("recording the same api key for the same account preserves the original extracted time", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "same@outlook.com", password: "same-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const secondKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+
+    expect(secondKey.accountId).toBe(accountId);
+    expect(secondKey.extractedAt).toBe(firstKey.extractedAt);
+    expect(new Date(secondKey.lastVerifiedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.lastVerifiedAt).getTime());
+
+    appDb.close();
+  });
+
   test("searches accounts by email, password, and group", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts(

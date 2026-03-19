@@ -973,7 +973,10 @@ export class AppDatabase {
             account_id = excluded.account_id,
             api_key_prefix = excluded.api_key_prefix,
             status = excluded.status,
-            extracted_at = excluded.extracted_at,
+            extracted_at = CASE
+              WHEN api_keys.account_id IS excluded.account_id THEN api_keys.extracted_at
+              ELSE excluded.extracted_at
+            END,
             last_verified_at = excluded.last_verified_at
           RETURNING *
         `)
