@@ -98,6 +98,9 @@ export function extractFreshMicrosoftProofCodeFromMoeMailResponse(payload: unkno
   }
 
   let sawTimestamp = false;
+  let newestTimestamp = Number.NEGATIVE_INFINITY;
+  let newestCode: string | null = null;
+  let untimedCode: string | null = null;
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
     const record = message as JsonRecord;
@@ -109,11 +112,25 @@ export function extractFreshMicrosoftProofCodeFromMoeMailResponse(payload: unkno
       }
     }
     const code = extractMicrosoftProofCodeFromPayload(message);
-    if (code) {
-      return code;
+    if (!code) {
+      continue;
+    }
+    if (receivedAt == null) {
+      untimedCode ||= code;
+      continue;
+    }
+    if (receivedAt >= newestTimestamp) {
+      newestTimestamp = receivedAt;
+      newestCode = code;
     }
   }
 
+  if (newestCode) {
+    return newestCode;
+  }
+  if (untimedCode) {
+    return untimedCode;
+  }
   return sawTimestamp ? null : extractMicrosoftProofCodeFromPayload(payload);
 }
 
