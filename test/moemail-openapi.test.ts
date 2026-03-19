@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildMoeMailAuthHeaders,
+  extractFreshMicrosoftProofCodeFromMoeMailResponse,
   extractMicrosoftProofCodeFromPayload,
   normalizeMoeMailBaseUrl,
   resolveMoeMailMailboxId,
@@ -105,5 +106,35 @@ describe("Microsoft proof code extraction", () => {
 
     expect(extractMicrosoftProofCodeFromPayload(localizedPayload)).toBe("481903");
     expect(extractMicrosoftProofCodeFromPayload(unrelatedPayload)).toBeNull();
+  });
+
+  test("ignores stale Microsoft proof codes when MoeMail returns old persistent messages", () => {
+    const now = Date.now();
+    const payload = {
+      messages: [
+        {
+          id: "msg-old",
+          subject: "Microsoft account security code",
+          content: "Use security code 111111 to verify your identity.",
+          received_at: now - 120_000,
+        },
+        {
+          id: "msg-new",
+          subject: "Microsoft account security code",
+          content: "Use security code 222222 to verify your identity.",
+          received_at: now - 2_000,
+        },
+      ],
+    };
+
+    expect(extractFreshMicrosoftProofCodeFromMoeMailResponse(payload, now - 15_000)).toBe("222222");
+    expect(
+      extractFreshMicrosoftProofCodeFromMoeMailResponse(
+        {
+          messages: [payload.messages[0]],
+        },
+        now - 15_000,
+      ),
+    ).toBeNull();
   });
 });

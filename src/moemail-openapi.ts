@@ -75,6 +75,48 @@ export function extractMicrosoftProofCodeFromPayload(payload: unknown): string |
   return null;
 }
 
+function parseMessageTimestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 0 ? value : null;
+  }
+  if (typeof value === "string" && value.trim()) {
+    if (/^\d+$/.test(value.trim())) {
+      const parsedInt = Number.parseInt(value.trim(), 10);
+      return Number.isFinite(parsedInt) && parsedInt > 0 ? parsedInt : null;
+    }
+    const parsedDate = Date.parse(value);
+    return Number.isFinite(parsedDate) ? parsedDate : null;
+  }
+  return null;
+}
+
+export function extractFreshMicrosoftProofCodeFromMoeMailResponse(payload: unknown, notBeforeMs: number): string | null {
+  const response = payload && typeof payload === "object" ? (payload as JsonRecord) : null;
+  const messages = Array.isArray(response?.messages) ? (response?.messages as unknown[]) : null;
+  if (!messages || messages.length === 0) {
+    return extractMicrosoftProofCodeFromPayload(payload);
+  }
+
+  let sawTimestamp = false;
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    const record = message as JsonRecord;
+    const receivedAt = parseMessageTimestamp(record.received_at ?? record.receivedAt ?? record.sent_at ?? record.sentAt);
+    if (receivedAt != null) {
+      sawTimestamp = true;
+      if (receivedAt < notBeforeMs) {
+        continue;
+      }
+    }
+    const code = extractMicrosoftProofCodeFromPayload(message);
+    if (code) {
+      return code;
+    }
+  }
+
+  return sawTimestamp ? null : extractMicrosoftProofCodeFromPayload(payload);
+}
+
 function findMailboxIdByAddress(response: unknown, address: string): string | null {
   const normalizedAddress = address.trim().toLowerCase();
   if (!normalizedAddress) return null;
