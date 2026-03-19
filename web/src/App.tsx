@@ -10,6 +10,7 @@ import type {
   AccountImportPreviewPayload,
   AccountQuery,
   AccountsPayload,
+  ApiKeysPayload,
   ApiKeyQuery,
   ApiKeyRecord,
   EventRecord,
@@ -62,12 +63,20 @@ function mergeIds(current: number[], next: number[]): number[] {
 export function App() {
   const { pathname, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>({ job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 });
-  const [accounts, setAccounts] = useState<AccountsPayload>({ rows: [], total: 0, page: 1, pageSize: 20, groups: [] });
-  const [apiKeys, setApiKeys] = useState<{ rows: ApiKeyRecord[]; total: number; page: number; pageSize: number }>({
+  const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
     page: 1,
     pageSize: 20,
+    summary: { ready: 0, linked: 0, failed: 0 },
+    groups: [],
+  });
+  const [apiKeys, setApiKeys] = useState<ApiKeysPayload>({
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: 20,
+    summary: { active: 0, revoked: 0 },
   });
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -131,7 +140,7 @@ export function App() {
     if (apiKeyQuery.status) params.set("status", apiKeyQuery.status);
     params.set("page", String(apiKeyQuery.page));
     params.set("pageSize", String(apiKeyQuery.pageSize));
-    const payload = await api<{ rows: ApiKeyRecord[]; total: number; page: number; pageSize: number }>(`/api/api-keys?${params.toString()}`);
+    const payload = await api<ApiKeysPayload>(`/api/api-keys?${params.toString()}`);
     if (payload.rows.length === 0 && payload.total > 0 && apiKeyQuery.page > 1) {
       setApiKeyQuery((current) => ({ ...current, page: current.page - 1 }));
       return;

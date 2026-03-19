@@ -25,6 +25,11 @@ export type AccountsPayload = {
   total: number;
   page: number;
   pageSize: number;
+  summary: {
+    ready: number;
+    linked: number;
+    failed: number;
+  };
   groups: string[];
 };
 
@@ -81,6 +86,17 @@ export type ApiKeyRecord = {
   status: string;
   extractedAt: string;
   lastVerifiedAt: string | null;
+};
+
+export type ApiKeysPayload = {
+  rows: ApiKeyRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: {
+    active: number;
+    revoked: number;
+  };
 };
 
 export type AttemptRecord = {

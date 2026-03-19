@@ -1,6 +1,8 @@
 import type {
   AccountRecord,
+  AccountsPayload,
   ApiKeyRecord,
+  ApiKeysPayload,
   EventRecord,
   JobSnapshot,
   ProxyPayload,
@@ -94,6 +96,11 @@ export const sampleAccounts = {
   total: 3,
   page: 1,
   pageSize: 20,
+  summary: {
+    ready: 1,
+    linked: 1,
+    failed: 1,
+  },
   groups: ["default", "linked", "failed-pool"],
   rows: [
     {
@@ -148,12 +155,16 @@ export const sampleAccounts = {
       disabledAt: null,
     },
   ],
-} satisfies { rows: AccountRecord[]; total: number; page: number; pageSize: number; groups: string[] };
+} satisfies AccountsPayload;
 
-export const sampleApiKeys: { rows: ApiKeyRecord[]; total: number; page: number; pageSize: number } = {
+export const sampleApiKeys: ApiKeysPayload = {
   total: 2,
   page: 1,
   pageSize: 20,
+  summary: {
+    active: 1,
+    revoked: 1,
+  },
   rows: [
     {
       id: 1,

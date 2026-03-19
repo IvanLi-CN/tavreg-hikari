@@ -29,7 +29,7 @@ export const Default: Story = {
 
 export const Empty: Story = {
   args: {
-    apiKeys: { rows: [], total: 0, page: 1, pageSize: 20 },
+    apiKeys: { rows: [], total: 0, page: 1, pageSize: 20, summary: { active: 0, revoked: 0 } },
     query: { q: "", status: "", page: 1, pageSize: 20 },
     onQueryChange: fn(),
   },

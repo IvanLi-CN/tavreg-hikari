@@ -148,6 +148,33 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("returns account summary counts across the full filtered result set, not just one page", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "ready-a@outlook.com", password: "pass-a" },
+      { email: "ready-b@outlook.com", password: "pass-b" },
+      { email: "failed-c@outlook.com", password: "pass-c" },
+    ]);
+    appDb.recordApiKey(imported.affectedIds[0], "tvly-summary-0001");
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+    expect(leased).not.toBeNull();
+    const attempt = appDb.createAttempt(job.id, leased.id, "/tmp/tavreg-summary-attempt");
+    appDb.completeAttemptFailure(job.id, attempt.id, leased.id, { errorCode: "summary-failed" });
+
+    const firstPage = appDb.listAccounts({ page: 1, pageSize: 1 });
+
+    expect(firstPage.rows).toHaveLength(1);
+    expect(firstPage.summary).toEqual({
+      ready: 1,
+      linked: 1,
+      failed: 1,
+    });
+
+    appDb.close();
+  });
+
   test("fails paused jobs during stale-state recovery", async () => {
     const { dbPath, appDb } = await createTempDb();
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -517,6 +544,37 @@ describe("api key queries", () => {
     expect(firstPage.total).toBe(25);
     expect(firstPage.rows).toHaveLength(20);
     expect(secondPage.rows).toHaveLength(5);
+    expect(firstPage.summary).toEqual({
+      active: 25,
+      revoked: 0,
+    });
+
+    appDb.close();
+  });
+
+  test("returns api key summary counts across the full filtered result set, not just one page", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "active-a@outlook.com", password: "pass-a" },
+      { email: "active-b@outlook.com", password: "pass-b" },
+      { email: "revoked-c@outlook.com", password: "pass-c" },
+    ]);
+
+    const [activeA, activeB, revokedC] = imported.affectedIds;
+    appDb.recordApiKey(activeA, "tvly-summary-active-1");
+    appDb.recordApiKey(activeB, "tvly-summary-active-2");
+    const revoked = appDb.recordApiKey(revokedC, "tvly-summary-revoked-3");
+    appDb.db
+      .query("UPDATE api_keys SET status = 'revoked' WHERE id = ?")
+      .run(revoked.id);
+
+    const paged = appDb.listApiKeys({ page: 2, pageSize: 1 });
+
+    expect(paged.rows).toHaveLength(1);
+    expect(paged.summary).toEqual({
+      active: 2,
+      revoked: 1,
+    });
 
     appDb.close();
   });

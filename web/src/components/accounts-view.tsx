@@ -93,9 +93,9 @@ export function AccountsView({
   onDeleteSelected: () => void;
   onClearSelection: () => void;
 }) {
-  const readyCount = accounts.rows.filter((row) => row.lastResultStatus === "ready").length;
-  const linkedCount = accounts.rows.filter((row) => row.hasApiKey).length;
-  const failedCount = accounts.rows.filter((row) => row.lastResultStatus === "failed").length;
+  const readyCount = accounts.summary.ready;
+  const linkedCount = accounts.summary.linked;
+  const failedCount = accounts.summary.failed;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>

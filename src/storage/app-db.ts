@@ -596,7 +596,7 @@ export class AppDatabase {
     groupName?: string;
     page?: number;
     pageSize?: number;
-  }): { rows: MicrosoftAccountRecord[]; total: number } {
+  }): { rows: MicrosoftAccountRecord[]; total: number; summary: { ready: number; linked: number; failed: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
@@ -624,11 +624,30 @@ export class AppDatabase {
       params.push(filters.groupName.trim());
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const total = Number((this.db.query(`SELECT COUNT(*) AS count FROM microsoft_accounts ${whereSql}`).get(...(params as any[])) as { count?: number })?.count || 0);
+    const summaryRow = this.db
+      .query(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN last_result_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
+          SUM(CASE WHEN has_api_key = 1 THEN 1 ELSE 0 END) AS linked_count,
+          SUM(CASE WHEN last_result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+        FROM microsoft_accounts
+        ${whereSql}
+      `)
+      .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number } | null;
+    const total = Number(summaryRow?.total || 0);
     const rows = this.db
       .query(`SELECT * FROM microsoft_accounts ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
-    return { rows: rows.map(mapAccountRow), total };
+    return {
+      rows: rows.map(mapAccountRow),
+      total,
+      summary: {
+        ready: Number(summaryRow?.ready_count || 0),
+        linked: Number(summaryRow?.linked_count || 0),
+        failed: Number(summaryRow?.failed_count || 0),
+      },
+    };
   }
 
   listAccountGroups(): string[] {
@@ -697,7 +716,7 @@ export class AppDatabase {
     return { deleted, blockedIds };
   }
 
-  listApiKeys(filters: { q?: string; status?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number } {
+  listApiKeys(filters: { q?: string; status?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
@@ -711,13 +730,18 @@ export class AppDatabase {
       params.push(filters.status.trim());
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const total = Number(
-      (
-        this.db
-          .query(`SELECT COUNT(*) AS count FROM api_keys k JOIN microsoft_accounts a ON a.id = k.account_id ${whereSql}`)
-          .get(...(params as any[])) as { count?: number }
-      )?.count || 0,
-    );
+    const summaryRow = this.db
+      .query(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN k.status = 'active' THEN 1 ELSE 0 END) AS active_count,
+          SUM(CASE WHEN k.status = 'revoked' THEN 1 ELSE 0 END) AS revoked_count
+        FROM api_keys k
+        JOIN microsoft_accounts a ON a.id = k.account_id
+        ${whereSql}
+      `)
+      .get(...(params as any[])) as { total?: number; active_count?: number; revoked_count?: number } | null;
+    const total = Number(summaryRow?.total || 0);
     const rows = this.db
       .query(`
         SELECT k.*, a.microsoft_email
@@ -728,7 +752,14 @@ export class AppDatabase {
         LIMIT ? OFFSET ?
       `)
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
-    return { rows: rows.map(mapApiKeyRow), total };
+    return {
+      rows: rows.map(mapApiKeyRow),
+      total,
+      summary: {
+        active: Number(summaryRow?.active_count || 0),
+        revoked: Number(summaryRow?.revoked_count || 0),
+      },
+    };
   }
 
   createJob(input: { runMode: "headed" | "headless"; need: number; parallel: number; maxAttempts: number }): JobRecord {

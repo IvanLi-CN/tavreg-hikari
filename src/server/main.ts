@@ -347,6 +347,7 @@ async function main(): Promise<void> {
           total: data.total,
           page,
           pageSize,
+          summary: data.summary,
           groups: db.listAccountGroups(),
           rows: data.rows.map((row) => serializeAccount(row)),
         });
@@ -389,6 +390,7 @@ async function main(): Promise<void> {
           total: data.total,
           page,
           pageSize,
+          summary: data.summary,
           rows: data.rows.map((row) => ({
             ...row,
             apiKeyMasked: maskSecret(row.apiKey),
@@ -509,6 +511,8 @@ async function main(): Promise<void> {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
         const settings = db.getSettings(getDefaultSettings());
         const controller = await createProxyController(settings);
+        let response: Response | null = null;
+        let event: ServerEvent | null = null;
         try {
           let results: NodeCheckResult[] = [];
           if (body?.scope === "all") {
@@ -523,40 +527,48 @@ async function main(): Promise<void> {
               body?.scope === "node"
                 ? String(body.nodeName || "").trim()
                 : (await controller.getGroupSelection()) || db.getSelectedProxyName() || "";
-            if (!targetNode) return badRequest("no proxy node selected");
-            results = [
-              await checkNode(controller, targetNode, {
-                checkUrl: settings.checkUrl,
-                timeoutMs: settings.timeoutMs,
-                maxLatencyMs: settings.maxLatencyMs,
-                ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
-              }),
-            ];
+            if (!targetNode) {
+              response = badRequest("no proxy node selected");
+            } else {
+              results = [
+                await checkNode(controller, targetNode, {
+                  checkUrl: settings.checkUrl,
+                  timeoutMs: settings.timeoutMs,
+                  maxLatencyMs: settings.maxLatencyMs,
+                  ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
+                }),
+              ];
+            }
           }
-          for (const result of results) {
-            db.recordProxyCheck({
-              nodeName: String(result.name),
-              status: result.ok ? "ok" : "fail",
-              latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
-              egressIp: result.geo?.ip || null,
-              country: result.geo?.country || null,
-              city: result.geo?.city || null,
-              org: result.geo?.org || null,
-              error: typeof result.error === "string" ? result.error : null,
-            });
+          if (!response) {
+            for (const result of results) {
+              db.recordProxyCheck({
+                nodeName: String(result.name),
+                status: result.ok ? "ok" : "fail",
+                latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
+                egressIp: result.geo?.ip || null,
+                country: result.geo?.country || null,
+                city: result.geo?.city || null,
+                org: result.geo?.org || null,
+                error: typeof result.error === "string" ? result.error : null,
+              });
+            }
+            const nodes = db.listProxyNodes();
+            const payload = { ok: true, results, nodes, selectedName: await controller.getGroupSelection() };
+            event = {
+              type: "proxy.check.completed",
+              payload,
+              timestamp: nowIso(),
+            };
+            response = json(payload);
           }
-          const nodes = db.listProxyNodes();
-          const payload = { ok: true, results, nodes, selectedName: await controller.getGroupSelection() };
-          const event: ServerEvent = {
-            type: "proxy.check.completed",
-            payload,
-            timestamp: nowIso(),
-          };
-          broadcast(event);
-          return json(payload);
         } finally {
           await controller.stop().catch(() => {});
         }
+        if (event) {
+          broadcast(event);
+        }
+        return response || badRequest("proxy check failed");
       }
 
       return await serveStatic(req);

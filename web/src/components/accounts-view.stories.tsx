@@ -186,6 +186,11 @@ export const Empty: Story = {
         total: 0,
         page: 1,
         pageSize: 20,
+        summary: {
+          ready: 0,
+          linked: 0,
+          failed: 0,
+        },
         groups: [],
       }}
     />

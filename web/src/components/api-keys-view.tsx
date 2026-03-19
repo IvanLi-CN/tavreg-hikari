@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge } from "@/components/status-badge";
-import type { ApiKeyQuery, ApiKeyRecord } from "@/lib/app-types";
+import type { ApiKeyQuery, ApiKeysPayload } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
 function FilterField(props: { label: string; children: React.ReactNode }) {
@@ -22,12 +22,12 @@ export function ApiKeysView({
   query,
   onQueryChange,
 }: {
-  apiKeys: { rows: ApiKeyRecord[]; total: number; page: number; pageSize: number };
+  apiKeys: ApiKeysPayload;
   query: ApiKeyQuery;
   onQueryChange: (value: ApiKeyQuery) => void;
 }) {
-  const activeCount = apiKeys.rows.filter((row) => row.status === "active").length;
-  const revokedCount = apiKeys.rows.filter((row) => row.status === "revoked").length;
+  const activeCount = apiKeys.summary.active;
+  const revokedCount = apiKeys.summary.revoked;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, apiKeys.total) / Math.max(1, query.pageSize)));
 
   return (
