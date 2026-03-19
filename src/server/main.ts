@@ -380,6 +380,7 @@ async function main(): Promise<void> {
         const data = db.listApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
+          groupName: url.searchParams.get("groupName") || undefined,
           page,
           pageSize,
         });
@@ -388,6 +389,7 @@ async function main(): Promise<void> {
           page,
           pageSize,
           summary: data.summary,
+          groups: db.listAccountGroups(),
           rows: data.rows.map((row) => ({
             ...row,
             apiKeyMasked: maskSecret(row.apiKey),

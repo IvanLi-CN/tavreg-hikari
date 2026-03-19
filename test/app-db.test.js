@@ -576,6 +576,46 @@ describe("settings updates", () => {
 });
 
 describe("api key queries", () => {
+  test("inherits account groups for api key listings and follows later group updates", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      [
+        { email: "grouped-a@outlook.com", password: "pass-a" },
+        { email: "grouped-b@outlook.com", password: "pass-b" },
+      ],
+      { groupName: "team-alpha" },
+    );
+    appDb.updateAccountsGroup([imported.affectedIds[1]], "team-bravo");
+
+    appDb.recordApiKey(imported.affectedIds[0], "tvly-group-alpha", "10.10.10.10");
+    appDb.recordApiKey(imported.affectedIds[1], "tvly-group-bravo", "20.20.20.20");
+
+    const alphaKeys = appDb.listApiKeys({ groupName: "team-alpha", page: 1, pageSize: 10 });
+    const bravoKeys = appDb.listApiKeys({ q: "team-bravo", page: 1, pageSize: 10 });
+
+    expect(alphaKeys.rows).toHaveLength(1);
+    expect(alphaKeys.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-a@outlook.com",
+      groupName: "team-alpha",
+    });
+    expect(bravoKeys.rows).toHaveLength(1);
+    expect(bravoKeys.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-b@outlook.com",
+      groupName: "team-bravo",
+    });
+
+    appDb.updateAccountsGroup([imported.affectedIds[0]], "team-charlie");
+
+    const refreshed = appDb.listApiKeys({ groupName: "team-charlie", page: 1, pageSize: 10 });
+    expect(refreshed.rows).toHaveLength(1);
+    expect(refreshed.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-a@outlook.com",
+      groupName: "team-charlie",
+    });
+
+    appDb.close();
+  });
+
   test("supports pagination for api key listings", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(

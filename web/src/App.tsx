@@ -80,6 +80,7 @@ export function App() {
     page: 1,
     pageSize: 20,
     summary: { active: 0, revoked: 0 },
+    groups: [],
   });
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
@@ -94,7 +95,7 @@ export function App() {
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
-  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", page: 1, pageSize: 20 });
+  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", groupName: "", page: 1, pageSize: 20 });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -142,6 +143,7 @@ export function App() {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.status) params.set("status", nextQuery.status);
+    if (nextQuery.groupName) params.set("groupName", nextQuery.groupName);
     params.set("page", String(nextQuery.page));
     params.set("pageSize", String(nextQuery.pageSize));
     const payload = await api<ApiKeysPayload>(`/api/api-keys?${params.toString()}`);

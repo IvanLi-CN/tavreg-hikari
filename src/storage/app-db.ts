@@ -62,6 +62,7 @@ export interface ApiKeyRecord {
   id: number;
   accountId: number;
   microsoftEmail: string;
+  groupName: string | null;
   apiKey: string;
   apiKeyPrefix: string;
   status: ApiKeyStatus;
@@ -174,6 +175,7 @@ function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
     id: Number(row.id),
     accountId: Number(row.account_id),
     microsoftEmail: String(row.microsoft_email),
+    groupName: row.group_name == null ? null : String(row.group_name),
     apiKey: String(row.api_key),
     apiKeyPrefix: String(row.api_key_prefix),
     status: String(row.status || "unknown") as ApiKeyStatus,
@@ -723,18 +725,23 @@ export class AppDatabase {
     return { deleted, blockedIds };
   }
 
-  listApiKeys(filters: { q?: string; status?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
+  listApiKeys(filters: { q?: string; status?: string; groupName?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
-      where.push("(a.microsoft_email LIKE ? OR k.api_key_prefix LIKE ?)");
-      params.push(`%${filters.q.trim().toLowerCase()}%`, `%${filters.q.trim()}%`);
+      const pattern = `%${filters.q.trim().toLowerCase()}%`;
+      where.push("(LOWER(a.microsoft_email) LIKE ? OR LOWER(k.api_key_prefix) LIKE ? OR LOWER(COALESCE(a.group_name, '')) LIKE ?)");
+      params.push(pattern, pattern, pattern);
     }
     if (filters.status?.trim()) {
       where.push("k.status = ?");
       params.push(filters.status.trim());
+    }
+    if (filters.groupName?.trim()) {
+      where.push("a.group_name = ?");
+      params.push(filters.groupName.trim());
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const summaryRow = this.db
@@ -751,7 +758,7 @@ export class AppDatabase {
     const total = Number(summaryRow?.total || 0);
     const rows = this.db
       .query(`
-        SELECT k.*, a.microsoft_email
+        SELECT k.*, a.microsoft_email, a.group_name
         FROM api_keys k
         JOIN microsoft_accounts a ON a.id = k.account_id
         ${whereSql}
@@ -779,7 +786,7 @@ export class AppDatabase {
       const placeholders = chunk.map(() => "?").join(", ");
       const chunkRows = this.db
         .query(`
-          SELECT k.*, a.microsoft_email
+          SELECT k.*, a.microsoft_email, a.group_name
           FROM api_keys k
           JOIN microsoft_accounts a ON a.id = k.account_id
           WHERE k.id IN (${placeholders})
@@ -1052,9 +1059,11 @@ export class AppDatabase {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+    const account = this.getAccount(accountId);
     return mapApiKeyRow({
       ...row,
-      microsoft_email: this.getAccount(accountId)?.microsoftEmail || "",
+      microsoft_email: account?.microsoftEmail || "",
+      group_name: account?.groupName ?? null,
     });
   }
 

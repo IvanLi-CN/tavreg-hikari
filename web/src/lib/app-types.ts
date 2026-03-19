@@ -81,6 +81,7 @@ export type ApiKeyRecord = {
   id: number;
   accountId: number;
   microsoftEmail: string;
+  groupName: string | null;
   apiKeyMasked: string;
   apiKeyPrefix: string;
   status: string;
@@ -97,6 +98,7 @@ export type ApiKeysPayload = {
     active: number;
     revoked: number;
   };
+  groups: string[];
 };
 
 export type ApiKeyExportItem = {
@@ -210,6 +212,7 @@ export type AccountQuery = {
 export type ApiKeyQuery = {
   q: string;
   status: string;
+  groupName: string;
   page: number;
   pageSize: number;
 };

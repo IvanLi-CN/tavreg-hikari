@@ -82,7 +82,7 @@ export function ApiKeysView({
       <Card>
         <CardHeader>
           <CardTitle>API Keys</CardTitle>
-          <CardDescription>共 {apiKeys.total} 条 key 记录，默认展示前缀与遮罩值。支持跨分页勾选后批量导出。</CardDescription>
+          <CardDescription>共 {apiKeys.total} 条 key 记录，默认展示前缀与遮罩值。支持按账号分组筛选，并可跨分页勾选后批量导出。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
@@ -115,13 +115,13 @@ export function ApiKeysView({
             </div>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             <FilterField label="搜索">
               <Input
                 name="api-key-query"
                 value={query.q}
                 onChange={(event) => onQueryChange({ ...query, q: event.target.value, page: 1 })}
-                placeholder="邮箱或前缀"
+                placeholder="邮箱 / 分组 / 前缀"
               />
             </FilterField>
             <FilterField label="状态">
@@ -134,6 +134,21 @@ export function ApiKeysView({
                   <SelectItem value="active">active</SelectItem>
                   <SelectItem value="revoked">revoked</SelectItem>
                   <SelectItem value="unknown">unknown</SelectItem>
+                </SelectContent>
+              </Select>
+            </FilterField>
+            <FilterField label="分组">
+              <Select value={query.groupName || "__all__"} onValueChange={(value) => onQueryChange({ ...query, groupName: value === "__all__" ? "" : value, page: 1 })}>
+                <SelectTrigger>
+                  <SelectValue placeholder="全部分组" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__all__">全部分组</SelectItem>
+                  {apiKeys.groups.map((group) => (
+                    <SelectItem key={group} value={group}>
+                      {group}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FilterField>
@@ -168,6 +183,10 @@ export function ApiKeysView({
                             <dd>{row.apiKeyMasked}</dd>
                           </div>
                           <div className="flex items-center justify-between gap-3">
+                            <dt className="text-slate-500">分组</dt>
+                            <dd>{row.groupName || "—"}</dd>
+                          </div>
+                          <div className="flex items-center justify-between gap-3">
                             <dt className="text-slate-500">提取时间</dt>
                             <dd>{formatDate(row.extractedAt)}</dd>
                           </div>
@@ -193,6 +212,7 @@ export function ApiKeysView({
                         />
                       </TableHead>
                       <TableHead>账号</TableHead>
+                      <TableHead>分组</TableHead>
                       <TableHead>Key 前缀</TableHead>
                       <TableHead>Key 遮罩</TableHead>
                       <TableHead>状态</TableHead>
@@ -211,6 +231,7 @@ export function ApiKeysView({
                           />
                         </TableCell>
                         <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
+                        <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                         <TableCell>{row.apiKeyPrefix}</TableCell>
                         <TableCell>{row.apiKeyMasked}</TableCell>
                         <TableCell><StatusBadge status={row.status} /></TableCell>

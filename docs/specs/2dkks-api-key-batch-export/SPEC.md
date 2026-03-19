@@ -11,6 +11,7 @@
 - 当前 Web 管理台的 API Keys 页只有筛选与分页，没有批量选择能力。
 - 现有列表接口只返回遮罩 key，用户无法从管理台直接导出明文 key。
 - 业务上需要导出 `key | ip`，其中 `ip` 必须是“该 key 被提取成功那次对应的 IP”，不能用最近一次任务 IP 事后猜测。
+- 微软账号已经支持分组，API Keys 页也必须继承对应账号分组，支持展示与按分组筛选。
 
 ## 目标 / 非目标
 
@@ -20,6 +21,7 @@
 - 新增导出能力，弹出只读多行文本窗口展示导出内容，并支持复制与保存成文件。
 - 为 `api_keys` 记录新增“提取时 IP”字段，仅对新提取的数据保证精确写入。
 - 保持列表接口继续只返回遮罩 key，不在常规列表中暴露明文 key。
+- API Keys 记录实时继承所属微软账号的分组，用于列表展示与筛选。
 
 ### Non-goals
 
@@ -35,6 +37,7 @@
 - 成功提 key 路径写入 `extracted_ip`，优先取 `signupTask.proxy_ip`，缺失时回落 `job_attempts.proxy_ip`。
 - 新增 API key 导出接口，按选中 id 返回明文 key 与提取 IP，并由服务端生成 `key | ip` 文本。
 - `ApiKeysView` 与 `App` 的勾选状态、导出弹窗、复制与文件下载动作。
+- API Keys 列表按账号实时继承 `group_name`，并支持分组筛选与展示。
 - 相关测试、故事和规格索引更新。
 
 ### Out of scope
@@ -48,6 +51,7 @@
 ### MUST
 
 - API Keys 页必须支持跨分页保留勾选状态。
+- API Keys 页必须展示所属账号分组，并支持按分组筛选。
 - 导出按钮在未勾选任何记录时必须禁用。
 - 导出弹窗中的文本框必须为只读、多行，并在打开时自动全选当前内容。
 - 导出文本格式固定为每行一条 `key | ip`。
@@ -65,6 +69,7 @@
 ### Core flows
 
 - 用户在 API Keys 页勾选若干 key，可跨分页累积选择。
+- 用户可按账号分组筛选 API key；当账号分组被修改后，API Keys 页下次刷新必须反映最新分组。
 - 点击“导出”后，前端请求导出接口并打开 Dialog，显示只读文本内容。
 - Dialog 打开时自动聚焦文本框并选中全部文本。
 - 用户可点击“复制”把文本写入剪贴板，或点击“保存成文件”下载同内容的文本文件。
@@ -83,14 +88,18 @@
   - `recordApiKey(accountId, apiKey, extractedIp?)`
   - `listApiKeysForExport(ids)`
 - HTTP API:
-  - `POST /api/api-keys/export`
+- `POST /api/api-keys/export`
   - request: `{ ids: number[] }`
   - response: `{ items: Array<{ id, apiKey, extractedIp }>, content: string }`
+- `GET /api/api-keys`
+  - response rows include inherited `groupName`
+  - response payload includes `groups`
 
 ## 验收标准（Acceptance Criteria）
 
 - Given 用户跨两页勾选多条 key，When 返回第一页，Then 已勾选状态仍然保留。
 - Given 当前没有勾选项，When 查看 API Keys 页工具区，Then 导出按钮为禁用态。
+- Given 某个微软账号已经属于分组 `team-a`，When 查看其 API key 记录，Then 该记录显示为 `team-a`，且可通过分组筛选命中。
 - Given 已勾选 key，When 点击导出，Then 打开只读多行文本弹窗，并自动全选文本内容。
 - Given 弹窗已经打开，When 点击复制，Then 剪贴板内容与文本框内容完全一致。
 - Given 弹窗已经打开，When 点击保存成文件，Then 下载 `.txt` 文件，文件内容与文本框内容完全一致。
@@ -117,3 +126,4 @@
 
 - 2026-03-20: 初始化规格，定义 API Keys 批量导出、提取时 IP 与弹窗交互边界。
 - 2026-03-20: 完成 `api_keys.extracted_ip` 写入、批量勾选导出弹窗、复制/文件下载与相关测试。
+- 2026-03-20: API Keys 列表改为实时继承账号分组，补充分组展示、分组筛选与 Storybook 场景。
