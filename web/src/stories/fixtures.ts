@@ -150,8 +150,10 @@ export const sampleAccounts = {
   ],
 } satisfies { rows: AccountRecord[]; total: number; page: number; pageSize: number; groups: string[] };
 
-export const sampleApiKeys: { rows: ApiKeyRecord[]; total: number } = {
+export const sampleApiKeys: { rows: ApiKeyRecord[]; total: number; page: number; pageSize: number } = {
   total: 2,
+  page: 1,
+  pageSize: 20,
   rows: [
     {
       id: 1,

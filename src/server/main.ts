@@ -57,8 +57,8 @@ function maskSecret(secret: string, visible = 4): string {
 function getDefaultSettings(): AppSettings {
   return {
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
-    groupName: "CODEX_AUTO",
-    routeGroupName: "CODEX_ROUTE",
+    groupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
+    routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
     checkUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
     timeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, 8000),
     maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, 3000),
@@ -369,14 +369,18 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/api-keys" && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
-          page: toInt(url.searchParams.get("page") || undefined, 1),
-          pageSize: toInt(url.searchParams.get("pageSize") || undefined, 20),
+          page,
+          pageSize,
         });
         return json({
           total: data.total,
+          page,
+          pageSize,
           rows: data.rows.map((row) => ({
             ...row,
             apiKeyMasked: maskSecret(row.apiKey),

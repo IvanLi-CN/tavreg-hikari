@@ -602,8 +602,10 @@ export class AppDatabase {
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
-      where.push("microsoft_email LIKE ?");
-      params.push(`%${filters.q.trim().toLowerCase()}%`);
+      const normalizedQuery = filters.q.trim().toLowerCase();
+      const rawQuery = filters.q.trim();
+      where.push("(microsoft_email LIKE ? OR password_plaintext LIKE ? OR LOWER(COALESCE(group_name, '')) LIKE ?)");
+      params.push(`%${normalizedQuery}%`, `%${rawQuery}%`, `%${normalizedQuery}%`);
     }
     if (filters.status?.trim()) {
       where.push("last_result_status = ?");

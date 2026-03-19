@@ -22,15 +22,15 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {
   args: {
     apiKeys: sampleApiKeys,
-    query: { q: "", status: "" },
+    query: { q: "", status: "", page: 1, pageSize: 20 },
     onQueryChange: fn(),
   },
 };
 
 export const Empty: Story = {
   args: {
-    apiKeys: { rows: [], total: 0 },
-    query: { q: "", status: "" },
+    apiKeys: { rows: [], total: 0, page: 1, pageSize: 20 },
+    query: { q: "", status: "", page: 1, pageSize: 20 },
     onQueryChange: fn(),
   },
 };

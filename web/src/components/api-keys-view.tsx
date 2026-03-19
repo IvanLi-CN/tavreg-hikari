@@ -1,4 +1,5 @@
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -21,12 +22,13 @@ export function ApiKeysView({
   query,
   onQueryChange,
 }: {
-  apiKeys: { rows: ApiKeyRecord[]; total: number };
+  apiKeys: { rows: ApiKeyRecord[]; total: number; page: number; pageSize: number };
   query: ApiKeyQuery;
   onQueryChange: (value: ApiKeyQuery) => void;
 }) {
   const activeCount = apiKeys.rows.filter((row) => row.status === "active").length;
   const revokedCount = apiKeys.rows.filter((row) => row.status === "revoked").length;
+  const pageCount = Math.max(1, Math.ceil(Math.max(1, apiKeys.total) / Math.max(1, query.pageSize)));
 
   return (
     <Card>
@@ -45,12 +47,12 @@ export function ApiKeysView({
             <Input
               name="api-key-query"
               value={query.q}
-              onChange={(event) => onQueryChange({ ...query, q: event.target.value })}
+              onChange={(event) => onQueryChange({ ...query, q: event.target.value, page: 1 })}
               placeholder="邮箱或前缀"
             />
           </FilterField>
           <FilterField label="状态">
-            <Select value={query.status || "__all__"} onValueChange={(value) => onQueryChange({ ...query, status: value === "__all__" ? "" : value })}>
+            <Select value={query.status || "__all__"} onValueChange={(value) => onQueryChange({ ...query, status: value === "__all__" ? "" : value, page: 1 })}>
               <SelectTrigger>
                 <SelectValue placeholder="全部" />
               </SelectTrigger>
@@ -122,6 +124,30 @@ export function ApiKeysView({
                   ))}
                 </TableBody>
               </Table>
+            </div>
+            <div className="flex flex-col gap-3 border-t border-white/8 pt-4 lg:flex-row lg:items-center lg:justify-between">
+              <div className="text-sm text-slate-400">
+                第 {query.page} / {pageCount} 页，每页 {query.pageSize} 条。
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={String(query.pageSize)} onValueChange={(value) => onQueryChange({ ...query, pageSize: Number(value), page: 1 })}>
+                  <SelectTrigger className="w-[7.5rem]">
+                    <SelectValue placeholder="每页条数" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="10">10 / 页</SelectItem>
+                    <SelectItem value="20">20 / 页</SelectItem>
+                    <SelectItem value="50">50 / 页</SelectItem>
+                    <SelectItem value="100">100 / 页</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button variant="secondary" onClick={() => onQueryChange({ ...query, page: Math.max(1, query.page - 1) })} disabled={query.page <= 1}>
+                  上一页
+                </Button>
+                <Button variant="secondary" onClick={() => onQueryChange({ ...query, page: Math.min(pageCount, query.page + 1) })} disabled={query.page >= pageCount}>
+                  下一页
+                </Button>
+              </div>
             </div>
           </>
         )}

@@ -96,6 +96,24 @@ describe("AppDatabase account import", () => {
 
     appDb.close();
   });
+
+  test("searches accounts by email, password, and group", async () => {
+    const { appDb } = await createTempDb();
+    appDb.importAccounts(
+      [
+        { email: "search-a@outlook.com", password: "alpha-pass" },
+        { email: "search-b@outlook.com", password: "bravo-pass" },
+      ],
+      { groupName: "team-bravo" },
+    );
+    appDb.importAccounts([{ email: "solo@outlook.com", password: "solo-pass" }], { groupName: "solo-group" });
+
+    expect(appDb.listAccounts({ q: "search-a", page: 1, pageSize: 10 }).rows).toHaveLength(1);
+    expect(appDb.listAccounts({ q: "bravo-pass", page: 1, pageSize: 10 }).rows).toHaveLength(1);
+    expect(appDb.listAccounts({ q: "team-bravo", page: 1, pageSize: 10 }).rows).toHaveLength(2);
+
+    appDb.close();
+  });
 });
 
 describe("scheduler helpers", () => {
@@ -283,6 +301,31 @@ describe("settings updates", () => {
     ).rejects.toThrow("invalid proxy config");
 
     expect(persisted).toBeNull();
+  });
+});
+
+describe("api key queries", () => {
+  test("supports pagination for api key listings", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      Array.from({ length: 25 }, (_, index) => ({
+        email: `key-${index}@outlook.com`,
+        password: `pass-${index}`,
+      })),
+    );
+
+    imported.affectedIds.forEach((accountId, index) => {
+      appDb.recordApiKey(accountId, `tvly-key-${index.toString().padStart(4, "0")}`);
+    });
+
+    const firstPage = appDb.listApiKeys({ page: 1, pageSize: 20 });
+    const secondPage = appDb.listApiKeys({ page: 2, pageSize: 20 });
+
+    expect(firstPage.total).toBe(25);
+    expect(firstPage.rows).toHaveLength(20);
+    expect(secondPage.rows).toHaveLength(5);
+
+    appDb.close();
   });
 });
 

@@ -63,7 +63,12 @@ export function App() {
   const { pathname, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>({ job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 });
   const [accounts, setAccounts] = useState<AccountsPayload>({ rows: [], total: 0, page: 1, pageSize: 20, groups: [] });
-  const [apiKeys, setApiKeys] = useState<{ rows: ApiKeyRecord[]; total: number }>({ rows: [], total: 0 });
+  const [apiKeys, setApiKeys] = useState<{ rows: ApiKeyRecord[]; total: number; page: number; pageSize: number }>({
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: 20,
+  });
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -76,7 +81,7 @@ export function App() {
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
-  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "" });
+  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", page: 1, pageSize: 20 });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -120,7 +125,14 @@ export function App() {
     const params = new URLSearchParams();
     if (apiKeyQuery.q) params.set("q", apiKeyQuery.q);
     if (apiKeyQuery.status) params.set("status", apiKeyQuery.status);
-    setApiKeys(await api<{ rows: ApiKeyRecord[]; total: number }>(`/api/api-keys?${params.toString()}`));
+    params.set("page", String(apiKeyQuery.page));
+    params.set("pageSize", String(apiKeyQuery.pageSize));
+    const payload = await api<{ rows: ApiKeyRecord[]; total: number; page: number; pageSize: number }>(`/api/api-keys?${params.toString()}`);
+    if (payload.rows.length === 0 && payload.total > 0 && apiKeyQuery.page > 1) {
+      setApiKeyQuery((current) => ({ ...current, page: current.page - 1 }));
+      return;
+    }
+    setApiKeys(payload);
   };
   const refreshProxies = async () => {
     const payload = await api<ProxyPayload>("/api/proxies");

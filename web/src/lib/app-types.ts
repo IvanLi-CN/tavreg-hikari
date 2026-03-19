@@ -184,6 +184,8 @@ export type AccountQuery = {
 export type ApiKeyQuery = {
   q: string;
   status: string;
+  page: number;
+  pageSize: number;
 };
 
 export type ProxyCheckScope = "current" | "all";
