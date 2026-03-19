@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import viteConfig from "../vite.config.ts";
+import viteConfig, { buildBackendTarget } from "../vite.config.ts";
 
 describe("vite dev proxy", () => {
   test("proxies api and websocket traffic to the Bun backend", () => {
@@ -15,5 +15,9 @@ describe("vite dev proxy", () => {
 
     expect(target).toBe("http://127.0.0.1:3717");
     expect(ws).toBe(true);
+  });
+
+  test("brackets IPv6 localhost targets", () => {
+    expect(buildBackendTarget("::1", 3717)).toBe("http://[::1]:3717");
   });
 });

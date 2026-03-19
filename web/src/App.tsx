@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
 import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
@@ -108,6 +108,8 @@ export function App() {
     () => proxies?.nodes.find((node) => node.isSelected) || null,
     [proxies],
   );
+  const accountQueryRef = useRef(accountQuery);
+  const apiKeyQueryRef = useRef(apiKeyQuery);
   const importCommitEntries = useMemo(
     () => buildImportCommitEntries(importPreview, importGroupName),
     [importGroupName, importPreview],
@@ -134,14 +136,14 @@ export function App() {
     }
     setAccounts(payload);
   };
-  const refreshApiKeys = async () => {
+  const refreshApiKeys = async (nextQuery = apiKeyQuery) => {
     const params = new URLSearchParams();
-    if (apiKeyQuery.q) params.set("q", apiKeyQuery.q);
-    if (apiKeyQuery.status) params.set("status", apiKeyQuery.status);
-    params.set("page", String(apiKeyQuery.page));
-    params.set("pageSize", String(apiKeyQuery.pageSize));
+    if (nextQuery.q) params.set("q", nextQuery.q);
+    if (nextQuery.status) params.set("status", nextQuery.status);
+    params.set("page", String(nextQuery.page));
+    params.set("pageSize", String(nextQuery.pageSize));
     const payload = await api<ApiKeysPayload>(`/api/api-keys?${params.toString()}`);
-    if (payload.rows.length === 0 && payload.total > 0 && apiKeyQuery.page > 1) {
+    if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
       setApiKeyQuery((current) => ({ ...current, page: current.page - 1 }));
       return;
     }
@@ -169,6 +171,14 @@ export function App() {
   }, [jobDraftTouched, proxies]);
 
   useEffect(() => {
+    accountQueryRef.current = accountQuery;
+  }, [accountQuery]);
+
+  useEffect(() => {
+    apiKeyQueryRef.current = apiKeyQuery;
+  }, [apiKeyQuery]);
+
+  useEffect(() => {
     const socket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/events/ws`);
     socket.onmessage = (event) => {
       const next = JSON.parse(event.data) as EventRecord;
@@ -177,8 +187,8 @@ export function App() {
         void refreshJob();
       }
       if (next.type === "account.updated") {
-        void refreshAccounts();
-        void refreshApiKeys();
+        void refreshAccounts(accountQueryRef.current);
+        void refreshApiKeys(apiKeyQueryRef.current);
       }
       if (next.type === "proxy.updated" || next.type === "proxy.check.completed") {
         void refreshProxies();
@@ -186,7 +196,7 @@ export function App() {
     };
     socket.onerror = () => setError("WebSocket disconnected");
     return () => socket.close();
-  }, [accountQuery, apiKeyQuery]);
+  }, []);
 
   useEffect(() => {
     void refreshAccounts(accountQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));

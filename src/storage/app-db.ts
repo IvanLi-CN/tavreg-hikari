@@ -548,7 +548,6 @@ export class AppDatabase {
     const updateStmt = this.db.query(`
       UPDATE microsoft_accounts
       SET password_plaintext = ?,
-          imported_at = ?,
           updated_at = ?,
           import_source = ?,
           group_name = COALESCE(?, group_name),
@@ -575,7 +574,7 @@ export class AppDatabase {
           created += 1;
           continue;
         }
-        updateStmt.run(password, now, now, source, normalizedGroupName, Number(existing.id));
+        updateStmt.run(password, now, source, normalizedGroupName, Number(existing.id));
         affectedIds.push(Number(existing.id));
         updated += 1;
       }

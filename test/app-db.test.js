@@ -175,6 +175,23 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("preserves the original imported_at when an existing account is re-imported", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "stable@outlook.com", password: "first-pass" }]);
+    const before = appDb.getAccount(imported.affectedIds[0]);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    appDb.importAccounts([{ email: "stable@outlook.com", password: "second-pass" }], { groupName: "retry-pool" });
+
+    const after = appDb.getAccount(imported.affectedIds[0]);
+    expect(after?.passwordPlaintext).toBe("second-pass");
+    expect(after?.groupName).toBe("retry-pool");
+    expect(after?.importedAt).toBe(before?.importedAt);
+    expect(after?.updatedAt).not.toBe(before?.updatedAt);
+
+    appDb.close();
+  });
+
   test("fails paused jobs during stale-state recovery", async () => {
     const { dbPath, appDb } = await createTempDb();
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
