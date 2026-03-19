@@ -3771,9 +3771,12 @@ async function handleMicrosoftConsentPrompt(page: any): Promise<boolean> {
   return true;
 }
 
-async function handleMicrosoftProofMethodPrompt(page: any): Promise<boolean> {
+async function handleMicrosoftProofMethodPrompt(page: any, proofState: { mailbox: MailboxSession | null; startedAt: number | null }): Promise<boolean> {
   if (!(await pageContainsAnyText(page, [/what security info would you like to add/i, /你想添加哪些安全信息/i]))) {
     return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
   }
   const selected = await clickMatchingAction(page, [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /电子邮件地址/i], undefined, [
     "button",
@@ -3790,20 +3793,24 @@ async function handleMicrosoftProofEmailPrompt(
   page: any,
   cfg: AppConfig,
   proxyUrl: string | undefined,
-  proofState: { mailbox: MailboxSession | null },
+  proofState: { mailbox: MailboxSession | null; startedAt: number | null },
 ): Promise<boolean> {
-  if (
-    !(await pageContainsAnyText(page, [
-      /protect your account/i,
-      /let.?s protect your account/i,
-      /让我们来保护你的帐户/i,
-      /backup email/i,
-      /alternate email/i,
-      /备用电子邮件地址/i,
-      /电子邮件地址/i,
-    ]))
-  ) {
+  const onProofRoute = /account\.live\.com\/proofs\//i.test(page.url());
+  const hasProofCopy = await pageContainsAnyText(page, [
+    /protect your account/i,
+    /let.?s protect your account/i,
+    /let us protect your account/i,
+    /让我们来保护你的帐户/i,
+    /what security info would you like to add/i,
+    /你想添加哪些安全信息/i,
+    /verify your identity/i,
+    /验证你的身份/i,
+  ]);
+  if (!onProofRoute && !hasProofCopy) {
     return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
   }
   const selector = await markBestVisibleControl(
     page,
@@ -3836,7 +3843,7 @@ async function handleMicrosoftProofCodePrompt(
   page: any,
   cfg: AppConfig,
   proxyUrl: string | undefined,
-  proofState: { mailbox: MailboxSession | null },
+  proofState: { mailbox: MailboxSession | null; startedAt: number | null },
 ): Promise<boolean> {
   if (
     !(await pageContainsAnyText(page, [
@@ -3863,7 +3870,8 @@ async function handleMicrosoftProofCodePrompt(
   const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
   proofState.mailbox = proofMailbox;
   await clearAuthFieldValidationState(page, selector);
-  const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl, Date.now() - 15_000);
+  const notBeforeMs = (proofState.startedAt || Date.now()) - 30_000;
+  const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl, notBeforeMs);
   if (!code) {
     throw new Error("microsoft_proof_code_timeout");
   }
@@ -3894,7 +3902,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
   if (!email || !password) {
     throw new Error("microsoft_account_credentials_missing");
   }
-  const proofState = { mailbox: null as MailboxSession | null };
+  const proofState = { mailbox: null as MailboxSession | null, startedAt: null as number | null };
   const dialogHandler = async (dialog: any) => {
     const message = `${String(dialog?.message?.() || "")} ${String(dialog?.defaultValue?.() || "")}`.trim();
     if (/must provide prefix|break into debugger/i.test(message)) {
@@ -3918,7 +3926,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       }
 
       if (await handleMicrosoftAccountPicker(page, email)) continue;
-      if (await handleMicrosoftProofMethodPrompt(page)) continue;
+      if (await handleMicrosoftProofMethodPrompt(page, proofState)) continue;
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftEmailPrompt(page, email)) continue;
