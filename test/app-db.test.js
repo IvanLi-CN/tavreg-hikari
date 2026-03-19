@@ -633,6 +633,26 @@ describe("api key queries", () => {
 
     appDb.close();
   });
+
+  test("chunks large export selections to avoid SQLite bind limits", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      Array.from({ length: 520 }, (_, index) => ({
+        email: `bulk-export-${index}@outlook.com`,
+        password: `pass-${index}`,
+      })),
+    );
+
+    const keys = imported.affectedIds.map((accountId, index) => appDb.recordApiKey(accountId, `tvly-bulk-${index}`, `10.0.0.${index % 255}`));
+    const selected = keys.slice().reverse().map((row) => row.id);
+    const exported = appDb.listApiKeysForExport(selected);
+
+    expect(exported).toHaveLength(520);
+    expect(exported[0]?.id).toBe(selected[0]);
+    expect(exported.at(-1)?.id).toBe(selected.at(-1));
+
+    appDb.close();
+  });
 });
 
 describe("scheduler runtime spec", () => {

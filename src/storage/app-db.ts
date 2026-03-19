@@ -772,15 +772,21 @@ export class AppDatabase {
   listApiKeysForExport(ids: number[]): ApiKeyRecord[] {
     const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
     if (uniqueIds.length === 0) return [];
-    const placeholders = uniqueIds.map(() => "?").join(", ");
-    const rows = this.db
-      .query(`
-        SELECT k.*, a.microsoft_email
-        FROM api_keys k
-        JOIN microsoft_accounts a ON a.id = k.account_id
-        WHERE k.id IN (${placeholders})
-      `)
-      .all(...uniqueIds) as Record<string, unknown>[];
+    const rows: Record<string, unknown>[] = [];
+    const chunkSize = 500;
+    for (let index = 0; index < uniqueIds.length; index += chunkSize) {
+      const chunk = uniqueIds.slice(index, index + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const chunkRows = this.db
+        .query(`
+          SELECT k.*, a.microsoft_email
+          FROM api_keys k
+          JOIN microsoft_accounts a ON a.id = k.account_id
+          WHERE k.id IN (${placeholders})
+        `)
+        .all(...chunk) as Record<string, unknown>[];
+      rows.push(...chunkRows);
+    }
     const byId = new Map(rows.map((row) => [Number(row.id), mapApiKeyRow(row)]));
     return uniqueIds.map((id) => byId.get(id)).filter((row): row is ApiKeyRecord => Boolean(row));
   }
