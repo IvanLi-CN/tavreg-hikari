@@ -4,7 +4,7 @@ import process from "node:process";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
-import { validateBeforePersist } from "./app-settings.js";
+import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
@@ -54,6 +54,14 @@ function maskSecret(secret: string, visible = 4): string {
   return `${"*".repeat(Math.max(4, secret.length - visible))}${secret.slice(-visible)}`;
 }
 
+function normalizeLoopbackHost(host: string | undefined): string {
+  const normalized = String(host || "").trim();
+  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") {
+    return normalized;
+  }
+  return "127.0.0.1";
+}
+
 function getDefaultSettings(): AppSettings {
   return {
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
@@ -64,7 +72,7 @@ function getDefaultSettings(): AppSettings {
     maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, 3000),
     apiPort: toInt(process.env.MIHOMO_API_PORT, 39090),
     mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, 49090),
-    serverHost: (process.env.WEB_HOST || "127.0.0.1").trim() || "127.0.0.1",
+    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || "127.0.0.1"),
     serverPort: toInt(process.env.WEB_PORT, 3717),
     defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : "headed",
     defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, 1),
@@ -77,7 +85,7 @@ function getRuntimeServerBinding(settings: AppSettings): { host: string; port: n
   const envHost = (process.env.WEB_HOST || "").trim();
   const envPort = (process.env.WEB_PORT || "").trim();
   return {
-    host: envHost || settings.serverHost,
+    host: normalizeLoopbackHost(envHost || settings.serverHost),
     port: envPort ? toInt(envPort, settings.serverPort) : settings.serverPort,
   };
 }
@@ -86,6 +94,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
+    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     hasApiKey: row.hasApiKey,
     apiKeyId: row.apiKeyId,
@@ -458,8 +467,20 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
+        const current = db.getSettings(getDefaultSettings());
+        const optimisticNext = buildNextSettings(current, body);
+        if (!optimisticNext.subscriptionUrl.trim()) {
+          db.setSettings(optimisticNext);
+          return json({
+            ok: true,
+            settings: optimisticNext,
+            selectedName: db.getSelectedProxyName(),
+            nodes: db.listProxyNodes(),
+            syncError: null,
+          });
+        }
         const { settings: next, result: inventory } = await validateBeforePersist({
-          current: db.getSettings(getDefaultSettings()),
+          current,
           input: body,
           sync: fetchProxyInventory,
           persist: (validatedSettings) => db.setSettings(validatedSettings),
