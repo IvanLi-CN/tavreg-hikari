@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { createServer } from "node:net";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import { AppDatabase, computeLaunchCapacity, type AppSettings, type JobAttemptRecord, type JobRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
   type: "job.updated" | "attempt.updated" | "account.updated" | "proxy.updated" | "proxy.check.completed" | "toast";
@@ -19,7 +19,6 @@ interface ActiveAttempt {
   tail: string[];
 }
 
-const RESERVED_LOCAL_PORTS = new Set<number>();
 const STRIPPED_ATTEMPT_ENV_KEYS = [
   "EXISTING_EMAIL",
   "EXISTING_PASSWORD",
@@ -101,48 +100,6 @@ function nowIso(): string {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function reserveLocalPort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      const port = typeof address === "object" && address ? address.port : 0;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        if (!port || port <= 0) {
-          reject(new Error("failed to reserve local port"));
-          return;
-        }
-        resolve(port);
-      });
-    });
-  });
-}
-
-async function reserveUniqueLocalPort(): Promise<number> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const port = await reserveLocalPort();
-    if (RESERVED_LOCAL_PORTS.has(port)) continue;
-    RESERVED_LOCAL_PORTS.add(port);
-    return port;
-  }
-  throw new Error("failed to reserve a unique local port");
-}
-
-async function reserveMihomoPorts(): Promise<{ apiPort: number; mixedPort: number }> {
-  const apiPort = await reserveUniqueLocalPort();
-  let mixedPort = await reserveUniqueLocalPort();
-  while (mixedPort === apiPort) {
-    RESERVED_LOCAL_PORTS.delete(mixedPort);
-    mixedPort = await reserveUniqueLocalPort();
-  }
-  return { apiPort, mixedPort };
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -323,10 +280,15 @@ export class JobScheduler {
 
   private async spawnAttempt(job: JobRecord, account: MicrosoftAccountRecord, attempt: JobAttemptRecord, outputDir: string): Promise<void> {
     let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
+    let portLeases: { apiPort: PortLease; mixedPort: PortLease } | null = null;
     try {
       await mkdir(outputDir, { recursive: true });
       const settings = this.getSettings();
-      reservedPorts = await reserveMihomoPorts();
+      portLeases = await reserveMihomoPortLeases();
+      reservedPorts = {
+        apiPort: portLeases.apiPort.port,
+        mixedPort: portLeases.mixedPort.port,
+      };
       const selectedProxyNode = this.db.getSelectedProxyName();
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
@@ -351,7 +313,12 @@ export class JobScheduler {
         reservedPorts,
         tail: [],
       };
-      const activeReservedPorts = reservedPorts;
+      let leasesReleased = false;
+      const releasePortLeases = async () => {
+        if (leasesReleased) return;
+        leasesReleased = true;
+        await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+      };
       this.activeAttempts.set(attempt.id, active);
       this.emit("toast", { level: "info", message: `attempt #${attempt.id} started for ${account.microsoftEmail}` });
 
@@ -379,10 +346,13 @@ export class JobScheduler {
           await runner();
         } finally {
           this.activeAttempts.delete(attempt.id);
-          RESERVED_LOCAL_PORTS.delete(activeReservedPorts.apiPort);
-          RESERVED_LOCAL_PORTS.delete(activeReservedPorts.mixedPort);
+          await releasePortLeases();
         }
       };
+
+      child.once("spawn", () => {
+        void releasePortLeases();
+      });
 
       child.once("error", (error) => {
         void finalize(() =>
@@ -397,9 +367,8 @@ export class JobScheduler {
         void finalize(() => this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal));
       });
     } catch (error) {
-      if (reservedPorts) {
-        RESERVED_LOCAL_PORTS.delete(reservedPorts.apiPort);
-        RESERVED_LOCAL_PORTS.delete(reservedPorts.mixedPort);
+      if (portLeases) {
+        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       }
       throw error;
     }

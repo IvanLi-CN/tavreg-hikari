@@ -6,6 +6,7 @@ import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.j
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
+import { createExclusiveRunner } from "./exclusive-runner.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 
@@ -212,6 +213,7 @@ async function main(): Promise<void> {
   const defaults = db.ensureSettings(getDefaultSettings());
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
+  const runExclusiveProxyOp = createExclusiveRunner();
   const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, () => db.getSettings(getDefaultSettings()), (event) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
@@ -226,7 +228,7 @@ async function main(): Promise<void> {
     }
   };
 
-  await syncProxyInventory(db, defaults).catch(() => {});
+  await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   const server = Bun.serve({
     hostname: runtimeBinding.host,
@@ -449,7 +451,7 @@ async function main(): Promise<void> {
           });
         }
         try {
-          const inventory = await syncProxyInventory(db, settings);
+          const inventory = await runExclusiveProxyOp(() => syncProxyInventory(db, settings));
           return json({
             settings,
             selectedName: inventory.selected,
@@ -481,12 +483,14 @@ async function main(): Promise<void> {
             syncError: null,
           });
         }
-        const { settings: next, result: inventory } = await validateBeforePersist({
-          current,
-          input: body,
-          sync: fetchProxyInventory,
-          persist: (validatedSettings) => db.setSettings(validatedSettings),
-        });
+        const { settings: next, result: inventory } = await runExclusiveProxyOp(() =>
+          validateBeforePersist({
+            current,
+            input: body,
+            sync: fetchProxyInventory,
+            persist: (validatedSettings) => db.setSettings(validatedSettings),
+          }),
+        );
         db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
         return json({ ok: true, settings: next, selectedName: inventory.selected, nodes: db.listProxyNodes() });
       }
@@ -496,75 +500,80 @@ async function main(): Promise<void> {
         const nodeName = String(body?.nodeName || "").trim();
         if (!nodeName) return badRequest("nodeName is required");
         const settings = db.getSettings(getDefaultSettings());
-        const controller = await createProxyController(settings);
-        try {
-          await controller.setGroupProxy(nodeName);
-          db.setSelectedProxy(nodeName);
-          const selected = await controller.getGroupSelection();
-          return json({ ok: true, selectedName: selected || nodeName, nodes: db.listProxyNodes() });
-        } finally {
-          await controller.stop().catch(() => {});
-        }
+        return await runExclusiveProxyOp(async () => {
+          const controller = await createProxyController(settings);
+          try {
+            await controller.setGroupProxy(nodeName);
+            db.setSelectedProxy(nodeName);
+            const selected = await controller.getGroupSelection();
+            return json({ ok: true, selectedName: selected || nodeName, nodes: db.listProxyNodes() });
+          } finally {
+            await controller.stop().catch(() => {});
+          }
+        });
       }
 
       if (pathname === "/api/proxies/check" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
         const settings = db.getSettings(getDefaultSettings());
-        const controller = await createProxyController(settings);
-        let response: Response | null = null;
-        let event: ServerEvent | null = null;
-        try {
-          let results: NodeCheckResult[] = [];
-          if (body?.scope === "all") {
-            results = await checkAllNodes(controller, {
-              checkUrl: settings.checkUrl,
-              timeoutMs: settings.timeoutMs,
-              maxLatencyMs: settings.maxLatencyMs,
-              ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
-            });
-          } else {
-            const targetNode =
-              body?.scope === "node"
-                ? String(body.nodeName || "").trim()
-                : (await controller.getGroupSelection()) || db.getSelectedProxyName() || "";
-            if (!targetNode) {
-              response = badRequest("no proxy node selected");
-            } else {
-              results = [
-                await checkNode(controller, targetNode, {
-                  checkUrl: settings.checkUrl,
-                  timeoutMs: settings.timeoutMs,
-                  maxLatencyMs: settings.maxLatencyMs,
-                  ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
-                }),
-              ];
-            }
-          }
-          if (!response) {
-            for (const result of results) {
-              db.recordProxyCheck({
-                nodeName: String(result.name),
-                status: result.ok ? "ok" : "fail",
-                latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
-                egressIp: result.geo?.ip || null,
-                country: result.geo?.country || null,
-                city: result.geo?.city || null,
-                org: result.geo?.org || null,
-                error: typeof result.error === "string" ? result.error : null,
+        const { response, event } = await runExclusiveProxyOp(async () => {
+          const controller = await createProxyController(settings);
+          let response: Response | null = null;
+          let event: ServerEvent | null = null;
+          try {
+            let results: NodeCheckResult[] = [];
+            if (body?.scope === "all") {
+              results = await checkAllNodes(controller, {
+                checkUrl: settings.checkUrl,
+                timeoutMs: settings.timeoutMs,
+                maxLatencyMs: settings.maxLatencyMs,
+                ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
               });
+            } else {
+              const targetNode =
+                body?.scope === "node"
+                  ? String(body.nodeName || "").trim()
+                  : (await controller.getGroupSelection()) || db.getSelectedProxyName() || "";
+              if (!targetNode) {
+                response = badRequest("no proxy node selected");
+              } else {
+                results = [
+                  await checkNode(controller, targetNode, {
+                    checkUrl: settings.checkUrl,
+                    timeoutMs: settings.timeoutMs,
+                    maxLatencyMs: settings.maxLatencyMs,
+                    ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
+                  }),
+                ];
+              }
             }
-            const nodes = db.listProxyNodes();
-            const payload = { ok: true, results, nodes, selectedName: await controller.getGroupSelection() };
-            event = {
-              type: "proxy.check.completed",
-              payload,
-              timestamp: nowIso(),
-            };
-            response = json(payload);
+            if (!response) {
+              for (const result of results) {
+                db.recordProxyCheck({
+                  nodeName: String(result.name),
+                  status: result.ok ? "ok" : "fail",
+                  latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
+                  egressIp: result.geo?.ip || null,
+                  country: result.geo?.country || null,
+                  city: result.geo?.city || null,
+                  org: result.geo?.org || null,
+                  error: typeof result.error === "string" ? result.error : null,
+                });
+              }
+              const nodes = db.listProxyNodes();
+              const payload = { ok: true, results, nodes, selectedName: await controller.getGroupSelection() };
+              event = {
+                type: "proxy.check.completed",
+                payload,
+                timestamp: nowIso(),
+              };
+              response = json(payload);
+            }
+          } finally {
+            await controller.stop().catch(() => {});
           }
-        } finally {
-          await controller.stop().catch(() => {});
-        }
+          return { response, event };
+        });
         if (event) {
           broadcast(event);
         }
