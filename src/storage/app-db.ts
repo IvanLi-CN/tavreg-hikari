@@ -973,6 +973,7 @@ export class AppDatabase {
             account_id = excluded.account_id,
             api_key_prefix = excluded.api_key_prefix,
             status = excluded.status,
+            extracted_at = excluded.extracted_at,
             last_verified_at = excluded.last_verified_at
           RETURNING *
         `)

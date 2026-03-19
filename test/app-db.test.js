@@ -104,7 +104,8 @@ describe("AppDatabase account import", () => {
       { email: "second@outlook.com", password: "second-pass" },
     ]);
     const [firstId, secondId] = imported.affectedIds;
-    appDb.recordApiKey(firstId, "tvly-shared-key");
+    const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key");
+    await new Promise((resolve) => setTimeout(resolve, 5));
     appDb.recordApiKey(secondId, "tvly-shared-key");
 
     const first = appDb.getAccount(firstId);
@@ -126,6 +127,7 @@ describe("AppDatabase account import", () => {
       accountId: secondId,
       microsoftEmail: "second@outlook.com",
     });
+    expect(new Date(keys.rows[0].extractedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.extractedAt).getTime());
 
     appDb.close();
   });
