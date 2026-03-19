@@ -96,6 +96,15 @@ export function ApiKeysView({
               <span>当前页已选 {selectedOnPage} / {apiKeys.rows.length}</span>
               <span>总已选 {selectedIds.length} / {apiKeys.total}</span>
             </div>
+            <label className="flex items-center gap-3 text-sm text-slate-300 md:hidden">
+              <Checkbox
+                checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
+                onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
+                aria-label="select-current-page-mobile"
+                disabled={apiKeys.rows.length === 0}
+              />
+              <span>全选当前页</span>
+            </label>
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" onClick={onClearSelection} disabled={selectedIds.length === 0 || exportBusy}>
                 清空勾选
