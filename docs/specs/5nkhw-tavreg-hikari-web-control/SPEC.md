@@ -224,6 +224,12 @@
 - Given 用户打开代理页并执行节点检查，When 检查完成，Then 界面显示节点延迟、出口 IP、地理信息和检查结果。
 - Given 当前实现完成，When 执行 `bun run typecheck`、`bun test` 与前端构建，Then 全部通过。
 
+## Visual Evidence (PR)
+
+![Dashboard overflow guard desktop](./assets/dashboard-overflow-guard-desktop.png)
+
+![Dashboard overflow guard tablet](./assets/dashboard-overflow-guard-tablet.png)
+
 ## 里程碑
 
 - [x] M1: 建立 spec、前端工具链与 Web/Bun 入口
