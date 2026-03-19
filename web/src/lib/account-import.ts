@@ -12,6 +12,18 @@ export interface InvalidImportRow {
   reason: string;
 }
 
+export interface ImportPreviewItemLike {
+  email: string;
+  normalizedEmail: string;
+  password: string;
+  decision: "create" | "update_password" | "keep_existing" | "input_duplicate" | "invalid";
+}
+
+export interface ImportPreviewPayloadLike {
+  items: ImportPreviewItemLike[];
+  effectiveEntries: Array<{ email: string; password: string }>;
+}
+
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const LEADING_BOUNDARY_PATTERN = /^(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)/;
 const TRAILING_BOUNDARY_PATTERN = /(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)$/;
@@ -90,4 +102,23 @@ export function parseImportContent(content: string): { entries: ParsedImportEntr
   }
 
   return { entries, invalidRows };
+}
+
+export function buildImportCommitEntries(preview: ImportPreviewPayloadLike | null, groupName: string): Array<{ email: string; password: string }> {
+  if (!preview) return [];
+  if (!groupName.trim()) {
+    return preview.effectiveEntries;
+  }
+
+  const entries: Array<{ email: string; password: string }> = [];
+  const seen = new Set<string>();
+  for (const item of preview.items) {
+    if (!["create", "update_password", "keep_existing"].includes(item.decision)) continue;
+    if (!item.email || !item.password) continue;
+    const key = item.normalizedEmail || item.email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ email: item.email, password: item.password });
+  }
+  return entries;
 }

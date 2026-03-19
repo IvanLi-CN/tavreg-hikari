@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
+import { buildImportCommitEntries } from "@/lib/account-import";
 import type { AccountImportPreviewPayload, AccountQuery, AccountsPayload } from "@/lib/app-types";
 import { sampleAccounts } from "@/stories/fixtures";
 
@@ -84,6 +85,7 @@ const baseArgs = {
   importGroupName: "",
   batchGroupName: "",
   preview: null,
+  previewCommitCount: 0,
   previewOpen: false,
   query: createDefaultQuery(),
   selectedIds: [],
@@ -128,6 +130,7 @@ function AccountsStorySurface(props: {
       importGroupName={importGroupName}
       batchGroupName={batchGroupName}
       preview={props.preview || null}
+      previewCommitCount={props.preview ? buildImportCommitEntries(props.preview, importGroupName).length : 0}
       previewOpen={previewOpen}
       query={query}
       selectedIds={selectedIds}

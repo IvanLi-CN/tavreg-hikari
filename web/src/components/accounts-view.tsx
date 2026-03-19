@@ -44,6 +44,7 @@ export function AccountsView({
   importGroupName,
   batchGroupName,
   preview,
+  previewCommitCount,
   previewOpen,
   query,
   selectedIds,
@@ -70,6 +71,7 @@ export function AccountsView({
   importGroupName: string;
   batchGroupName: string;
   preview: AccountImportPreviewPayload | null;
+  previewCommitCount: number;
   previewOpen: boolean;
   query: AccountQuery;
   selectedIds: number[];
@@ -422,8 +424,8 @@ export function AccountsView({
             <Button variant="secondary" onClick={() => onPreviewOpenChange(false)}>
               取消
             </Button>
-            <Button onClick={onConfirmImport} disabled={!preview?.effectiveEntries.length || importBusy}>
-              {importBusy ? "导入中…" : `确认导入 ${preview?.effectiveEntries.length || 0} 条`}
+            <Button onClick={onConfirmImport} disabled={previewCommitCount === 0 || importBusy}>
+              {importBusy ? "导入中…" : `确认导入 ${previewCommitCount} 条`}
             </Button>
           </DialogFooter>
         </DialogContent>

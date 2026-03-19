@@ -4,7 +4,7 @@ import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProxiesView } from "@/components/proxies-view";
-import { parseImportContent } from "@/lib/account-import";
+import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import type {
   AccountImportPayload,
   AccountImportPreviewPayload,
@@ -98,6 +98,10 @@ export function App() {
   const selectedProxy = useMemo(
     () => proxies?.nodes.find((node) => node.isSelected) || null,
     [proxies],
+  );
+  const importCommitEntries = useMemo(
+    () => buildImportCommitEntries(importPreview, importGroupName),
+    [importGroupName, importPreview],
   );
 
   const currentPageIds = accounts.rows.map((row) => row.id);
@@ -207,7 +211,7 @@ export function App() {
   };
 
   const handleConfirmImport = async () => {
-    if (!importPreview) return;
+    if (!importPreview || importCommitEntries.length === 0) return;
     try {
       setImportBusy(true);
       setError(null);
@@ -215,7 +219,7 @@ export function App() {
       const payload = await api<AccountImportPayload>("/api/accounts/import", {
         method: "POST",
         body: JSON.stringify({
-          entries: importPreview.effectiveEntries,
+          entries: importCommitEntries,
           groupName: importGroupName || null,
         }),
       });
@@ -397,6 +401,7 @@ export function App() {
           importGroupName={importGroupName}
           batchGroupName={batchGroupName}
           preview={importPreview}
+          previewCommitCount={importCommitEntries.length}
           previewOpen={importPreviewOpen}
           query={accountQuery}
           selectedIds={selectedAccountIds}
