@@ -303,7 +303,6 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ scope: proxyCheckScope }),
       });
-      await refreshProxies();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -329,7 +328,6 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ scope: "node", nodeName }),
       });
-      await refreshProxies();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
