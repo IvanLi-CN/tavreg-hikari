@@ -24,6 +24,14 @@ test("reserveMihomoPortLeases keeps ports bound until release", async () => {
   expect(await canConnect(leases.apiPort.port)).toBe(true);
   expect(await canConnect(leases.mixedPort.port)).toBe(true);
 
+  await leases.apiPort.releaseListener();
+  await leases.mixedPort.releaseListener();
+
+  expect(isPortLeaseReserved(leases.apiPort.port)).toBe(true);
+  expect(isPortLeaseReserved(leases.mixedPort.port)).toBe(true);
+  expect(await canConnect(leases.apiPort.port)).toBe(false);
+  expect(await canConnect(leases.mixedPort.port)).toBe(false);
+
   await leases.apiPort.release();
   await leases.mixedPort.release();
 

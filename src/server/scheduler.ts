@@ -319,6 +319,12 @@ export class JobScheduler {
         leasesReleased = true;
         await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       };
+      let listenersReleased = false;
+      const releasePortListeners = async () => {
+        if (listenersReleased) return;
+        listenersReleased = true;
+        await Promise.all([portLeases?.apiPort.releaseListener(), portLeases?.mixedPort.releaseListener()]);
+      };
       this.activeAttempts.set(attempt.id, active);
       this.emit("toast", { level: "info", message: `attempt #${attempt.id} started for ${account.microsoftEmail}` });
 
@@ -351,7 +357,7 @@ export class JobScheduler {
       };
 
       child.once("spawn", () => {
-        void releasePortLeases();
+        void releasePortListeners();
       });
 
       child.once("error", (error) => {

@@ -2,6 +2,7 @@ import { createServer } from "node:net";
 
 export interface PortLease {
   port: number;
+  releaseListener: () => Promise<void>;
   release: () => Promise<void>;
 }
 
@@ -25,12 +26,12 @@ async function reserveLocalPortLease(): Promise<PortLease> {
       }
 
       server.removeListener("error", fail);
-      let released = false;
+      let listenerReleased = false;
       resolve({
         port,
-        release: async () => {
-          if (released) return;
-          released = true;
+        releaseListener: async () => {
+          if (listenerReleased) return;
+          listenerReleased = true;
           await new Promise<void>((resolveClose, rejectClose) => {
             server.close((error) => {
               if (error) {
@@ -40,6 +41,20 @@ async function reserveLocalPortLease(): Promise<PortLease> {
               resolveClose();
             });
           });
+        },
+        release: async () => {
+          if (!listenerReleased) {
+            await new Promise<void>((resolveClose, rejectClose) => {
+              server.close((error) => {
+                if (error) {
+                  rejectClose(error);
+                  return;
+                }
+                listenerReleased = true;
+                resolveClose();
+              });
+            });
+          }
         },
       });
     });
@@ -58,6 +73,9 @@ export async function reserveUniqueLocalPortLease(): Promise<PortLease> {
     let released = false;
     return {
       port: lease.port,
+      releaseListener: async () => {
+        await lease.releaseListener().catch(() => {});
+      },
       release: async () => {
         if (released) return;
         released = true;
