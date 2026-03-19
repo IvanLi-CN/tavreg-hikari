@@ -15,7 +15,7 @@ import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildMoeMailAuthHeaders,
-  extractMicrosoftProofCodeFromPayload,
+  extractFreshMicrosoftProofCodeFromMoeMailResponse,
   normalizeMoeMailBaseUrl,
   resolveMoeMailMailboxId as resolveMoeMailMailboxIdViaOpenApi,
 } from "./moemail-openapi.js";
@@ -2707,6 +2707,7 @@ async function waitForMicrosoftProofCode(
   timeoutMs: number,
   pollMs: number,
   proxyUrl?: string,
+  notBeforeMs = Date.now() - 15_000,
 ): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   let rateLimitHits = 0;
@@ -2719,13 +2720,8 @@ async function waitForMicrosoftProofCode(
         headers: mailbox.headers,
         proxyUrl: activeProxyUrl,
       });
-      const messages = Array.isArray(response.messages) ? response.messages : [];
-      for (const message of messages) {
-        const code = extractMicrosoftProofCodeFromPayload(message);
-        if (code) return code;
-      }
-      const fallbackCode = extractMicrosoftProofCodeFromPayload(response);
-      if (fallbackCode) return fallbackCode;
+      const freshCode = extractFreshMicrosoftProofCodeFromMoeMailResponse(response, notBeforeMs);
+      if (freshCode) return freshCode;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isMailboxRateLimitError(message)) {
@@ -3779,11 +3775,11 @@ async function handleMicrosoftProofMethodPrompt(page: any): Promise<boolean> {
   if (!(await pageContainsAnyText(page, [/what security info would you like to add/i, /你想添加哪些安全信息/i]))) {
     return false;
   }
-  const selected = await clickMatchingAction(
-    page,
-    [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /电子邮件地址/i],
-    'button, [role="button"], [role="option"], option',
-  );
+  const selected = await clickMatchingAction(page, [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /电子邮件地址/i], undefined, [
+    "button",
+    "option",
+    "link",
+  ]);
   if (selected) {
     log("login flow: selected Microsoft proof backup email method");
   }
@@ -3867,7 +3863,7 @@ async function handleMicrosoftProofCodePrompt(
   const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
   proofState.mailbox = proofMailbox;
   await clearAuthFieldValidationState(page, selector);
-  const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl);
+  const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl, Date.now() - 15_000);
   if (!code) {
     throw new Error("microsoft_proof_code_timeout");
   }
@@ -3922,12 +3918,12 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       }
 
       if (await handleMicrosoftAccountPicker(page, email)) continue;
-      if (await handleMicrosoftEmailPrompt(page, email)) continue;
-      if (await handleMicrosoftPasswordPrompt(page, password)) continue;
-      if (await handleMicrosoftPasskeyInterrupt(page)) continue;
       if (await handleMicrosoftProofMethodPrompt(page)) continue;
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
+      if (await handleMicrosoftEmailPrompt(page, email)) continue;
+      if (await handleMicrosoftPasswordPrompt(page, password)) continue;
+      if (await handleMicrosoftPasskeyInterrupt(page)) continue;
       if (await handleMicrosoftKeepSignedInPrompt(page, cfg.microsoftKeepSignedIn)) continue;
       if (await handleMicrosoftConsentPrompt(page)) continue;
 
