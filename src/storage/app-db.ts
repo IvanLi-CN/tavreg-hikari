@@ -13,6 +13,7 @@ export type AccountStatus =
 export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
 export type AttemptStatus = "running" | "succeeded" | "failed";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
+export type ProofMailboxProvider = "moemail";
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -35,6 +36,9 @@ export interface MicrosoftAccountRecord {
   id: number;
   microsoftEmail: string;
   passwordPlaintext: string;
+  proofMailboxProvider: ProofMailboxProvider | null;
+  proofMailboxAddress: string | null;
+  proofMailboxId: string | null;
   hasApiKey: boolean;
   apiKeyId: number | null;
   importedAt: string;
@@ -153,6 +157,9 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     id: Number(row.id),
     microsoftEmail: String(row.microsoft_email),
     passwordPlaintext: String(row.password_plaintext || ""),
+    proofMailboxProvider: row.proof_mailbox_provider == null ? null : (String(row.proof_mailbox_provider) as ProofMailboxProvider),
+    proofMailboxAddress: row.proof_mailbox_address == null ? null : String(row.proof_mailbox_address),
+    proofMailboxId: row.proof_mailbox_id == null ? null : String(row.proof_mailbox_id),
     hasApiKey: asBoolean(row.has_api_key),
     apiKeyId: row.api_key_id == null ? null : Number(row.api_key_id),
     importedAt: String(row.imported_at),
@@ -291,6 +298,9 @@ export class AppDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         microsoft_email TEXT NOT NULL UNIQUE,
         password_plaintext TEXT NOT NULL,
+        proof_mailbox_provider TEXT,
+        proof_mailbox_address TEXT,
+        proof_mailbox_id TEXT,
         has_api_key INTEGER NOT NULL DEFAULT 0,
         api_key_id INTEGER,
         imported_at TEXT NOT NULL,
@@ -398,6 +408,15 @@ export class AppDatabase {
     if (!accountColumns.has("group_name")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN group_name TEXT;");
     }
+    if (!accountColumns.has("proof_mailbox_provider")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN proof_mailbox_provider TEXT;");
+    }
+    if (!accountColumns.has("proof_mailbox_address")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN proof_mailbox_address TEXT;");
+    }
+    if (!accountColumns.has("proof_mailbox_id")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN proof_mailbox_id TEXT;");
+    }
     const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
     const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!apiKeyColumns.has("extracted_ip")) {
@@ -407,6 +426,7 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_result ON microsoft_accounts(last_result_status, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_skip_reason ON microsoft_accounts(skip_reason, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_group_name ON microsoft_accounts(group_name, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_proof_mailbox ON microsoft_accounts(proof_mailbox_address, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_attempts_job_status ON job_attempts(job_id, status, started_at DESC);");
@@ -613,8 +633,8 @@ export class AppDatabase {
     if (filters.q?.trim()) {
       const normalizedQuery = filters.q.trim().toLowerCase();
       const rawQuery = filters.q.trim();
-      where.push("(microsoft_email LIKE ? OR password_plaintext LIKE ? OR LOWER(COALESCE(group_name, '')) LIKE ?)");
-      params.push(`%${normalizedQuery}%`, `%${rawQuery}%`, `%${normalizedQuery}%`);
+      where.push("(microsoft_email LIKE ? OR password_plaintext LIKE ? OR LOWER(COALESCE(group_name, '')) LIKE ? OR LOWER(COALESCE(proof_mailbox_address, '')) LIKE ?)");
+      params.push(`%${normalizedQuery}%`, `%${rawQuery}%`, `%${normalizedQuery}%`, `%${normalizedQuery}%`);
     }
     if (filters.status?.trim()) {
       where.push("last_result_status = ?");
@@ -681,6 +701,53 @@ export class AppDatabase {
       .query(`SELECT * FROM microsoft_accounts WHERE microsoft_email IN (${placeholders})`)
       .all(...normalizedEmails) as Array<Record<string, unknown>>;
     return rows.map(mapAccountRow);
+  }
+
+  updateAccountProofMailbox(
+    accountId: number,
+    input: {
+      provider?: ProofMailboxProvider | null;
+      address?: string | null;
+      mailboxId?: string | null;
+    },
+  ): MicrosoftAccountRecord {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
+
+    const addressChanged = input.address !== undefined;
+    const normalizedAddress = input.address === undefined ? current.proofMailboxAddress : input.address?.trim() || null;
+    let normalizedProvider = input.provider === undefined ? current.proofMailboxProvider : input.provider;
+    let normalizedMailboxId = input.mailboxId === undefined ? current.proofMailboxId : input.mailboxId?.trim() || null;
+
+    if (!normalizedAddress) {
+      normalizedProvider = null;
+      normalizedMailboxId = null;
+    } else {
+      if (!normalizedProvider) {
+        normalizedProvider = "moemail";
+      }
+      if (normalizedProvider !== "moemail") {
+        throw new Error("only moemail proof mailbox provider is supported");
+      }
+      if (addressChanged && normalizedAddress !== current.proofMailboxAddress && input.mailboxId === undefined) {
+        normalizedMailboxId = null;
+      }
+    }
+
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET proof_mailbox_provider = ?,
+            proof_mailbox_address = ?,
+            proof_mailbox_id = ?,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(normalizedProvider, normalizedAddress, normalizedMailboxId, nowIso(), accountId);
+
+    return this.getAccount(accountId)!;
   }
 
   updateAccountsGroup(ids: number[], groupName: string | null): { updated: number; groupName: string | null } {

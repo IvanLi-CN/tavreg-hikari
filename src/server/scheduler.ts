@@ -24,6 +24,9 @@ const STRIPPED_ATTEMPT_ENV_KEYS = [
   "EXISTING_PASSWORD",
   "MICROSOFT_ACCOUNT_EMAIL",
   "MICROSOFT_ACCOUNT_PASSWORD",
+  "MICROSOFT_PROOF_MAILBOX_PROVIDER",
+  "MICROSOFT_PROOF_MAILBOX_ADDRESS",
+  "MICROSOFT_PROOF_MAILBOX_ID",
   "CHROME_REMOTE_DEBUGGING_PORT",
 ] as const;
 
@@ -54,7 +57,10 @@ function isTerminalJobStatus(status: JobRecord["status"]): boolean {
 
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
-  account: Pick<MicrosoftAccountRecord, "id" | "microsoftEmail" | "passwordPlaintext">;
+  account: Pick<
+    MicrosoftAccountRecord,
+    "id" | "microsoftEmail" | "passwordPlaintext" | "proofMailboxProvider" | "proofMailboxAddress" | "proofMailboxId"
+  >;
   outputDir: string;
   sharedLedgerPath: string;
   settings: Pick<AppSettings, "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs">;
@@ -76,6 +82,9 @@ export function buildAttemptRuntimeSpec(input: {
       RUN_MODE: input.job.runMode,
       MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
       MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
+      ...(input.account.proofMailboxProvider ? { MICROSOFT_PROOF_MAILBOX_PROVIDER: input.account.proofMailboxProvider } : {}),
+      ...(input.account.proofMailboxAddress ? { MICROSOFT_PROOF_MAILBOX_ADDRESS: input.account.proofMailboxAddress } : {}),
+      ...(input.account.proofMailboxId ? { MICROSOFT_PROOF_MAILBOX_ID: input.account.proofMailboxId } : {}),
       MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
       MIHOMO_GROUP_NAME: input.settings.groupName,
       MIHOMO_ROUTE_GROUP_NAME: input.settings.routeGroupName,

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,7 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { GroupCombobox } from "@/components/group-combobox";
 import { StatusBadge } from "@/components/status-badge";
-import type { AccountImportPreviewPayload, AccountQuery, AccountsPayload } from "@/lib/app-types";
+import type { AccountImportPreviewPayload, AccountQuery, AccountRecord, AccountsPayload } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -65,6 +65,7 @@ export function AccountsView({
   onApplyBatchGroup,
   onDeleteSelected,
   onClearSelection,
+  onSaveProofMailbox,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -92,7 +93,14 @@ export function AccountsView({
   onApplyBatchGroup: () => void;
   onDeleteSelected: () => void;
   onClearSelection: () => void;
+  onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
 }) {
+  const [proofDialogOpen, setProofDialogOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
+  const [proofMailboxDraft, setProofMailboxDraft] = useState("");
+  const [proofMailboxIdDraft, setProofMailboxIdDraft] = useState("");
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -100,6 +108,55 @@ export function AccountsView({
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>
     plaintext || revealedPasswordsById[accountId] || fallbackMasked;
+  const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "moemail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
+
+  const openProofDialog = (account: AccountRecord) => {
+    setEditingAccount(account);
+    setProofMailboxDraft(account.proofMailboxAddress || "");
+    setProofMailboxIdDraft(account.proofMailboxId || "");
+    setProofError(null);
+    setProofDialogOpen(true);
+  };
+
+  const closeProofDialog = (open: boolean) => {
+    setProofDialogOpen(open);
+    if (open) return;
+    setEditingAccount(null);
+    setProofMailboxDraft("");
+    setProofMailboxIdDraft("");
+    setProofError(null);
+    setProofBusy(false);
+  };
+
+  const handleProofMailboxChange = (value: string) => {
+    setProofMailboxDraft(value);
+    if (!editingAccount) {
+      setProofMailboxIdDraft("");
+      return;
+    }
+    const normalized = value.trim().toLowerCase();
+    const original = (editingAccount.proofMailboxAddress || "").trim().toLowerCase();
+    setProofMailboxIdDraft(normalized && normalized === original ? editingAccount.proofMailboxId || "" : "");
+  };
+
+  const handleSaveProofMailbox = async () => {
+    if (!editingAccount) return;
+    const normalizedAddress = proofMailboxDraft.trim() || null;
+    if (normalizedAddress && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedAddress)) {
+      setProofError("请输入合法的备用邮箱地址。");
+      return;
+    }
+    try {
+      setProofBusy(true);
+      setProofError(null);
+      await onSaveProofMailbox(editingAccount.id, normalizedAddress, normalizedAddress ? proofMailboxIdDraft.trim() || null : null);
+      closeProofDialog(false);
+    } catch (error) {
+      setProofError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProofBusy(false);
+    }
+  };
 
   return (
     <>
@@ -254,19 +311,28 @@ export function AccountsView({
                           aria-label={`select-${row.microsoftEmail}`}
                         />
                         <div className="min-w-0 flex-1">
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0">
-                              <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
-                              <div className="mt-1 break-all font-mono text-sm text-slate-300">
-                                {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
+                                <div className="mt-1 break-all font-mono text-sm text-slate-300">
+                                  {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                                </div>
+                              </div>
+                              <div className="flex shrink-0 flex-col items-end gap-2">
+                                {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
+                                <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
+                                  绑定邮箱
+                                </Button>
                               </div>
                             </div>
-                            {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
-                          </div>
                           <dl className="mt-4 grid gap-3 text-sm text-slate-300">
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">分组</dt>
                               <dd>{row.groupName || "—"}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Proof 邮箱</dt>
+                              <dd className="break-all text-right">{row.proofMailboxAddress || "—"}</dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
@@ -305,11 +371,13 @@ export function AccountsView({
                         <TableHead>邮箱</TableHead>
                         <TableHead>密码</TableHead>
                         <TableHead>分组</TableHead>
+                        <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
                         <TableHead>最近状态</TableHead>
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
                         <TableHead>跳过原因</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -327,11 +395,17 @@ export function AccountsView({
                             {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
                           </TableCell>
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
+                          <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
+                              绑定邮箱
+                            </Button>
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -426,6 +500,80 @@ export function AccountsView({
             </Button>
             <Button onClick={onConfirmImport} disabled={previewCommitCount === 0 || importBusy}>
               {importBusy ? "导入中…" : `确认导入 ${previewCommitCount} 条`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={proofDialogOpen} onOpenChange={closeProofDialog}>
+        <DialogContent className="w-[min(96vw,34rem)]">
+          <DialogHeader>
+            <DialogTitle>设置 Microsoft Proof 邮箱</DialogTitle>
+            <DialogDescription>
+              把备用邮箱映射记录到数据库。运行时若微软弹出绑定或验证码页面，会优先用 MoeMail OpenAPI 自动恢复。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 px-6 py-2">
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
+              <div className="break-all font-medium text-white">{editingAccount?.microsoftEmail || "—"}</div>
+              <div className="mt-2 text-slate-400">{proofMailboxPreview}</div>
+            </div>
+
+            <label className="flex flex-col gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Proof 邮箱地址</span>
+              <Input
+                value={proofMailboxDraft}
+                onChange={(event) => handleProofMailboxChange(event.target.value)}
+                placeholder="someone@example.com"
+              />
+            </label>
+
+            <label className="flex flex-col gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">已缓存 mailbox id</span>
+              <Input value={proofMailboxIdDraft} readOnly placeholder="首次自动解析后会回填" />
+            </label>
+
+            {proofError ? (
+              <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">{proofError}</div>
+            ) : null}
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setProofMailboxDraft("");
+                setProofMailboxIdDraft("");
+              }}
+              disabled={proofBusy}
+            >
+              清空表单
+            </Button>
+            <Button
+              variant="outline"
+              onClick={async () => {
+                if (!editingAccount) return;
+                try {
+                  setProofBusy(true);
+                  setProofError(null);
+                  await onSaveProofMailbox(editingAccount.id, null, null);
+                  closeProofDialog(false);
+                } catch (error) {
+                  setProofError(error instanceof Error ? error.message : String(error));
+                } finally {
+                  setProofBusy(false);
+                }
+              }}
+              disabled={proofBusy}
+            >
+              清空映射
+            </Button>
+            <Button variant="secondary" onClick={() => closeProofDialog(false)} disabled={proofBusy}>
+              取消
+            </Button>
+            <Button onClick={handleSaveProofMailbox} disabled={proofBusy}>
+              {proofBusy ? "保存中…" : "保存映射"}
             </Button>
           </DialogFooter>
         </DialogContent>

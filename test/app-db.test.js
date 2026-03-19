@@ -174,10 +174,17 @@ describe("AppDatabase account import", () => {
       { groupName: "team-bravo" },
     );
     appDb.importAccounts([{ email: "solo@outlook.com", password: "solo-pass" }], { groupName: "solo-group" });
+    const proofAccount = appDb.listAccounts({ q: "search-a", page: 1, pageSize: 10 }).rows[0];
+    appDb.updateAccountProofMailbox(proofAccount.id, {
+      provider: "moemail",
+      address: "search-a-proof@mail-us.707079.xyz",
+      mailboxId: "proof-search-a",
+    });
 
     expect(appDb.listAccounts({ q: "search-a", page: 1, pageSize: 10 }).rows).toHaveLength(1);
     expect(appDb.listAccounts({ q: "bravo-pass", page: 1, pageSize: 10 }).rows).toHaveLength(1);
     expect(appDb.listAccounts({ q: "team-bravo", page: 1, pageSize: 10 }).rows).toHaveLength(2);
+    expect(appDb.listAccounts({ q: "search-a-proof", page: 1, pageSize: 10 }).rows).toHaveLength(1);
 
     appDb.close();
   });
@@ -222,6 +229,43 @@ describe("AppDatabase account import", () => {
     expect(after?.groupName).toBe("retry-pool");
     expect(after?.importedAt).toBe(before?.importedAt);
     expect(after?.updatedAt).not.toBe(before?.updatedAt);
+
+    appDb.close();
+  });
+
+  test("stores proof mailbox mapping and clears cached mailbox id when the address changes", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proof@outlook.com", password: "proof-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    let account = appDb.updateAccountProofMailbox(accountId, {
+      provider: "moemail",
+      address: "proof-a@mail-us.707079.xyz",
+      mailboxId: "moe-proof-a",
+    });
+    expect(account).toMatchObject({
+      proofMailboxProvider: "moemail",
+      proofMailboxAddress: "proof-a@mail-us.707079.xyz",
+      proofMailboxId: "moe-proof-a",
+    });
+
+    account = appDb.updateAccountProofMailbox(accountId, {
+      address: "proof-b@mail-us.707079.xyz",
+    });
+    expect(account).toMatchObject({
+      proofMailboxProvider: "moemail",
+      proofMailboxAddress: "proof-b@mail-us.707079.xyz",
+      proofMailboxId: null,
+    });
+
+    account = appDb.updateAccountProofMailbox(accountId, {
+      address: null,
+    });
+    expect(account).toMatchObject({
+      proofMailboxProvider: null,
+      proofMailboxAddress: null,
+      proofMailboxId: null,
+    });
 
     appDb.close();
   });
@@ -718,6 +762,9 @@ describe("scheduler runtime spec", () => {
         id: 21,
         microsoftEmail: "worker@outlook.com",
         passwordPlaintext: "worker-pass",
+        proofMailboxProvider: "moemail",
+        proofMailboxAddress: "worker-proof@mail-us.707079.xyz",
+        proofMailboxId: "worker-proof-001",
       },
       outputDir: "/tmp/tavreg/job-8/attempt-21",
       sharedLedgerPath: "/tmp/tavreg/app.sqlite",
@@ -769,6 +816,9 @@ describe("scheduler runtime spec", () => {
       PROXY_LATENCY_MAX_MS: "987",
       MICROSOFT_ACCOUNT_EMAIL: "worker@outlook.com",
       MICROSOFT_ACCOUNT_PASSWORD: "worker-pass",
+      MICROSOFT_PROOF_MAILBOX_PROVIDER: "moemail",
+      MICROSOFT_PROOF_MAILBOX_ADDRESS: "worker-proof@mail-us.707079.xyz",
+      MICROSOFT_PROOF_MAILBOX_ID: "worker-proof-001",
       TASK_LEDGER_JOB_ID: "8",
       TASK_LEDGER_ACCOUNT_ID: "21",
       TASK_LEDGER_DB_PATH: "/tmp/tavreg/app.sqlite",
@@ -778,6 +828,9 @@ describe("scheduler runtime spec", () => {
     });
     expect(runtime.env.EXISTING_EMAIL).toBeUndefined();
     expect(runtime.env.EXISTING_PASSWORD).toBeUndefined();
+    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_PROVIDER).toBe("moemail");
+    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
+    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
   });
 });

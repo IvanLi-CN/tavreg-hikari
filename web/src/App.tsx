@@ -9,6 +9,7 @@ import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import type {
   AccountImportPayload,
   AccountImportPreviewPayload,
+  AccountProofMailboxUpdatePayload,
   AccountQuery,
   AccountsPayload,
   ApiKeyExportPayload,
@@ -460,7 +461,26 @@ export function App() {
     anchor.remove();
     window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
   };
-
+  const handleSaveProofMailbox = async (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => {
+    try {
+      setBatchBusy(true);
+      setError(null);
+      await api<AccountProofMailboxUpdatePayload>(`/api/accounts/${accountId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          proofMailboxProvider: proofMailboxAddress ? "moemail" : null,
+          proofMailboxAddress,
+          proofMailboxId: proofMailboxAddress ? (proofMailboxId ?? null) : null,
+        }),
+      });
+      await refreshAccounts(accountQueryRef.current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setBatchBusy(false);
+    }
+  };
   return (
     <AppShell activePage={activePage} error={error} onNavigate={(page) => navigate(page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`)}>
       {activePage === "dashboard" ? (
@@ -504,6 +524,7 @@ export function App() {
           onApplyBatchGroup={handleApplyBatchGroup}
           onDeleteSelected={handleDeleteSelected}
           onClearSelection={() => setSelectedAccountIds([])}
+          onSaveProofMailbox={handleSaveProofMailbox}
         />
       ) : null}
 

@@ -13,15 +13,22 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  buildMoeMailAuthHeaders,
+  extractMicrosoftProofCodeFromPayload,
+  normalizeMoeMailBaseUrl,
+  resolveMoeMailMailboxId as resolveMoeMailMailboxIdViaOpenApi,
+} from "./moemail-openapi.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
+import { AppDatabase } from "./storage/app-db.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
 type BrowserEngine = "chrome";
-type MailProvider = "duckmail" | "gptmail" | "vmail";
+type MailProvider = "duckmail" | "gptmail" | "vmail" | "moemail";
 type AuthLoginProvider = "password" | "microsoft";
 
 interface GptmailAuthPayload {
@@ -65,6 +72,8 @@ interface AppConfig {
   vmailBaseUrl: string;
   vmailApiKey?: string;
   vmailDomain?: string;
+  moemailBaseUrl: string;
+  moemailApiKey?: string;
   duckmailBaseUrl: string;
   duckmailApiKey?: string;
   duckmailDomain?: string;
@@ -75,6 +84,9 @@ interface AppConfig {
   existingPassword?: string;
   microsoftAccountEmail?: string;
   microsoftAccountPassword?: string;
+  microsoftProofMailboxProvider?: "moemail";
+  microsoftProofMailboxAddress?: string;
+  microsoftProofMailboxId?: string;
   microsoftKeepSignedIn: boolean;
   mihomoSubscriptionUrl: string;
   mihomoGroupName: string;
@@ -1420,6 +1432,11 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/proxy_node_blocked_by_recent_ip_rate_limit/i.test(message)) {
     return "proxy_ip_rate_limit_block";
   }
+  if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
+  if (/moemail_api_key_missing/i.test(message)) return "moemail_api_key_missing";
+  if (/moemail_mailbox_not_found/i.test(message)) return "moemail_mailbox_not_found";
+  if (/microsoft_proof_code_timeout/i.test(message)) return "microsoft_proof_code_timeout";
+  if (/microsoft_proof_submit_failed/i.test(message)) return "microsoft_proof_submit_failed";
   if (/timeout/i.test(normalized)) return "timeout";
   if (/network/i.test(normalized)) return "network";
   if (/browser precheck failed/i.test(normalized)) return "browser_precheck_failed";
@@ -2622,6 +2639,129 @@ async function createMailboxSession(cfg: AppConfig, blockedDomains: ReadonlySet<
   throw new Error(`mailbox_domain_blocked:${lastBlockedDomain || "unknown"}`);
 }
 
+async function resolveMoeMailMailboxId(cfg: AppConfig, address: string, proxyUrl?: string): Promise<string | null> {
+  return await resolveMoeMailMailboxIdViaOpenApi({
+    baseUrl: cfg.moemailBaseUrl,
+    apiKey: cfg.moemailApiKey || "",
+    address,
+    httpJson,
+    proxyUrl,
+  });
+}
+
+async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: string, mailboxId: string): Promise<void> {
+  const envAccountId = Number.parseInt((process.env.TASK_LEDGER_ACCOUNT_ID || "").trim(), 10);
+  if (!Number.isInteger(envAccountId) || envAccountId < 1) {
+    return;
+  }
+  const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
+  const db = new AppDatabase(dbPath);
+  try {
+    db.updateAccountProofMailbox(envAccountId, {
+      provider: "moemail",
+      address,
+      mailboxId,
+    });
+  } finally {
+    db.close();
+  }
+}
+
+async function resolveMicrosoftProofMailboxSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
+  const address = cfg.microsoftProofMailboxAddress?.trim();
+  if (!address) {
+    throw new Error("microsoft_proof_mailbox_missing");
+  }
+  const provider = cfg.microsoftProofMailboxProvider || "moemail";
+  if (provider !== "moemail") {
+    throw new Error(`unsupported_microsoft_proof_mailbox_provider:${provider}`);
+  }
+  if (!cfg.moemailApiKey) {
+    throw new Error("moemail_api_key_missing");
+  }
+  let mailboxId = cfg.microsoftProofMailboxId?.trim() || "";
+  if (!mailboxId) {
+    mailboxId = (await resolveMoeMailMailboxId(cfg, address, proxyUrl)) || "";
+    if (!mailboxId) {
+      throw new Error(`moemail_mailbox_not_found:${address}`);
+    }
+    cfg.microsoftProofMailboxId = mailboxId;
+    cfg.microsoftProofMailboxProvider = "moemail";
+    try {
+      await persistResolvedMicrosoftProofMailbox(cfg, address, mailboxId);
+    } catch (error) {
+      log(`proof mailbox id cache skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return {
+    provider: "moemail",
+    baseUrl: normalizeMoeMailBaseUrl(cfg.moemailBaseUrl),
+    address,
+    accountId: mailboxId,
+    headers: buildMoeMailAuthHeaders(cfg.moemailApiKey),
+  };
+}
+
+async function waitForMicrosoftProofCode(
+  mailbox: MailboxSession,
+  timeoutMs: number,
+  pollMs: number,
+  proxyUrl?: string,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  let rateLimitHits = 0;
+  let activeProxyUrl = proxyUrl;
+  let directFallbackLogged = false;
+
+  while (Date.now() < deadline) {
+    try {
+      const response = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/api/emails/${encodeURIComponent(mailbox.accountId)}`, {
+        headers: mailbox.headers,
+        proxyUrl: activeProxyUrl,
+      });
+      const messages = Array.isArray(response.messages) ? response.messages : [];
+      for (const message of messages) {
+        const code = extractMicrosoftProofCodeFromPayload(message);
+        if (code) return code;
+      }
+      const fallbackCode = extractMicrosoftProofCodeFromPayload(response);
+      if (fallbackCode) return fallbackCode;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isMailboxRateLimitError(message)) {
+        if (activeProxyUrl && !directFallbackLogged) {
+          activeProxyUrl = undefined;
+          directFallbackLogged = true;
+          log("microsoft proof mailbox rate limited via proxy, switch to direct polling");
+          await delay(Math.max(1_200, pollMs));
+          continue;
+        }
+        rateLimitHits += 1;
+        const waitMs = Math.min(30_000, Math.max(4_000, pollMs * Math.min(rateLimitHits * 3, 12)));
+        log(`microsoft proof mailbox rate limited, backoff ${waitMs}ms (hit=${rateLimitHits})`);
+        await delay(waitMs);
+        continue;
+      }
+      if (!isMailboxTransientError(message)) {
+        throw error;
+      }
+      if (activeProxyUrl && !directFallbackLogged) {
+        activeProxyUrl = undefined;
+        directFallbackLogged = true;
+        log(`microsoft proof mailbox transient via proxy, switch to direct polling: ${message.split("\n")[0]}`);
+        await delay(Math.max(800, pollMs));
+        continue;
+      }
+      log(`microsoft proof mailbox transient, retry after ${Math.max(400, pollMs)}ms: ${message.split("\n")[0]}`);
+      await delay(Math.max(400, pollMs));
+      continue;
+    }
+    await delay(Math.max(250, pollMs));
+  }
+
+  return null;
+}
+
 async function waitForVerificationLink(
   mailbox: MailboxSession,
   timeoutMs: number,
@@ -3011,6 +3151,93 @@ async function waitForStableInputValue(
     await page.waitForTimeout(120);
   }
   return false;
+}
+
+async function markBestVisibleControl(page: any, selector: string, hintPatterns: RegExp[], label: string): Promise<string | null> {
+  const marker = `${label}-${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const matched = await page
+    .evaluate(
+      ({ selector: rawSelector, marker: rawMarker, hints }: { selector: string; marker: string; hints: string[] }) => {
+        const isVisible = (node: Element): node is HTMLElement => {
+          if (!(node instanceof HTMLElement)) return false;
+          const rect = node.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" && !node.hasAttribute("disabled");
+        };
+        const score = (node: HTMLElement): number => {
+          const labelText =
+            (node.getAttribute("aria-label") || "") +
+            " " +
+            (node.getAttribute("placeholder") || "") +
+            " " +
+            (node.getAttribute("name") || "") +
+            " " +
+            (node.getAttribute("id") || "") +
+            " " +
+            (node.textContent || "");
+          let value = 0;
+          if (node instanceof HTMLInputElement) {
+            const type = (node.type || "").toLowerCase();
+            if (type === "email") value += 14;
+            if (type === "text" || type === "tel" || !type) value += 6;
+            if (type === "number") value += 4;
+          }
+          for (const hint of hints) {
+            try {
+              if (new RegExp(hint, "i").test(labelText)) value += 25;
+            } catch {
+              // ignore invalid hint source
+            }
+          }
+          return value;
+        };
+        const nodes = Array.from(document.querySelectorAll(rawSelector)).filter(isVisible);
+        let best: HTMLElement | null = null;
+        let bestScore = Number.NEGATIVE_INFINITY;
+        for (const node of nodes) {
+          const nextScore = score(node);
+          if (best && nextScore < bestScore) continue;
+          best = node;
+          bestScore = nextScore;
+        }
+        if (!best) return false;
+        for (const node of Array.from(document.querySelectorAll("[data-codex-visible-control]"))) {
+          node.removeAttribute("data-codex-visible-control");
+        }
+        best.setAttribute("data-codex-visible-control", rawMarker);
+        return true;
+      },
+      { selector, marker, hints: hintPatterns.map((pattern) => pattern.source) },
+    )
+    .catch(() => false);
+  return matched ? `[data-codex-visible-control="${marker}"]` : null;
+}
+
+async function ensureDirectInputValue(page: any, selector: string, value: string, label: string): Promise<void> {
+  await page.waitForSelector(selector, { timeout: 30_000 });
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    await page.locator(selector).first().evaluate(
+      (node: HTMLInputElement | HTMLTextAreaElement, nextValue: string) => {
+        node.focus();
+        const proto =
+          node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+        descriptor?.set?.call(node, nextValue);
+        node.dispatchEvent(new Event("input", { bubbles: true }));
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+        node.dispatchEvent(new Event("blur", { bubbles: true }));
+      },
+      value,
+    );
+    const stable = await waitForStableInputValue(page, selector, value, 450, 3_500);
+    if (stable) {
+      return;
+    }
+    log(`${label} direct input value did not persist (attempt=${attempt})`);
+    await page.waitForTimeout(180 * attempt);
+  }
+  throw new Error(`${label}_input_not_persisted`);
 }
 
 async function clearAuthFieldValidationState(page: any, selector: string): Promise<void> {
@@ -3548,31 +3775,166 @@ async function handleMicrosoftConsentPrompt(page: any): Promise<boolean> {
   return true;
 }
 
-async function completeMicrosoftLogin(page: any, cfg: AppConfig): Promise<void> {
+async function handleMicrosoftProofMethodPrompt(page: any): Promise<boolean> {
+  if (!(await pageContainsAnyText(page, [/what security info would you like to add/i, /你想添加哪些安全信息/i]))) {
+    return false;
+  }
+  const selected = await clickMatchingAction(
+    page,
+    [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /电子邮件地址/i],
+    'button, [role="button"], [role="option"], option',
+  );
+  if (selected) {
+    log("login flow: selected Microsoft proof backup email method");
+  }
+  return selected;
+}
+
+async function handleMicrosoftProofEmailPrompt(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl: string | undefined,
+  proofState: { mailbox: MailboxSession | null },
+): Promise<boolean> {
+  if (
+    !(await pageContainsAnyText(page, [
+      /protect your account/i,
+      /let.?s protect your account/i,
+      /让我们来保护你的帐户/i,
+      /backup email/i,
+      /alternate email/i,
+      /备用电子邮件地址/i,
+      /电子邮件地址/i,
+    ]))
+  ) {
+    return false;
+  }
+  const selector = await markBestVisibleControl(
+    page,
+    'input[type="email"], input[type="text"], input:not([type])',
+    [/backup.*email/i, /alternate.*email/i, /备用电子邮件/i, /电子邮件地址/i, /example\.com/i, /email/i],
+    "microsoft-proof-email",
+  );
+  if (!selector) {
+    return false;
+  }
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
+  proofState.mailbox = proofMailbox;
+  await clearAuthFieldValidationState(page, selector);
+  await ensureDirectInputValue(page, selector, proofMailbox.address, "microsoft_proof_mailbox");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^continue$/i, /^send code$/i, /^verify$/i, /^下一步$/i, /^继续$/i, /^发送代码$/i, /^验证$/i],
+      'input[type="submit"], button[type="submit"], button',
+    )) || false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  log(`login flow: submitted Microsoft proof mailbox ${proofMailbox.address}`);
+  return true;
+}
+
+async function handleMicrosoftProofCodePrompt(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl: string | undefined,
+  proofState: { mailbox: MailboxSession | null },
+): Promise<boolean> {
+  if (
+    !(await pageContainsAnyText(page, [
+      /security code/i,
+      /enter the code/i,
+      /verify your identity/i,
+      /安全代码/i,
+      /输入代码/i,
+      /验证码/i,
+      /验证你的身份/i,
+    ]))
+  ) {
+    return false;
+  }
+  const selector = await markBestVisibleControl(
+    page,
+    'input[type="tel"], input[type="number"], input[inputmode="numeric"], input[type="text"], input:not([type])',
+    [/code/i, /security/i, /验证码/i, /安全代码/i, /verify/i],
+    "microsoft-proof-code",
+  );
+  if (!selector) {
+    return false;
+  }
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
+  proofState.mailbox = proofMailbox;
+  await clearAuthFieldValidationState(page, selector);
+  const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl);
+  if (!code) {
+    throw new Error("microsoft_proof_code_timeout");
+  }
+  log(`login flow: received Microsoft proof code (${code.length} digits)`);
+  await ensureDirectInputValue(page, selector, code, "microsoft_proof_code");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^continue$/i, /^verify$/i, /^submit$/i, /^下一步$/i, /^继续$/i, /^验证$/i, /^提交$/i],
+      'input[type="submit"], button[type="submit"], button',
+    )) || false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  await page.waitForTimeout(1_500);
+  const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (formErrors.some((text) => /invalid|incorrect|wrong|不正确|无效/i.test(text))) {
+    throw new Error(`microsoft_proof_submit_failed:${formErrors.join(" | ")}`);
+  }
+  log("login flow: submitted Microsoft proof code");
+  return true;
+}
+
+async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: string): Promise<void> {
   const email = cfg.microsoftAccountEmail;
   const password = cfg.microsoftAccountPassword;
   if (!email || !password) {
     throw new Error("microsoft_account_credentials_missing");
   }
-
-  for (let step = 1; step <= 24; step += 1) {
-    const currentUrl = page.url();
-    if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+  const proofState = { mailbox: null as MailboxSession | null };
+  const dialogHandler = async (dialog: any) => {
+    const message = `${String(dialog?.message?.() || "")} ${String(dialog?.defaultValue?.() || "")}`.trim();
+    if (/must provide prefix|break into debugger/i.test(message)) {
+      log(`login flow: dismissed Microsoft proof dialog: ${message}`);
+      await dialog.dismiss().catch(() => dialog.accept().catch(() => {}));
       return;
     }
+    await dialog.dismiss().catch(() => {});
+  };
 
-    if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
-      if (await clickMicrosoftProviderEntry(page)) continue;
+  page.on("dialog", dialogHandler);
+  try {
+    for (let step = 1; step <= 40; step += 1) {
+      const currentUrl = page.url();
+      if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+        return;
+      }
+
+      if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+        if (await clickMicrosoftProviderEntry(page)) continue;
+      }
+
+      if (await handleMicrosoftAccountPicker(page, email)) continue;
+      if (await handleMicrosoftEmailPrompt(page, email)) continue;
+      if (await handleMicrosoftPasswordPrompt(page, password)) continue;
+      if (await handleMicrosoftPasskeyInterrupt(page)) continue;
+      if (await handleMicrosoftProofMethodPrompt(page)) continue;
+      if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState)) continue;
+      if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
+      if (await handleMicrosoftKeepSignedInPrompt(page, cfg.microsoftKeepSignedIn)) continue;
+      if (await handleMicrosoftConsentPrompt(page)) continue;
+
+      await page.waitForTimeout(1_000);
     }
-
-    if (await handleMicrosoftAccountPicker(page, email)) continue;
-    if (await handleMicrosoftEmailPrompt(page, email)) continue;
-    if (await handleMicrosoftPasswordPrompt(page, password)) continue;
-    if (await handleMicrosoftPasskeyInterrupt(page)) continue;
-    if (await handleMicrosoftKeepSignedInPrompt(page, cfg.microsoftKeepSignedIn)) continue;
-    if (await handleMicrosoftConsentPrompt(page)) continue;
-
-    await page.waitForTimeout(1_000);
+  } finally {
+    page.off("dialog", dialogHandler);
   }
 
   throw new Error(`microsoft login flow did not reach home, last_url=${page.url()}`);
@@ -5846,7 +6208,7 @@ async function loginAndReachHome(
     await page.waitForTimeout(900);
 
     if (loginProvider === "microsoft") {
-      await completeMicrosoftLogin(page, cfg);
+      await completeMicrosoftLogin(page, cfg, proxyUrl);
     } else {
       if (/\/u\/login\/identifier/i.test(page.url())) {
         await solveCaptchaForm(page, solver, "login", email, cfg.maxCaptchaRounds);
@@ -6130,6 +6492,7 @@ function loadConfig(): AppConfig {
   const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "gptmail";
   const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
+  const moemailBaseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
   const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
   if (envMailProvider === "vmail" && !vmailBaseUrl) {
     throw new Error("Missing env: VMAIL_BASE_URL (required when MAIL_PROVIDER=vmail)");
@@ -6148,6 +6511,23 @@ function loadConfig(): AppConfig {
   const existingPassword = (process.env.EXISTING_PASSWORD || "").trim() || undefined;
   const microsoftAccountEmail = (process.env.MICROSOFT_ACCOUNT_EMAIL || "").trim() || undefined;
   const microsoftAccountPassword = (process.env.MICROSOFT_ACCOUNT_PASSWORD || "").trim() || undefined;
+  const rawMicrosoftProofMailboxProvider = (process.env.MICROSOFT_PROOF_MAILBOX_PROVIDER || "").trim().toLowerCase();
+  const microsoftProofMailboxProvider = rawMicrosoftProofMailboxProvider
+    ? rawMicrosoftProofMailboxProvider === "moemail"
+      ? "moemail"
+      : null
+    : undefined;
+  const microsoftProofMailboxAddress = (process.env.MICROSOFT_PROOF_MAILBOX_ADDRESS || "").trim() || undefined;
+  const microsoftProofMailboxId = (process.env.MICROSOFT_PROOF_MAILBOX_ID || "").trim() || undefined;
+  if (rawMicrosoftProofMailboxProvider && !microsoftProofMailboxProvider) {
+    throw new Error(`Unsupported env MICROSOFT_PROOF_MAILBOX_PROVIDER: ${rawMicrosoftProofMailboxProvider}`);
+  }
+  if (microsoftProofMailboxProvider && !microsoftProofMailboxAddress) {
+    throw new Error("MICROSOFT_PROOF_MAILBOX_PROVIDER requires MICROSOFT_PROOF_MAILBOX_ADDRESS");
+  }
+  if (microsoftProofMailboxId && !microsoftProofMailboxAddress) {
+    throw new Error("MICROSOFT_PROOF_MAILBOX_ID requires MICROSOFT_PROOF_MAILBOX_ADDRESS");
+  }
   if ((existingEmail && !existingPassword) || (!existingEmail && existingPassword)) {
     throw new Error("EXISTING_EMAIL and EXISTING_PASSWORD must be configured together");
   }
@@ -6182,6 +6562,8 @@ function loadConfig(): AppConfig {
     vmailBaseUrl,
     vmailApiKey: (process.env.VMAIL_API_KEY || "").trim() || undefined,
     vmailDomain: (process.env.VMAIL_DOMAIN || "").trim() || undefined,
+    moemailBaseUrl,
+    moemailApiKey: (process.env.MOEMAIL_API_KEY || "").trim() || undefined,
     duckmailBaseUrl,
     duckmailApiKey: (process.env.DUCKMAIL_API_KEY || "").trim() || undefined,
     duckmailDomain: (process.env.DUCKMAIL_DOMAIN || "").trim() || undefined,
@@ -6192,6 +6574,9 @@ function loadConfig(): AppConfig {
     existingPassword,
     microsoftAccountEmail,
     microsoftAccountPassword,
+    microsoftProofMailboxProvider: microsoftProofMailboxAddress ? (microsoftProofMailboxProvider || "moemail") : undefined,
+    microsoftProofMailboxAddress,
+    microsoftProofMailboxId,
     microsoftKeepSignedIn: toBool(process.env.MICROSOFT_KEEP_SIGNED_IN, true),
     mihomoSubscriptionUrl: mustEnv("MIHOMO_SUBSCRIPTION_URL"),
     mihomoGroupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
