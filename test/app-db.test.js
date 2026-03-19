@@ -104,9 +104,9 @@ describe("AppDatabase account import", () => {
       { email: "second@outlook.com", password: "second-pass" },
     ]);
     const [firstId, secondId] = imported.affectedIds;
-    const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key");
+    const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key", "1.1.1.1");
     await new Promise((resolve) => setTimeout(resolve, 5));
-    appDb.recordApiKey(secondId, "tvly-shared-key");
+    appDb.recordApiKey(secondId, "tvly-shared-key", "2.2.2.2");
 
     const first = appDb.getAccount(firstId);
     const second = appDb.getAccount(secondId);
@@ -126,22 +126,24 @@ describe("AppDatabase account import", () => {
     expect(keys.rows[0]).toMatchObject({
       accountId: secondId,
       microsoftEmail: "second@outlook.com",
+      extractedIp: "2.2.2.2",
     });
     expect(new Date(keys.rows[0].extractedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.extractedAt).getTime());
 
     appDb.close();
   });
 
-  test("recording the same api key for the same account preserves the original extracted time", async () => {
+  test("recording the same api key for the same account preserves the original extracted time and ip", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "same@outlook.com", password: "same-pass" }]);
     const accountId = imported.affectedIds[0];
-    const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+    const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key", "3.3.3.3");
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const secondKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+    const secondKey = appDb.recordApiKey(accountId, "tvly-stable-key", "4.4.4.4");
 
     expect(secondKey.accountId).toBe(accountId);
     expect(secondKey.extractedAt).toBe(firstKey.extractedAt);
+    expect(secondKey.extractedIp).toBe("3.3.3.3");
     expect(new Date(secondKey.lastVerifiedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.lastVerifiedAt).getTime());
 
     appDb.close();
@@ -609,6 +611,25 @@ describe("api key queries", () => {
       active: 2,
       revoked: 1,
     });
+
+    appDb.close();
+  });
+
+  test("returns selected api keys for export in request order", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "export-a@outlook.com", password: "pass-a" },
+      { email: "export-b@outlook.com", password: "pass-b" },
+      { email: "export-c@outlook.com", password: "pass-c" },
+    ]);
+
+    const keyA = appDb.recordApiKey(imported.affectedIds[0], "tvly-export-a", "11.11.11.11");
+    const keyB = appDb.recordApiKey(imported.affectedIds[1], "tvly-export-b", null);
+    const keyC = appDb.recordApiKey(imported.affectedIds[2], "tvly-export-c", "33.33.33.33");
+    const exported = appDb.listApiKeysForExport([keyC.id, keyA.id, keyB.id]);
+
+    expect(exported.map((row) => row.id)).toEqual([keyC.id, keyA.id, keyB.id]);
+    expect(exported.map((row) => row.extractedIp)).toEqual(["33.33.33.33", "11.11.11.11", null]);
 
     appDb.close();
   });

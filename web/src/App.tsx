@@ -5,14 +5,15 @@ import { AppShell } from "@/components/app-shell";
 import { DashboardView } from "@/components/dashboard-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
+import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import type {
   AccountImportPayload,
   AccountImportPreviewPayload,
   AccountQuery,
   AccountsPayload,
+  ApiKeyExportPayload,
   ApiKeysPayload,
   ApiKeyQuery,
-  ApiKeyRecord,
   EventRecord,
   JobDraft,
   JobSnapshot,
@@ -89,6 +90,7 @@ export function App() {
   const [importPreview, setImportPreview] = useState<AccountImportPreviewPayload | null>(null);
   const [importPreviewOpen, setImportPreviewOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
+  const [selectedApiKeyIds, setSelectedApiKeyIds] = useState<number[]>([]);
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
@@ -98,6 +100,9 @@ export function App() {
   const [importBusy, setImportBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
+  const [apiKeyExportOpen, setApiKeyExportOpen] = useState(false);
+  const [apiKeyExportContent, setApiKeyExportContent] = useState("");
+  const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
 
@@ -396,6 +401,64 @@ export function App() {
     }
   };
 
+  const handleToggleApiKeySelection = (apiKeyId: number, checked: boolean) => {
+    setSelectedApiKeyIds((current) => (checked ? mergeIds(current, [apiKeyId]) : current.filter((id) => id !== apiKeyId)));
+  };
+
+  const handleToggleApiKeyPageSelection = (checked: boolean) => {
+    const currentPageApiKeyIds = apiKeys.rows.map((row) => row.id);
+    if (checked) {
+      setSelectedApiKeyIds((current) => mergeIds(current, currentPageApiKeyIds));
+      return;
+    }
+    setSelectedApiKeyIds((current) => current.filter((id) => !currentPageApiKeyIds.includes(id)));
+  };
+
+  const handleOpenApiKeyExport = async () => {
+    if (selectedApiKeyIds.length === 0) return;
+    try {
+      setApiKeyExportBusy(true);
+      setError(null);
+      const payload = await api<ApiKeyExportPayload>("/api/api-keys/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedApiKeyIds }),
+      });
+      if (payload.items.length === 0) {
+        setError("选中的 API key 已不存在");
+        return;
+      }
+      setApiKeyExportContent(payload.content);
+      setApiKeyExportOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApiKeyExportBusy(false);
+    }
+  };
+
+  const handleCopyApiKeyExport = async () => {
+    if (!apiKeyExportContent) return;
+    try {
+      setError(null);
+      await navigator.clipboard.writeText(apiKeyExportContent);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleSaveApiKeyExport = () => {
+    if (!apiKeyExportContent) return;
+    const blob = new Blob([apiKeyExportContent], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = buildApiKeyExportFilename();
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
+  };
+
   return (
     <AppShell activePage={activePage} error={error} onNavigate={(page) => navigate(page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`)}>
       {activePage === "dashboard" ? (
@@ -446,7 +509,18 @@ export function App() {
         <ApiKeysView
           apiKeys={apiKeys}
           query={apiKeyQuery}
+          selectedIds={selectedApiKeyIds}
+          exportOpen={apiKeyExportOpen}
+          exportContent={apiKeyExportContent}
+          exportBusy={apiKeyExportBusy}
           onQueryChange={setApiKeyQuery}
+          onToggleSelection={handleToggleApiKeySelection}
+          onTogglePageSelection={handleToggleApiKeyPageSelection}
+          onClearSelection={() => setSelectedApiKeyIds([])}
+          onOpenExport={handleOpenApiKeyExport}
+          onExportOpenChange={setApiKeyExportOpen}
+          onCopyExport={handleCopyApiKeyExport}
+          onSaveExport={handleSaveApiKeyExport}
         />
       ) : null}
 

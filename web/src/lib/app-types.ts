@@ -99,6 +99,17 @@ export type ApiKeysPayload = {
   };
 };
 
+export type ApiKeyExportItem = {
+  id: number;
+  apiKey: string;
+  extractedIp: string | null;
+};
+
+export type ApiKeyExportPayload = {
+  items: ApiKeyExportItem[];
+  content: string;
+};
+
 export type AttemptRecord = {
   id: number;
   accountId: number;

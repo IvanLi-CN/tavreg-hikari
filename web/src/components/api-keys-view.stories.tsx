@@ -23,7 +23,18 @@ export const Default: Story = {
   args: {
     apiKeys: sampleApiKeys,
     query: { q: "", status: "", page: 1, pageSize: 20 },
+    selectedIds: [],
+    exportOpen: false,
+    exportContent: "",
+    exportBusy: false,
     onQueryChange: fn(),
+    onToggleSelection: fn(),
+    onTogglePageSelection: fn(),
+    onClearSelection: fn(),
+    onOpenExport: fn(),
+    onExportOpenChange: fn(),
+    onCopyExport: fn(),
+    onSaveExport: fn(),
   },
 };
 
@@ -31,6 +42,36 @@ export const Empty: Story = {
   args: {
     apiKeys: { rows: [], total: 0, page: 1, pageSize: 20, summary: { active: 0, revoked: 0 } },
     query: { q: "", status: "", page: 1, pageSize: 20 },
+    selectedIds: [],
+    exportOpen: false,
+    exportContent: "",
+    exportBusy: false,
     onQueryChange: fn(),
+    onToggleSelection: fn(),
+    onTogglePageSelection: fn(),
+    onClearSelection: fn(),
+    onOpenExport: fn(),
+    onExportOpenChange: fn(),
+    onCopyExport: fn(),
+    onSaveExport: fn(),
+  },
+};
+
+export const ExportDialog: Story = {
+  args: {
+    apiKeys: sampleApiKeys,
+    query: { q: "", status: "", page: 1, pageSize: 20 },
+    selectedIds: [1, 2],
+    exportOpen: true,
+    exportContent: "tvly-real-key-a | 1.2.3.4\ntvly-real-key-b | ",
+    exportBusy: false,
+    onQueryChange: fn(),
+    onToggleSelection: fn(),
+    onTogglePageSelection: fn(),
+    onClearSelection: fn(),
+    onOpenExport: fn(),
+    onExportOpenChange: fn(),
+    onCopyExport: fn(),
+    onSaveExport: fn(),
   },
 };

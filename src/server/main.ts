@@ -10,6 +10,7 @@ import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
+import { buildApiKeyExportContent } from "./api-key-export.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -392,6 +393,25 @@ async function main(): Promise<void> {
             apiKeyMasked: maskSecret(row.apiKey),
             apiKey: undefined,
           })),
+        });
+      }
+
+      if (pathname === "/api/api-keys/export" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: number[] } | null;
+        const ids = Array.isArray(body?.ids)
+          ? Array.from(new Set(body.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+          : [];
+        if (ids.length === 0) {
+          return badRequest("api key ids are required");
+        }
+        const items = db.listApiKeysForExport(ids).map((row) => ({
+          id: row.id,
+          apiKey: row.apiKey,
+          extractedIp: row.extractedIp,
+        }));
+        return json({
+          items,
+          content: buildApiKeyExportContent(items),
         });
       }
 
