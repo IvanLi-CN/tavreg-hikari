@@ -36,6 +36,23 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
   return next;
 }
 
+function resolveWorkerRuntime(): { command: string; bootstrapArgs: string[] } {
+  if (process.versions.bun) {
+    return {
+      command: process.execPath,
+      bootstrapArgs: ["run", "src/main.ts"],
+    };
+  }
+  return {
+    command: process.execPath || "node",
+    bootstrapArgs: ["--import", "tsx", "src/main.ts"],
+  };
+}
+
+function isTerminalJobStatus(status: JobRecord["status"]): boolean {
+  return status === "completed" || status === "failed";
+}
+
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
   account: Pick<MicrosoftAccountRecord, "id" | "microsoftEmail" | "passwordPlaintext">;
@@ -45,13 +62,15 @@ export function buildAttemptRuntimeSpec(input: {
   reservedPorts: { apiPort: number; mixedPort: number };
   selectedProxyNode?: string | null;
   baseEnv?: NodeJS.ProcessEnv;
-}): { args: string[]; env: NodeJS.ProcessEnv } {
-  const args = ["--import", "tsx", "src/main.ts", "--mode", input.job.runMode, "--parallel", "1", "--need", "1"];
+}): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
+  const runtime = resolveWorkerRuntime();
+  const args = [...runtime.bootstrapArgs, "--mode", input.job.runMode, "--parallel", "1", "--need", "1"];
   if (input.selectedProxyNode?.trim()) {
     args.push("--proxy-node", input.selectedProxyNode.trim());
   }
   const inheritedEnv = buildAttemptBaseEnv(input.baseEnv);
   return {
+    command: runtime.command,
     args,
     env: {
       ...inheritedEnv,
@@ -221,6 +240,9 @@ export class JobScheduler {
   private requireCurrentJob(): JobRecord {
     const job = this.db.getCurrentJob();
     if (!job) throw new Error("no current job");
+    if (isTerminalJobStatus(job.status)) {
+      throw new Error(`current job is already ${job.status}`);
+    }
     return job;
   }
 
@@ -264,10 +286,17 @@ export class JobScheduler {
         if (!account) break;
         const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${job.id}`, `attempt-${Date.now()}-${account.id}`);
         const attempt = this.db.createAttempt(job.id, account.id, attemptOutputDir);
-        await this.spawnAttempt(job, account, attempt, attemptOutputDir);
-        this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
-        this.emit("account.updated", { account: this.db.getAccount(account.id) });
-        this.emit("job.updated", { job: this.db.getJob(job.id) });
+        try {
+          await this.spawnAttempt(job, account, attempt, attemptOutputDir);
+          this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
+          this.emit("account.updated", { account: this.db.getAccount(account.id) });
+          this.emit("job.updated", { job: this.db.getJob(job.id) });
+        } catch (error) {
+          this.failAttempt(job.id, attempt.id, account.id, {
+            errorCode: "launch_setup_failed",
+            errorMessage: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
 
       const refreshed = this.db.getJob(jobId);
@@ -293,61 +322,87 @@ export class JobScheduler {
   }
 
   private async spawnAttempt(job: JobRecord, account: MicrosoftAccountRecord, attempt: JobAttemptRecord, outputDir: string): Promise<void> {
-    await mkdir(outputDir, { recursive: true });
-    const settings = this.getSettings();
-    const reservedPorts = await reserveMihomoPorts();
-    const selectedProxyNode = this.db.getSelectedProxyName();
-    const runtimeSpec = buildAttemptRuntimeSpec({
-      job,
-      account,
-      outputDir,
-      sharedLedgerPath: this.sharedLedgerPath,
-      settings,
-      reservedPorts,
-      selectedProxyNode,
-    });
-    const child = spawn("node", runtimeSpec.args, {
-      cwd: this.repoRoot,
-      env: runtimeSpec.env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    child.stdin.end();
-    const active: ActiveAttempt = {
-      child,
-      attempt,
-      account,
-      outputDir,
-      reservedPorts,
-      tail: [],
-    };
-    this.activeAttempts.set(attempt.id, active);
-    this.emit("toast", { level: "info", message: `attempt #${attempt.id} started for ${account.microsoftEmail}` });
+    let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
+    try {
+      await mkdir(outputDir, { recursive: true });
+      const settings = this.getSettings();
+      reservedPorts = await reserveMihomoPorts();
+      const selectedProxyNode = this.db.getSelectedProxyName();
+      const runtimeSpec = buildAttemptRuntimeSpec({
+        job,
+        account,
+        outputDir,
+        sharedLedgerPath: this.sharedLedgerPath,
+        settings,
+        reservedPorts,
+        selectedProxyNode,
+      });
+      const child = spawn(runtimeSpec.command, runtimeSpec.args, {
+        cwd: this.repoRoot,
+        env: runtimeSpec.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+      const active: ActiveAttempt = {
+        child,
+        attempt,
+        account,
+        outputDir,
+        reservedPorts,
+        tail: [],
+      };
+      const activeReservedPorts = reservedPorts;
+      this.activeAttempts.set(attempt.id, active);
+      this.emit("toast", { level: "info", message: `attempt #${attempt.id} started for ${account.microsoftEmail}` });
 
-    const pushTail = (chunk: Buffer): void => {
-      const lines = chunk
-        .toString("utf8")
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      if (lines.length === 0) return;
-      active.tail.push(...lines);
-      if (active.tail.length > 40) {
-        active.tail.splice(0, active.tail.length - 40);
-      }
-    };
+      const pushTail = (chunk: Buffer): void => {
+        const lines = chunk
+          .toString("utf8")
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        if (lines.length === 0) return;
+        active.tail.push(...lines);
+        if (active.tail.length > 40) {
+          active.tail.splice(0, active.tail.length - 40);
+        }
+      };
 
-    child.stdout.on("data", pushTail);
-    child.stderr.on("data", pushTail);
+      child.stdout.on("data", pushTail);
+      child.stderr.on("data", pushTail);
 
-    child.once("close", async (code, signal) => {
-      try {
-        await this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal);
-      } finally {
-        this.activeAttempts.delete(attempt.id);
+      let settled = false;
+      const finalize = async (runner: () => Promise<void> | void) => {
+        if (settled) return;
+        settled = true;
+        try {
+          await runner();
+        } finally {
+          this.activeAttempts.delete(attempt.id);
+          RESERVED_LOCAL_PORTS.delete(activeReservedPorts.apiPort);
+          RESERVED_LOCAL_PORTS.delete(activeReservedPorts.mixedPort);
+        }
+      };
+
+      child.once("error", (error) => {
+        void finalize(() =>
+          this.failAttempt(job.id, attempt.id, account.id, {
+            errorCode: "spawn_error",
+            errorMessage: error.message || "failed to start worker process",
+          }),
+        );
+      });
+
+      child.once("close", (code, signal) => {
+        void finalize(() => this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal));
+      });
+    } catch (error) {
+      if (reservedPorts) {
         RESERVED_LOCAL_PORTS.delete(reservedPorts.apiPort);
         RESERVED_LOCAL_PORTS.delete(reservedPorts.mixedPort);
       }
-    });
+      throw error;
+    }
   }
 
   private async handleAttemptExit(
@@ -403,6 +458,19 @@ export class JobScheduler {
     this.emit("account.updated", { account: this.db.getAccount(accountId) });
     this.emit("job.updated", { job });
     this.emit("toast", { level: "error", message: `attempt #${attempt.id} failed for account #${accountId}: ${message}` });
+  }
+
+  private failAttempt(
+    jobId: number,
+    attemptId: number,
+    accountId: number,
+    input: { errorCode: string; errorMessage: string },
+  ): void {
+    const { job, attempt } = this.db.completeAttemptFailure(jobId, attemptId, accountId, input, null);
+    this.emit("attempt.updated", { attempt });
+    this.emit("account.updated", { account: this.db.getAccount(accountId) });
+    this.emit("job.updated", { job });
+    this.emit("toast", { level: "error", message: `attempt #${attempt.id} failed for account #${accountId}: ${input.errorMessage}` });
   }
 
   private emit(type: ServerEvent["type"], payload: Record<string, unknown>): void {

@@ -224,6 +224,102 @@ describe("scheduler helpers", () => {
     await scheduler.shutdown();
     appDb.close();
   });
+
+  test("rejects control actions for terminal jobs", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => ({
+        subscriptionUrl: "https://example.com/sub.yaml",
+        groupName: "CODEX_AUTO",
+        routeGroupName: "CODEX_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 1000,
+        maxLatencyMs: 1000,
+        apiPort: 39090,
+        mixedPort: 49090,
+        serverHost: "127.0.0.1",
+        serverPort: 3717,
+        defaultRunMode: "headed",
+        defaultNeed: 1,
+        defaultParallel: 1,
+        defaultMaxAttempts: 1,
+      }),
+      () => undefined,
+    );
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    appDb.completeJob(job.id, true);
+
+    expect(() => scheduler.pauseCurrentJob()).toThrow("current job is already completed");
+    expect(() => scheduler.resumeCurrentJob()).toThrow("current job is already completed");
+    expect(() => scheduler.updateCurrentJobLimits({ parallel: 2 })).toThrow("current job is already completed");
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("marks attempts failed when launch setup throws before spawn", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "broken@outlook.com", password: "broken-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const events = [];
+    const scheduler = new JobScheduler(
+      appDb,
+      "/dev/null",
+      dbPath,
+      () => ({
+        subscriptionUrl: "https://example.com/sub.yaml",
+        groupName: "CODEX_AUTO",
+        routeGroupName: "CODEX_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 1000,
+        maxLatencyMs: 1000,
+        apiPort: 39090,
+        mixedPort: 49090,
+        serverHost: "127.0.0.1",
+        serverPort: 3717,
+        defaultRunMode: "headed",
+        defaultNeed: 1,
+        defaultParallel: 1,
+        defaultMaxAttempts: 1,
+      }),
+      (event) => events.push(event),
+    );
+
+    const job = await scheduler.startJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const current = appDb.getJob(job.id);
+      if (current?.status === "failed") break;
+    }
+
+    const currentJob = appDb.getJob(job.id);
+    const attempts = appDb.listAttempts(job.id, false);
+    const account = appDb.getAccount(accountId);
+
+    expect(currentJob).toMatchObject({
+      status: "failed",
+      failureCount: 1,
+      lastError: "eligible accounts exhausted or max attempts reached",
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]).toMatchObject({
+      status: "failed",
+      errorCode: "launch_setup_failed",
+    });
+    expect(account).toMatchObject({
+      leaseJobId: null,
+      lastResultStatus: "failed",
+    });
+    expect(events.some((event) => event.type === "attempt.updated")).toBe(true);
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
 });
 
 describe("proxy aggregation", () => {
@@ -443,10 +539,8 @@ describe("scheduler runtime spec", () => {
       },
     });
 
-    expect(runtime.args).toEqual([
-      "--import",
-      "tsx",
-      "src/main.ts",
+    expect(runtime.command).toBe(process.execPath);
+    expect(runtime.args.slice(-8)).toEqual([
       "--mode",
       "headed",
       "--parallel",
@@ -456,6 +550,11 @@ describe("scheduler runtime spec", () => {
       "--proxy-node",
       "Tokyo-01",
     ]);
+    if (process.versions.bun) {
+      expect(runtime.args.slice(0, 2)).toEqual(["run", "src/main.ts"]);
+    } else {
+      expect(runtime.args.slice(0, 3)).toEqual(["--import", "tsx", "src/main.ts"]);
+    }
     expect(runtime.env).toMatchObject({
       MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
       MIHOMO_GROUP_NAME: "WEB_AUTO",
