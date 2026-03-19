@@ -149,6 +149,21 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("recording a legacy api key backfills missing extracted ip for the same account", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const firstKey = appDb.recordApiKey(accountId, "tvly-legacy-key");
+    appDb.db.query("UPDATE api_keys SET extracted_ip = NULL WHERE id = ?").run(firstKey.id);
+
+    const refreshed = appDb.recordApiKey(accountId, "tvly-legacy-key", "5.5.5.5");
+
+    expect(refreshed.extractedAt).toBe(firstKey.extractedAt);
+    expect(refreshed.extractedIp).toBe("5.5.5.5");
+
+    appDb.close();
+  });
+
   test("searches accounts by email, password, and group", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts(

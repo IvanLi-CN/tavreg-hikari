@@ -1009,7 +1009,7 @@ export class AppDatabase {
               ELSE excluded.extracted_at
             END,
             extracted_ip = CASE
-              WHEN api_keys.account_id IS excluded.account_id THEN api_keys.extracted_ip
+              WHEN api_keys.account_id IS excluded.account_id AND api_keys.extracted_ip IS NOT NULL THEN api_keys.extracted_ip
               ELSE excluded.extracted_ip
             END,
             last_verified_at = excluded.last_verified_at
