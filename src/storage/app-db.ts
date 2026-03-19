@@ -931,33 +931,58 @@ export class AppDatabase {
   recordApiKey(accountId: number, apiKey: string): ApiKeyRecord {
     const now = nowIso();
     const prefix = apiKey.slice(0, Math.min(apiKey.length, 12));
-    const row = this.db
-      .query(`
-        INSERT INTO api_keys (account_id, api_key, api_key_prefix, status, extracted_at, last_verified_at)
-        VALUES (?, ?, ?, 'active', ?, ?)
-        ON CONFLICT(api_key) DO UPDATE SET
-          account_id = excluded.account_id,
-          api_key_prefix = excluded.api_key_prefix,
-          status = excluded.status,
-          last_verified_at = excluded.last_verified_at
-        RETURNING *
-      `)
-      .get(accountId, apiKey, prefix, now, now) as Record<string, unknown>;
-    const keyId = Number(row.id);
-    this.db
-      .query(`
-        UPDATE microsoft_accounts
-        SET has_api_key = 1,
-            api_key_id = ?,
-            skip_reason = 'has_api_key',
-            last_result_status = 'skipped_has_key',
-            last_result_at = ?,
-            updated_at = ?,
-            lease_job_id = NULL,
-            lease_started_at = NULL
-        WHERE id = ?
-      `)
-      .run(keyId, now, now, accountId);
+    const previous = this.db.query("SELECT account_id FROM api_keys WHERE api_key = ? LIMIT 1").get(apiKey) as { account_id?: number | null } | null;
+    this.db.exec("BEGIN IMMEDIATE;");
+    let row: Record<string, unknown>;
+    try {
+      row = this.db
+        .query(`
+          INSERT INTO api_keys (account_id, api_key, api_key_prefix, status, extracted_at, last_verified_at)
+          VALUES (?, ?, ?, 'active', ?, ?)
+          ON CONFLICT(api_key) DO UPDATE SET
+            account_id = excluded.account_id,
+            api_key_prefix = excluded.api_key_prefix,
+            status = excluded.status,
+            last_verified_at = excluded.last_verified_at
+          RETURNING *
+        `)
+        .get(accountId, apiKey, prefix, now, now) as Record<string, unknown>;
+      const keyId = Number(row.id);
+      const previousAccountId = previous?.account_id == null ? null : Number(previous.account_id);
+      if (previousAccountId && previousAccountId !== accountId) {
+        this.db
+          .query(`
+            UPDATE microsoft_accounts
+            SET has_api_key = 0,
+                api_key_id = NULL,
+                skip_reason = NULL,
+                last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'ready' END,
+                updated_at = ?,
+                lease_job_id = NULL,
+                lease_started_at = NULL
+            WHERE id = ?
+          `)
+          .run(now, previousAccountId);
+      }
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET has_api_key = 1,
+              api_key_id = ?,
+              skip_reason = 'has_api_key',
+              last_result_status = 'skipped_has_key',
+              last_result_at = ?,
+              updated_at = ?,
+              lease_job_id = NULL,
+              lease_started_at = NULL
+          WHERE id = ?
+        `)
+        .run(keyId, now, now, accountId);
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
     return mapApiKeyRow({
       ...row,
       microsoft_email: this.getAccount(accountId)?.microsoftEmail || "",

@@ -138,7 +138,6 @@ bad-line
     expect(preview.effectiveEntries).toEqual([
       { email: "alpha@outlook.com", password: "password456" },
       { email: "beta@outlook.com", password: "password789" },
-      { email: "gamma@outlook.com", password: "password789" },
     ]);
   });
 });

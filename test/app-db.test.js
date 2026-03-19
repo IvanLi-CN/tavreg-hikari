@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
-import { buildAttemptRuntimeSpec } from "../src/server/scheduler.ts";
+import { JobScheduler, buildAttemptRuntimeSpec } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -97,6 +97,39 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("reassigning a duplicate api key clears the previous owner state", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "first@outlook.com", password: "first-pass" },
+      { email: "second@outlook.com", password: "second-pass" },
+    ]);
+    const [firstId, secondId] = imported.affectedIds;
+    appDb.recordApiKey(firstId, "tvly-shared-key");
+    appDb.recordApiKey(secondId, "tvly-shared-key");
+
+    const first = appDb.getAccount(firstId);
+    const second = appDb.getAccount(secondId);
+    const keys = appDb.listApiKeys({ page: 1, pageSize: 10 });
+
+    expect(first).toMatchObject({
+      hasApiKey: false,
+      apiKeyId: null,
+      skipReason: null,
+      lastResultStatus: "ready",
+    });
+    expect(second).toMatchObject({
+      hasApiKey: true,
+      skipReason: "has_api_key",
+    });
+    expect(keys.total).toBe(1);
+    expect(keys.rows[0]).toMatchObject({
+      accountId: secondId,
+      microsoftEmail: "second@outlook.com",
+    });
+
+    appDb.close();
+  });
+
   test("searches accounts by email, password, and group", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts(
@@ -152,6 +185,44 @@ describe("scheduler helpers", () => {
         launchedCount: 2,
       }),
     ).toBe(true);
+  });
+
+  test("rejects job starts before proxy subscription is configured", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => ({
+        subscriptionUrl: "",
+        groupName: "CODEX_AUTO",
+        routeGroupName: "CODEX_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 1000,
+        maxLatencyMs: 1000,
+        apiPort: 39090,
+        mixedPort: 49090,
+        serverHost: "127.0.0.1",
+        serverPort: 3717,
+        defaultRunMode: "headed",
+        defaultNeed: 1,
+        defaultParallel: 1,
+        defaultMaxAttempts: 1,
+      }),
+      () => undefined,
+    );
+
+    await expect(
+      scheduler.startJob({
+        runMode: "headed",
+        need: 1,
+        parallel: 1,
+        maxAttempts: 1,
+      }),
+    ).rejects.toThrow("configure a Mihomo subscription before starting a job");
+
+    await scheduler.shutdown();
+    appDb.close();
   });
 });
 

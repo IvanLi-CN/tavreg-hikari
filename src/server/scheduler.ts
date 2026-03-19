@@ -161,6 +161,10 @@ export class JobScheduler {
     parallel: number;
     maxAttempts: number;
   }): Promise<JobRecord> {
+    const settings = this.getSettings();
+    if (!settings.subscriptionUrl.trim()) {
+      throw new Error("configure a Mihomo subscription before starting a job");
+    }
     const job = this.db.createJob(params);
     this.emit("job.updated", { job });
     this.emit("toast", { level: "info", message: `job #${job.id} started` });

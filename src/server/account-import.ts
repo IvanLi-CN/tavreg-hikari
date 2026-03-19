@@ -210,8 +210,8 @@ export function buildImportPreview(entries: ParsedImportEntry[], invalidRows: In
       existingHasApiKey: existing.hasApiKey,
       groupName: existing.groupName,
     });
-    effectiveEntries.push({ email: entry.email, password: entry.password });
     if (shouldUpdatePassword) {
+      effectiveEntries.push({ email: entry.email, password: entry.password });
       summary.updatePassword += 1;
     } else {
       summary.keepExisting += 1;
