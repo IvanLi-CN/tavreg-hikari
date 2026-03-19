@@ -122,6 +122,30 @@
 - `docs/specs/README.md`
 - `docs/specs/2dkks-api-key-batch-export/SPEC.md`
 
+## Visual Evidence (PR)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: element
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  story_id_or_title: `Views/ApiKeysView/Linked Group`
+  state: `group filter applied`
+  evidence_note: 验证 API Keys 列表会继承微软账号分组，支持按分组筛选，并在表格中展示分组列。
+  image:
+  ![API Keys linked group filter](./assets/api-keys-linked-group.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: element
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  story_id_or_title: `Views/ApiKeysView/Export Dialog`
+  state: `export dialog open`
+  evidence_note: 验证导出弹窗会展示只读多行 `key | ip` 内容，并保留复制与保存成文件动作入口。
+  image:
+  ![API Keys export dialog](./assets/api-keys-export-dialog.png)
+
 ## 变更记录（Change log）
 
 - 2026-03-20: 初始化规格，定义 API Keys 批量导出、提取时 IP 与弹窗交互边界。
