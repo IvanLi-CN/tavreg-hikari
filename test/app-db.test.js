@@ -104,9 +104,9 @@ describe("AppDatabase account import", () => {
       { email: "second@outlook.com", password: "second-pass" },
     ]);
     const [firstId, secondId] = imported.affectedIds;
-    const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key");
+    const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key", "1.1.1.1");
     await new Promise((resolve) => setTimeout(resolve, 5));
-    appDb.recordApiKey(secondId, "tvly-shared-key");
+    appDb.recordApiKey(secondId, "tvly-shared-key", "2.2.2.2");
 
     const first = appDb.getAccount(firstId);
     const second = appDb.getAccount(secondId);
@@ -126,23 +126,40 @@ describe("AppDatabase account import", () => {
     expect(keys.rows[0]).toMatchObject({
       accountId: secondId,
       microsoftEmail: "second@outlook.com",
+      extractedIp: "2.2.2.2",
     });
     expect(new Date(keys.rows[0].extractedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.extractedAt).getTime());
 
     appDb.close();
   });
 
-  test("recording the same api key for the same account preserves the original extracted time", async () => {
+  test("recording the same api key for the same account preserves the original extracted time and ip", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "same@outlook.com", password: "same-pass" }]);
     const accountId = imported.affectedIds[0];
-    const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+    const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key", "3.3.3.3");
     await new Promise((resolve) => setTimeout(resolve, 5));
-    const secondKey = appDb.recordApiKey(accountId, "tvly-stable-key");
+    const secondKey = appDb.recordApiKey(accountId, "tvly-stable-key", "4.4.4.4");
 
     expect(secondKey.accountId).toBe(accountId);
     expect(secondKey.extractedAt).toBe(firstKey.extractedAt);
+    expect(secondKey.extractedIp).toBe("3.3.3.3");
     expect(new Date(secondKey.lastVerifiedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.lastVerifiedAt).getTime());
+
+    appDb.close();
+  });
+
+  test("recording a legacy api key backfills missing extracted ip for the same account", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const firstKey = appDb.recordApiKey(accountId, "tvly-legacy-key");
+    appDb.db.query("UPDATE api_keys SET extracted_ip = NULL WHERE id = ?").run(firstKey.id);
+
+    const refreshed = appDb.recordApiKey(accountId, "tvly-legacy-key", "5.5.5.5");
+
+    expect(refreshed.extractedAt).toBe(firstKey.extractedAt);
+    expect(refreshed.extractedIp).toBe("5.5.5.5");
 
     appDb.close();
   });
@@ -559,6 +576,46 @@ describe("settings updates", () => {
 });
 
 describe("api key queries", () => {
+  test("inherits account groups for api key listings and follows later group updates", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      [
+        { email: "grouped-a@outlook.com", password: "pass-a" },
+        { email: "grouped-b@outlook.com", password: "pass-b" },
+      ],
+      { groupName: "team-alpha" },
+    );
+    appDb.updateAccountsGroup([imported.affectedIds[1]], "team-bravo");
+
+    appDb.recordApiKey(imported.affectedIds[0], "tvly-group-alpha", "10.10.10.10");
+    appDb.recordApiKey(imported.affectedIds[1], "tvly-group-bravo", "20.20.20.20");
+
+    const alphaKeys = appDb.listApiKeys({ groupName: "team-alpha", page: 1, pageSize: 10 });
+    const bravoKeys = appDb.listApiKeys({ q: "team-bravo", page: 1, pageSize: 10 });
+
+    expect(alphaKeys.rows).toHaveLength(1);
+    expect(alphaKeys.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-a@outlook.com",
+      groupName: "team-alpha",
+    });
+    expect(bravoKeys.rows).toHaveLength(1);
+    expect(bravoKeys.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-b@outlook.com",
+      groupName: "team-bravo",
+    });
+
+    appDb.updateAccountsGroup([imported.affectedIds[0]], "team-charlie");
+
+    const refreshed = appDb.listApiKeys({ groupName: "team-charlie", page: 1, pageSize: 10 });
+    expect(refreshed.rows).toHaveLength(1);
+    expect(refreshed.rows[0]).toMatchObject({
+      microsoftEmail: "grouped-a@outlook.com",
+      groupName: "team-charlie",
+    });
+
+    appDb.close();
+  });
+
   test("supports pagination for api key listings", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
@@ -609,6 +666,45 @@ describe("api key queries", () => {
       active: 2,
       revoked: 1,
     });
+
+    appDb.close();
+  });
+
+  test("returns selected api keys for export in request order", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "export-a@outlook.com", password: "pass-a" },
+      { email: "export-b@outlook.com", password: "pass-b" },
+      { email: "export-c@outlook.com", password: "pass-c" },
+    ]);
+
+    const keyA = appDb.recordApiKey(imported.affectedIds[0], "tvly-export-a", "11.11.11.11");
+    const keyB = appDb.recordApiKey(imported.affectedIds[1], "tvly-export-b", null);
+    const keyC = appDb.recordApiKey(imported.affectedIds[2], "tvly-export-c", "33.33.33.33");
+    const exported = appDb.listApiKeysForExport([keyC.id, keyA.id, keyB.id]);
+
+    expect(exported.map((row) => row.id)).toEqual([keyC.id, keyA.id, keyB.id]);
+    expect(exported.map((row) => row.extractedIp)).toEqual(["33.33.33.33", "11.11.11.11", null]);
+
+    appDb.close();
+  });
+
+  test("chunks large export selections to avoid SQLite bind limits", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      Array.from({ length: 520 }, (_, index) => ({
+        email: `bulk-export-${index}@outlook.com`,
+        password: `pass-${index}`,
+      })),
+    );
+
+    const keys = imported.affectedIds.map((accountId, index) => appDb.recordApiKey(accountId, `tvly-bulk-${index}`, `10.0.0.${index % 255}`));
+    const selected = keys.slice().reverse().map((row) => row.id);
+    const exported = appDb.listApiKeysForExport(selected);
+
+    expect(exported).toHaveLength(520);
+    expect(exported[0]?.id).toBe(selected[0]);
+    expect(exported.at(-1)?.id).toBe(selected.at(-1));
 
     appDb.close();
   });

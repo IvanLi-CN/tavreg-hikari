@@ -62,10 +62,12 @@ export interface ApiKeyRecord {
   id: number;
   accountId: number;
   microsoftEmail: string;
+  groupName: string | null;
   apiKey: string;
   apiKeyPrefix: string;
   status: ApiKeyStatus;
   extractedAt: string;
+  extractedIp: string | null;
   lastVerifiedAt: string | null;
 }
 
@@ -173,10 +175,12 @@ function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
     id: Number(row.id),
     accountId: Number(row.account_id),
     microsoftEmail: String(row.microsoft_email),
+    groupName: row.group_name == null ? null : String(row.group_name),
     apiKey: String(row.api_key),
     apiKeyPrefix: String(row.api_key_prefix),
     status: String(row.status || "unknown") as ApiKeyStatus,
     extractedAt: String(row.extracted_at),
+    extractedIp: row.extracted_ip == null ? null : String(row.extracted_ip),
     lastVerifiedAt: row.last_verified_at == null ? null : String(row.last_verified_at),
   };
 }
@@ -310,6 +314,7 @@ export class AppDatabase {
         api_key_prefix TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
         extracted_at TEXT NOT NULL,
+        extracted_ip TEXT,
         last_verified_at TEXT
       );
 
@@ -392,6 +397,11 @@ export class AppDatabase {
     const accountColumns = new Set(accountTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!accountColumns.has("group_name")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN group_name TEXT;");
+    }
+    const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
+    const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!apiKeyColumns.has("extracted_ip")) {
+      this.db.exec("ALTER TABLE api_keys ADD COLUMN extracted_ip TEXT;");
     }
 
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_result ON microsoft_accounts(last_result_status, updated_at DESC);");
@@ -715,18 +725,23 @@ export class AppDatabase {
     return { deleted, blockedIds };
   }
 
-  listApiKeys(filters: { q?: string; status?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
+  listApiKeys(filters: { q?: string; status?: string; groupName?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
-      where.push("(a.microsoft_email LIKE ? OR k.api_key_prefix LIKE ?)");
-      params.push(`%${filters.q.trim().toLowerCase()}%`, `%${filters.q.trim()}%`);
+      const pattern = `%${filters.q.trim().toLowerCase()}%`;
+      where.push("(LOWER(a.microsoft_email) LIKE ? OR LOWER(k.api_key_prefix) LIKE ? OR LOWER(COALESCE(a.group_name, '')) LIKE ?)");
+      params.push(pattern, pattern, pattern);
     }
     if (filters.status?.trim()) {
       where.push("k.status = ?");
       params.push(filters.status.trim());
+    }
+    if (filters.groupName?.trim()) {
+      where.push("a.group_name = ?");
+      params.push(filters.groupName.trim());
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const summaryRow = this.db
@@ -743,7 +758,7 @@ export class AppDatabase {
     const total = Number(summaryRow?.total || 0);
     const rows = this.db
       .query(`
-        SELECT k.*, a.microsoft_email
+        SELECT k.*, a.microsoft_email, a.group_name
         FROM api_keys k
         JOIN microsoft_accounts a ON a.id = k.account_id
         ${whereSql}
@@ -759,6 +774,28 @@ export class AppDatabase {
         revoked: Number(summaryRow?.revoked_count || 0),
       },
     };
+  }
+
+  listApiKeysForExport(ids: number[]): ApiKeyRecord[] {
+    const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+    if (uniqueIds.length === 0) return [];
+    const rows: Record<string, unknown>[] = [];
+    const chunkSize = 500;
+    for (let index = 0; index < uniqueIds.length; index += chunkSize) {
+      const chunk = uniqueIds.slice(index, index + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const chunkRows = this.db
+        .query(`
+          SELECT k.*, a.microsoft_email, a.group_name
+          FROM api_keys k
+          JOIN microsoft_accounts a ON a.id = k.account_id
+          WHERE k.id IN (${placeholders})
+        `)
+        .all(...chunk) as Record<string, unknown>[];
+      rows.push(...chunkRows);
+    }
+    const byId = new Map(rows.map((row) => [Number(row.id), mapApiKeyRow(row)]));
+    return uniqueIds.map((id) => byId.get(id)).filter((row): row is ApiKeyRecord => Boolean(row));
   }
 
   createJob(input: { runMode: "headed" | "headless"; need: number; parallel: number; maxAttempts: number }): JobRecord {
@@ -958,17 +995,18 @@ export class AppDatabase {
     return row || null;
   }
 
-  recordApiKey(accountId: number, apiKey: string): ApiKeyRecord {
+  recordApiKey(accountId: number, apiKey: string, extractedIp?: string | null): ApiKeyRecord {
     const now = nowIso();
     const prefix = apiKey.slice(0, Math.min(apiKey.length, 12));
+    const normalizedExtractedIp = extractedIp == null ? null : String(extractedIp).trim() || null;
     const previous = this.db.query("SELECT account_id FROM api_keys WHERE api_key = ? LIMIT 1").get(apiKey) as { account_id?: number | null } | null;
     this.db.exec("BEGIN IMMEDIATE;");
     let row: Record<string, unknown>;
     try {
       row = this.db
         .query(`
-          INSERT INTO api_keys (account_id, api_key, api_key_prefix, status, extracted_at, last_verified_at)
-          VALUES (?, ?, ?, 'active', ?, ?)
+          INSERT INTO api_keys (account_id, api_key, api_key_prefix, status, extracted_at, extracted_ip, last_verified_at)
+          VALUES (?, ?, ?, 'active', ?, ?, ?)
           ON CONFLICT(api_key) DO UPDATE SET
             account_id = excluded.account_id,
             api_key_prefix = excluded.api_key_prefix,
@@ -977,10 +1015,14 @@ export class AppDatabase {
               WHEN api_keys.account_id IS excluded.account_id THEN api_keys.extracted_at
               ELSE excluded.extracted_at
             END,
+            extracted_ip = CASE
+              WHEN api_keys.account_id IS excluded.account_id AND api_keys.extracted_ip IS NOT NULL THEN api_keys.extracted_ip
+              ELSE excluded.extracted_ip
+            END,
             last_verified_at = excluded.last_verified_at
           RETURNING *
         `)
-        .get(accountId, apiKey, prefix, now, now) as Record<string, unknown>;
+        .get(accountId, apiKey, prefix, now, normalizedExtractedIp, now) as Record<string, unknown>;
       const keyId = Number(row.id);
       const previousAccountId = previous?.account_id == null ? null : Number(previous.account_id);
       if (previousAccountId && previousAccountId !== accountId) {
@@ -1017,9 +1059,11 @@ export class AppDatabase {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+    const account = this.getAccount(accountId);
     return mapApiKeyRow({
       ...row,
-      microsoft_email: this.getAccount(accountId)?.microsoftEmail || "",
+      microsoft_email: account?.microsoftEmail || "",
+      group_name: account?.groupName ?? null,
     });
   }
 
@@ -1027,8 +1071,10 @@ export class AppDatabase {
     const now = nowIso();
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
-    this.recordApiKey(accountId, apiKey);
-    const startedAt = this.getAttempt(attemptId)?.startedAt || now;
+    const currentAttempt = this.getAttempt(attemptId);
+    const extractedIp = signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null;
+    this.recordApiKey(accountId, apiKey, extractedIp);
+    const startedAt = currentAttempt?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const attempt = this.updateAttempt(attemptId, {
       status: "succeeded",

@@ -165,11 +165,13 @@ export const sampleApiKeys: ApiKeysPayload = {
     active: 1,
     revoked: 1,
   },
+  groups: ["linked", "ops"],
   rows: [
     {
       id: 1,
       accountId: 2,
       microsoftEmail: "beta@outlook.com",
+      groupName: "linked",
       apiKeyMasked: "tvly-****-af3x",
       apiKeyPrefix: "tvly-prod",
       status: "active",
@@ -180,6 +182,7 @@ export const sampleApiKeys: ApiKeysPayload = {
       id: 2,
       accountId: 7,
       microsoftEmail: "omega@outlook.com",
+      groupName: "ops",
       apiKeyMasked: "tvly-****-mm9p",
       apiKeyPrefix: "tvly-sbx",
       status: "revoked",
