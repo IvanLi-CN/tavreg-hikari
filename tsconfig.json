@@ -13,6 +13,10 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["web/src/*"]
+    },
 
     // Best practices
     "strict": true,
@@ -27,7 +31,13 @@
     "noPropertyAccessFromIndexSignature": false
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "test/**/*.ts",
+    "web/**/*.ts",
+    "web/**/*.tsx",
+    ".storybook/**/*.ts",
+    "vite.config.ts"
   ],
   "exclude": [
     "node_modules",

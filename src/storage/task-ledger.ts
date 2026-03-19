@@ -71,6 +71,8 @@ export interface TaskLedgerConfig {
 
 export interface SignupTaskRecord {
   runId: string;
+  jobId?: number;
+  accountId?: number;
   batchId: string;
   mode: "headed" | "headless";
   attemptIndex: number;
@@ -116,6 +118,8 @@ export interface SignupTaskRecord {
 
 interface SignupTaskRecordRow {
   runId: string;
+  jobId: number | null;
+  accountId: number | null;
   batchId: string;
   mode: string;
   attemptIndex: number;
@@ -182,6 +186,8 @@ function toNullableNumber(value: number | undefined): number | null {
 function toRecordRow(input: SignupTaskRecord): SignupTaskRecordRow {
   return {
     runId: input.runId,
+    jobId: toNullableNumber(input.jobId),
+    accountId: toNullableNumber(input.accountId),
     batchId: input.batchId,
     mode: input.mode,
     attemptIndex: input.attemptIndex,
@@ -253,6 +259,8 @@ export class TaskLedger {
       CREATE TABLE IF NOT EXISTS signup_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL UNIQUE,
+        job_id INTEGER,
+        account_id INTEGER,
         batch_id TEXT NOT NULL,
         mode TEXT NOT NULL,
         attempt_index INTEGER NOT NULL,
@@ -307,6 +315,12 @@ export class TaskLedger {
     if (!existingColumns.has("api_key")) {
       db.exec("ALTER TABLE signup_tasks ADD COLUMN api_key TEXT;");
     }
+    if (!existingColumns.has("job_id")) {
+      db.exec("ALTER TABLE signup_tasks ADD COLUMN job_id INTEGER;");
+    }
+    if (!existingColumns.has("account_id")) {
+      db.exec("ALTER TABLE signup_tasks ADD COLUMN account_id INTEGER;");
+    }
 
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_started_at ON signup_tasks(started_at DESC);");
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_status_started ON signup_tasks(status, started_at DESC);");
@@ -314,6 +328,7 @@ export class TaskLedger {
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_error_code_started ON signup_tasks(error_code, started_at DESC);");
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_ip_risk_started ON signup_tasks(has_ip_rate_limit, started_at DESC);");
     db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_batch_id ON signup_tasks(batch_id);");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_job_account_started ON signup_tasks(job_id, account_id, started_at DESC);");
 
     return new TaskLedger(db, cfg);
   }
@@ -385,14 +400,14 @@ export class TaskLedger {
     const stmt = this.db.prepare(
         `
         INSERT INTO signup_tasks (
-          run_id, batch_id, mode, attempt_index, mode_retry_max, status, started_at, completed_at, duration_ms,
+          run_id, job_id, account_id, batch_id, mode, attempt_index, mode_retry_max, status, started_at, completed_at, duration_ms,
           failure_stage, error_code, error_message, proxy_node, proxy_ip, proxy_country, proxy_city, proxy_timezone,
           browser_engine, browser_mode, browser_user_agent, browser_locale, browser_timezone, model_name,
           precheck_passed, verify_passed, signup_submitted, request_count, suspicious_hit_count, captcha_submit_count, max_captcha_length,
           has_ip_rate_limit, has_suspicious_activity, has_extensibility_error, has_invalid_captcha,
           email_address, email_domain, email_local_len, password, api_key, api_key_prefix, notes_json, details_json, updated_at
         ) VALUES (
-          $runId, $batchId, $mode, $attemptIndex, $modeRetryMax, $status, $startedAt, $completedAt, $durationMs,
+          $runId, $jobId, $accountId, $batchId, $mode, $attemptIndex, $modeRetryMax, $status, $startedAt, $completedAt, $durationMs,
           $failureStage, $errorCode, $errorMessage, $proxyNode, $proxyIp, $proxyCountry, $proxyCity, $proxyTimezone,
           $browserEngine, $browserMode, $browserUserAgent, $browserLocale, $browserTimezone, $modelName,
           $precheckPassed, $verifyPassed, $signupSubmitted, $requestCount, $suspiciousHitCount, $captchaSubmitCount, $maxCaptchaLength,
@@ -400,6 +415,8 @@ export class TaskLedger {
           $emailAddress, $emailDomain, $emailLocalLen, $password, $apiKey, $apiKeyPrefix, $notesJson, $detailsJson, $updatedAt
         )
         ON CONFLICT(run_id) DO UPDATE SET
+          job_id = excluded.job_id,
+          account_id = excluded.account_id,
           batch_id = excluded.batch_id,
           mode = excluded.mode,
           attempt_index = excluded.attempt_index,

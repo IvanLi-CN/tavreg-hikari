@@ -5,14 +5,14 @@ import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions 
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { spawn } from "node:child_process";
 import { sep as pathSep } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
 import { release as osRelease } from "node:os";
 import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
@@ -22,6 +22,7 @@ type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
 type BrowserEngine = "chrome";
 type MailProvider = "duckmail" | "gptmail" | "vmail";
+type AuthLoginProvider = "password" | "microsoft";
 
 interface GptmailAuthPayload {
   token: string;
@@ -72,7 +73,12 @@ interface AppConfig {
   keyLimit: number;
   existingEmail?: string;
   existingPassword?: string;
+  microsoftAccountEmail?: string;
+  microsoftAccountPassword?: string;
+  microsoftKeepSignedIn: boolean;
   mihomoSubscriptionUrl: string;
+  mihomoGroupName: string;
+  mihomoRouteGroupName: string;
   mihomoApiPort: number;
   mihomoMixedPort: number;
   proxyCheckUrl: string;
@@ -120,6 +126,28 @@ function isBlockedMailboxAddress(blockedDomains: ReadonlySet<string>, address: s
 function computeMailboxPreloadTarget(need: number): number {
   if (need <= 0) return 0;
   return Math.max(1, Math.ceil(need * 0.25));
+}
+
+function getConfiguredLoginProvider(cfg: Pick<AppConfig, "existingEmail" | "existingPassword" | "microsoftAccountEmail" | "microsoftAccountPassword">): AuthLoginProvider | null {
+  if (cfg.microsoftAccountEmail && cfg.microsoftAccountPassword) {
+    return "microsoft";
+  }
+  if (cfg.existingEmail && cfg.existingPassword) {
+    return "password";
+  }
+  return null;
+}
+
+function hasConfiguredLoginAccount(cfg: Pick<AppConfig, "existingEmail" | "existingPassword" | "microsoftAccountEmail" | "microsoftAccountPassword">): boolean {
+  return getConfiguredLoginProvider(cfg) !== null;
+}
+
+function getConfiguredLoginEmail(cfg: Pick<AppConfig, "existingEmail" | "microsoftAccountEmail">): string | undefined {
+  return cfg.microsoftAccountEmail || cfg.existingEmail;
+}
+
+function getConfiguredLoginPassword(cfg: Pick<AppConfig, "existingPassword" | "microsoftAccountPassword">): string | undefined {
+  return cfg.microsoftAccountPassword || cfg.existingPassword;
 }
 
 interface ResultPayload {
@@ -216,6 +244,7 @@ interface AuthChallengeSnapshot {
   captchaProvider?: string;
   captchaSiteKeyHint?: string;
   challengeHint: boolean;
+  challengeSuccessVisible: boolean;
   visibleErrors: string[];
   visibleErrorCodes: string[];
 }
@@ -235,6 +264,7 @@ interface ManagedChallengeCdpSnapshot {
   checkboxChecked?: boolean;
   hasCheckbox: boolean;
   statusText?: string;
+  successVisible?: boolean;
 }
 
 interface BrowserFingerprintSnapshot {
@@ -264,6 +294,11 @@ interface RiskSignalSummary {
   maxCaptchaLength?: number;
   snippets: string[];
 }
+
+const authSubmitFieldCache = new WeakMap<
+  object,
+  { captcha?: string; challengeToken?: string; email?: string; password?: string; code?: string; state?: string }
+>();
 
 interface ModeRunContext {
   batchId: string;
@@ -329,8 +364,9 @@ interface ProxyNodeUsageState {
 
 loadDotenv({ path: ".env.local", quiet: true });
 
-const OUTPUT_DIR = new URL("../output/", import.meta.url);
-const OUTPUT_PATH = fileURLToPath(OUTPUT_DIR);
+const DEFAULT_OUTPUT_PATH = fileURLToPath(new URL("../output/", import.meta.url));
+const OUTPUT_PATH = path.resolve(process.env.OUTPUT_ROOT_DIR || DEFAULT_OUTPUT_PATH);
+const OUTPUT_DIR = pathToFileURL(`${OUTPUT_PATH}${pathSep}`);
 const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
 const AUTH_CHALLENGE_RESOURCE_RE =
   /(?:challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha|hcaptcha\.com|recaptcha(?:\.net|\.com)|friendly-challenge|cdn\.auth0\.com\/ulp)/i;
@@ -964,8 +1000,8 @@ function buildMihomoConfig(
     subscriptionUrl: cfg.mihomoSubscriptionUrl,
     apiPort: overrides?.apiPort ?? cfg.mihomoApiPort,
     mixedPort: overrides?.mixedPort ?? cfg.mihomoMixedPort,
-    groupName: "CODEX_AUTO",
-    routeGroupName: "CODEX_ROUTE",
+    groupName: cfg.mihomoGroupName,
+    routeGroupName: cfg.mihomoRouteGroupName,
     checkUrl: cfg.proxyCheckUrl,
     workDir: overrides?.workDir ?? path.join(OUTPUT_PATH, "mihomo"),
     downloadDir: path.resolve("downloads", "mihomo"),
@@ -1387,7 +1423,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/timeout/i.test(normalized)) return "timeout";
   if (/network/i.test(normalized)) return "network";
   if (/browser precheck failed/i.test(normalized)) return "browser_precheck_failed";
-  if (/verification email not found/i.test(normalized)) return "verification_email_missing";
+  if (/verification email (not found|code not found)/i.test(normalized)) return "verification_email_missing";
   if (/signup password step failed/i.test(normalized)) return "signup_password_step_failed";
   if (stage) return `stage_${stage}`;
   return "unknown";
@@ -1548,6 +1584,12 @@ const SINGLE_BROWSER_IP_PROBE_TARGET: IpProbeTarget = {
   url: "https://ifconfig.me/ip",
 };
 
+const SINGLE_BROWSER_IP_PROBE_TARGETS: IpProbeTarget[] = [
+  SINGLE_BROWSER_IP_PROBE_TARGET,
+  ...GLOBAL_IP_PROBE_TARGETS,
+  ...DOMESTIC_IP_PROBE_TARGETS,
+];
+
 function parseCsvList(raw: string | undefined): string[] {
   if (!raw || !raw.trim()) return [];
   return raw
@@ -1671,14 +1713,31 @@ async function safeCollectIpProbeSnapshot(page: any, target: IpProbeTarget, wait
 }
 
 async function collectSingleBrowserIpProbe(page: any): Promise<IpProbeSnapshot> {
-  return await safeCollectIpProbeSnapshot(page, SINGLE_BROWSER_IP_PROBE_TARGET, 4500);
+  let lastSnapshot: IpProbeSnapshot | null = null;
+  for (const target of SINGLE_BROWSER_IP_PROBE_TARGETS) {
+    const snapshot = await safeCollectIpProbeSnapshot(page, target, 4500);
+    lastSnapshot = snapshot;
+    if (normalizeIp(snapshot.ip || snapshot.ipCandidates?.[0])) {
+      return snapshot;
+    }
+  }
+  return (
+    lastSnapshot || {
+      name: SINGLE_BROWSER_IP_PROBE_TARGET.name,
+      scope: SINGLE_BROWSER_IP_PROBE_TARGET.scope,
+      url: SINGLE_BROWSER_IP_PROBE_TARGET.url,
+      ipCandidates: [],
+      loaded: false,
+      error: "browser ip probe exhausted all targets",
+    }
+  );
 }
 
 async function collectSingleBrowserIpProbeWithMinimalContext(browser: Browser): Promise<IpProbeSnapshot> {
   const probeContext = await browser.newContext();
   try {
     const probePage = await probeContext.newPage();
-    return await safeCollectIpProbeSnapshot(probePage, SINGLE_BROWSER_IP_PROBE_TARGET, 4500);
+    return await collectSingleBrowserIpProbe(probePage);
   } finally {
     await probeContext.close().catch(() => {});
   }
@@ -2144,6 +2203,39 @@ function extractVerificationLinkFromPayload(payload: unknown, allowlist: string[
   return null;
 }
 
+function extractEmailCodeFromPayload(payload: unknown): string | null {
+  const texts: string[] = [];
+  collectStrings(payload, texts);
+  const seen = new Set<string>();
+
+  for (const text of texts) {
+    const normalized = text
+      .replaceAll("\\/", "/")
+      .replaceAll("&amp;", "&")
+      .replaceAll("\\u003d", "=")
+      .replaceAll("\\u0026", "&")
+      .replace(/\s+/g, " ");
+    const matches = Array.from(normalized.matchAll(/\b(\d{6})\b/g));
+    for (const match of matches) {
+      const code = match[1];
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      const start = Math.max(0, (match.index || 0) - 64);
+      const end = Math.min(normalized.length, (match.index || 0) + code.length + 64);
+      const context = normalized.slice(start, end);
+      if (/(code|otp|one-time|one time|verification|verify|login|sign in|identity)/i.test(context)) {
+        return code;
+      }
+    }
+  }
+
+  if (seen.size === 1) {
+    return Array.from(seen)[0] || null;
+  }
+
+  return null;
+}
+
 function isMailboxTransientError(reason: string): boolean {
   const lower = reason.toLowerCase();
   return [
@@ -2539,6 +2631,9 @@ async function waitForVerificationLink(
 ): Promise<string | null> {
   const deadline = Date.now() + timeoutMs;
   const seen = new Set<string>();
+  let rateLimitHits = 0;
+  let activeProxyUrl = proxyUrl;
+  let directFallbackLogged = false;
 
   while (Date.now() < deadline) {
     let items: unknown[] = [];
@@ -2546,7 +2641,7 @@ async function waitForVerificationLink(
       if (mailbox.provider === "duckmail") {
         const messages = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/messages`, {
           headers: mailbox.headers,
-          proxyUrl,
+          proxyUrl: activeProxyUrl,
         });
         items = ((messages["hydra:member"] as unknown[]) || []).slice(0, 50);
       } else if (mailbox.provider === "gptmail") {
@@ -2555,7 +2650,7 @@ async function waitForVerificationLink(
           `${mailbox.baseUrl}/api/emails?email=${encodeURIComponent(mailbox.address)}`,
           {
             headers: mailbox.headers,
-            proxyUrl,
+            proxyUrl: activeProxyUrl,
           },
         );
         syncGptmailMailboxAuth(mailbox, messages);
@@ -2569,7 +2664,7 @@ async function waitForVerificationLink(
           `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages?limit=20`,
           {
             headers: mailbox.headers,
-            proxyUrl,
+            proxyUrl: activeProxyUrl,
           },
         );
         if (messages && typeof messages === "object" && !Array.isArray(messages)) {
@@ -2584,10 +2679,28 @@ async function waitForVerificationLink(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isMailboxRateLimitError(message)) {
-        throw new Error("mailbox_rate_limited");
+        if (activeProxyUrl && !directFallbackLogged) {
+          activeProxyUrl = undefined;
+          directFallbackLogged = true;
+          log("mailbox poll rate limited via proxy, switch to direct mailbox polling");
+          await delay(Math.max(1_200, pollMs));
+          continue;
+        }
+        rateLimitHits += 1;
+        const waitMs = Math.min(30_000, Math.max(4_000, pollMs * Math.min(rateLimitHits * 3, 12)));
+        log(`mailbox poll rate limited, backoff ${waitMs}ms (hit=${rateLimitHits})`);
+        await delay(waitMs);
+        continue;
       }
       if (!isMailboxTransientError(message)) {
         throw error;
+      }
+      if (activeProxyUrl && !directFallbackLogged) {
+        activeProxyUrl = undefined;
+        directFallbackLogged = true;
+        log(`mailbox poll transient via proxy, switch to direct mailbox polling: ${message.split("\n")[0]}`);
+        await delay(Math.max(800, pollMs));
+        continue;
       }
       log(`mailbox poll transient, retry after ${Math.max(400, pollMs)}ms: ${message.split("\n")[0]}`);
       await delay(Math.max(400, pollMs));
@@ -2615,7 +2728,7 @@ async function waitForVerificationLink(
               )}`;
         const detail = await httpJson<JsonRecord>("GET", detailUrl, {
           headers: mailbox.headers,
-          proxyUrl,
+          proxyUrl: activeProxyUrl,
         });
         syncGptmailMailboxAuth(mailbox, detail);
 
@@ -2628,15 +2741,183 @@ async function waitForVerificationLink(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (isMailboxRateLimitError(message)) {
-          throw new Error("mailbox_rate_limited");
+          if (activeProxyUrl && !directFallbackLogged) {
+            activeProxyUrl = undefined;
+            directFallbackLogged = true;
+            log("mailbox detail poll rate limited via proxy, switch to direct mailbox polling");
+            await delay(Math.max(1_200, pollMs));
+            continue;
+          }
+          rateLimitHits += 1;
+          const waitMs = Math.min(30_000, Math.max(4_000, pollMs * Math.min(rateLimitHits * 3, 12)));
+          log(`mailbox detail poll rate limited, backoff ${waitMs}ms (hit=${rateLimitHits})`);
+          await delay(waitMs);
+          continue;
         }
         if (!isMailboxTransientError(message)) {
           throw error;
+        }
+        if (activeProxyUrl && !directFallbackLogged) {
+          activeProxyUrl = undefined;
+          directFallbackLogged = true;
+          log(`mailbox detail poll transient via proxy, switch to direct mailbox polling: ${message.split("\n")[0]}`);
+          await delay(Math.max(800, pollMs));
+          continue;
         }
       }
     }
 
     await new Promise((resolve) => setTimeout(resolve, Math.max(200, pollMs)));
+  }
+
+  return null;
+}
+
+async function waitForEmailCode(
+  mailbox: MailboxSession,
+  timeoutMs: number,
+  pollMs: number,
+  proxyUrl?: string,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  const seen = new Set<string>();
+  let rateLimitHits = 0;
+  let activeProxyUrl = proxyUrl;
+  let directFallbackLogged = false;
+
+  while (Date.now() < deadline) {
+    let items: unknown[] = [];
+    try {
+      if (mailbox.provider === "duckmail") {
+        const messages = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/messages`, {
+          headers: mailbox.headers,
+          proxyUrl: activeProxyUrl,
+        });
+        items = ((messages["hydra:member"] as unknown[]) || []).slice(0, 50);
+      } else if (mailbox.provider === "gptmail") {
+        const messages = await httpJson<JsonRecord>(
+          "GET",
+          `${mailbox.baseUrl}/api/emails?email=${encodeURIComponent(mailbox.address)}`,
+          {
+            headers: mailbox.headers,
+            proxyUrl: activeProxyUrl,
+          },
+        );
+        syncGptmailMailboxAuth(mailbox, messages);
+        const data = messages.data;
+        if (data && typeof data === "object" && Array.isArray((data as JsonRecord).emails)) {
+          items = ((data as JsonRecord).emails as unknown[]).slice(0, 50);
+        }
+      } else {
+        const messages = await httpJson<unknown>(
+          "GET",
+          `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages?limit=20`,
+          {
+            headers: mailbox.headers,
+            proxyUrl: activeProxyUrl,
+          },
+        );
+        if (messages && typeof messages === "object" && !Array.isArray(messages)) {
+          const data = (messages as JsonRecord)["data"];
+          if (Array.isArray(data)) {
+            items = data.slice(0, 50);
+          }
+        } else if (Array.isArray(messages)) {
+          items = messages.slice(0, 50);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isMailboxRateLimitError(message)) {
+        if (activeProxyUrl && !directFallbackLogged) {
+          activeProxyUrl = undefined;
+          directFallbackLogged = true;
+          log("mailbox code poll rate limited via proxy, switch to direct mailbox polling");
+          await delay(Math.max(1_200, pollMs));
+          continue;
+        }
+        rateLimitHits += 1;
+        const waitMs = Math.min(30_000, Math.max(4_000, pollMs * Math.min(rateLimitHits * 3, 12)));
+        log(`mailbox code poll rate limited, backoff ${waitMs}ms (hit=${rateLimitHits})`);
+        await delay(waitMs);
+        continue;
+      }
+      if (!isMailboxTransientError(message)) {
+        throw error;
+      }
+      if (activeProxyUrl && !directFallbackLogged) {
+        activeProxyUrl = undefined;
+        directFallbackLogged = true;
+        log(`mailbox code poll transient via proxy, switch to direct mailbox polling: ${message.split("\n")[0]}`);
+        await delay(Math.max(800, pollMs));
+        continue;
+      }
+      log(`mailbox code poll transient, retry after ${Math.max(400, pollMs)}ms: ${message.split("\n")[0]}`);
+      await delay(Math.max(400, pollMs));
+      continue;
+    }
+
+    for (const item of items) {
+      const fromSummary = extractEmailCodeFromPayload(item);
+      if (fromSummary) return fromSummary;
+
+      if (!item || typeof item !== "object") continue;
+      const record = item as JsonRecord;
+      const messageId = String(record.id || record.messageId || "").trim();
+      if (!messageId || seen.has(messageId)) continue;
+      seen.add(messageId);
+
+      try {
+        const detailUrl =
+          mailbox.provider === "duckmail"
+            ? `${mailbox.baseUrl}/messages/${encodeURIComponent(messageId)}`
+            : mailbox.provider === "gptmail"
+              ? `${mailbox.baseUrl}/api/email/${encodeURIComponent(messageId)}`
+              : `${mailbox.baseUrl}/mailboxes/${encodeURIComponent(mailbox.accountId)}/messages/${encodeURIComponent(
+                  messageId,
+                )}`;
+        const detail = await httpJson<JsonRecord>("GET", detailUrl, {
+          headers: mailbox.headers,
+          proxyUrl: activeProxyUrl,
+        });
+        syncGptmailMailboxAuth(mailbox, detail);
+
+        const payload =
+          mailbox.provider !== "duckmail" && detail.data && typeof detail.data === "object"
+            ? (detail.data as JsonRecord)
+            : detail;
+        const fromDetail = extractEmailCodeFromPayload(payload);
+        if (fromDetail) return fromDetail;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isMailboxRateLimitError(message)) {
+          if (activeProxyUrl && !directFallbackLogged) {
+            activeProxyUrl = undefined;
+            directFallbackLogged = true;
+            log("mailbox code detail rate limited via proxy, switch to direct mailbox polling");
+            await delay(Math.max(1_200, pollMs));
+            continue;
+          }
+          rateLimitHits += 1;
+          const waitMs = Math.min(30_000, Math.max(4_000, pollMs * Math.min(rateLimitHits * 3, 12)));
+          log(`mailbox code detail rate limited, backoff ${waitMs}ms (hit=${rateLimitHits})`);
+          await delay(waitMs);
+          continue;
+        }
+        if (!isMailboxTransientError(message)) {
+          throw error;
+        }
+        if (activeProxyUrl && !directFallbackLogged) {
+          activeProxyUrl = undefined;
+          directFallbackLogged = true;
+          log(`mailbox code detail transient via proxy, switch to direct mailbox polling: ${message.split("\n")[0]}`);
+          await delay(Math.max(800, pollMs));
+          continue;
+        }
+      }
+    }
+
+    await delay(Math.max(200, pollMs));
   }
 
   return null;
@@ -2656,8 +2937,97 @@ async function verifyVerificationLanding(page: any): Promise<boolean> {
 async function fillInput(page: any, selector: string, value: string): Promise<void> {
   await page.waitForSelector(selector, { timeout: 30000 });
   const input = page.locator(selector).first();
+  await input.click({ timeout: 5_000 }).catch(() => {});
   await input.fill("");
   await input.type(value, { delay: randomInt(55, 135) });
+  const currentValue = await input.inputValue().catch(() => "");
+  if (currentValue === value) {
+    await input.dispatchEvent("input").catch(() => {});
+    await input.dispatchEvent("change").catch(() => {});
+    return;
+  }
+  await input.evaluate(
+    (node: HTMLInputElement | HTMLTextAreaElement, nextValue: string) => {
+      node.value = nextValue;
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+      node.dispatchEvent(new Event("blur", { bubbles: true }));
+    },
+    value,
+  );
+}
+
+async function ensureInputValue(page: any, selector: string, value: string, label: string): Promise<void> {
+  await page.waitForSelector(selector, { timeout: 30_000 });
+  const input = page.locator(selector).first();
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await fillInput(page, selector, value);
+    await page.waitForTimeout(randomInt(120, 260));
+    const currentValue = await input.inputValue().catch(() => "");
+    if (currentValue === value) {
+      return;
+    }
+    await input.evaluate(
+      (node: HTMLInputElement | HTMLTextAreaElement, nextValue: string) => {
+        const proto =
+          node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
+        descriptor?.set?.call(node, nextValue);
+        node.dispatchEvent(new Event("input", { bubbles: true }));
+        node.dispatchEvent(new Event("change", { bubbles: true }));
+        node.dispatchEvent(new Event("blur", { bubbles: true }));
+      },
+      value,
+    );
+    await page.waitForTimeout(randomInt(120, 260));
+    const restoredValue = await input.inputValue().catch(() => "");
+    if (restoredValue === value) {
+      return;
+    }
+    log(`${label} input value did not persist (attempt=${attempt}, len=${restoredValue.length})`);
+  }
+  throw new Error(`${label}_input_not_persisted`);
+}
+
+async function waitForStableInputValue(
+  page: any,
+  selector: string,
+  expected: string,
+  settleMs = 500,
+  timeoutMs = 6_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const currentValue = await page.locator(selector).first().inputValue().catch(() => "");
+    if (currentValue === expected) {
+      if (!stableSince) stableSince = Date.now();
+      if (Date.now() - stableSince >= settleMs) {
+        return true;
+      }
+    } else {
+      stableSince = 0;
+    }
+    await page.waitForTimeout(120);
+  }
+  return false;
+}
+
+async function clearAuthFieldValidationState(page: any, selector: string): Promise<void> {
+  try {
+    await page.waitForSelector(selector, { timeout: 10_000 });
+    await page.locator(selector).first().evaluate((node: HTMLInputElement | HTMLTextAreaElement) => {
+      node.focus();
+      if (typeof node.setCustomValidity === "function") {
+        node.setCustomValidity("");
+      }
+      node.removeAttribute("aria-invalid");
+      node.dispatchEvent(new Event("input", { bubbles: true }));
+      node.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  } catch {
+    // best effort
+  }
 }
 
 async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> {
@@ -2888,10 +3258,14 @@ async function openAuthFlowEntry(
         switchedToSignup = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (onLoginIdentifier && /Sign up entry not found/i.test(message)) {
+        if (onLoginIdentifier && (/Sign up entry not found/i.test(message) || /forURL: Timeout/i.test(message))) {
           const navigated = await navigateToSignupWithCurrentState(page);
           if (navigated) {
-            log(`${kind} entry switched via state-preserving signup URL`);
+            log(
+              `${kind} entry switched via state-preserving signup URL${
+                /forURL: Timeout/i.test(message) ? " after click timeout" : ""
+              }`,
+            );
             switchedToSignup = true;
           } else {
             throw error;
@@ -3010,6 +3384,198 @@ async function dismissCookieBannerBestEffort(page: any): Promise<void> {
       return;
     }
   }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+}
+
+async function getNormalizedBodyText(page: any): Promise<string> {
+  return await page
+    .evaluate(() => (document.body?.innerText || "").replace(/\s+/g, " ").trim())
+    .catch(() => "");
+}
+
+async function pageContainsAnyText(page: any, patterns: RegExp[]): Promise<boolean> {
+  const text = await getNormalizedBodyText(page);
+  if (!text) return false;
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+async function hasVisibleElement(page: any, selector: string): Promise<boolean> {
+  return await page
+    .locator(selector)
+    .evaluateAll((nodes: Element[]) =>
+      nodes.some((node: Element) => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      }),
+    )
+    .catch(() => false);
+}
+
+async function clickMatchingAction(
+  page: any,
+  patterns: RegExp[],
+  selector?: string,
+  roles: string[] = ["button", "link"],
+): Promise<boolean> {
+  const point =
+    (selector ? await findClickablePointBySelector(page, selector) : null) ||
+    (await findClickablePointViaAxName(page, patterns, roles)) ||
+    (await findClickablePointByActionText(page, patterns));
+  if (!point) return false;
+  await dispatchMouseClickViaCdp(page, point.x, point.y);
+  await page.waitForTimeout(1_000);
+  return true;
+}
+
+async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
+  const clicked = await clickMatchingAction(
+    page,
+    [/^continue with microsoft account$/i, /^microsoft account$/i, /continue with microsoft/i, /microsoft/i],
+    'button, a, [role="button"]',
+  );
+  if (clicked) {
+    log("login flow: selected Microsoft account provider");
+  }
+  return clicked;
+}
+
+async function handleMicrosoftAccountPicker(page: any, email: string): Promise<boolean> {
+  const emailPattern = new RegExp(escapeRegExp(email), "i");
+  if (await clickMatchingAction(page, [emailPattern], 'button, a, [role="button"]')) {
+    log("login flow: selected remembered Microsoft account");
+    return true;
+  }
+  if (
+    await clickMatchingAction(
+      page,
+      [/^use another account$/i, /^other account$/i, /使用其他帐户/i, /改用其他帐户/i],
+      'button, a, [role="button"]',
+    )
+  ) {
+    log("login flow: switched Microsoft picker to another account");
+    return true;
+  }
+  return false;
+}
+
+async function handleMicrosoftEmailPrompt(page: any, email: string): Promise<boolean> {
+  const selector = 'input[type="email"], input[autocomplete="username"]';
+  if (!(await hasVisibleElement(page, selector))) return false;
+  await ensureInputValue(page, selector, email, "microsoft_email");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^continue$/i, /^sign in$/i, /^login$/i, /^下一步$/i, /^继续$/i, /^登录$/i],
+      'input[type="submit"], button[type="submit"]',
+    )) || false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  log("login flow: submitted Microsoft account email");
+  return true;
+}
+
+async function handleMicrosoftPasswordPrompt(page: any, password: string): Promise<boolean> {
+  const selector = 'input[type="password"], input[autocomplete="current-password"]';
+  if (!(await hasVisibleElement(page, selector))) return false;
+  await ensureInputValue(page, selector, password, "microsoft_password");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^sign in$/i, /^login$/i, /^continue$/i, /^next$/i, /^登录$/i, /^继续$/i, /^下一步$/i],
+      'input[type="submit"], button[type="submit"]',
+    )) || false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  log("login flow: submitted Microsoft account password");
+  return true;
+}
+
+async function handleMicrosoftPasskeyInterrupt(page: any): Promise<boolean> {
+  if (!(await pageContainsAnyText(page, [/unable to create a passkey/i, /can[’']?t create a passkey/i, /无法创建通行密钥/i]))) {
+    return false;
+  }
+  const dismissed = await clickMatchingAction(
+    page,
+    [/^cancel$/i, /^not now$/i, /^skip for now$/i, /^取消$/i, /^暂不$/i],
+    'button, [role="button"]',
+  );
+  if (!dismissed) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  log("login flow: dismissed Microsoft passkey interrupt");
+  return true;
+}
+
+async function handleMicrosoftKeepSignedInPrompt(page: any, keepSignedIn: boolean): Promise<boolean> {
+  if (!(await pageContainsAnyText(page, [/stay signed in/i, /保持登录状态/i]))) {
+    return false;
+  }
+  const patterns = keepSignedIn ? [/^yes$/i, /^是$/i] : [/^no$/i, /^否$/i];
+  const clicked = await clickMatchingAction(page, patterns, 'input[type="submit"], button[type="submit"], button');
+  if (!clicked) {
+    throw new Error(`microsoft_keep_signed_in_action_missing:${keepSignedIn ? "yes" : "no"}`);
+  }
+  log(`login flow: selected Microsoft keep-signed-in=${keepSignedIn ? "yes" : "no"}`);
+  return true;
+}
+
+async function handleMicrosoftConsentPrompt(page: any): Promise<boolean> {
+  if (
+    !(await pageContainsAnyText(page, [/allow this app to access your info/i, /allow this application to access your info/i, /允许此应用访问你的信息/i]))
+  ) {
+    return false;
+  }
+  const clicked = await clickMatchingAction(
+    page,
+    [/^accept$/i, /^allow$/i, /^yes$/i, /^接受$/i, /^允许$/i, /^是$/i],
+    'input[type="submit"], button[type="submit"], button',
+  );
+  if (!clicked) {
+    throw new Error("microsoft_consent_accept_missing");
+  }
+  log("login flow: accepted Microsoft OAuth consent");
+  return true;
+}
+
+async function completeMicrosoftLogin(page: any, cfg: AppConfig): Promise<void> {
+  const email = cfg.microsoftAccountEmail;
+  const password = cfg.microsoftAccountPassword;
+  if (!email || !password) {
+    throw new Error("microsoft_account_credentials_missing");
+  }
+
+  for (let step = 1; step <= 24; step += 1) {
+    const currentUrl = page.url();
+    if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+      return;
+    }
+
+    if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+      if (await clickMicrosoftProviderEntry(page)) continue;
+    }
+
+    if (await handleMicrosoftAccountPicker(page, email)) continue;
+    if (await handleMicrosoftEmailPrompt(page, email)) continue;
+    if (await handleMicrosoftPasswordPrompt(page, password)) continue;
+    if (await handleMicrosoftPasskeyInterrupt(page)) continue;
+    if (await handleMicrosoftKeepSignedInPrompt(page, cfg.microsoftKeepSignedIn)) continue;
+    if (await handleMicrosoftConsentPrompt(page)) continue;
+
+    await page.waitForTimeout(1_000);
+  }
+
+  throw new Error(`microsoft login flow did not reach home, last_url=${page.url()}`);
 }
 
 async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
@@ -3240,6 +3806,7 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
       captchaSiteKeyHint:
         sitekey.length >= 10 ? `${sitekey.slice(0, 8)}...${sitekey.slice(-4)}` : sitekey || undefined,
       challengeHint: /challenge|captcha|robot|verify/i.test(bodyText),
+      challengeSuccessVisible: /\bsuccess!?\b/i.test(bodyText),
     };
   });
 
@@ -3282,6 +3849,7 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
     captchaSiteKeyHint:
       typeof payload.captchaSiteKeyHint === "string" && payload.captchaSiteKeyHint ? payload.captchaSiteKeyHint : undefined,
     challengeHint: Boolean(payload.challengeHint),
+    challengeSuccessVisible: Boolean(payload.challengeSuccessVisible || cdpSnapshot?.successVisible),
     visibleErrors,
     visibleErrorCodes,
   };
@@ -3311,7 +3879,10 @@ function getChallengeTokenLength(snapshot: AuthChallengeSnapshot | null | undefi
 
 function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
   if (!snapshot) return false;
-  if (getChallengeTokenLength(snapshot) > 0) return true;
+  if (snapshot.challengeSuccessVisible) return true;
+  if (getChallengeTokenLength(snapshot) > 0) {
+    return isManagedChallengeStableForSubmit(snapshot);
+  }
   if (snapshot.hasChallengeCheckbox) {
     return snapshot.challengeCheckboxChecked === true;
   }
@@ -3319,6 +3890,47 @@ function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSna
     snapshot.hasChallengeFrame ||
     snapshot.hasTurnstileApi
   );
+}
+
+function isManagedChallengeStableForSubmit(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
+  if (!snapshot) return false;
+  if (snapshot.challengeSuccessVisible) return true;
+  const tokenLength = getChallengeTokenLength(snapshot);
+  if (tokenLength <= 0) {
+    return snapshot.hasChallengeCheckbox ? snapshot.challengeCheckboxChecked === true : false;
+  }
+  if (!snapshot.hasChallengeFrame && !snapshot.hasChallengeCheckbox) {
+    return true;
+  }
+  if (snapshot.hasChallengeCheckbox) {
+    return snapshot.challengeCheckboxChecked === true;
+  }
+  return false;
+}
+
+async function waitForManagedChallengeStableToken(
+  page: any,
+  formKind: "signup" | "login",
+  timeoutMs: number,
+): Promise<AuthChallengeSnapshot | null> {
+  const deadline = Date.now() + Math.max(1_500, timeoutMs);
+  let latest: AuthChallengeSnapshot | null = null;
+  while (Date.now() < deadline) {
+    latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+    if (!latest) return latest;
+    if (isManagedChallengeStableForSubmit(latest)) {
+      return latest;
+    }
+    await page.waitForTimeout(300);
+  }
+  if (latest && getChallengeTokenLength(latest) > 0) {
+    log(
+      `${formKind} managed challenge token remained unstable (frame=${latest.hasChallengeFrame ? 1 : 0}, checkbox=${
+        latest.hasChallengeCheckbox ? 1 : 0
+      }, checked=${latest.challengeCheckboxChecked ? 1 : 0}, success=${latest.challengeSuccessVisible ? 1 : 0}, token=${getChallengeTokenLength(latest)})`,
+    );
+  }
+  return latest;
 }
 
 function toChallengeBoxRect(content: number[] | undefined): ChallengeBoxRect | undefined {
@@ -3724,6 +4336,8 @@ async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedCha
     frameAx?.nodes?.find((node: any) =>
       /verification expired|verify you are human|checking your browser/i.test(String(node?.name?.value || "")),
     ) || null;
+  const successNode =
+    frameAx?.nodes?.find((node: any) => /\bsuccess!?\b/i.test(String(node?.name?.value || ""))) || null;
   const checkboxBox = checkboxNode?.backendDOMNodeId
     ? toChallengeBoxRect((await frameCdp.send("DOM.getBoxModel", { backendNodeId: checkboxNode.backendDOMNodeId }).catch(() => null))?.model?.content)
     : undefined;
@@ -3740,6 +4354,7 @@ async function collectManagedChallengeCdpSnapshot(page: any): Promise<ManagedCha
     checkboxChecked: checkedValue === "true" ? true : checkedValue === "false" ? false : undefined,
     hasCheckbox: Boolean(checkboxNode),
     statusText: typeof statusNode?.name?.value === "string" ? statusNode.name.value : undefined,
+    successVisible: Boolean(successNode),
   };
 }
 
@@ -3826,6 +4441,46 @@ async function waitForManagedChallengeToken(
     await page.waitForTimeout(400);
   }
   return { status: "timeout", snapshot: latest };
+}
+
+async function waitForAuthCaptchaValue(
+  page: any,
+  timeoutMs: number,
+): Promise<{ value: string; length: number } | null> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    const value = await page
+      .evaluate(() => {
+        const pickValue = (selector: string): string => {
+          const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
+          return typeof field?.value === "string" ? field.value.trim() : "";
+        };
+        const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+        const directCaptcha = pickValue('input[name="captcha"]');
+        if (directCaptcha) return directCaptcha;
+        const fallbackToken =
+          pickValue('input[name="cf-turnstile-response"]') ||
+          pickValue('input[name="g-recaptcha-response"]') ||
+          pickValue('textarea[name="h-captcha-response"]') ||
+          pickValue('input[name="h-captcha-response"]') ||
+          String((globalThis as any).__kohaLastChallengeToken || "").trim();
+        if (captchaField && fallbackToken) {
+          captchaField.value = fallbackToken;
+          captchaField.dispatchEvent(new Event("input", { bubbles: true }));
+          captchaField.dispatchEvent(new Event("change", { bubbles: true }));
+          (globalThis as any).__kohaLastAuthCaptcha = fallbackToken;
+          return fallbackToken;
+        }
+        return fallbackToken;
+      })
+      .catch(() => "");
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    if (trimmed) {
+      return { value: trimmed, length: trimmed.length };
+    }
+    await page.waitForTimeout(250);
+  }
+  return null;
 }
 
 async function waitForManagedChallengeDismissal(
@@ -3947,6 +4602,14 @@ async function ensureManagedChallengeTokenBeforeSubmit(
     return lastOutcome;
   }
   if (lastOutcome.status === "token_ready") {
+    const stableSnapshot = await waitForManagedChallengeStableToken(page, formKind, 8_000);
+    if (isManagedChallengeStableForSubmit(stableSnapshot)) {
+      return { status: "token_ready", snapshot: stableSnapshot };
+    }
+    lastOutcome = { status: "timeout", snapshot: stableSnapshot };
+  }
+
+  if (lastOutcome.status === "token_ready") {
     return lastOutcome;
   }
 
@@ -3970,7 +4633,12 @@ async function ensureManagedChallengeTokenBeforeSubmit(
       return lastOutcome;
     }
     if (lastOutcome.status === "token_ready") {
-      return lastOutcome;
+      const stableSnapshot = await waitForManagedChallengeStableToken(page, formKind, 8_000);
+      if (isManagedChallengeStableForSubmit(stableSnapshot)) {
+        return { status: "token_ready", snapshot: stableSnapshot };
+      }
+      latest = stableSnapshot || latest;
+      lastOutcome = { status: "timeout", snapshot: stableSnapshot };
     }
     latest = lastOutcome.snapshot || latest;
     log(
@@ -4061,6 +4729,33 @@ async function waitForAuthFormPostResponse(page: any, pattern: RegExp, timeoutMs
   }
 }
 
+async function waitForAuthSubmitSignal(
+  page: any,
+  pattern: RegExp,
+  timeoutMs: number,
+  previousUrl?: string,
+): Promise<"post" | "navigation" | "none"> {
+  const baselineUrl = previousUrl || page.url();
+  try {
+    return await Promise.race([
+      (async () => {
+        const posted = await waitForAuthFormPostResponse(page, pattern, timeoutMs);
+        return posted ? "post" : "none";
+      })(),
+      (async () => {
+        try {
+          await page.waitForURL((url: URL) => url.toString() !== baselineUrl, { timeout: timeoutMs });
+          return "navigation" as const;
+        } catch {
+          return "none" as const;
+        }
+      })(),
+    ]);
+  } catch {
+    return "none";
+  }
+}
+
 async function requestSubmitVisibleAuthForm(page: any): Promise<string | null> {
   try {
     return await page.evaluate(() => {
@@ -4102,21 +4797,296 @@ async function requestSubmitVisibleAuthForm(page: any): Promise<string | null> {
   }
 }
 
+async function forceNativeSubmitAuthForm(page: any): Promise<boolean> {
+  try {
+    return await page.evaluate(() => {
+      const form =
+        (document.querySelector('form[data-form-primary="true"]') as HTMLFormElement | null) ||
+        (document.querySelector("form") as HTMLFormElement | null);
+      if (!(form instanceof HTMLFormElement)) return false;
+      form.submit();
+      return true;
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function syncAuthFormHiddenFields(page: any): Promise<string[]> {
+  try {
+    return await page.evaluate(() => {
+      const touched: string[] = [];
+      const globalState = window as Window & {
+        __kohaLastAuthCaptcha?: string;
+        __kohaLastChallengeToken?: string;
+        __kohaLastAuthEmail?: string;
+        __kohaLastAuthPassword?: string;
+        __kohaLastEmailCode?: string;
+        __kohaAuthFormPatched?: boolean;
+      };
+      const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+      const turnstileField = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+      const recaptchaField = document.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null;
+      const hcaptchaField = document.querySelector(
+        'textarea[name="h-captcha-response"], input[name="h-captcha-response"]',
+      ) as HTMLInputElement | HTMLTextAreaElement | null;
+      const emailField = document.querySelector('input[name="email"], input[type="email"]') as HTMLInputElement | null;
+      const passwordField = document.querySelector('input[name="password"], input[type="password"]') as HTMLInputElement | null;
+      const codeField = document.querySelector('input[name="code"]') as HTMLInputElement | null;
+      const form =
+        (document.querySelector('form[data-form-primary="true"]') as HTMLFormElement | null) ||
+        (document.querySelector("form") as HTMLFormElement | null);
+
+      const captchaValue = typeof captchaField?.value === "string" ? captchaField.value.trim() : "";
+      const challengeToken =
+        (typeof turnstileField?.value === "string" ? turnstileField.value.trim() : "") ||
+        (typeof recaptchaField?.value === "string" ? recaptchaField.value.trim() : "") ||
+        (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "");
+      if (captchaValue) {
+        globalState.__kohaLastAuthCaptcha = captchaValue;
+      }
+      if (challengeToken) {
+        globalState.__kohaLastChallengeToken = challengeToken;
+      }
+      const restoredCaptcha = globalState.__kohaLastAuthCaptcha || globalState.__kohaLastChallengeToken;
+      if (!captchaValue && captchaField && restoredCaptcha) {
+        captchaField.value = restoredCaptcha;
+        touched.push("captcha:restore");
+        globalState.__kohaLastAuthCaptcha = restoredCaptcha;
+      }
+
+      const emailValue = typeof emailField?.value === "string" ? emailField.value.trim() : "";
+      if (emailValue) {
+        globalState.__kohaLastAuthEmail = emailValue;
+      } else if (emailField && globalState.__kohaLastAuthEmail) {
+        emailField.value = globalState.__kohaLastAuthEmail;
+        touched.push("email:restore");
+      }
+
+      const passwordValue = typeof passwordField?.value === "string" ? passwordField.value : "";
+      if (passwordValue) {
+        globalState.__kohaLastAuthPassword = passwordValue;
+      } else if (passwordField && globalState.__kohaLastAuthPassword) {
+        passwordField.value = globalState.__kohaLastAuthPassword;
+        touched.push("password:restore");
+      }
+
+      const codeValue = typeof codeField?.value === "string" ? codeField.value.trim() : "";
+      if (codeValue) {
+        globalState.__kohaLastEmailCode = codeValue;
+      } else if (codeField && globalState.__kohaLastEmailCode) {
+        codeField.value = globalState.__kohaLastEmailCode;
+        touched.push("code:restore");
+      }
+
+      for (const field of [captchaField, emailField, passwordField, codeField]) {
+        if (!field) continue;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      if (form && !globalState.__kohaAuthFormPatched) {
+        const nativeSubmit = HTMLFormElement.prototype.submit;
+        const nativeRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+        const syncBeforeSubmit = (targetForm: HTMLFormElement) => {
+          const targetCaptcha = targetForm.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+          const targetTurnstile = targetForm.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+          const targetRecaptcha = targetForm.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null;
+          const targetHcaptcha = targetForm.querySelector(
+            'textarea[name="h-captcha-response"], input[name="h-captcha-response"]',
+          ) as HTMLInputElement | HTMLTextAreaElement | null;
+          const targetEmail = targetForm.querySelector('input[name="email"], input[type="email"]') as HTMLInputElement | null;
+          const targetPassword = targetForm.querySelector('input[name="password"], input[type="password"]') as HTMLInputElement | null;
+          const targetCode = targetForm.querySelector('input[name="code"]') as HTMLInputElement | null;
+          const currentChallengeToken =
+            (typeof targetTurnstile?.value === "string" ? targetTurnstile.value.trim() : "") ||
+            (typeof targetRecaptcha?.value === "string" ? targetRecaptcha.value.trim() : "") ||
+            (typeof targetHcaptcha?.value === "string" ? targetHcaptcha.value.trim() : "") ||
+            globalState.__kohaLastChallengeToken ||
+            globalState.__kohaLastAuthCaptcha ||
+            "";
+          if (currentChallengeToken) {
+            globalState.__kohaLastChallengeToken = currentChallengeToken;
+          }
+          if (targetCaptcha && !targetCaptcha.value && currentChallengeToken) {
+            targetCaptcha.value = currentChallengeToken;
+            targetCaptcha.dispatchEvent(new Event("input", { bubbles: true }));
+            targetCaptcha.dispatchEvent(new Event("change", { bubbles: true }));
+            globalState.__kohaLastAuthCaptcha = currentChallengeToken;
+          }
+          if (targetEmail && !targetEmail.value && globalState.__kohaLastAuthEmail) {
+            targetEmail.value = globalState.__kohaLastAuthEmail;
+            targetEmail.dispatchEvent(new Event("input", { bubbles: true }));
+            targetEmail.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          if (targetPassword && !targetPassword.value && globalState.__kohaLastAuthPassword) {
+            targetPassword.value = globalState.__kohaLastAuthPassword;
+            targetPassword.dispatchEvent(new Event("input", { bubbles: true }));
+            targetPassword.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          if (targetCode && !targetCode.value && globalState.__kohaLastEmailCode) {
+            targetCode.value = globalState.__kohaLastEmailCode;
+            targetCode.dispatchEvent(new Event("input", { bubbles: true }));
+            targetCode.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+        };
+        HTMLFormElement.prototype.submit = function patchedSubmit(this: HTMLFormElement) {
+          syncBeforeSubmit(this);
+          return nativeSubmit.call(this);
+        };
+        HTMLFormElement.prototype.requestSubmit = function patchedRequestSubmit(
+          this: HTMLFormElement,
+          submitter?: HTMLElement,
+        ) {
+          syncBeforeSubmit(this);
+          return nativeRequestSubmit.call(this, submitter as HTMLElement | undefined);
+        };
+        globalState.__kohaAuthFormPatched = true;
+        touched.push("form:patched");
+      }
+
+      return touched;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function collectAuthSubmitFields(
+  page: any,
+): Promise<{ captcha?: string; challengeToken?: string; email?: string; password?: string; code?: string; state?: string }> {
+  try {
+    const pickLocatorValue = async (selector: string): Promise<string | undefined> => {
+      const locator = page.locator(selector).first();
+      if ((await locator.count().catch(() => 0)) === 0) return undefined;
+      const value = (await locator.inputValue().catch(() => "")).trim();
+      return value || undefined;
+    };
+    const email =
+      (await pickLocatorValue('input[name="email"]')) ||
+      (await pickLocatorValue('input[type="email"]')) ||
+      (await page.evaluate(() => (globalThis as any).__kohaLastAuthEmail || undefined).catch(() => undefined));
+    const challengeToken =
+      (await pickLocatorValue('input[name="cf-turnstile-response"]')) ||
+      (await pickLocatorValue('input[name="g-recaptcha-response"]')) ||
+      (await pickLocatorValue('textarea[name="h-captcha-response"]')) ||
+      (await pickLocatorValue('input[name="h-captcha-response"]')) ||
+      (await page.evaluate(() => (globalThis as any).__kohaLastChallengeToken || undefined).catch(() => undefined));
+    const captcha =
+      (await pickLocatorValue('input[name="captcha"]')) ||
+      challengeToken ||
+      (await page.evaluate(() => (globalThis as any).__kohaLastAuthCaptcha || undefined).catch(() => undefined));
+    const password =
+      (await pickLocatorValue('input[name="password"]')) ||
+      (await pickLocatorValue('input[type="password"]')) ||
+      (await page.evaluate(() => (globalThis as any).__kohaLastAuthPassword || undefined).catch(() => undefined));
+    const code =
+      (await pickLocatorValue('input[name="code"]')) ||
+      (await page.evaluate(() => (globalThis as any).__kohaLastEmailCode || undefined).catch(() => undefined));
+    const state = await pickLocatorValue('input[name="state"]');
+    return { captcha, challengeToken, email, password, code, state };
+  } catch {
+    return {};
+  }
+}
+
+async function dispatchChallengeResponseEvents(page: any): Promise<string[]> {
+  try {
+    return await page.evaluate(() => {
+      const touched: string[] = [];
+      const candidates = [
+        'input[name="captcha"]',
+        'input[name="cf-turnstile-response"]',
+        'input[name="g-recaptcha-response"]',
+        'textarea[name="h-captcha-response"]',
+        'input[name="h-captcha-response"]',
+      ];
+      for (const selector of candidates) {
+        const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
+        const value = typeof field?.value === "string" ? field.value.trim() : "";
+        if (!field || value.length === 0) continue;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+        touched.push(selector);
+      }
+      return touched;
+    });
+  } catch {
+    return [];
+  }
+}
+
 async function submitAuthForm(page: any, postPattern: RegExp, logLabel: string): Promise<boolean> {
+  const baselineUrl = page.url();
+  const syncedHiddenFields = await syncAuthFormHiddenFields(page);
+  if (syncedHiddenFields.length > 0) {
+    log(`${logLabel} synced auth fields: ${syncedHiddenFields.join(", ")}`);
+  }
+  const touchedChallengeFields = await dispatchChallengeResponseEvents(page);
+  if (touchedChallengeFields.length > 0) {
+    log(`${logLabel} refreshed challenge fields via events: ${touchedChallengeFields.join(", ")}`);
+    await page.waitForTimeout(randomInt(120, 260));
+  }
+  try {
+    const visibleSubmitter = page
+      .locator(
+        'button[data-action-button-primary="true"], button[type="submit"]:not(.ulp-hidden-form-submit-button), input[type="submit"]',
+      )
+      .first();
+    if ((await visibleSubmitter.count()) > 0) {
+      await visibleSubmitter.click({ timeout: 2_000, force: true });
+      const submitSignal = await waitForAuthSubmitSignal(page, postPattern, 3_500, baselineUrl);
+      if (submitSignal !== "none") {
+        if (submitSignal === "navigation") {
+          log(`${logLabel} navigation detected after locator click`);
+        }
+        log(`${logLabel} submit via locator click`);
+        return true;
+      }
+    }
+  } catch {
+    // Fall through to broader submit strategies.
+  }
   await clickSubmit(page);
-  if (await waitForAuthFormPostResponse(page, postPattern, 3_500)) {
+  {
+    const submitSignal = await waitForAuthSubmitSignal(page, postPattern, 3_500, baselineUrl);
+    if (submitSignal !== "none") {
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after cdp click`);
+      }
+      log(`${logLabel} submit via cdp click`);
+      return true;
+    }
+  }
+  const currentUrlAfterClick = page.url();
+  if (currentUrlAfterClick !== baselineUrl) {
+    log(`${logLabel} submit via cdp click`);
     return true;
   }
   const fallback = await requestSubmitVisibleAuthForm(page);
   if (fallback) {
     log(`${logLabel} submit fallback via ${fallback}`);
-    if (await waitForAuthFormPostResponse(page, postPattern, 4_500)) {
+    const submitSignal = await waitForAuthSubmitSignal(page, postPattern, 4_500, baselineUrl);
+    if (submitSignal !== "none") {
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after ${fallback}`);
+      }
+      return true;
+    }
+  }
+  if (await forceNativeSubmitAuthForm(page)) {
+    log(`${logLabel} submit fallback via form.submit()`);
+    const submitSignal = await waitForAuthSubmitSignal(page, postPattern, 4_500, baselineUrl);
+    if (submitSignal !== "none") {
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after form.submit()`);
+      }
       return true;
     }
   }
   await dispatchEnterViaCdp(page).catch(() => {});
   log(`${logLabel} submit fallback via cdp Enter`);
-  return await waitForAuthFormPostResponse(page, postPattern, 4_500);
+  return (await waitForAuthSubmitSignal(page, postPattern, 4_500, baselineUrl)) !== "none";
 }
 
 async function clickSubmit(page: any): Promise<void> {
@@ -4227,100 +5197,42 @@ async function solveCaptchaForm(
 
     const preSubmitChallenge = hasCaptcha ? null : await collectAuthChallengeSnapshot(page).catch(() => null);
     if (!hasCaptcha && hasManagedAuthChallenge(preSubmitChallenge)) {
+      const stabilizedChallenge = await waitForManagedChallengeStableToken(page, formKind, 2_500);
+      if (stabilizedChallenge && getChallengeTokenLength(stabilizedChallenge) > 0) {
+        const touchedChallengeFields = await dispatchChallengeResponseEvents(page);
+        if (touchedChallengeFields.length > 0) {
+          log(`${formKind} identifier pre-submit challenge fields refreshed: ${touchedChallengeFields.join(", ")}`);
+        }
+      }
+    }
+
+    const previousUrl = page.url();
+    await fillInput(page, emailSelector, email);
+    await page
+      .waitForSelector('div[data-captcha-provider="auth0_v2"], input[name="captcha"], iframe[src*="challenges.cloudflare.com"]', {
+        timeout: 8_000,
+      })
+      .catch(() => {});
+    const preSubmitManaged = await collectAuthChallengeSnapshot(page).catch(() => null);
+    if (hasManagedAuthChallenge(preSubmitManaged)) {
       const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, formKind);
       if (tokenOutcome.status === "rejected" && tokenOutcome.rejection && tokenOutcome.rejection !== "invalid_captcha") {
         throw new Error(tokenOutcome.rejection);
       }
-      const allowSubmitWithoutVisibleToken =
-        tokenOutcome.status === "timeout" && canSubmitManagedChallengeWithoutVisibleToken(tokenOutcome.snapshot);
-      if (tokenOutcome.status === "timeout" && !allowSubmitWithoutVisibleToken) {
-        log(
-          `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
-            tokenOutcome.snapshot?.hasChallengeFrame ? 1 : 0
-          }, checkbox=${tokenOutcome.snapshot?.hasChallengeCheckbox ? 1 : 0}, captcha=${
-            tokenOutcome.snapshot?.captchaValueLength || 0
-          }, turnstile=${tokenOutcome.snapshot?.turnstileValueLength || 0})`,
-        );
-        await page.waitForTimeout(randomInt(600, 1200));
-        continue;
+      const hiddenCaptcha = await waitForAuthCaptchaValue(page, tokenOutcome.status === "token_ready" ? 8_000 : 3_000);
+      if (hiddenCaptcha) {
+        log(`${formKind} identifier hidden captcha ready before submit (len=${hiddenCaptcha.length})`);
+      } else if (tokenOutcome.status === "token_ready") {
+        log(`${formKind} identifier token reported ready but hidden captcha still empty before submit`);
       }
-
-      const previousUrl = page.url();
-      if (allowSubmitWithoutVisibleToken) {
-        log(
-          `${formKind} managed challenge armed without visible token; submit once with checkbox state=${
-            tokenOutcome.snapshot?.challengeCheckboxChecked ? 1 : 0
-          }`,
-        );
-      }
-      let submitTriggered = await submitAuthForm(page, submitPostPattern, `${formKind} identifier`);
-
-      try {
-        await page.waitForURL(successUrlPattern, { timeout: 10_000 });
-        return;
-      } catch {
-        // Auth0 turnstile hooks may requestSubmit asynchronously after the challenge completes.
-      }
-
-      const managedOutcome = await waitForManagedChallengeOutcome(page, formKind, successUrlPattern, 25_000);
-      if (managedOutcome.status === "success") {
-        return;
-      }
-      if (managedOutcome.status === "rejected" && managedOutcome.rejection && managedOutcome.rejection !== "invalid_captcha") {
-        throw new Error(managedOutcome.rejection);
-      }
-      if (managedOutcome.status === "token_ready") {
-        await page.waitForTimeout(2_500);
-        if (successUrlPattern.test(page.url())) {
-          return;
-        }
-        if (page.url() === previousUrl) {
-          submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-challenge`)) || submitTriggered;
-          try {
-            await page.waitForURL(successUrlPattern, { timeout: 15_000 });
-            return;
-          } catch {
-            await page.waitForTimeout(1_500);
-            if (successUrlPattern.test(page.url())) {
-              return;
-            }
-          }
-        }
-      }
-      if (!submitTriggered && page.url() === previousUrl) {
-        log(`${formKind} identifier submit did not trigger POST (attempt=${attempt})`);
-      }
-      if (allowSubmitWithoutVisibleToken) {
-        if (successUrlPattern.test(page.url())) {
-          return;
-        }
-        const explicitRejection = detectExplicitFormRejection(
-          managedOutcome.snapshot?.visibleErrors || [],
-          managedOutcome.snapshot?.visibleErrorCodes || [],
-        );
-        if (explicitRejection && explicitRejection !== "invalid_captcha") {
-          throw new Error(explicitRejection);
-        }
-        if (
-          getChallengeTokenLength(managedOutcome.snapshot || tokenOutcome.snapshot) === 0 &&
-          (managedOutcome.snapshot?.hasChallengeCheckbox ||
-            tokenOutcome.snapshot?.hasChallengeCheckbox ||
-            managedOutcome.snapshot?.hasChallengeFrame ||
-            tokenOutcome.snapshot?.hasChallengeFrame)
-        ) {
-          throw new Error("challenge_unresponsive");
-        }
-      }
-      log(
-        `${formKind} managed challenge token unavailable before submit (attempt=${attempt}, frame=${
-          managedOutcome.snapshot?.hasChallengeFrame || tokenOutcome.snapshot?.hasChallengeFrame ? 1 : 0
-        }, checkbox=${managedOutcome.snapshot?.hasChallengeCheckbox || tokenOutcome.snapshot?.hasChallengeCheckbox ? 1 : 0})`,
-      );
-      await page.waitForTimeout(randomInt(600, 1200));
-      continue;
     }
-
-    const previousUrl = page.url();
+    const initialSubmitFields = await collectAuthSubmitFields(page);
+    authSubmitFieldCache.set(page, initialSubmitFields);
+    log(
+      `${formKind} identifier cached submit fields before submit (email=${initialSubmitFields.email ? 1 : 0}, captcha=${
+        initialSubmitFields.captcha ? String(initialSubmitFields.captcha).length : 0
+      }, state=${initialSubmitFields.state ? 1 : 0})`,
+    );
     let submitTriggered = await submitAuthForm(page, submitPostPattern, `${formKind} identifier`);
 
     try {
@@ -4351,6 +5263,14 @@ async function solveCaptchaForm(
         }
       }
       if (managedOutcome.status === "token_ready") {
+        await fillInput(page, emailSelector, email);
+        const postTokenFields = await collectAuthSubmitFields(page);
+        authSubmitFieldCache.set(page, postTokenFields);
+        log(
+          `${formKind} identifier cached submit fields after token (email=${postTokenFields.email ? 1 : 0}, captcha=${
+            postTokenFields.captcha ? String(postTokenFields.captcha).length : 0
+          }, state=${postTokenFields.state ? 1 : 0})`,
+        );
         submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-token`)) || submitTriggered;
         try {
           await page.waitForURL(successUrlPattern, { timeout: 15_000 });
@@ -4359,6 +5279,37 @@ async function solveCaptchaForm(
           await page.waitForTimeout(1500);
           if (successUrlPattern.test(page.url())) {
             return;
+          }
+        }
+      }
+      if (
+        managedOutcome.status === "timeout" &&
+        managedOutcome.snapshot &&
+        hasManagedAuthChallenge(managedOutcome.snapshot)
+      ) {
+        const rescueToken = await waitForManagedChallengeToken(page, formKind, 12_000);
+        if (rescueToken.status === "rejected" && rescueToken.rejection && rescueToken.rejection !== "invalid_captcha") {
+          throw new Error(rescueToken.rejection);
+        }
+        if (rescueToken.status === "token_ready") {
+          await fillInput(page, emailSelector, email);
+          const rescueFields = await collectAuthSubmitFields(page);
+          authSubmitFieldCache.set(page, rescueFields);
+          log(
+            `${formKind} identifier cached submit fields after rescue token (email=${rescueFields.email ? 1 : 0}, captcha=${
+              rescueFields.captcha ? String(rescueFields.captcha).length : 0
+            }, state=${rescueFields.state ? 1 : 0})`,
+          );
+          submitTriggered =
+            (await submitAuthForm(page, submitPostPattern, `${formKind} identifier rescue-token`)) || submitTriggered;
+          try {
+            await page.waitForURL(successUrlPattern, { timeout: 15_000 });
+            return;
+          } catch {
+            await page.waitForTimeout(1_500);
+            if (successUrlPattern.test(page.url())) {
+              return;
+            }
           }
         }
       }
@@ -4378,6 +5329,14 @@ async function solveCaptchaForm(
             throw new Error(postClickOutcome.rejection);
           }
           if (postClickOutcome.status === "token_ready") {
+            await fillInput(page, emailSelector, email);
+            const activateFields = await collectAuthSubmitFields(page);
+            authSubmitFieldCache.set(page, activateFields);
+            log(
+              `${formKind} identifier cached submit fields after activate (email=${activateFields.email ? 1 : 0}, captcha=${
+                activateFields.captcha ? String(activateFields.captcha).length : 0
+              }, state=${activateFields.state ? 1 : 0})`,
+            );
             submitTriggered = (await submitAuthForm(page, submitPostPattern, `${formKind} identifier post-activate`)) || submitTriggered;
             try {
               await page.waitForURL(successUrlPattern, { timeout: 15_000 });
@@ -4426,16 +5385,89 @@ interface SignupAttemptPolicy {
   passwordStepRounds: number;
 }
 
+interface SignupFlowResult {
+  password: string;
+  emailVerifiedInFlow: boolean;
+}
+
+async function completeEmailIdentifierChallenge(
+  page: any,
+  mailbox: MailboxSession,
+  cfg: AppConfig,
+  proxyUrl?: string,
+): Promise<boolean> {
+  if (!/\/u\/email-identifier\/challenge/i.test(page.url())) {
+    return false;
+  }
+
+  await page.waitForSelector('input[name="code"]', { timeout: 30_000 });
+  await clearAuthFieldValidationState(page, 'input[name="code"]');
+  await page.waitForTimeout(400);
+  const code = await waitForEmailCode(mailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl);
+  if (!code) {
+    throw new Error("verification email code not found within timeout");
+  }
+
+  log(`email identifier challenge code received (${code.length} digits)`);
+  await ensureInputValue(page, 'input[name="code"]', code, "email_code");
+  const stableCodeInput = await waitForStableInputValue(page, 'input[name="code"]', code, 500, 6_000);
+  if (!stableCodeInput) {
+    throw new Error("email_code_input_not_stable");
+  }
+  const preSubmitErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (preSubmitErrors.some((text) => /please enter a code/i.test(text))) {
+    log("email identifier challenge stale empty-code error visible before submit, refilling code");
+    await clearAuthFieldValidationState(page, 'input[name="code"]');
+    await ensureInputValue(page, 'input[name="code"]', code, "email_code");
+    const refilledStable = await waitForStableInputValue(page, 'input[name="code"]', code, 500, 6_000);
+    if (!refilledStable) {
+      throw new Error("email_code_input_not_stable_after_refill");
+    }
+  }
+  await page.waitForTimeout(randomInt(250, 550));
+  const codeSubmitFields = await collectAuthSubmitFields(page);
+  authSubmitFieldCache.set(page, codeSubmitFields);
+  log(
+    `email identifier cached submit fields before submit (code=${codeSubmitFields.code ? String(codeSubmitFields.code).length : 0}, state=${codeSubmitFields.state ? 1 : 0})`,
+  );
+
+  const submitTriggered = await submitAuthForm(page, /\/u\/email-identifier\/challenge/i, "email identifier challenge");
+  if (!submitTriggered) {
+    log("email identifier challenge submit did not observe POST; waiting for URL transition");
+  }
+
+  await Promise.race([
+    page.waitForURL((url: URL) => !/\/u\/email-identifier\/challenge/i.test(url.toString()), { timeout: 45_000 }),
+    page.waitForTimeout(45_000),
+  ]);
+
+  if (/\/u\/email-identifier\/challenge/i.test(page.url())) {
+    const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+    const errorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+    throw new Error(
+      `email identifier challenge did not advance: current=${page.url()} errors=${formErrors.join(" | ") || "none"} codes=${
+        errorCodes.join(",") || "none"
+      }`,
+    );
+  }
+
+  log(`email identifier challenge advanced to ${page.url()}`);
+  return true;
+}
+
 async function completeSignup(
   page: any,
   solver: CaptchaSolver,
   email: string,
   password: string,
+  mailbox: MailboxSession,
   cfg: AppConfig,
   outputDir: URL,
   policy: SignupAttemptPolicy,
+  proxyUrl?: string,
   hooks?: SignupDiagHooks,
-): Promise<string> {
+): Promise<SignupFlowResult> {
+  let emailVerifiedInFlow = false;
   await openAuthFlowEntry(page, "signup");
 
   if (!/\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
@@ -4453,7 +5485,14 @@ async function completeSignup(
   }
 
   if (/app\.tavily\.com\/home/i.test(page.url())) {
-    return password;
+    return { password, emailVerifiedInFlow };
+  }
+  if (/\/u\/email-identifier\/challenge/i.test(page.url())) {
+    emailVerifiedInFlow = await completeEmailIdentifierChallenge(page, mailbox, cfg, proxyUrl);
+    await page.waitForTimeout(1200);
+  }
+  if (/app\.tavily\.com\/home/i.test(page.url())) {
+    return { password, emailVerifiedInFlow };
   }
   if (!/\/u\/signup\/password/i.test(page.url())) {
     throw new Error(`signup did not reach password step, current=${page.url()}`);
@@ -4478,54 +5517,58 @@ async function completeSignup(
       const passwordInputs = page.locator('input[type="password"]');
       const pwdCount = await passwordInputs.count();
       if (pwdCount === 0) {
-        await fillInput(page, 'input[name="password"]', workingPassword);
+        await ensureInputValue(page, 'input[name="password"]', workingPassword, "signup_password");
       } else {
         for (let i = 0; i < pwdCount; i += 1) {
-          const input = passwordInputs.nth(i);
-          await input.fill("");
-          await input.type(workingPassword, { delay: randomInt(55, 135) });
+          await ensureInputValue(page, `input[type="password"] >> nth=${i}`, workingPassword, `signup_password_${i + 1}`);
         }
-      }
-
-      let hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
-      if (!hasCaptchaInput) {
-        const waitTimeout = attempt === 1 ? 9000 : 3200;
-        await page.waitForSelector('input[name="captcha"]', { timeout: waitTimeout }).catch(() => {});
-        hasCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
       }
 
       const preSubmitSnapshot = await collectPasswordStepSnapshot(page).catch(() => null);
       if (preSubmitSnapshot) {
         hooks?.onPasswordSnapshot?.(preSubmitSnapshot);
-        hasCaptchaInput = hasCaptchaInput || preSubmitSnapshot.hasCaptchaInput;
       }
-      let hasCaptchaImage = preSubmitSnapshot?.hasCaptchaImage ?? (await page.locator('img[alt="captcha"]').count()) > 0;
+      const preSubmitChallengeSnapshot = await collectAuthChallengeSnapshot(page).catch(() => null);
+      const hasCaptchaImage = Boolean(
+        preSubmitSnapshot?.hasCaptchaImage ?? (await page.locator('img[alt="captcha"]').count()).catch(() => 0),
+      );
       let challengeReadyForSubmit = false;
-      let solvedCaptchaCode = "";
       let allowSubmitWithoutCaptcha = false;
-
-      if (hasCaptchaInput) {
-        if (!hasCaptchaImage) {
-          await page.waitForSelector('img[alt="captcha"]', { timeout: 3500 }).catch(() => {});
-          hasCaptchaImage = (await page.locator('img[alt="captcha"]').count()) > 0;
-        }
-        if (!hasCaptchaImage) {
-          captchaMissingStreak += 1;
-          if (attempt < passwordAttemptMax) {
-            log(`signup password captcha input visible but image missing (attempt=${attempt}, streak=${captchaMissingStreak}), reloading`);
-            await safeGoto(page, page.url());
-            await page.waitForTimeout(randomInt(1200, 2600));
-            continue;
-          }
-          throw new Error("signup_password_captcha_missing");
-        }
-        captchaMissingStreak = 0;
+      if (hasCaptchaImage) {
         throw new Error("signup_password_image_captcha_not_supported");
+      }
+
+      if (hasManagedAuthChallenge(preSubmitChallengeSnapshot)) {
+        const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, "signup");
+        if (tokenOutcome.status === "rejected" && tokenOutcome.rejection && tokenOutcome.rejection !== "invalid_captcha") {
+          throw new Error(tokenOutcome.rejection);
+        }
+        const dismissalSnapshot =
+          getChallengeTokenLength(tokenOutcome.snapshot) > 0 || tokenOutcome.snapshot?.challengeSuccessVisible
+            ? await waitForManagedChallengeDismissal(page, "signup", 8_000)
+            : tokenOutcome.snapshot;
+        const effectiveChallengeSnapshot = dismissalSnapshot || tokenOutcome.snapshot;
+        const hiddenCaptcha = await waitForAuthCaptchaValue(page, tokenOutcome.status === "token_ready" ? 8_000 : 3_000);
+        if (hiddenCaptcha) {
+          challengeReadyForSubmit = true;
+          captchaMissingStreak = 0;
+          log(`signup password hidden captcha ready before submit (len=${hiddenCaptcha.length})`);
+        } else {
+          challengeReadyForSubmit = canSubmitManagedChallengeWithoutVisibleToken(effectiveChallengeSnapshot);
+        }
+        if (!challengeReadyForSubmit) {
+          captchaMissingStreak += 1;
+          if (attempt >= passwordAttemptMax) {
+            throw new Error("signup_password_captcha_missing");
+          }
+          log(`signup password managed challenge not ready for submit (attempt=${attempt}, streak=${captchaMissingStreak}), waiting`);
+          await page.waitForTimeout(randomInt(1000, 1800));
+          continue;
+        }
       } else {
         const challengeHint = preSubmitSnapshot?.challengeHint || false;
         const hasCaptchaSignal =
           challengeHint ||
-          hasCaptchaImage ||
           Boolean(preSubmitSnapshot?.hasCaptchaContainer) ||
           Boolean(preSubmitSnapshot?.hasTurnstileResponseInput) ||
           Boolean(preSubmitSnapshot?.hasRecaptchaResponseInput) ||
@@ -4568,20 +5611,21 @@ async function completeSignup(
           await page.waitForSelector('input[name="captcha"]', { timeout: 2600 }).catch(() => {});
           const lateCaptchaInput = (await page.locator('input[name="captcha"]').count()) > 0;
           if (lateCaptchaInput) {
-            log(`signup password captcha input appeared after dwell (attempt=${attempt}), image captcha unsupported`);
+            challengeReadyForSubmit = true;
+            captchaMissingStreak = 0;
+          } else {
+            if (attempt >= passwordAttemptMax) {
+              throw new Error("signup_password_captcha_missing");
+            }
+            log(`signup password captcha input still missing, reloading for challenge hydration (attempt=${attempt})`);
+            await safeGoto(page, page.url());
+            await page.waitForTimeout(randomInt(1200, 2600));
             continue;
           }
-          if (attempt >= passwordAttemptMax) {
-            throw new Error("signup_password_captcha_missing");
-          }
-          log(`signup password captcha input still missing, reloading for challenge hydration (attempt=${attempt})`);
-          await safeGoto(page, page.url());
-          await page.waitForTimeout(randomInt(1200, 2600));
-          continue;
         }
       }
 
-      if ((!challengeReadyForSubmit || solvedCaptchaCode.length !== 6) && !allowSubmitWithoutCaptcha) {
+      if (!challengeReadyForSubmit && !allowSubmitWithoutCaptcha) {
         if (attempt >= passwordAttemptMax) {
           throw new Error("signup_password_captcha_missing");
         }
@@ -4616,10 +5660,20 @@ async function completeSignup(
       }
 
       await page.waitForTimeout(randomInt(900, 2600));
+      const passwordSubmitFields = await collectAuthSubmitFields(page);
+      authSubmitFieldCache.set(page, passwordSubmitFields);
+      log(
+        `signup password cached submit fields before submit (password=${passwordSubmitFields.password ? String(passwordSubmitFields.password).length : 0}, captcha=${
+          passwordSubmitFields.captcha ? String(passwordSubmitFields.captcha).length : 0
+        }, state=${passwordSubmitFields.state ? 1 : 0})`,
+      );
       if (allowSubmitWithoutCaptcha) {
         log(`signup password submit without captcha challenge (attempt=${attempt})`);
       }
-      await clickSubmit(page);
+      const submitTriggered = await submitAuthForm(page, /\/u\/signup\/password/i, "signup password");
+      if (!submitTriggered) {
+        log(`signup password submit did not observe POST (attempt=${attempt}), waiting for page transition`);
+      }
       await page.waitForTimeout(2200);
 
       if (attempt === 1) {
@@ -4627,7 +5681,7 @@ async function completeSignup(
       }
 
         if (!/\/u\/signup\/password/i.test(page.url())) {
-          return workingPassword;
+          return { password: workingPassword, emailVerifiedInFlow };
         }
 
       const formErrors = await collectVisibleFormErrors(page).catch(() => []);
@@ -4693,7 +5747,7 @@ async function completeSignup(
             await page.waitForTimeout(1800);
           }
           if (!/\/u\/signup\/password/i.test(page.url())) {
-            return workingPassword;
+            return { password: workingPassword, emailVerifiedInFlow };
           }
           if (!submitTriggered) {
             log(`signup password post-challenge submit did not trigger POST (attempt=${attempt}), treat as suspicious`);
@@ -4763,7 +5817,7 @@ async function completeSignup(
     throw new Error(`signup password step failed after ${passwordAttemptMax} attempts`);
   }
 
-  return password;
+  return { password, emailVerifiedInFlow };
 }
 
 async function loginAndReachHome(
@@ -4772,8 +5826,11 @@ async function loginAndReachHome(
   email: string,
   password: string,
   cfg: AppConfig,
+  mailbox?: MailboxSession | null,
+  proxyUrl?: string,
   maxCycles = 5,
 ): Promise<void> {
+  const loginProvider = getConfiguredLoginProvider(cfg);
   for (let cycle = 1; cycle <= Math.max(1, maxCycles); cycle += 1) {
     await safeGoto(page, "https://app.tavily.com/home");
     await page.waitForTimeout(1200);
@@ -4788,14 +5845,22 @@ async function loginAndReachHome(
     await openAuthFlowEntry(page, "login");
     await page.waitForTimeout(900);
 
-    if (/\/u\/login\/identifier/i.test(page.url())) {
-      await solveCaptchaForm(page, solver, "login", email, cfg.maxCaptchaRounds);
-    }
+    if (loginProvider === "microsoft") {
+      await completeMicrosoftLogin(page, cfg);
+    } else {
+      if (/\/u\/login\/identifier/i.test(page.url())) {
+        await solveCaptchaForm(page, solver, "login", email, cfg.maxCaptchaRounds);
+      }
+      if (/\/u\/email-identifier\/challenge/i.test(page.url()) && mailbox) {
+        await completeEmailIdentifierChallenge(page, mailbox, cfg, proxyUrl);
+        await page.waitForTimeout(1200);
+      }
 
-    if ((await page.locator('input[name="password"]').count()) > 0) {
-      await fillInput(page, 'input[name="password"]', password);
-      await clickSubmit(page);
-      await page.waitForTimeout(1400);
+      if ((await page.locator('input[name="password"]').count()) > 0) {
+        await fillInput(page, 'input[name="password"]', password);
+        await clickSubmit(page);
+        await page.waitForTimeout(1400);
+      }
     }
 
     const current = page.url();
@@ -5079,6 +6144,19 @@ function loadConfig(): AppConfig {
   );
   const defaultApiPort = 39090 + randomInt(0, 2000);
   const defaultMixedPort = 49090 + randomInt(0, 2000);
+  const existingEmail = (process.env.EXISTING_EMAIL || "").trim() || undefined;
+  const existingPassword = (process.env.EXISTING_PASSWORD || "").trim() || undefined;
+  const microsoftAccountEmail = (process.env.MICROSOFT_ACCOUNT_EMAIL || "").trim() || undefined;
+  const microsoftAccountPassword = (process.env.MICROSOFT_ACCOUNT_PASSWORD || "").trim() || undefined;
+  if ((existingEmail && !existingPassword) || (!existingEmail && existingPassword)) {
+    throw new Error("EXISTING_EMAIL and EXISTING_PASSWORD must be configured together");
+  }
+  if ((microsoftAccountEmail && !microsoftAccountPassword) || (!microsoftAccountEmail && microsoftAccountPassword)) {
+    throw new Error("MICROSOFT_ACCOUNT_EMAIL and MICROSOFT_ACCOUNT_PASSWORD must be configured together");
+  }
+  if ((existingEmail || existingPassword) && (microsoftAccountEmail || microsoftAccountPassword)) {
+    throw new Error("Configure either EXISTING_EMAIL/EXISTING_PASSWORD or MICROSOFT_ACCOUNT_EMAIL/MICROSOFT_ACCOUNT_PASSWORD, not both");
+  }
 
   return {
     runMode: envRunMode || fallbackRunMode,
@@ -5110,9 +6188,14 @@ function loadConfig(): AppConfig {
     emailWaitMs: toInt(process.env.EMAIL_WAIT_MS, 180_000),
     keyName: (process.env.KEY_NAME || "").trim() || `reg-key-${String(Date.now()).slice(-6)}`,
     keyLimit: toInt(process.env.KEY_LIMIT, 1000),
-    existingEmail: (process.env.EXISTING_EMAIL || "").trim() || undefined,
-    existingPassword: (process.env.EXISTING_PASSWORD || "").trim() || undefined,
+    existingEmail,
+    existingPassword,
+    microsoftAccountEmail,
+    microsoftAccountPassword,
+    microsoftKeepSignedIn: toBool(process.env.MICROSOFT_KEEP_SIGNED_IN, true),
     mihomoSubscriptionUrl: mustEnv("MIHOMO_SUBSCRIPTION_URL"),
+    mihomoGroupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
+    mihomoRouteGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
     mihomoApiPort: toInt(process.env.MIHOMO_API_PORT, defaultApiPort),
     mihomoMixedPort: toInt(process.env.MIHOMO_MIXED_PORT, defaultMixedPort),
     proxyCheckUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
@@ -5189,7 +6272,7 @@ function shouldRetryTaskFailure(message: string): boolean {
 }
 
 function shouldAbortBatchFailure(message: string): boolean {
-  return /browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|Target page, context or browser has been closed|page has been closed|context has been closed|browser has been closed/i.test(
+  return /browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|Target page, context or browser has been closed|page has been closed|context has been closed|browser has been closed/i.test(
     message,
   );
 }
@@ -5213,6 +6296,14 @@ function getChromeVisualArgs(): string[] {
 function getChromeCredentialStoreArgs(): string[] {
   if (process.platform !== "darwin") return [];
   return ["--use-mock-keychain", "--password-store=basic"];
+}
+
+function getChromeNativePlatformArgs(): string[] {
+  if (process.platform !== "linux") return [];
+  return [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+  ];
 }
 
 function normalizeChromeVersion(raw: string): string {
@@ -5715,7 +6806,27 @@ async function reserveMihomoPorts(): Promise<{ apiPort: number; mixedPort: numbe
   return { apiPort, mixedPort };
 }
 
-async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promise<string> {
+async function readChromeDevToolsActivePort(profileDir: string): Promise<{ port: number; wsPath?: string } | null> {
+  try {
+    const raw = await readFile(path.join(profileDir, "DevToolsActivePort"), "utf8");
+    const [portLine, wsPathLine] = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const filePort = Number.parseInt(portLine || "", 10);
+    if (!Number.isFinite(filePort) || filePort <= 0) {
+      return null;
+    }
+    return {
+      port: filePort,
+      wsPath: wsPathLine || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function waitForChromeWsEndpoint(port: number, profileDir: string, timeoutMs = 40_000): Promise<string> {
   const endpoint = `http://127.0.0.1:${port}/json/version`;
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -5729,9 +6840,40 @@ async function waitForChromeWsEndpoint(port: number, timeoutMs = 40_000): Promis
     } catch {
       // retry until timeout
     }
+    const activePort = await readChromeDevToolsActivePort(profileDir);
+    if (activePort?.port) {
+      const candidateWs = activePort.wsPath?.startsWith("/")
+        ? `ws://127.0.0.1:${activePort.port}${activePort.wsPath}`
+        : "";
+      if (candidateWs) {
+        return candidateWs;
+      }
+      if (activePort.port !== port) {
+        try {
+          const fallbackResp = await fetchWithTimeout(`http://127.0.0.1:${activePort.port}/json/version`, 2500);
+          if (fallbackResp.ok) {
+            const payload = (await fallbackResp.json()) as JsonRecord;
+            const ws = typeof payload.webSocketDebuggerUrl === "string" ? payload.webSocketDebuggerUrl.trim() : "";
+            if (ws) return ws;
+          }
+        } catch {
+          // keep polling
+        }
+      }
+    }
     await delay(250);
   }
-  throw new Error(`native chrome debugger endpoint timeout on port ${port}`);
+  throw new Error(`native chrome debugger endpoint timeout on port ${port} (profile=${profileDir})`);
+}
+
+function isPidAlive(pid: number | undefined): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function launchNativeChromeCdp(
@@ -5775,6 +6917,7 @@ async function launchNativeChromeCdp(
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
       ...getChromeCredentialStoreArgs(),
+      ...getChromeNativePlatformArgs(),
       ...getFingerprintChromiumArgs(cfg.chromeExecutablePath, profileDir, proxyServer, locale, acceptLanguage, timezoneId),
     ];
     if (mode === "headless") {
@@ -5782,8 +6925,9 @@ async function launchNativeChromeCdp(
     } else {
       args.push("--new-window", ...startupTargets);
     }
-
-    const child = spawn(cfg.chromeExecutablePath, args, { stdio: "ignore", detached: true });
+    const chromeLogPath = path.join(profileDir, "native-chrome.log");
+    const chromeLogFd = openSync(chromeLogPath, "a");
+    const child = spawn(cfg.chromeExecutablePath, args, { stdio: ["ignore", chromeLogFd, chromeLogFd], detached: true });
     child.unref();
     const stop = createChildProcessStopper(child, profileDir);
     await delay(1800);
@@ -5793,12 +6937,23 @@ async function launchNativeChromeCdp(
       );
       continue;
     }
+    if (!isPidAlive(child.pid)) {
+      const chromeLog = existsSync(chromeLogPath) ? (await readFile(chromeLogPath, "utf8").catch(() => "")) : "";
+      const compactLog = chromeLog.split(/\r?\n/).filter(Boolean).slice(-20).join(" | ");
+      lastError = new Error(
+        `native chrome exited before debugger became ready${usingBaseProfile ? " (base profile fallback)" : ""}${
+          compactLog ? `: ${compactLog}` : ""
+        }`,
+      );
+      await stop().catch(() => {});
+      continue;
+    }
 
     try {
       if (mode === "headed" && cfg.chromeActivateOnLaunch) {
         await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
       }
-      const wsEndpoint = await waitForChromeWsEndpoint(debugPort);
+      const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
       const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
       let browser: Browser | null = null;
@@ -5833,7 +6988,10 @@ async function launchNativeChromeCdp(
         },
       };
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+      const chromeLog = existsSync(chromeLogPath) ? (await readFile(chromeLogPath, "utf8").catch(() => "")) : "";
+      const compactLog = chromeLog.split(/\r?\n/).filter(Boolean).slice(-20).join(" | ");
+      const baseError = error instanceof Error ? error : new Error(String(error));
+      lastError = compactLog ? new Error(`${baseError.message}; chrome_log=${compactLog}`) : baseError;
       await stop().catch(() => {});
     }
   }
@@ -5988,6 +7146,7 @@ async function launchNativeChromeInspect(
     ...getChromeVisualArgs(),
     ...getChromeWebRtcPolicyArgs(cfg),
     ...getChromeCredentialStoreArgs(),
+    ...getChromeNativePlatformArgs(),
     ...getFingerprintChromiumArgs(cfg.chromeExecutablePath, cfg.inspectChromeProfileDir, proxyServer, locale, acceptLanguage, timezoneId),
     "--disable-background-mode",
     "--disable-background-networking",
@@ -6040,6 +7199,61 @@ async function applyEngineStealth(
         }
         return originalQuery(parameters);
       };
+    }
+
+    const globalState = window as Window & {
+      __kohaLastAuthCaptcha?: string;
+      __kohaLastChallengeToken?: string;
+      __kohaLastAuthEmail?: string;
+      __kohaLastAuthPassword?: string;
+      __kohaLastEmailCode?: string;
+      __kohaAuthFieldWatcherInstalled?: boolean;
+    };
+    if (!globalState.__kohaAuthFieldWatcherInstalled) {
+      globalState.__kohaAuthFieldWatcherInstalled = true;
+      const syncFields = (): void => {
+        const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
+        const turnstileField = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
+        const recaptchaField = document.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null;
+        const hcaptchaField = document.querySelector(
+          'textarea[name="h-captcha-response"], input[name="h-captcha-response"]',
+        ) as HTMLInputElement | HTMLTextAreaElement | null;
+        const emailField = document.querySelector('input[name="email"], input[type="email"]') as HTMLInputElement | null;
+        const passwordField = document.querySelector('input[name="password"], input[type="password"]') as HTMLInputElement | null;
+        const codeField = document.querySelector('input[name="code"]') as HTMLInputElement | null;
+        const captchaValue = typeof captchaField?.value === "string" ? captchaField.value.trim() : "";
+        const challengeToken =
+          (typeof turnstileField?.value === "string" ? turnstileField.value.trim() : "") ||
+          (typeof recaptchaField?.value === "string" ? recaptchaField.value.trim() : "") ||
+          (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "");
+        const emailValue = typeof emailField?.value === "string" ? emailField.value.trim() : "";
+        const passwordValue = typeof passwordField?.value === "string" ? passwordField.value : "";
+        const codeValue = typeof codeField?.value === "string" ? codeField.value.trim() : "";
+        if (captchaValue) globalState.__kohaLastAuthCaptcha = captchaValue;
+        if (challengeToken) globalState.__kohaLastChallengeToken = challengeToken;
+        if (!captchaValue && captchaField && challengeToken) {
+          captchaField.value = challengeToken;
+          captchaField.dispatchEvent(new Event("input", { bubbles: true }));
+          captchaField.dispatchEvent(new Event("change", { bubbles: true }));
+          globalState.__kohaLastAuthCaptcha = challengeToken;
+        }
+        if (emailValue) globalState.__kohaLastAuthEmail = emailValue;
+        if (passwordValue) globalState.__kohaLastAuthPassword = passwordValue;
+        if (codeValue) globalState.__kohaLastEmailCode = codeValue;
+      };
+      const startWatcher = (): void => {
+        syncFields();
+        const observer = new MutationObserver(() => syncFields());
+        observer.observe(document.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["value"] });
+        window.setInterval(syncFields, 250);
+        document.addEventListener("input", syncFields, true);
+        document.addEventListener("change", syncFields, true);
+      };
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", startWatcher, { once: true });
+      } else {
+        startWatcher();
+      }
     }
   }, lang);
 }
@@ -6148,7 +7362,7 @@ async function prepareSignupTask(
   taskOrdinal: number,
   preloadMailbox: boolean,
 ): Promise<PreparedSignupTask> {
-  const password = cfg.existingPassword || randomPassword();
+  const password = getConfiguredLoginPassword(cfg) || randomPassword();
   const ipQuotaBlocked = new Set<string>();
   for (const [ip, emails] of ipEmailUsage.entries()) {
     if (emails.size >= 3) {
@@ -6201,14 +7415,14 @@ async function prepareSignupTask(
 
     try {
       const mailboxPromise =
-        preloadMailbox && !cfg.existingEmail
+        preloadMailbox && !hasConfiguredLoginAccount(cfg)
           ? createTaskMailboxSession(cfg, blockedMailboxDomains, batchId, taskId, selectedProxy.name, proxyIp || undefined)
               .then((mailbox) => ({ ok: true as const, mailbox }))
               .catch((error) => ({ ok: false as const, error }))
           : null;
       return {
         taskId,
-        email: cfg.existingEmail || "",
+        email: getConfiguredLoginEmail(cfg) || "",
         password,
         mailbox: null,
         mailboxPromise,
@@ -6254,16 +7468,21 @@ async function runSingleMode(
   const ledger = ctx.taskLedger;
 
   let mailbox: MailboxSession | null = preparedTask?.mailbox || null;
-  let email = preparedTask?.email || cfg.existingEmail || "";
-  let password = preparedTask?.password || cfg.existingPassword || "";
+  let email = preparedTask?.email || getConfiguredLoginEmail(cfg) || "";
+  let password = preparedTask?.password || getConfiguredLoginPassword(cfg) || "";
   let verificationLink: string | null = null;
   let apiKey: string | null = null;
   let verifyPassed = false;
   let precheckPassed = !cfg.browserPrecheckEnabled || args.skipPrecheck;
 
-  if (!preparedTask && email && password) {
-    log(`[${mode}] existing account mode: ${email}`);
-    notes.push("existing account mode enabled");
+  const configuredLoginProvider = getConfiguredLoginProvider(cfg);
+  const envJobId = Number.parseInt((process.env.TASK_LEDGER_JOB_ID || "").trim(), 10);
+  const envAccountId = Number.parseInt((process.env.TASK_LEDGER_ACCOUNT_ID || "").trim(), 10);
+  const linkedJobId = Number.isFinite(envJobId) ? envJobId : undefined;
+  const linkedAccountId = Number.isFinite(envAccountId) ? envAccountId : undefined;
+  if (!preparedTask && email && password && configuredLoginProvider) {
+    log(`[${mode}] configured ${configuredLoginProvider} account mode: ${email}`);
+    notes.push(`configured ${configuredLoginProvider} account mode enabled`);
   }
   if (preparedTask) {
     notes.push(`task id: ${preparedTask.taskId}`);
@@ -6321,6 +7540,8 @@ async function runSingleMode(
   const { domain: initialEmailDomain, localLen: initialEmailLocalLen } = splitEmail(email);
   const ledgerRecord: SignupTaskRecord = {
     runId,
+    jobId: linkedJobId,
+    accountId: linkedAccountId,
     batchId: ctx.batchId,
     mode,
     attemptIndex: ctx.modeAttempt,
@@ -6526,6 +7747,111 @@ async function runSingleMode(
         // ignore response sampling errors
       }
     });
+  };
+
+  const installAuthRequestRoute = async (targetContext: any): Promise<void> => {
+    if (!targetContext || typeof targetContext.route !== "function") return;
+    await targetContext.route(
+      /https?:\/\/auth\.tavily\.com\/u\/((signup|login)\/(identifier|password)|email-identifier\/challenge)/i,
+      async (route: any) => {
+      try {
+        const req = route.request();
+        const method = String(req.method?.() || "GET").toUpperCase();
+        if (method !== "POST") {
+          await route.continue();
+          return;
+        }
+        const headers = (req.headers?.() || {}) as Record<string, string>;
+        const contentType = String(headers["content-type"] || "");
+        const payload = parseRequestPayload(String(req.postData?.() || ""), contentType);
+        let touched = false;
+        const cachedFields = (page && typeof page === "object" ? authSubmitFieldCache.get(page) : undefined) || {};
+        const fallbackEmail = cachedFields.email || email;
+        const requestUrl = String(req.url?.() || "");
+        const challengeToken =
+          cachedFields.challengeToken ||
+          cachedFields.captcha ||
+          (await page
+            .evaluate(() => {
+              const pickValue = (selector: string): string => {
+                const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
+                return typeof field?.value === "string" ? field.value.trim() : "";
+              };
+              return (
+                pickValue('input[name="captcha"]') ||
+                pickValue('input[name="cf-turnstile-response"]') ||
+                pickValue('input[name="g-recaptcha-response"]') ||
+                pickValue('textarea[name="h-captcha-response"]') ||
+                pickValue('input[name="h-captcha-response"]') ||
+                String((globalThis as any).__kohaLastAuthCaptcha || "").trim() ||
+                String((globalThis as any).__kohaLastChallengeToken || "").trim()
+              );
+            })
+            .catch(() => ""));
+        const livePassword =
+          cachedFields.password ||
+          (await page
+            .evaluate(() => {
+              const candidates = Array.from(
+                document.querySelectorAll('input[type="password"], input[name="password"]'),
+              ) as HTMLInputElement[];
+              for (const field of candidates) {
+                const value = typeof field?.value === "string" ? field.value : "";
+                if (value) return value;
+              }
+              return "";
+            })
+            .catch(() => "")) || "";
+        const liveCode =
+          cachedFields.code ||
+          (await page
+            .evaluate(() => {
+              const field = document.querySelector('input[name="code"]') as HTMLInputElement | null;
+              return typeof field?.value === "string" ? field.value.trim() : "";
+            })
+            .catch(() => "")) || "";
+        if ((!payload["email"] || !String(payload["email"]).trim()) && fallbackEmail) {
+          payload["email"] = fallbackEmail;
+          touched = true;
+        }
+        if ((!payload["captcha"] || !String(payload["captcha"]).trim()) && challengeToken) {
+          payload["captcha"] = challengeToken;
+          touched = true;
+        }
+        if ((!payload["state"] || !String(payload["state"]).trim()) && cachedFields.state) {
+          payload["state"] = cachedFields.state;
+          touched = true;
+        }
+        if (/\/u\/(?:signup|login)\/password/i.test(requestUrl) && (!payload["password"] || !String(payload["password"]).trim()) && livePassword) {
+          payload["password"] = livePassword;
+          touched = true;
+        }
+        if (/\/u\/email-identifier\/challenge/i.test(requestUrl) && (!payload["code"] || !String(payload["code"]).trim()) && liveCode) {
+          payload["code"] = liveCode;
+          touched = true;
+        }
+        if (!touched) {
+          await route.continue();
+          return;
+        }
+        const nextHeaders = { ...headers };
+        delete nextHeaders["content-length"];
+        delete nextHeaders["Content-Length"];
+        const nextBody = new URLSearchParams(
+          Object.entries(payload).map(([key, value]) => [key, typeof value === "string" ? value : String(value)]),
+        ).toString();
+        log(
+          `patched auth submit payload via route (email=${payload["email"] ? 1 : 0}, captcha=${payload["captcha"] ? 1 : 0}, password=${payload["password"] ? 1 : 0}, code=${payload["code"] ? 1 : 0}, state=${payload["state"] ? 1 : 0})`,
+        );
+        await route.continue({
+          headers: nextHeaders,
+          postData: nextBody,
+        });
+      } catch {
+        await route.continue().catch(() => {});
+      }
+    },
+    );
   };
 
   try {
@@ -6778,6 +8104,7 @@ async function runSingleMode(
         }
       } else {
         context = await browser!.newContext(contextOptions);
+        await installAuthRequestRoute(context);
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, selectedGeo?.timezone);
         }
@@ -6937,8 +8264,8 @@ async function runSingleMode(
     });
     persistLedgerRecord("after-browser-ip-probe");
 
-    if (cfg.existingEmail && cfg.existingPassword) {
-      notes.push("skip signup (existing account)");
+    if (configuredLoginProvider) {
+      notes.push(`skip signup (${configuredLoginProvider} account)`);
     } else {
       if (!mailbox && preparedTask?.mailboxPromise) {
         try {
@@ -7026,14 +8353,16 @@ async function runSingleMode(
 
       for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
         try {
-          password = await completeSignup(
+          const signupResult = await completeSignup(
             page,
             solver,
             email,
             password,
+            mailbox!,
             cfg,
             diagOutputDir,
             signupAttemptPolicy,
+            mihomoController.proxyServer,
             {
             onPasswordSnapshot: (snapshot) => {
               passwordStepSnapshots.push(snapshot);
@@ -7044,7 +8373,13 @@ async function runSingleMode(
               if (browserFingerprintSnapshots.length > 20) browserFingerprintSnapshots.shift();
             },
           });
+          password = signupResult.password;
           notes.push("signup flow submitted");
+          if (signupResult.emailVerifiedInFlow) {
+            verifyPassed = true;
+            verificationLink = "email-code";
+            notes.push("email verification confirmed via code challenge");
+          }
           ledgerRecord.signupSubmitted = true;
           ledgerRecord.password = password;
           ledgerRecord.notesJson = safeJsonStringify(notes);
@@ -7055,36 +8390,38 @@ async function runSingleMode(
           if (!isRecoverableBrowserError(message) || attempt === 2) {
             throw error;
           }
-          log(`[${mode}] signup retry after browser reset (attempt=${attempt})`);
+          log(`[${mode}] signup retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
           await rebuildPageWithRecovery("signup retry");
         }
       }
 
-      failureStage = "email_verify_wait";
-      verificationLink = await waitForVerificationLink(
-        mailbox!,
-        cfg.emailWaitMs,
-        cfg.mailPollMs,
-        cfg.verifyHostAllowlist,
-        mihomoController.proxyServer,
-      );
-      if (!verificationLink) {
-        throw new Error("verification email not found within timeout");
-      }
-
-      failureStage = "email_verify_open";
-      await safeGoto(page, verificationLink, 120000);
-      verifyPassed = await verifyVerificationLanding(page);
       if (!verifyPassed) {
-        throw new Error(`verification link opened but success signal missing, current=${page.url()}`);
+        failureStage = "email_verify_wait";
+        verificationLink = await waitForVerificationLink(
+          mailbox!,
+          cfg.emailWaitMs,
+          cfg.mailPollMs,
+          cfg.verifyHostAllowlist,
+          mihomoController.proxyServer,
+        );
+        if (!verificationLink) {
+          throw new Error("verification email not found within timeout");
+        }
+
+        failureStage = "email_verify_open";
+        await safeGoto(page, verificationLink, 120000);
+        verifyPassed = await verifyVerificationLanding(page);
+        if (!verifyPassed) {
+          throw new Error(`verification link opened but success signal missing, current=${page.url()}`);
+        }
+        notes.push("email verification confirmed");
       }
-      notes.push("email verification confirmed");
     }
 
     failureStage = "login_home";
     for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
       try {
-        await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
+        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         notes.push("reached app home");
         break;
@@ -7093,7 +8430,7 @@ async function runSingleMode(
         if (!isRecoverableBrowserError(message) || attempt === 2) {
           throw error;
         }
-        log(`[${mode}] login retry after browser reset (attempt=${attempt})`);
+        log(`[${mode}] login retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
         await rebuildPageWithRecovery("login retry");
       }
     }
@@ -7108,7 +8445,7 @@ async function runSingleMode(
           break;
         }
 
-        await loginAndReachHome(page, solver, email, password, cfg, loginCycleMax);
+        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
         await acceptPostSignupConsent(page).catch(() => false);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         await page.waitForTimeout(1500);
@@ -7154,7 +8491,7 @@ async function runSingleMode(
     ledgerRecord.failureStage = undefined;
     ledgerRecord.errorCode = undefined;
     ledgerRecord.errorMessage = undefined;
-    ledgerRecord.verifyPassed = verifyPassed || !!cfg.existingEmail;
+    ledgerRecord.verifyPassed = verifyPassed || hasConfiguredLoginAccount(cfg);
     ledgerRecord.precheckPassed = precheckPassed;
     ledgerRecord.hasIpRateLimit = successRisk.hasIpRateLimit;
     ledgerRecord.hasSuspiciousActivity = successRisk.hasSuspiciousActivity;
@@ -7201,7 +8538,7 @@ async function runSingleMode(
       apiKey,
       model: resolvedModel,
       precheckPassed,
-      verifyPassed: verifyPassed || !!cfg.existingEmail,
+      verifyPassed: verifyPassed || hasConfiguredLoginAccount(cfg),
       notes,
     };
   } catch (error) {
@@ -7274,6 +8611,21 @@ async function runSingleMode(
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     stopTaskWatchers();
+    if (mode === "headed" && toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false)) {
+      const holdUrl = page ? page.url() : "unknown";
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          await rl.question(`Browser paused at stage=${failureStage} url=${holdUrl}. Press Enter to close: `);
+        } finally {
+          rl.close();
+        }
+      } else {
+        const holdMs = Math.max(30_000, toInt(process.env.KEEP_BROWSER_OPEN_MS, 15 * 60_000));
+        log(`keep browser open on exit for ${holdMs}ms at stage=${failureStage} url=${holdUrl}`);
+        await delay(holdMs);
+      }
+    }
     if (context && !useNativeChrome) {
       await context.close().catch(() => {});
     }
@@ -7473,7 +8825,12 @@ async function run(): Promise<void> {
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
       let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
-      const ports = await reserveMihomoPorts();
+      const ports = batchEnabled
+        ? await reserveMihomoPorts()
+        : {
+            apiPort: cfg.mihomoApiPort,
+            mixedPort: cfg.mihomoMixedPort,
+          };
       mihomoOverrides = {
         apiPort: ports.apiPort,
         mixedPort: ports.mixedPort,
