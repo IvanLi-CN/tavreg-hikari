@@ -13,7 +13,8 @@ export interface InvalidImportRow {
 }
 
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
-const EDGE_SEPARATOR_PATTERN = /^[\s,|:：;；\-—–_=]+|[\s,|:：;；\-—–_=]+$/g;
+const LEADING_BOUNDARY_PATTERN = /^(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)/;
+const TRAILING_BOUNDARY_PATTERN = /(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)$/;
 
 function normalizeLine(rawLine: string): string {
   return rawLine
@@ -23,8 +24,12 @@ function normalizeLine(rawLine: string): string {
     .trim();
 }
 
-function trimSeparators(value: string): string {
-  return value.replace(EDGE_SEPARATOR_PATTERN, "").trim();
+function readPasswordAfterEmail(value: string): string {
+  return value.trimEnd().replace(LEADING_BOUNDARY_PATTERN, "").trim();
+}
+
+function readPasswordBeforeEmail(value: string): string {
+  return value.trimStart().replace(TRAILING_BOUNDARY_PATTERN, "").trim();
 }
 
 export function parseImportLine(rawLine: string, lineNumber: number): ParsedImportEntry | InvalidImportRow {
@@ -48,8 +53,8 @@ export function parseImportLine(rawLine: string, lineNumber: number): ParsedImpo
 
   const email = emailMatch[0].trim();
   const normalizedEmail = email.toLowerCase();
-  const before = trimSeparators(normalizedLine.slice(0, emailMatch.index));
-  const after = trimSeparators(normalizedLine.slice(emailMatch.index + email.length));
+  const before = readPasswordBeforeEmail(normalizedLine.slice(0, emailMatch.index));
+  const after = readPasswordAfterEmail(normalizedLine.slice(emailMatch.index + email.length));
   const password = after || before;
 
   if (!password) {

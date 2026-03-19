@@ -29,6 +29,25 @@ describe("parseImportLine", () => {
     });
   });
 
+  test("preserves separator characters when they belong to passwords", () => {
+    expect(parseImportLine("user@example.com,-Secret123", 1)).toMatchObject({
+      email: "user@example.com",
+      password: "-Secret123",
+    });
+    expect(parseImportLine("user@example.com,_Secret123", 2)).toMatchObject({
+      email: "user@example.com",
+      password: "_Secret123",
+    });
+    expect(parseImportLine("user@example.com,Secret123-", 3)).toMatchObject({
+      email: "user@example.com",
+      password: "Secret123-",
+    });
+    expect(parseImportLine("Secret123- user@example.com", 4)).toMatchObject({
+      email: "user@example.com",
+      password: "Secret123-",
+    });
+  });
+
   test("reports invalid rows with reason codes", () => {
     expect(parseImportLine("just-text", 2)).toEqual({
       lineNumber: 2,
@@ -112,6 +131,7 @@ bad-line
       existingHasApiKey: true,
       groupName: "linked",
     });
+    expect(preview.items.find((item) => item.email === "beta@outlook.com")).not.toHaveProperty("existingPassword");
     expect(preview.items.find((item) => item.email === "gamma@outlook.com")).toMatchObject({
       decision: "keep_existing",
     });

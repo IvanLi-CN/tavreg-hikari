@@ -94,7 +94,6 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
-    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     hasApiKey: row.hasApiKey,
     apiKeyId: row.apiKeyId,

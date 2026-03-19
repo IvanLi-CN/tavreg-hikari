@@ -41,7 +41,6 @@ export type AccountImportPreviewItem = {
   duplicateOfLine?: number;
   existingAccountId?: number;
   existingHasApiKey?: boolean;
-  existingPassword?: string;
   groupName?: string | null;
 };
 
