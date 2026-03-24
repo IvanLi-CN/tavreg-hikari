@@ -107,6 +107,7 @@ const baseArgs = {
   onDeleteSelected: fn(),
   onClearSelection: fn(),
   onSaveProofMailbox: fn(async () => undefined),
+  onSaveAvailability: fn(async () => undefined),
 };
 
 function AccountsStorySurface(props: {
@@ -153,6 +154,7 @@ function AccountsStorySurface(props: {
       onDeleteSelected={() => undefined}
       onClearSelection={() => setSelectedIds([])}
       onSaveProofMailbox={async () => undefined}
+      onSaveAvailability={async () => undefined}
     />
   );
 }

@@ -113,6 +113,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     skipReason: row.skipReason,
     groupName: row.groupName,
     disabledAt: row.disabledAt,
+    disabledReason: row.disabledReason,
   };
 }
 
@@ -252,50 +253,51 @@ async function main(): Promise<void> {
       const pathname = url.pathname;
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
 
-      if (pathname === "/api/events/ws") {
-        if (server.upgrade(req)) {
-          return new Response(null);
+      try {
+        if (pathname === "/api/events/ws") {
+          if (server.upgrade(req)) {
+            return new Response(null);
+          }
+          return badRequest("websocket upgrade failed", 500);
         }
-        return badRequest("websocket upgrade failed", 500);
-      }
 
-      if (pathname === "/api/health") {
-        return json({ ok: true, now: nowIso() });
-      }
+        if (pathname === "/api/health") {
+          return json({ ok: true, now: nowIso() });
+        }
 
-      if (pathname === "/api/accounts/import-preview" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as {
-          entries?: ParsedImportEntry[];
-          invalidRows?: InvalidImportRow[];
-        } | null;
-        const entries = Array.isArray(body?.entries) ? body.entries : [];
-        const invalidRows = Array.isArray(body?.invalidRows) ? body.invalidRows : [];
-        const existingAccounts = db.getAccountsByEmails(entries.map((entry) => String(entry?.email || "")));
-        const preview = buildImportPreview(
-          entries.map((entry, index) => ({
-            lineNumber: Number(entry.lineNumber || index + 1),
-            rawLine: String(entry.rawLine || ""),
-            email: String(entry.email || "").trim(),
-            normalizedEmail: String(entry.normalizedEmail || String(entry.email || "").trim().toLowerCase()),
-            password: String(entry.password || ""),
-          })),
-          invalidRows.map((row, index) => ({
-            lineNumber: Number(row.lineNumber || index + 1),
-            rawLine: String(row.rawLine || ""),
-            reason: String(row.reason || "invalid"),
-          })),
-          existingAccounts.map((account) => ({
-            id: account.id,
-            microsoftEmail: account.microsoftEmail,
-            passwordPlaintext: account.passwordPlaintext,
-            hasApiKey: account.hasApiKey,
-            groupName: account.groupName,
-          })),
-        );
-        return json(preview);
-      }
+        if (pathname === "/api/accounts/import-preview" && req.method === "POST") {
+          const body = (await req.json().catch(() => null)) as {
+            entries?: ParsedImportEntry[];
+            invalidRows?: InvalidImportRow[];
+          } | null;
+          const entries = Array.isArray(body?.entries) ? body.entries : [];
+          const invalidRows = Array.isArray(body?.invalidRows) ? body.invalidRows : [];
+          const existingAccounts = db.getAccountsByEmails(entries.map((entry) => String(entry?.email || "")));
+          const preview = buildImportPreview(
+            entries.map((entry, index) => ({
+              lineNumber: Number(entry.lineNumber || index + 1),
+              rawLine: String(entry.rawLine || ""),
+              email: String(entry.email || "").trim(),
+              normalizedEmail: String(entry.normalizedEmail || String(entry.email || "").trim().toLowerCase()),
+              password: String(entry.password || ""),
+            })),
+            invalidRows.map((row, index) => ({
+              lineNumber: Number(row.lineNumber || index + 1),
+              rawLine: String(row.rawLine || ""),
+              reason: String(row.reason || "invalid"),
+            })),
+            existingAccounts.map((account) => ({
+              id: account.id,
+              microsoftEmail: account.microsoftEmail,
+              passwordPlaintext: account.passwordPlaintext,
+              hasApiKey: account.hasApiKey,
+              groupName: account.groupName,
+            })),
+          );
+          return json(preview);
+        }
 
-      if (pathname === "/api/accounts/import" && req.method === "POST") {
+        if (pathname === "/api/accounts/import" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as {
           content?: string;
           entries?: Array<{ email?: string; password?: string }>;
@@ -332,7 +334,7 @@ async function main(): Promise<void> {
         });
       }
 
-      if (pathname === "/api/accounts" && req.method === "GET") {
+        if (pathname === "/api/accounts" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({
@@ -354,7 +356,7 @@ async function main(): Promise<void> {
         });
       }
 
-      if (pathname === "/api/accounts/group" && req.method === "POST") {
+        if (pathname === "/api/accounts/group" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { ids?: number[]; groupName?: string | null } | null;
         const ids = Array.isArray(body?.ids) ? body.ids.map((id) => Number(id)) : [];
         const result = db.updateAccountsGroup(ids, body?.groupName ?? null);
@@ -366,7 +368,7 @@ async function main(): Promise<void> {
         return json({ ok: true, ...result });
       }
 
-      if (accountDetailMatch && req.method === "PATCH") {
+        if (accountDetailMatch && req.method === "PATCH") {
         const accountId = Number.parseInt(accountDetailMatch[1] || "", 10);
         if (!Number.isInteger(accountId) || accountId < 1) {
           return badRequest("invalid account id");
@@ -375,25 +377,44 @@ async function main(): Promise<void> {
           proofMailboxProvider?: string | null;
           proofMailboxAddress?: string | null;
           proofMailboxId?: string | null;
+          disabled?: boolean;
+          disabledReason?: string | null;
         } | null;
         const proofMailboxAddress = body?.proofMailboxAddress == null ? undefined : String(body.proofMailboxAddress).trim() || null;
         const proofMailboxId = body?.proofMailboxId == null ? undefined : String(body.proofMailboxId).trim() || null;
         const rawProvider = body?.proofMailboxProvider == null ? undefined : String(body.proofMailboxProvider).trim().toLowerCase() || null;
+        const disabled = body?.disabled == null ? undefined : Boolean(body.disabled);
+        const disabledReason = body?.disabledReason == null ? undefined : String(body.disabledReason).trim() || null;
         if (rawProvider != null && rawProvider !== "moemail") {
           return badRequest("unsupported proof mailbox provider");
         }
         if (proofMailboxAddress && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(proofMailboxAddress)) {
           return badRequest("invalid proof mailbox address");
         }
+        if (disabled === true && !disabledReason) {
+          return badRequest("disabled reason is required");
+        }
         try {
-          const account = db.updateAccountProofMailbox(accountId, {
-            provider: rawProvider === undefined ? undefined : rawProvider,
-            address: proofMailboxAddress,
-            mailboxId: proofMailboxId,
-          });
+          if (rawProvider !== undefined || proofMailboxAddress !== undefined || proofMailboxId !== undefined) {
+            db.updateAccountProofMailbox(accountId, {
+              provider: rawProvider === undefined ? undefined : rawProvider,
+              address: proofMailboxAddress,
+              mailboxId: proofMailboxId,
+            });
+          }
+          if (disabled !== undefined || disabledReason !== undefined) {
+            db.updateAccountAvailability(accountId, {
+              disabled,
+              reason: disabledReason,
+            });
+          }
+          const account = db.getAccount(accountId);
+          if (!account) {
+            return badRequest(`account not found: ${accountId}`, 404);
+          }
           broadcast({
             type: "account.updated",
-            payload: { ids: [accountId], action: "proof_mailbox" },
+            payload: { ids: [accountId], action: "account_meta" },
             timestamp: nowIso(),
           });
           return json({ ok: true, account: serializeAccount(account) });
@@ -406,7 +427,7 @@ async function main(): Promise<void> {
         }
       }
 
-      if (pathname === "/api/accounts" && req.method === "DELETE") {
+        if (pathname === "/api/accounts" && req.method === "DELETE") {
         const body = (await req.json().catch(() => null)) as { ids?: number[] } | null;
         const ids = Array.isArray(body?.ids) ? body.ids.map((id) => Number(id)) : [];
         const result = db.deleteAccounts(ids);
@@ -418,7 +439,7 @@ async function main(): Promise<void> {
         return json({ ok: true, ...result });
       }
 
-      if (pathname === "/api/api-keys" && req.method === "GET") {
+        if (pathname === "/api/api-keys" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listApiKeys({
@@ -465,7 +486,7 @@ async function main(): Promise<void> {
         return json(serializeJobSnapshot(db, scheduler));
       }
 
-      if (pathname === "/api/jobs/current/control" && req.method === "POST") {
+        if (pathname === "/api/jobs/current/control" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
         const action = String(body?.action || "");
         try {
@@ -500,7 +521,7 @@ async function main(): Promise<void> {
         }
       }
 
-      if (pathname === "/api/proxies" && req.method === "GET") {
+        if (pathname === "/api/proxies" && req.method === "GET") {
         const settings = db.getSettings(getDefaultSettings());
         if (!settings.subscriptionUrl.trim()) {
           return json({
@@ -515,6 +536,7 @@ async function main(): Promise<void> {
           return json({
             settings,
             selectedName: inventory.selected,
+            pinnedName: db.getPinnedProxyName(),
             nodes: inventory.nodes,
             syncError: null,
           });
@@ -522,13 +544,14 @@ async function main(): Promise<void> {
           return json({
             settings,
             selectedName: db.getSelectedProxyName(),
+            pinnedName: db.getPinnedProxyName(),
             nodes: db.listProxyNodes(),
             syncError: error instanceof Error ? error.message : String(error),
           });
         }
       }
 
-      if (pathname === "/api/proxies/settings" && req.method === "POST") {
+        if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
         const current = db.getSettings(getDefaultSettings());
         const optimisticNext = buildNextSettings(current, body);
@@ -539,6 +562,7 @@ async function main(): Promise<void> {
             ok: true,
             settings: optimisticNext,
             selectedName: null,
+            pinnedName: db.getPinnedProxyName(),
             nodes: [],
             syncError: null,
           });
@@ -552,28 +576,32 @@ async function main(): Promise<void> {
           }),
         );
         db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
-        return json({ ok: true, settings: next, selectedName: inventory.selected, nodes: db.listProxyNodes() });
+        return json({ ok: true, settings: next, selectedName: inventory.selected, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
       }
 
-      if (pathname === "/api/proxies/select" && req.method === "POST") {
+        if (pathname === "/api/proxies/select" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { nodeName?: string } | null;
         const nodeName = String(body?.nodeName || "").trim();
-        if (!nodeName) return badRequest("nodeName is required");
+        if (!nodeName) {
+          db.setPinnedProxyName(null);
+          return json({ ok: true, selectedName: db.getSelectedProxyName(), pinnedName: null, nodes: db.listProxyNodes() });
+        }
         const settings = db.getSettings(getDefaultSettings());
         return await runExclusiveProxyOp(async () => {
           const controller = await createProxyController(settings);
           try {
             await controller.setGroupProxy(nodeName);
             db.setSelectedProxy(nodeName);
+            db.setPinnedProxyName(nodeName);
             const selected = await controller.getGroupSelection();
-            return json({ ok: true, selectedName: selected || nodeName, nodes: db.listProxyNodes() });
+            return json({ ok: true, selectedName: selected || nodeName, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
           } finally {
             await controller.stop().catch(() => {});
           }
         });
       }
 
-      if (pathname === "/api/proxies/check" && req.method === "POST") {
+        if (pathname === "/api/proxies/check" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
         const settings = db.getSettings(getDefaultSettings());
         const { response, event } = await runExclusiveProxyOp(async () => {
@@ -640,7 +668,15 @@ async function main(): Promise<void> {
         return response || badRequest("proxy check failed");
       }
 
-      return await serveStatic(req);
+        return await serveStatic(req);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[web-admin] ${req.method} ${pathname} failed: ${message}`);
+        if (error instanceof Error && error.stack) {
+          console.error(error.stack);
+        }
+        return badRequest(message, 500);
+      }
     },
   });
 

@@ -122,6 +122,7 @@ export const sampleAccounts = {
       skipReason: null,
       groupName: "default",
       disabledAt: null,
+      disabledReason: null,
     },
     {
       id: 2,
@@ -142,6 +143,7 @@ export const sampleAccounts = {
       skipReason: "linked_api_key",
       groupName: "linked",
       disabledAt: null,
+      disabledReason: null,
     },
     {
       id: 3,
@@ -156,12 +158,13 @@ export const sampleAccounts = {
       updatedAt: "2026-03-18T07:05:00.000Z",
       importSource: "manual",
       lastUsedAt: "2026-03-18T06:59:00.000Z",
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       lastResultAt: "2026-03-18T07:01:00.000Z",
-      lastErrorCode: "password-invalid",
+      lastErrorCode: "microsoft_unknown_recovery_email",
       skipReason: null,
       groupName: "failed-pool",
-      disabledAt: null,
+      disabledAt: "2026-03-18T07:01:00.000Z",
+      disabledReason: "未知辅助邮箱：ga*****@genq.top",
     },
   ],
 } satisfies AccountsPayload;

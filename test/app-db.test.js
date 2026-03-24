@@ -270,6 +270,60 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("stores unavailable reason and keeps disabled status across failure updates", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "disabled@outlook.com", password: "disabled-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.markAccountUnavailable(accountId, "未知辅助邮箱：di*****@genq.top", "microsoft_unknown_recovery_email");
+    let account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "disabled",
+      lastErrorCode: "microsoft_unknown_recovery_email",
+      disabledReason: "未知辅助邮箱：di*****@genq.top",
+    });
+    expect(account?.disabledAt).toBeTruthy();
+
+    appDb.markAccountDirectFailure(accountId, "network_connection_closed");
+    account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "disabled",
+      lastErrorCode: "network_connection_closed",
+      disabledReason: "未知辅助邮箱：di*****@genq.top",
+    });
+
+    appDb.updateAccountAvailability(accountId, { disabled: false, reason: null });
+    account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "ready",
+      disabledAt: null,
+      disabledReason: null,
+    });
+
+    appDb.close();
+  });
+
+  test("ignores proof mailbox mappings when leasing the next account", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "plain-a@outlook.com", password: "pass-a" },
+      { email: "proof-b@outlook.com", password: "pass-b" },
+      { email: "plain-c@outlook.com", password: "pass-c" },
+    ]);
+    appDb.updateAccountProofMailbox(imported.affectedIds[1], {
+      provider: "moemail",
+      address: "proof-b@mail-us.707079.xyz",
+      mailboxId: "proof-b-id",
+    });
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+
+    expect(leased?.microsoftEmail).toBe("plain-a@outlook.com");
+
+    appDb.close();
+  });
+
   test("fails paused jobs during stale-state recovery", async () => {
     const { dbPath, appDb } = await createTempDb();
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -789,7 +843,7 @@ describe("scheduler runtime spec", () => {
       },
     });
 
-    expect(runtime.command).toBe(process.execPath);
+    expect(runtime.command).toBe(process.versions.bun ? process.env.NODE_BINARY || "node" : process.execPath);
     expect(runtime.args.slice(-8)).toEqual([
       "--mode",
       "headed",
@@ -800,11 +854,7 @@ describe("scheduler runtime spec", () => {
       "--proxy-node",
       "Tokyo-01",
     ]);
-    if (process.versions.bun) {
-      expect(runtime.args.slice(0, 2)).toEqual(["run", "src/main.ts"]);
-    } else {
-      expect(runtime.args.slice(0, 3)).toEqual(["--import", "tsx", "src/main.ts"]);
-    }
+    expect(runtime.args.slice(0, 3)).toEqual(["--import", "tsx", "src/main.ts"]);
     expect(runtime.env).toMatchObject({
       MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
       MIHOMO_GROUP_NAME: "WEB_AUTO",

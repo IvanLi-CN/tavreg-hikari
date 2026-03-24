@@ -17,8 +17,18 @@ import {
   buildMoeMailAuthHeaders,
   extractFreshMicrosoftProofCodeFromMoeMailResponse,
   normalizeMoeMailBaseUrl,
+  provisionMoeMailMailbox,
   resolveMoeMailMailboxId as resolveMoeMailMailboxIdViaOpenApi,
 } from "./moemail-openapi.js";
+import {
+  classifyMicrosoftFlowInterrupt,
+  buildMicrosoftPasswordSurfaceKey,
+  classifyMicrosoftPasswordError,
+  isMicrosoftAuthorizeShellUnready,
+  shouldClassifyMicrosoftUnknownRecoveryEmail,
+  shouldAttemptMicrosoftProofPasswordFallback,
+  shouldRecoverMicrosoftPasskeyToProofCode,
+} from "./microsoft-login-state.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
@@ -315,6 +325,7 @@ const authSubmitFieldCache = new WeakMap<
 interface ModeRunContext {
   batchId: string;
   modeAttempt: number;
+  keepBrowserOpenOnFailure: boolean;
   taskLedger: TaskLedger | null;
   runtimeRecentProxyIps: string[];
   ipEmailUsage: Map<string, Set<string>>;
@@ -948,6 +959,18 @@ function resolveKnownNodeIp(
   return normalizeIp(entry?.lastIp || entry?.lastGeo?.ip);
 }
 
+function computeHistoricalNodeReliabilityPenalty(successCount: number | undefined, failCount: number | undefined): number {
+  const success = Math.max(0, Number(successCount) || 0);
+  const fail = Math.max(0, Number(failCount) || 0);
+  const total = success + fail;
+  if (total <= 0) return 0;
+
+  const failureRatioPenalty = Math.round((fail / total) * 1_600);
+  const accumulatedFailPenalty = Math.min(1_800, fail * 4);
+  const successCredit = Math.min(900, success * 28);
+  return Math.max(0, failureRatioPenalty + accumulatedFailPenalty - successCredit);
+}
+
 function nodeSelectionScore(
   name: string,
   usage: ProxyNodeUsageState,
@@ -958,8 +981,9 @@ function nodeSelectionScore(
 ): number {
   const entry = usage.nodes[name];
   const nodeIp = normalizeIp(entry?.lastIp || entry?.lastGeo?.ip);
+  const historicalReliabilityPenalty = computeHistoricalNodeReliabilityPenalty(entry?.successCount, entry?.failCount);
   const unknownIpFailPenalty =
-    ((entry?.lastOutcome === "fail" ? 180 : 0) + (entry?.consecutiveFailCount || 0) * 260 + (entry?.failCount || 0) * 20);
+    (entry?.lastOutcome === "fail" ? 180 : 0) + (entry?.consecutiveFailCount || 0) * 260 + historicalReliabilityPenalty;
   const unknownIpLatencyPenalty = typeof entry?.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 90 : 0;
   const unknownIpOrg = (entry?.lastGeo?.org || "").toLowerCase();
   const unknownIpHostingPenalty =
@@ -983,6 +1007,7 @@ function nodeSelectionScore(
   const cooldownPenalty =
     cooldownRemaining > 0 ? Math.round((cooldownRemaining / Math.max(1, cfg.nodeReuseCooldownMs)) * 900) : 0;
   const failPenalty = ((ipUsage?.lastOutcome === "fail" ? 180 : 0) + (ipUsage?.consecutiveFailCount || 0) * 260);
+  const reliabilityPenalty = computeHistoricalNodeReliabilityPenalty(entry?.successCount, entry?.failCount);
   const latencyPenalty = typeof entry?.lastLatencyMs === "number" && entry.lastLatencyMs > 0 ? entry.lastLatencyMs / 90 : 0;
   const org = (entry?.lastGeo?.org || "").toLowerCase();
   const hostingPenalty =
@@ -998,6 +1023,7 @@ function nodeSelectionScore(
     hottestIpPenalty +
     cooldownPenalty +
     failPenalty +
+    reliabilityPenalty +
     latencyPenalty +
     hostingPenalty +
     Math.random() * 0.01
@@ -1414,6 +1440,8 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   const normalized = (message || "").toLowerCase();
   if (/native_cdp_unavailable/i.test(message)) return "native_cdp_unavailable";
   if (/task_attempt_timeout/i.test(message)) return "task_attempt_timeout";
+  if (/ERR_CONNECTION_CLOSED/i.test(message)) return "network_connection_closed";
+  if (/ERR_CONNECTION_RESET/i.test(message)) return "network_connection_reset";
   if (/auth_session_invalid_request/i.test(message)) return "auth_session_invalid_request";
   if (/challenge_unresponsive/i.test(message)) return "challenge_unresponsive";
   if (/risk_control_ip_rate_limit/i.test(message)) return "too_many_signups_same_ip";
@@ -1435,6 +1463,14 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
   if (/moemail_api_key_missing/i.test(message)) return "moemail_api_key_missing";
   if (/moemail_mailbox_not_found/i.test(message)) return "moemail_mailbox_not_found";
+  if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
+  if (/microsoft_auth_try_again_later/i.test(message)) return "microsoft_auth_try_again_later";
+  if (/microsoft_password_rate_limited/i.test(message)) return "microsoft_password_rate_limited";
+  if (/microsoft_password_incorrect/i.test(message)) return "microsoft_password_incorrect";
+  if (/microsoft_password_submit_stalled/i.test(message)) return "microsoft_password_submit_stalled";
+  if (/microsoft_consent_accept_missing/i.test(message)) return "microsoft_consent_accept_missing";
+  if (/microsoft_proof_add_email_input_missing/i.test(message)) return "microsoft_proof_add_email_input_missing";
+  if (/microsoft_proof_add_submit_missing/i.test(message)) return "microsoft_proof_add_submit_missing";
   if (/microsoft_proof_code_timeout/i.test(message)) return "microsoft_proof_code_timeout";
   if (/microsoft_proof_submit_failed/i.test(message)) return "microsoft_proof_submit_failed";
   if (/timeout/i.test(normalized)) return "timeout";
@@ -1680,8 +1716,10 @@ function extractPublicIpList(text: string): string[] {
 
 async function collectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
   const expectedHost = new URL(target.url).hostname.toLowerCase();
-  await safeGoto(page, target.url, 15_000);
-  await page.waitForLoadState("domcontentloaded", { timeout: 60000 });
+  const navigationTimeout = Math.max(4_000, Math.min(8_000, waitMs + 2_000));
+  const loadStateTimeout = Math.max(4_000, Math.min(10_000, waitMs + 3_000));
+  await safeGoto(page, target.url, navigationTimeout);
+  await page.waitForLoadState("domcontentloaded", { timeout: loadStateTimeout });
   await page.waitForTimeout(waitMs);
 
   const payload = await page.evaluate(() => {
@@ -2667,17 +2705,90 @@ async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: str
   }
 }
 
-async function resolveMicrosoftProofMailboxSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
-  const address = cfg.microsoftProofMailboxAddress?.trim();
-  if (!address) {
-    throw new Error("microsoft_proof_mailbox_missing");
+async function syncLinkedMicrosoftAccountOutcome(
+  cfg: AppConfig,
+  outcome: { status: "succeeded"; apiKey: string } | { status: "failed"; errorCode?: string | null },
+): Promise<void> {
+  const envAccountId = Number.parseInt((process.env.TASK_LEDGER_ACCOUNT_ID || "").trim(), 10);
+  if (!Number.isInteger(envAccountId) || envAccountId < 1) {
+    return;
   }
+  const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
+  const db = new AppDatabase(dbPath);
+  try {
+    if (outcome.status === "succeeded") {
+      db.recordApiKey(envAccountId, outcome.apiKey);
+      db.markAccountDirectSuccess(envAccountId);
+      return;
+    }
+    const unavailableReason = deriveLinkedMicrosoftUnavailableReason(outcome.errorCode ?? null);
+    if (unavailableReason) {
+      db.markAccountUnavailable(envAccountId, unavailableReason, outcome.errorCode ?? null);
+      return;
+    }
+    db.markAccountDirectFailure(envAccountId, outcome.errorCode ?? null);
+  } finally {
+    db.close();
+  }
+}
+
+function deriveLinkedMicrosoftUnavailableReason(errorCode: string | null | undefined): string | null {
+  const normalized = String(errorCode || "").trim();
+  if (!/^microsoft_unknown_recovery_email/i.test(normalized)) {
+    return null;
+  }
+  const detail = normalized.split(":").slice(1).join(":").trim();
+  if (!detail || /challenge_mismatch|unknown_recovery_email/i.test(detail)) {
+    return "未知辅助邮箱";
+  }
+  return `未知辅助邮箱：${detail}`;
+}
+
+async function provisionMicrosoftProofMailbox(cfg: AppConfig, proxyUrl?: string): Promise<{ address: string; mailboxId: string }> {
+  if (!cfg.moemailApiKey) {
+    throw new Error("moemail_api_key_missing");
+  }
+  const mailbox = await provisionMoeMailMailbox({
+    baseUrl: cfg.moemailBaseUrl,
+    apiKey: cfg.moemailApiKey,
+    httpJson,
+    proxyUrl,
+    expiryTime: 0,
+  });
+  cfg.microsoftProofMailboxProvider = "moemail";
+  cfg.microsoftProofMailboxAddress = mailbox.address;
+  cfg.microsoftProofMailboxId = mailbox.id;
+  try {
+    await persistResolvedMicrosoftProofMailbox(cfg, mailbox.address, mailbox.id);
+  } catch (error) {
+    log(`proof mailbox provision cache skipped: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  log(`login flow: provisioned Microsoft proof mailbox ${mailbox.address}`);
+  return {
+    address: mailbox.address,
+    mailboxId: mailbox.id,
+  };
+}
+
+async function resolveMicrosoftProofMailboxSession(
+  cfg: AppConfig,
+  proxyUrl?: string,
+  options?: { allowProvision?: boolean },
+): Promise<MailboxSession> {
   const provider = cfg.microsoftProofMailboxProvider || "moemail";
   if (provider !== "moemail") {
     throw new Error(`unsupported_microsoft_proof_mailbox_provider:${provider}`);
   }
   if (!cfg.moemailApiKey) {
     throw new Error("moemail_api_key_missing");
+  }
+  let address = cfg.microsoftProofMailboxAddress?.trim() || "";
+  if (!address) {
+    if (!options?.allowProvision) {
+      throw new Error("microsoft_proof_mailbox_missing");
+    }
+    const provisioned = await provisionMicrosoftProofMailbox(cfg, proxyUrl);
+    address = provisioned.address;
   }
   let mailboxId = cfg.microsoftProofMailboxId?.trim() || "";
   if (!mailboxId) {
@@ -3236,6 +3347,19 @@ async function ensureDirectInputValue(page: any, selector: string, value: string
   throw new Error(`${label}_input_not_persisted`);
 }
 
+async function submitContainingFormDirectly(page: any, selector: string): Promise<boolean> {
+  return await page
+    .locator(selector)
+    .first()
+    .evaluate((node: Element) => {
+      const form = node.closest("form") as HTMLFormElement | null;
+      if (!form) return false;
+      form.submit();
+      return true;
+    })
+    .catch(() => false);
+}
+
 async function clearAuthFieldValidationState(page: any, selector: string): Promise<void> {
   try {
     await page.waitForSelector(selector, { timeout: 10_000 });
@@ -3253,10 +3377,28 @@ async function clearAuthFieldValidationState(page: any, selector: string): Promi
   }
 }
 
+async function collectBrowserNavigationErrorCode(page: any): Promise<string | null> {
+  return await page
+    .evaluate(() => {
+      const currentUrl = String(window.location.href || "");
+      if (!/^chrome-error:\/\//i.test(currentUrl)) {
+        return null;
+      }
+      const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const match = text.match(/\b(ERR_[A-Z_]+)\b/i);
+      return match?.[1] || "CHROME_ERROR_PAGE";
+    })
+    .catch(() => null);
+}
+
 async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> {
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
       await page.goto(url, { waitUntil: "domcontentloaded", timeout });
+      const browserErrorCode = await collectBrowserNavigationErrorCode(page);
+      if (browserErrorCode) {
+        throw new Error(browserErrorCode);
+      }
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3270,6 +3412,119 @@ async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> 
       await page.waitForTimeout(700 * attempt);
     }
   }
+}
+
+async function fillMicrosoftProofOtpInputs(page: any, code: string): Promise<boolean> {
+  const normalized = String(code || "").replace(/\D/g, "");
+  if (normalized.length !== 6) {
+    return false;
+  }
+  const firstSelector =
+    (await firstVisibleSelector(page, ["#codeEntry-0", 'input[id^="codeEntry-"]', '[data-codex-otp-input="0"]'])) || null;
+  if (!firstSelector) {
+    const taggedGenericInputs = await page
+      .evaluate((valueLength: number) => {
+        const isVisible = (node: Element): node is HTMLInputElement => {
+          if (!(node instanceof HTMLInputElement)) return false;
+          const rect = node.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" && !node.disabled;
+        };
+        const candidates = Array.from(
+          document.querySelectorAll(
+            'input[id^="codeEntry-"], input[autocomplete="one-time-code"], input[maxlength="1"], input[type="tel"], input[type="text"], input[type="number"], input[type="password"], input[inputmode="numeric"], input[inputmode="decimal"], input:not([type])',
+          ),
+        ).filter(isVisible);
+        const otpInputs = candidates.filter((node) => {
+          const maxLength = Number(node.getAttribute("maxlength") || "0");
+          const autocomplete = (node.getAttribute("autocomplete") || "").toLowerCase();
+          const hintText = [
+            node.getAttribute("aria-label") || "",
+            node.getAttribute("placeholder") || "",
+            node.getAttribute("name") || "",
+            node.getAttribute("id") || "",
+            autocomplete,
+          ]
+            .join(" ")
+            .toLowerCase();
+          return maxLength === 1 || autocomplete === "one-time-code" || /code|digit|验证码|安全代码|one.?time/i.test(hintText);
+        });
+        if (otpInputs.length < valueLength) {
+          return false;
+        }
+        for (const node of Array.from(document.querySelectorAll("[data-codex-otp-input]"))) {
+          node.removeAttribute("data-codex-otp-input");
+        }
+        otpInputs.slice(0, valueLength).forEach((node, index) => {
+          node.setAttribute("data-codex-otp-input", String(index));
+        });
+        return true;
+      }, normalized.length)
+      .catch(() => false);
+    if (!taggedGenericInputs) {
+      return false;
+    }
+  }
+
+  const joinedValues = async (): Promise<string> =>
+    await page
+      .evaluate(() =>
+        Array.from(document.querySelectorAll('input[id^="codeEntry-"], [data-codex-otp-input]'))
+          .map((node) => ((node as HTMLInputElement | null)?.value || "").trim())
+          .join(""),
+      )
+      .catch(() => "");
+
+  try {
+    const focusSelector = firstSelector || '[data-codex-otp-input="0"]';
+    await page.locator(focusSelector).first().click({ timeout: 5_000 });
+    await page.keyboard.type(normalized, { delay: 80 });
+    await page.waitForTimeout(300);
+    if ((await joinedValues()) === normalized) {
+      return true;
+    }
+  } catch {
+    // fall through to direct value injection
+  }
+
+  const directFilled = await page
+    .evaluate((value: string) => {
+      const inputs = Array.from(
+        document.querySelectorAll('input[id^="codeEntry-"], [data-codex-otp-input]'),
+      ) as HTMLInputElement[];
+      if (inputs.length < value.length) {
+        return false;
+      }
+      const firstInput = inputs[0];
+      if (!firstInput) {
+        return false;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value");
+      const setter = descriptor?.set?.bind(firstInput);
+      for (let index = 0; index < value.length; index += 1) {
+        const input = inputs[index];
+        if (!input) {
+          return false;
+        }
+        const digit = value[index] || "";
+        input.focus();
+        if (typeof setter === "function") {
+          setter.call(input, digit);
+        } else {
+          input.value = digit;
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      return inputs.slice(0, value.length).map((input) => (input.value || "").trim()).join("") === value;
+    }, normalized)
+    .catch(() => false);
+  if (!directFilled) {
+    return false;
+  }
+  await page.waitForTimeout(300);
+  return (await joinedValues()) === normalized;
 }
 
 async function hasAuthSessionErrorPage(page: any): Promise<boolean> {
@@ -3286,11 +3541,42 @@ async function hasAuthSessionErrorPage(page: any): Promise<boolean> {
 async function hasAuthChallengeLoadErrorPage(page: any): Promise<boolean> {
   try {
     return await page.evaluate(() => {
+      const isVisible = (el: Element | null): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        if (el.hidden) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      };
       const text = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
-      return /couldn[’']t load the security challenge/i.test(text) || /we couldn[’']t load the security challenge/i.test(text);
+      const visibleErrorText = Array.from(
+        document.querySelectorAll(
+          '#error-element-third-party-captcha, .ulp-captcha-client-error, [data-captcha-provider] ~ span, [data-captcha-provider] [id*="error"]',
+        ),
+      )
+        .filter(isVisible)
+        .map((el) => ((el as HTMLElement).innerText || el.textContent || "").replace(/\s+/g, " ").trim())
+        .filter((value) => value.length > 0)
+        .join(" ");
+      const combinedText = `${text} ${visibleErrorText}`.trim();
+      return (
+        /couldn[’']t load the security challenge/i.test(combinedText) ||
+        /we couldn[’']t load the security challenge/i.test(combinedText)
+      );
     });
   } catch {
     return false;
+  }
+}
+
+function buildAuthLoginSurfaceKey(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    const state = (url.searchParams.get("state") || "").trim();
+    return `${url.origin}${url.pathname}?state=${state}`;
+  } catch {
+    return rawUrl;
   }
 }
 
@@ -3310,6 +3596,36 @@ async function collectPageSurfaceSummary(page: any): Promise<string> {
   } catch (error) {
     const message = error instanceof Error ? error.message.split("\n")[0] : String(error);
     return `surface-unavailable: ${message}`;
+  }
+}
+
+async function detectChromiumNetErrorCode(page: any): Promise<string | null> {
+  try {
+    return await page.evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const title = (document.title || "").trim();
+      const code =
+        (document.querySelector(".error-code")?.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toUpperCase() ||
+        (bodyText.match(/\bERR_[A-Z0-9_]+\b/)?.[0] || "").trim().toUpperCase();
+      if (!code) return null;
+      const hasInterstitial =
+        window.location.href.startsWith("chrome-error://") ||
+        !!document.querySelector("#main-frame-error, .neterror, .error-code");
+      if (!hasInterstitial) return null;
+      if (
+        /(this site can.t be reached|can.t reach this page|无法访问此网站|意外终止了连接|took too long to respond)/i.test(
+          `${title} ${bodyText}`,
+        )
+      ) {
+        return code;
+      }
+      return null;
+    });
+  } catch {
+    return null;
   }
 }
 
@@ -3526,16 +3842,37 @@ async function openAuthFlowEntry(
 }
 
 async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
+  const hasAuthenticatedHomeSignal = async (): Promise<boolean> => {
+    if (await pageContainsAnyText(page, [/overview/i, /api keys/i, /billing/i, /settings/i, /\bdefault\b/i])) {
+      return true;
+    }
+    return await page
+      .evaluate(`async () => {
+        try {
+          const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+          if (!response.ok) return false;
+          const text = await response.text();
+          return /@|email|name|picture|user/i.test(text);
+        } catch {
+          return false;
+        }
+      }`)
+      .catch(() => false);
+  };
   const step = 800;
   const rounds = Math.max(1, Math.floor(stableMs / step));
+  let sawAuthenticatedSignal = false;
   for (let i = 0; i < rounds; i += 1) {
     const url = page.url();
     if (!/app\.tavily\.com\/home/i.test(url) || /auth\.tavily\.com/i.test(url)) {
       return false;
     }
+    if (await hasAuthenticatedHomeSignal()) {
+      sawAuthenticatedSignal = true;
+    }
     await page.waitForTimeout(step);
   }
-  return true;
+  return sawAuthenticatedSignal;
 }
 
 async function hasPostSignupConsentPrompt(page: any): Promise<boolean> {
@@ -3640,6 +3977,23 @@ async function hasVisibleElement(page: any, selector: string): Promise<boolean> 
     .catch(() => false);
 }
 
+async function firstVisibleSelector(page: any, selectors: string[]): Promise<string | null> {
+  for (const selector of selectors) {
+    if (await hasVisibleElement(page, selector)) {
+      return selector;
+    }
+  }
+  return null;
+}
+
+async function hasAnyElement(page: any, selector: string): Promise<boolean> {
+  return await page
+    .locator(selector)
+    .count()
+    .then((count: number) => count > 0)
+    .catch(() => false);
+}
+
 async function clickMatchingAction(
   page: any,
   patterns: RegExp[],
@@ -3647,20 +4001,297 @@ async function clickMatchingAction(
   roles: string[] = ["button", "link"],
 ): Promise<boolean> {
   const point =
-    (selector ? await findClickablePointBySelector(page, selector) : null) ||
+    (await findClickablePointByActionText(page, patterns)) ||
     (await findClickablePointViaAxName(page, patterns, roles)) ||
-    (await findClickablePointByActionText(page, patterns));
+    (selector ? await findClickablePointBySelector(page, selector) : null);
   if (!point) return false;
   await dispatchMouseClickViaCdp(page, point.x, point.y);
   await page.waitForTimeout(1_000);
   return true;
 }
 
+async function clickMicrosoftPasswordFallbackAction(page: any): Promise<boolean> {
+  const patterns = [/^use your password$/i, /^sign in with password$/i, /use.*password/i, /使用密码/i];
+  const patternPayload = patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags }));
+  const clickedDirectly = await page
+    .evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
+      const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const readActionText = (el: Element): string =>
+        normalize(
+          [
+            el.textContent || "",
+            el.getAttribute("aria-label") || "",
+            el.getAttribute("title") || "",
+            el.getAttribute("value") || "",
+          ].join(" "),
+        );
+      const baseCandidates = Array.from(
+        document.querySelectorAll('a, button, [role="button"], input[type="button"], input[type="submit"]'),
+      ).filter(isVisible);
+      let target = baseCandidates.find((el) => matchers.some((matcher) => matcher.test(readActionText(el)))) as
+        | HTMLElement
+        | undefined;
+      if (!target) {
+        const fallbackNode = Array.from(document.querySelectorAll("span, div"))
+          .filter(isVisible)
+          .find((el) => {
+            const text = normalize(el.textContent || "");
+            return text.length > 0 && text.length <= 120 && matchers.some((matcher) => matcher.test(text));
+          });
+        if (fallbackNode instanceof HTMLElement) {
+          target =
+            fallbackNode.closest(
+              'a, button, [role="button"], input[type="button"], input[type="submit"], [tabindex]:not([tabindex="-1"])',
+            ) instanceof HTMLElement
+              ? (fallbackNode.closest(
+                  'a, button, [role="button"], input[type="button"], input[type="submit"], [tabindex]:not([tabindex="-1"])',
+                ) as HTMLElement)
+              : fallbackNode;
+        }
+      }
+      if (!target) return false;
+      target.click();
+      return true;
+    }, patternPayload)
+    .catch(() => false);
+  const clicked =
+    clickedDirectly ||
+    (await clickMatchingAction(page, patterns, 'button, [role="button"], a'));
+  if (!clicked) {
+    return false;
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+      return true;
+    }
+    if (
+      await pageContainsAnyText(page, [
+        /enter your password/i,
+        /输入你的密码/i,
+        /stay signed in/i,
+        /保持登录状态/i,
+      ])
+    ) {
+      return true;
+    }
+    const currentUrl = page.url();
+    if (!/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
+      return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
+async function syncAuthProviderFormHiddenFields(page: any, provider: string): Promise<string[]> {
+  try {
+    return await page.evaluate((providerName: string) => {
+      const touched: string[] = [];
+      const globalState = window as Window & {
+        __kohaLastAuthCaptcha?: string;
+        __kohaLastChallengeToken?: string;
+      };
+      const primaryForm =
+        (document.querySelector('form[data-form-primary="true"]') as HTMLFormElement | null) ||
+        (document.querySelector("form") as HTMLFormElement | null);
+      const form = document.querySelector(`form[data-provider="${providerName}"]`) as HTMLFormElement | null;
+      if (!(form instanceof HTMLFormElement)) {
+        return touched;
+      }
+      const pageCaptcha = (document.querySelector('input[name="captcha"]') as HTMLInputElement | null)?.value?.trim() || "";
+      const pageTurnstile =
+        (document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null)?.value?.trim() || "";
+      const pageRecaptcha =
+        (document.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null)?.value?.trim() || "";
+      const pageHCaptcha =
+        (
+          document.querySelector('textarea[name="h-captcha-response"], input[name="h-captcha-response"]') as
+            | HTMLInputElement
+            | HTMLTextAreaElement
+            | null
+        )?.value?.trim() || "";
+      const challengeToken =
+        pageTurnstile || pageRecaptcha || pageHCaptcha || globalState.__kohaLastChallengeToken || pageCaptcha || "";
+      const captchaToken = pageCaptcha || challengeToken || globalState.__kohaLastAuthCaptcha || "";
+      if (challengeToken) {
+        globalState.__kohaLastChallengeToken = challengeToken;
+      }
+      if (captchaToken) {
+        globalState.__kohaLastAuthCaptcha = captchaToken;
+      }
+
+      const ensureHidden = (name: string, value: string) => {
+        if (!value) return;
+        let field = form.querySelector(`[name="${name}"]`) as HTMLInputElement | HTMLTextAreaElement | null;
+        if (!field) {
+          field = document.createElement("input");
+          field.setAttribute("type", "hidden");
+          field.setAttribute("name", name);
+          form.appendChild(field);
+          touched.push(`${name}:append`);
+        }
+        if ((field.value || "") !== value) {
+          field.value = value;
+          touched.push(`${name}:set`);
+        }
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      if (primaryForm instanceof HTMLFormElement) {
+        const primaryHiddenFields = Array.from(primaryForm.querySelectorAll('input[type="hidden"][name], textarea[name]'));
+        for (const sourceField of primaryHiddenFields) {
+          const name = (sourceField.getAttribute("name") || "").trim();
+          if (!name || name === "state" || name === "connection") continue;
+          const value =
+            sourceField instanceof HTMLInputElement || sourceField instanceof HTMLTextAreaElement
+              ? sourceField.value.trim()
+              : "";
+          if (!value) continue;
+          ensureHidden(name, value);
+        }
+      }
+      ensureHidden("captcha", captchaToken);
+      ensureHidden("cf-turnstile-response", challengeToken);
+      return touched;
+    }, provider);
+  } catch {
+    return [];
+  }
+}
+
+async function submitAuthProviderForm(
+  page: any,
+  provider: string,
+  buttonPatterns: RegExp[],
+  submitPostPattern: RegExp,
+  logLabel: string,
+): Promise<boolean> {
+  const baselineUrl = page.url();
+  const confirmProviderTransition = async (): Promise<boolean> => {
+    const deadline = Date.now() + 4_000;
+    while (Date.now() < deadline) {
+      const currentUrl = page.url();
+      if (currentUrl !== baselineUrl && !/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+        return true;
+      }
+      const stillShowingProvider = await page
+        .evaluate(() => {
+          const elements = Array.from(document.querySelectorAll("button, a, [role='button']"));
+          return elements.some((el) => /continue with microsoft account/i.test((el.textContent || "").replace(/\s+/g, " ").trim()));
+        })
+        .catch(() => false);
+      if (stillShowingProvider && /auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+        return false;
+      }
+      await page.waitForTimeout(250);
+    }
+    return page.url() !== baselineUrl && !/auth\.tavily\.com\/u\/login\/identifier/i.test(page.url());
+  };
+  const syncedHiddenFields = await syncAuthFormHiddenFields(page);
+  const syncedProviderFields = await syncAuthProviderFormHiddenFields(page, provider);
+  const touchedChallengeFields = await dispatchChallengeResponseEvents(page);
+  if (syncedHiddenFields.length > 0) {
+    log(`${logLabel} synced auth fields: ${syncedHiddenFields.join(", ")}`);
+  }
+  if (syncedProviderFields.length > 0) {
+    log(`${logLabel} synced provider fields: ${syncedProviderFields.join(", ")}`);
+  }
+  if (touchedChallengeFields.length > 0) {
+    log(`${logLabel} refreshed challenge fields via events: ${touchedChallengeFields.join(", ")}`);
+    await page.waitForTimeout(randomInt(120, 260));
+  }
+
+  try {
+    const providerSubmitted = await page.evaluate((providerName: string) => {
+      const form = document.querySelector(`form[data-provider="${providerName}"]`) as HTMLFormElement | null;
+      if (!(form instanceof HTMLFormElement)) return false;
+      const button =
+        (form.querySelector('button[type="submit"], input[type="submit"], button[data-action-button-secondary="true"]') as
+          | HTMLButtonElement
+          | HTMLInputElement
+          | null) || null;
+      if (button instanceof HTMLElement) {
+        button.click();
+        return true;
+      }
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+        return true;
+      }
+      form.submit();
+      return true;
+    }, provider);
+    if (providerSubmitted) {
+      const submitSignal = await waitForAuthSubmitSignal(page, submitPostPattern, 4_500, baselineUrl);
+      if (submitSignal !== "none") {
+        const transitioned = submitSignal === "navigation" ? true : await confirmProviderTransition();
+        if (!transitioned) {
+          log(`${logLabel} provider submit bounced back to login surface`);
+          return false;
+        }
+        if (submitSignal === "navigation") {
+          log(`${logLabel} navigation detected after provider form submit`);
+        }
+        log(`${logLabel} submit via provider form`);
+        return true;
+      }
+    }
+  } catch {
+    // fall through to cdp-based click
+  }
+
+  const clicked = await clickMatchingAction(page, buttonPatterns, 'button, a, [role="button"]');
+  if (clicked) {
+    const submitSignal = await waitForAuthSubmitSignal(page, submitPostPattern, 3_500, baselineUrl);
+    if (submitSignal !== "none") {
+      const transitioned = submitSignal === "navigation" ? true : await confirmProviderTransition();
+      if (!transitioned) {
+        log(`${logLabel} provider click bounced back to login surface`);
+        return false;
+      }
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after provider click`);
+      }
+      log(`${logLabel} submit via provider click`);
+      return true;
+    }
+  }
+  return clicked;
+}
+
 async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
-  const clicked = await clickMatchingAction(
+  const preSubmitManaged = await collectAuthChallengeSnapshot(page).catch(() => null);
+  if (hasManagedAuthChallenge(preSubmitManaged)) {
+    const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, "login");
+    if (
+      tokenOutcome.status === "rejected" &&
+      tokenOutcome.rejection &&
+      tokenOutcome.rejection !== "invalid_captcha" &&
+      tokenOutcome.rejection !== "challenge_unresponsive"
+    ) {
+      throw new Error(tokenOutcome.rejection);
+    }
+    if (tokenOutcome.status === "timeout" && tokenOutcome.snapshot && hasManagedAuthChallenge(tokenOutcome.snapshot)) {
+      log("login provider microsoft: managed challenge token unavailable, continuing with provider submit");
+    }
+    await waitForAuthCaptchaValue(page, tokenOutcome.status === "token_ready" ? 8_000 : 3_000).catch(() => "");
+  }
+  const clicked = await submitAuthProviderForm(
     page,
+    "windowslive",
     [/^continue with microsoft account$/i, /^microsoft account$/i, /continue with microsoft/i, /microsoft/i],
-    'button, a, [role="button"]',
+    /\/u\/login\/identifier/i,
+    "login provider microsoft",
   );
   if (clicked) {
     log("login flow: selected Microsoft account provider");
@@ -3687,10 +4318,48 @@ async function handleMicrosoftAccountPicker(page: any, email: string): Promise<b
   return false;
 }
 
+async function isMicrosoftProofConfirmationSurface(page: any): Promise<boolean> {
+  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+    return false;
+  }
+  if (await firstVisibleSelector(page, ["#iProofEmail", '#proof-confirmation-email-input', 'input[name="proof"]'])) {
+    return true;
+  }
+  if (!/account\.live\.com\/identity\/confirm|login\.live\.com\/oauth20_authorize\.srf|account\.live\.com\/proofs\//i.test(page.url())) {
+    return false;
+  }
+  return await pageContainsAnyText(page, [
+    /verify your email/i,
+    /we[’']?ll send a code to/i,
+    /already received a code/i,
+    /use your password/i,
+    /验证你的电子邮件/i,
+  ]);
+}
+
 async function handleMicrosoftEmailPrompt(page: any, email: string): Promise<boolean> {
+  if (/account\.live\.com\/proofs\//i.test(page.url())) {
+    return false;
+  }
+  if (await isMicrosoftProofConfirmationSurface(page)) {
+    return false;
+  }
   const selector = 'input[type="email"], input[autocomplete="username"]';
   if (!(await hasVisibleElement(page, selector))) return false;
-  await ensureInputValue(page, selector, email, "microsoft_email");
+  try {
+    await clearAuthFieldValidationState(page, selector);
+    await ensureDirectInputValue(page, selector, email, "microsoft_email");
+  } catch (error) {
+    if (await isMicrosoftProofConfirmationSurface(page)) {
+      log("login flow: Microsoft email prompt yielded to proof confirmation surface");
+      return false;
+    }
+    if (!(await hasVisibleElement(page, selector).catch(() => false))) {
+      log("login flow: Microsoft email input advanced away during direct fill");
+      return true;
+    }
+    throw error;
+  }
   const submitted =
     (await clickMatchingAction(
       page,
@@ -3705,10 +4374,199 @@ async function handleMicrosoftEmailPrompt(page: any, email: string): Promise<boo
   return true;
 }
 
-async function handleMicrosoftPasswordPrompt(page: any, password: string): Promise<boolean> {
+async function collectMicrosoftPasswordErrors(page: any): Promise<string[]> {
+  const visibleErrors = await collectVisibleFormErrors(page).catch(() => []);
+  const bodySignals = await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const patterns = [
+        /you['’]ve tried to sign in too many times with an incorrect account or password\.?/i,
+        /your account or password is incorrect\.?/i,
+        /incorrect account or password\.?/i,
+        /incorrect password\.?/i,
+        /wrong password\.?/i,
+        /invalid password\.?/i,
+        /try again later\.?/i,
+        /密码不正确。?/i,
+        /帐户或密码不正确。?/i,
+        /请稍后重试。?/i,
+      ];
+      return patterns.map((pattern) => bodyText.match(pattern)?.[0] || "").filter((text) => text.length > 0);
+    })
+    .catch(() => [] as string[]);
+  return Array.from(new Set([...visibleErrors, ...bodySignals]));
+}
+
+async function collectMicrosoftPasswordSurfaceKey(page: any): Promise<string> {
+  const payload = await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText || "").replace(/\s+/g, " ").trim();
+      const emailMatch = bodyText.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+      return {
+        url: window.location.href,
+        title: document.title || "",
+        bodyText: bodyText.slice(0, 400),
+        accountHint: emailMatch?.[0] || "",
+      };
+    })
+    .catch(() => ({
+      url: page.url(),
+      title: "",
+      bodyText: "",
+      accountHint: "",
+    }));
+  return buildMicrosoftPasswordSurfaceKey(payload);
+}
+
+async function collectMicrosoftSurfaceSnapshot(page: any): Promise<{ url: string; title: string; bodyText: string }> {
+  return await page
+    .evaluate(() => ({
+      url: window.location.href,
+      title: document.title || "",
+      bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+    }))
+    .catch(() => ({
+      url: page.url(),
+      title: "",
+      bodyText: "",
+    }));
+}
+
+async function classifyMicrosoftFlowInterruptFromPage(page: any) {
+  const payload = await collectMicrosoftSurfaceSnapshot(page);
+  return classifyMicrosoftFlowInterrupt(payload);
+}
+
+async function collectMicrosoftRecoveryChallengeState(
+  page: any,
+  configuredAddress: string | null,
+): Promise<{
+  hintedMaskedEmail: string;
+  matchesConfiguredMailbox: boolean | null;
+  hasMismatchError: boolean;
+  hasPasswordFallback: boolean;
+  surfaceKind: "verify_email" | "identity_confirm" | "unknown";
+}> {
+  const payload = await page
+    .evaluate(({ configuredAddress: configuredAddressValue }: { configuredAddress: string | null }) => {
+      const normalize = (value: string | null | undefined) =>
+        String(value || "")
+          .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+      const parseMaskedEmail = (value: string | null | undefined) => {
+        const match = normalize(value).match(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/i);
+        if (!match) return null;
+        return {
+          visibleLocal: (match[1] || "").toLowerCase(),
+          hasMask: !!match[2],
+          domain: (match[3] || "").toLowerCase(),
+        };
+      };
+      const configured = parseMaskedEmail(configuredAddressValue);
+      const textParts = [
+        document.title || "",
+        document.body?.innerText || "",
+        ...Array.from(document.querySelectorAll("input, button, a, label, option")).map((node) =>
+          [
+            node.textContent || "",
+            node.getAttribute("aria-label") || "",
+            node.getAttribute("title") || "",
+            node.getAttribute("value") || "",
+            node.getAttribute("placeholder") || "",
+          ].join(" "),
+        ),
+      ];
+      const combinedText = normalize(textParts.join(" "));
+      const matches = Array.from(combinedText.matchAll(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/gi));
+      let hinted: { visibleLocal: string; hasMask: boolean; domain: string } | null = null;
+      for (const match of matches) {
+        const candidate = {
+          visibleLocal: (match[1] || "").toLowerCase(),
+          hasMask: !!match[2],
+          domain: (match[3] || "").toLowerCase(),
+        };
+        if (!hinted || candidate.hasMask) {
+          hinted = candidate;
+        }
+        if (candidate.hasMask) {
+          break;
+        }
+      }
+      const hasMismatchError =
+        /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
+          combinedText,
+        );
+      const matchesConfiguredMailbox =
+        hinted && configured
+          ? hinted.domain === configured.domain && configured.visibleLocal.startsWith(hinted.visibleLocal)
+          : null;
+      const hasPasswordFallback = /use\s+your\s+password|sign\s+in\s+with\s+password|使用密码/i.test(combinedText);
+      const surfaceKind = /help us protect your account|verify online|i don[’']?t have these any more|我不再拥有这些信息/i.test(
+        combinedText,
+      )
+        ? "identity_confirm"
+        : /verify your email|we[’']?ll send a code to|already received a code|验证你的电子邮件/i.test(combinedText)
+          ? "verify_email"
+          : "unknown";
+      return {
+        hintedMaskedEmail: hinted ? `${hinted.visibleLocal}${hinted.hasMask ? "***" : ""}@${hinted.domain}` : "",
+        matchesConfiguredMailbox: hasMismatchError ? false : matchesConfiguredMailbox,
+        hasMismatchError,
+        hasPasswordFallback,
+        surfaceKind,
+      };
+    }, { configuredAddress })
+    .catch(() => ({
+      hintedMaskedEmail: "",
+      matchesConfiguredMailbox: null,
+      hasMismatchError: false,
+      hasPasswordFallback: false,
+      surfaceKind: "unknown" as const,
+    }));
+  return payload;
+}
+
+async function handleMicrosoftPasswordPrompt(
+  page: any,
+  password: string,
+  state: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
+): Promise<boolean> {
   const selector = 'input[type="password"], input[autocomplete="current-password"]';
   if (!(await hasVisibleElement(page, selector))) return false;
-  await ensureInputValue(page, selector, password, "microsoft_password");
+  const surfaceKey = await collectMicrosoftPasswordSurfaceKey(page);
+  const visibleErrors = await collectMicrosoftPasswordErrors(page);
+  const classifiedError = classifyMicrosoftPasswordError(visibleErrors);
+  if (classifiedError) {
+    throw new Error(`${classifiedError.code}:${classifiedError.message}`);
+  }
+  const currentPasswordValue = await page.locator(selector).first().inputValue().catch(() => "");
+  if (state.submissionKey !== surfaceKey) {
+    state.submissionKey = surfaceKey;
+    state.submittedAt = null;
+    state.submittedCount = 0;
+  }
+  if (state.submissionKey === surfaceKey && state.submittedAt && state.submittedCount > 0) {
+    if (!currentPasswordValue) {
+      state.submittedAt = null;
+      state.submittedCount = 0;
+      log("login flow: reset stale Microsoft password submission state on empty field");
+    } else {
+      if (Date.now() - state.submittedAt >= 8_000) {
+        throw new Error(`microsoft_password_submit_stalled:${surfaceKey}`);
+      }
+      await page.waitForTimeout(1_000);
+      const followupErrors = await collectMicrosoftPasswordErrors(page);
+      const followupClassifiedError = classifyMicrosoftPasswordError(followupErrors);
+      if (followupClassifiedError) {
+        throw new Error(`${followupClassifiedError.code}:${followupClassifiedError.message}`);
+      }
+      return true;
+    }
+  }
+  await clearAuthFieldValidationState(page, selector);
+  await ensureDirectInputValue(page, selector, password, "microsoft_password");
   const submitted =
     (await clickMatchingAction(
       page,
@@ -3719,24 +4577,360 @@ async function handleMicrosoftPasswordPrompt(page: any, password: string): Promi
     await dispatchEnterViaCdp(page);
     await page.waitForTimeout(1_000);
   }
+  state.submittedAt = Date.now();
+  state.submittedCount += 1;
+  await page.waitForTimeout(1_500);
+  const postSubmitErrors = await collectMicrosoftPasswordErrors(page);
+  const postSubmitClassifiedError = classifyMicrosoftPasswordError(postSubmitErrors);
+  if (postSubmitClassifiedError) {
+    throw new Error(`${postSubmitClassifiedError.code}:${postSubmitClassifiedError.message}`);
+  }
   log("login flow: submitted Microsoft account password");
   return true;
 }
 
-async function handleMicrosoftPasskeyInterrupt(page: any): Promise<boolean> {
-  if (!(await pageContainsAnyText(page, [/unable to create a passkey/i, /can[’']?t create a passkey/i, /无法创建通行密钥/i]))) {
+async function submitMicrosoftPasswordIfVisible(
+  page: any,
+  password: string,
+  state: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
+): Promise<void> {
+  if (!(await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]'))) {
+    return;
+  }
+  state.submissionKey = null;
+  state.submittedAt = null;
+  state.submittedCount = 0;
+  await handleMicrosoftPasswordPrompt(page, password, state);
+}
+
+async function collectMicrosoftPasswordShortcutSurfaceKey(page: any): Promise<string> {
+  const payload = await page
+    .evaluate(() => ({
+      url: window.location.href,
+      title: document.title || "",
+      bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 500),
+    }))
+    .catch(() => ({
+      url: page.url(),
+      title: "",
+      bodyText: "",
+    }));
+  return `${payload.url}::${payload.title}::${payload.bodyText}`;
+}
+
+async function hasVisibleMicrosoftPasswordShortcut(page: any): Promise<boolean> {
+  return await page
+    .evaluate(() => {
+      const matches = (value: string) => /use\s+your\s+password|sign\s+in\s+with\s+password|使用密码/i.test(value);
+      const nodes = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="submit"]'));
+      for (const node of nodes) {
+        const text = ((node as HTMLElement).innerText || (node as HTMLInputElement).value || node.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!matches(text)) continue;
+        if (!(node instanceof HTMLElement)) continue;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        const style = window.getComputedStyle(node);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+        return true;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+async function handleMicrosoftUsePasswordShortcut(
+  page: any,
+  proofState: MicrosoftProofFlowState,
+  password: string,
+  passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
+): Promise<boolean> {
+  if (proofState.passwordFallbackBlocked) {
+    proofState.passwordShortcutKey = null;
+    proofState.passwordShortcutSubmittedAt = null;
+    proofState.passwordShortcutSubmittedCount = 0;
     return false;
   }
-  const dismissed = await clickMatchingAction(
-    page,
-    [/^cancel$/i, /^not now$/i, /^skip for now$/i, /^取消$/i, /^暂不$/i],
-    'button, [role="button"]',
-  );
-  if (!dismissed) {
-    await dispatchEnterViaCdp(page);
-    await page.waitForTimeout(1_000);
+  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+    proofState.passwordShortcutKey = null;
+    proofState.passwordShortcutSubmittedAt = null;
+    proofState.passwordShortcutSubmittedCount = 0;
+    return false;
   }
-  log("login flow: dismissed Microsoft passkey interrupt");
+  const hasShortcut = await hasVisibleMicrosoftPasswordShortcut(page);
+  if (!hasShortcut) {
+    proofState.passwordShortcutKey = null;
+    proofState.passwordShortcutSubmittedAt = null;
+    proofState.passwordShortcutSubmittedCount = 0;
+    return false;
+  }
+  const surfaceKey = await collectMicrosoftPasswordShortcutSurfaceKey(page);
+  if (
+    proofState.passwordShortcutKey === surfaceKey &&
+    proofState.passwordShortcutSubmittedAt &&
+    proofState.passwordShortcutSubmittedCount > 0
+  ) {
+    if (Date.now() - proofState.passwordShortcutSubmittedAt >= 8_000) {
+      throw new Error(`microsoft_password_shortcut_stalled:${surfaceKey}`);
+    }
+    await page.waitForTimeout(1_000);
+    return true;
+  }
+  const clicked = await clickMicrosoftPasswordFallbackAction(page);
+  if (!clicked) {
+    throw new Error(`microsoft_password_shortcut_missing:${surfaceKey}`);
+  }
+  proofState.passwordShortcutKey = surfaceKey;
+  proofState.passwordShortcutSubmittedAt = Date.now();
+  proofState.passwordShortcutSubmittedCount += 1;
+  proofState.passwordFallbackAttempted = true;
+  proofState.passwordFallbackReturnUrl = page.url();
+  log("login flow: switched Microsoft verify-email surface to password shortcut");
+  await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+  return true;
+}
+
+interface MicrosoftProofFlowState {
+  mailbox: MailboxSession | null;
+  startedAt: number | null;
+  codeRequestedAt: number | null;
+  codeRecoveryCount: number;
+  passwordFallbackAttempted: boolean;
+  passwordFallbackBlocked: boolean;
+  passwordFallbackReturnUrl: string | null;
+  confirmationSubmissionKey: string | null;
+  confirmationSubmittedAt: number | null;
+  confirmationSubmittedCount: number;
+  passwordShortcutKey: string | null;
+  passwordShortcutSubmittedAt: number | null;
+  passwordShortcutSubmittedCount: number;
+}
+
+interface MicrosoftPasskeyState {
+  homeReturnAttempted: boolean;
+  tavilyRelaunchCount: number;
+  lastNonPasskeyUrl: string | null;
+}
+
+function isMicrosoftPasskeyInterruptUrl(url: string): boolean {
+  return /login\.microsoft\.com\/consumers\/fido\/create|account\.live\.com\/interrupt\/passkey\/enroll/i.test(url);
+}
+
+async function closeTransientPasskeyPopups(page: any): Promise<boolean> {
+  const pageCdp = await createCdpSession(page);
+  if (!pageCdp) return false;
+  const targetInfos = await pageCdp
+    .send("Target.getTargets")
+    .then((result: { targetInfos?: Array<{ targetId?: string; type?: string; title?: string; url?: string }> }) =>
+      Array.isArray(result?.targetInfos) ? result.targetInfos : [],
+    )
+    .catch(() => []);
+  let closed = false;
+  for (const info of targetInfos) {
+    const targetId = String(info?.targetId || "");
+    const type = String(info?.type || "");
+    const title = String(info?.title || "");
+    const url = String(info?.url || "");
+    if (!targetId || type !== "page" || !/^chrome-extension:\/\//i.test(url)) {
+      continue;
+    }
+    if (
+      !/fido2|passkey|webauthn/i.test(url) &&
+      !/(bitwarden|1password|dashlane|lastpass).*(passkey|fido|security key)/i.test(`${title} ${url}`)
+    ) {
+      continue;
+    }
+    const result = await pageCdp.send("Target.closeTarget", { targetId }).catch(() => null);
+    if (result) {
+      closed = true;
+    }
+  }
+  if (closed) {
+    await page.waitForTimeout(500);
+  }
+  return closed;
+}
+
+async function stabilizeMicrosoftSessionAfterPasskey(page: any): Promise<boolean> {
+  const probeUrls = ["https://account.microsoft.com/", "https://outlook.live.com/mail/0/"];
+  for (const probeUrl of probeUrls) {
+    await safeGoto(page, probeUrl, 20_000).catch(() => {});
+    await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
+    await page.waitForTimeout(1_200);
+    await handleMicrosoftKeepSignedInPrompt(page, true).catch(() => false);
+    await page.waitForTimeout(800);
+    const currentUrl = page.url();
+    if (
+      /account\.microsoft\.com|outlook\.live\.com/i.test(currentUrl) &&
+      !/login\.live\.com|login\.microsoftonline\.com/i.test(currentUrl)
+    ) {
+      log(`login flow: Microsoft session stabilized via ${currentUrl}`);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function handleMicrosoftPasskeyInterrupt(
+  page: any,
+  state?: MicrosoftPasskeyState,
+  proofState?: MicrosoftProofFlowState,
+): Promise<boolean | any> {
+  const MAX_TAVILY_RELAUNCHES = 1;
+  const onPasskeyInterruptRoute = isMicrosoftPasskeyInterruptUrl(page.url());
+  const isPasskeySetupPrompt =
+    onPasskeyInterruptRoute ||
+    (await pageContainsAnyText(page, [
+      /setting up your passkey/i,
+      /opening a security window/i,
+      /finish setting up your passkey/i,
+      /设置通行密钥/i,
+      /安全窗口/i,
+    ]));
+  const isPasskeyErrorPrompt =
+    !isPasskeySetupPrompt &&
+    (await pageContainsAnyText(page, [
+      /unable to create a passkey/i,
+      /can[’']?t create a passkey/i,
+      /we couldn[’']?t create a passkey/i,
+      /something went wrong trying to create a passkey/i,
+      /无法创建通行密钥/i,
+    ]));
+  if (!isPasskeySetupPrompt && !isPasskeyErrorPrompt) {
+    return false;
+  }
+  if (onPasskeyInterruptRoute && state && state.tavilyRelaunchCount < MAX_TAVILY_RELAUNCHES) {
+    state.tavilyRelaunchCount += 1;
+    const context = typeof page?.context === "function" ? page.context() : null;
+    if (context) {
+      await closeTransientPasskeyPopups(page).catch(() => false);
+      const siblingPages =
+        typeof context.pages === "function"
+          ? context.pages().filter((candidate: any) => candidate && candidate !== page && isMicrosoftPasskeyInterruptUrl(candidate.url()))
+          : [];
+      for (const sibling of siblingPages) {
+        await sibling.close().catch(() => {});
+      }
+      await page.close().catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const recoveryPage = await context.newPage().catch(() => null);
+      if (recoveryPage) {
+        await stabilizeMicrosoftSessionAfterPasskey(recoveryPage).catch(() => false);
+        await safeGoto(recoveryPage, "https://app.tavily.com/home", 20_000).catch(() => {});
+        await recoveryPage.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
+        await recoveryPage.bringToFront().catch(() => {});
+        log(
+          `login flow: recovered Microsoft passkey by closing interrupt page and reopening Tavily login (${state.tavilyRelaunchCount}/${MAX_TAVILY_RELAUNCHES})`,
+        );
+        return recoveryPage;
+      }
+    }
+  }
+  if (onPasskeyInterruptRoute && proofState && shouldRecoverMicrosoftPasskeyToProofCode(proofState)) {
+    proofState.passwordFallbackBlocked = true;
+    await closeTransientPasskeyPopups(page).catch(() => false);
+    const recoveryCandidates = [proofState.passwordFallbackReturnUrl, state?.lastNonPasskeyUrl].filter(
+      (value, index, array): value is string => !!value && array.indexOf(value) === index,
+    );
+    await page.goBack({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
+    await page.waitForTimeout(1_000);
+    if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
+      log("login flow: recovered Microsoft passkey redirect back to proof flow via history");
+      return true;
+    }
+    for (const recoveryUrl of recoveryCandidates) {
+      await safeGoto(page, recoveryUrl, 20_000).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
+      if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
+        log(`login flow: recovered Microsoft passkey redirect back to proof flow via ${recoveryUrl}`);
+        return true;
+      }
+    }
+  }
+  const dismissPatterns = [/^cancel$/i, /^not now$/i, /^skip for now$/i, /^skip$/i, /^取消$/i, /^暂不$/i];
+  const tryDismissPasskeyPrompt = async (): Promise<boolean> => {
+    const cdpClicked = await clickMatchingAction(page, dismissPatterns, "#idBtn_Back");
+    if (cdpClicked) {
+      await page.waitForTimeout(1_000);
+      return true;
+    }
+    const domClicked = await page
+      .evaluate(`(() => {
+        const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        const matchesCancel = (value) => ["cancel", "not now", "skip for now", "skip", "取消", "暂不"].includes(normalize(value));
+        const exact = document.querySelector("#idBtn_Back");
+        if (exact instanceof HTMLElement) {
+          exact.click();
+          return true;
+        }
+        const candidates = Array.from(document.querySelectorAll('input[type="button"], button, [role="button"], a'));
+        for (const candidate of candidates) {
+          const text = normalize([
+            candidate.textContent || "",
+            candidate.getAttribute("aria-label") || "",
+            candidate.getAttribute("title") || "",
+            candidate.getAttribute("value") || "",
+          ].join(" "));
+          if (!matchesCancel(text)) continue;
+          if (candidate instanceof HTMLElement) {
+            candidate.click();
+            return true;
+          }
+        }
+        return false;
+      })()`)
+      .catch(() => false);
+    if (domClicked) {
+      await page.waitForTimeout(1_000);
+      return true;
+    }
+    return false;
+  };
+
+  let dismissed = false;
+  if (isPasskeySetupPrompt) {
+    if (!state?.homeReturnAttempted) {
+      if (state) {
+        state.homeReturnAttempted = true;
+      }
+      await safeGoto(page, "https://app.tavily.com/home", 20_000).catch(() => {});
+      await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
+      if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
+        log("login flow: bypassed Microsoft passkey setup via Tavily home return");
+        return true;
+      }
+    }
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await dispatchEscapeViaCdp(page).catch(() => {});
+      await page.waitForTimeout(300);
+      if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
+        dismissed = true;
+        break;
+      }
+      if (await tryDismissPasskeyPrompt()) {
+        dismissed = true;
+        break;
+      }
+      await page.waitForTimeout(400);
+    }
+    if (!dismissed) {
+      throw new Error("microsoft_passkey_cancel_missing");
+    }
+  } else {
+    dismissed = await tryDismissPasskeyPrompt();
+    if (!dismissed) {
+      await page.keyboard.press("Escape").catch(() => {});
+      await page.waitForTimeout(600);
+    }
+    if (!dismissed) {
+      await dispatchEnterViaCdp(page);
+      await page.waitForTimeout(1_000);
+    }
+  }
+  log(`login flow: dismissed Microsoft passkey ${isPasskeySetupPrompt ? "setup" : "error"} prompt`);
   return true;
 }
 
@@ -3755,26 +4949,153 @@ async function handleMicrosoftKeepSignedInPrompt(page: any, keepSignedIn: boolea
 
 async function handleMicrosoftConsentPrompt(page: any): Promise<boolean> {
   if (
-    !(await pageContainsAnyText(page, [/allow this app to access your info/i, /allow this application to access your info/i, /允许此应用访问你的信息/i]))
+    !(await pageContainsAnyText(page, [
+      /allow this app to access your info/i,
+      /allow this application to access your info/i,
+      /let this app access your info/i,
+      /needs your permission to/i,
+      /allow this unverified app/i,
+      /允许此应用访问你的信息/i,
+    ])) &&
+    !/account\.live\.com\/Consent\/Update/i.test(page.url())
   ) {
     return false;
   }
-  const clicked = await clickMatchingAction(
-    page,
-    [/^accept$/i, /^allow$/i, /^yes$/i, /^接受$/i, /^允许$/i, /^是$/i],
-    'input[type="submit"], button[type="submit"], button',
-  );
-  if (!clicked) {
-    throw new Error("microsoft_consent_accept_missing");
+  const consentPatterns = [/^accept$/i, /^allow$/i, /^yes$/i, /^接受$/i, /^允许$/i, /^是$/i];
+  const consentSelectors =
+    '#idSIButton9, #acceptButton, #btnAccept, button[name="accept"], input[name="accept"], input[type="submit"], button[type="submit"], button';
+  const clickConsentOnTarget = async (target: any): Promise<boolean> => {
+    const clicked = await clickMatchingAction(target, consentPatterns, consentSelectors);
+    if (clicked) {
+      return true;
+    }
+    return target
+      .evaluate(`(() => {
+        const normalize = (value) => String(value || "").replace(/\\s+/g, " ").trim().toLowerCase();
+        const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], [role="button"], a'));
+        for (const candidate of candidates) {
+          const text = normalize([
+            candidate.textContent || "",
+            candidate.getAttribute("aria-label") || "",
+            candidate.getAttribute("title") || "",
+            candidate.getAttribute("value") || "",
+            candidate.getAttribute("name") || "",
+            candidate.getAttribute("id") || "",
+            candidate.getAttribute("data-testid") || "",
+          ].join(" "));
+          if (!/^(accept|allow|yes|接受|允许|是)$/.test(text) && !/(accept|allow|允许|接受)/.test(text)) {
+            continue;
+          }
+          if (candidate instanceof HTMLElement) {
+            candidate.click();
+            return true;
+          }
+        }
+        const fallback = document.querySelector('#idSIButton9, #acceptButton, #btnAccept');
+        if (fallback instanceof HTMLElement) {
+          fallback.click();
+          return true;
+        }
+        return false;
+      })()`)
+      .catch(() => false);
+  };
+  for (let attempt = 1; attempt <= 4; attempt += 1) {
+    const targets = [page, ...((typeof page.frames === "function" ? page.frames() : []) || [])];
+    for (const target of targets) {
+      if (await clickConsentOnTarget(target)) {
+        await page.waitForTimeout(1_000);
+        log("login flow: accepted Microsoft OAuth consent");
+        return true;
+      }
+    }
+    await page.waitForLoadState("domcontentloaded", { timeout: 5_000 }).catch(() => {});
+    await page.waitForTimeout(750);
   }
-  log("login flow: accepted Microsoft OAuth consent");
+  throw new Error("microsoft_consent_accept_missing");
+}
+
+async function handleMicrosoftProofAddPrompt(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl: string | undefined,
+  proofState: MicrosoftProofFlowState,
+): Promise<boolean> {
+  const onAddRoute = /account\.live\.com\/proofs\/Add/i.test(page.url());
+  const hasAddForm =
+    (await hasVisibleElement(page, "#iProofOptions").catch(() => false)) ||
+    (await hasVisibleElement(page, "#EmailAddress").catch(() => false)) ||
+    (await hasVisibleElement(page, 'input[name="EmailAddress"]').catch(() => false));
+  if (!onAddRoute && !hasAddForm) {
+    return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
+  }
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: true }));
+  proofState.mailbox = proofMailbox;
+
+  await page
+    .evaluate(() => {
+      const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
+      if (!select) return;
+      if (select.value !== "Email") {
+        select.value = "Email";
+        select.dispatchEvent(new Event("input", { bubbles: true }));
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    })
+    .catch(() => {});
+  await page.waitForTimeout(250);
+
+  const emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
+  if (!emailSelector) {
+    return true;
+  }
+
+  await clearAuthFieldValidationState(page, emailSelector);
+  await ensureDirectInputValue(page, emailSelector, proofMailbox.address, "microsoft_proof_mailbox");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^continue$/i, /^send code$/i, /^verify$/i, /^下一步$/i, /^继续$/i, /^发送代码$/i, /^验证$/i],
+      "#iNext",
+    )) ||
+    (await submitContainingFormDirectly(page, emailSelector)) ||
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^continue$/i, /^send code$/i, /^verify$/i, /^下一步$/i, /^继续$/i, /^发送代码$/i, /^验证$/i],
+      'input[type="submit"], button[type="submit"], button',
+    )) ||
+    false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  proofState.codeRequestedAt = Date.now();
+  log(`login flow: submitted Microsoft proof mailbox ${proofMailbox.address}`);
   return true;
 }
 
 async function handleMicrosoftProofMethodPrompt(
   page: any,
-  proofState: { mailbox: MailboxSession | null; startedAt: number | null; codeRequestedAt: number | null },
+  proofState: MicrosoftProofFlowState,
 ): Promise<boolean> {
+  if (await hasVisibleElement(page, "#iProofOptions")) {
+    await page
+      .evaluate(() => {
+        const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
+        if (!select) return;
+        if (select.value !== "Email") {
+          select.value = "Email";
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      })
+      .catch(() => {});
+    log("login flow: selected Microsoft proof backup email method");
+    return true;
+  }
   if (!(await pageContainsAnyText(page, [/what security info would you like to add/i, /你想添加哪些安全信息/i]))) {
     return false;
   }
@@ -3792,12 +5113,231 @@ async function handleMicrosoftProofMethodPrompt(
   return selected;
 }
 
+async function handleMicrosoftProofVerifyPrompt(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl: string | undefined,
+  proofState: MicrosoftProofFlowState,
+  password: string,
+  passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
+): Promise<boolean> {
+  const onProofVerifyRoute = /account\.live\.com\/proofs\/verify/i.test(page.url());
+  const proofOptionsCount = await page.locator('input[name="proof"][type="radio"]').count().catch(() => 0);
+  if (!onProofVerifyRoute && proofOptionsCount === 0) {
+    return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
+  }
+  const configuredProofAddress = proofState.mailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || "";
+
+  const verifyState = await page.evaluate(`(() => {
+    const address = ${JSON.stringify(configuredProofAddress)};
+    const normalize = (value) =>
+      String(value || "")
+        .replace(/[\\u200e\\u200f\\u202a-\\u202e]/g, "")
+        .replace(/\\s+/g, " ")
+        .trim()
+        .toLowerCase();
+    const normalizedAddress = normalize(address);
+    const [localPartRaw, domainRaw = ""] = normalizedAddress.split("@");
+    const localPart = localPartRaw || "";
+    const domainPart = domainRaw || "";
+    const parseMaskedEmail = (value) => {
+      const match = normalize(value).match(/([a-z0-9._%+-]*)(\\*+)?@([a-z0-9.-]+\\.[a-z]{2,})/i);
+      if (!match) return null;
+      return {
+        visibleLocal: match[1] || "",
+        hasMask: !!match[2],
+        domain: match[3] || "",
+      };
+    };
+    const optionInputs = Array.from(document.querySelectorAll('input[name="proof"][type="radio"]'));
+    const optionStates = optionInputs.map((input) => {
+      const optionId = input.id || "";
+      const labelText =
+        (optionId ? document.querySelector('label[for="' + CSS.escape(optionId) + '"]')?.textContent : "") ||
+        input.closest("label, li, div, fieldset")?.textContent ||
+        "";
+      return {
+        id: optionId,
+        value: input.value || "",
+        label: labelText,
+        checked: !!input.checked,
+      };
+    });
+    const hiddenSelect = document.querySelector("#iProofOptions");
+    const hiddenValue = hiddenSelect && "value" in hiddenSelect ? hiddenSelect.value || "" : "";
+    let checkedOption = optionStates.find((option) => option.checked) || null;
+    if (!checkedOption) {
+      checkedOption = optionStates.find((option) => normalize(option.value) === normalize(hiddenValue)) || null;
+    }
+    const bodyText = normalize(document.body?.innerText || "");
+    const titleText = normalize(document.title || "");
+    const codeInput = document.querySelector('#iOttText, input[name="iOttText"], input[aria-label*="code" i], input[placeholder*="code" i]');
+    const emailCompletionInput = document.querySelector('#iProofEmail');
+    let target = optionStates.find((option) => normalize(option.value).includes(normalizedAddress)) || null;
+    if (!target) {
+      target = optionStates.find((option) => normalize(option.label).includes(normalizedAddress)) || null;
+    }
+    let matchedVisibleLocal = "";
+    let hintedMaskedEmail = "";
+    if (!target) {
+      for (const option of optionStates) {
+        const fromValue = parseMaskedEmail(option.value);
+        const fromLabel = parseMaskedEmail(option.label);
+        const candidate = fromValue || fromLabel;
+        if (!candidate) continue;
+        if (!hintedMaskedEmail) {
+          hintedMaskedEmail = candidate.visibleLocal + (candidate.hasMask ? "***" : "") + "@" + candidate.domain;
+        }
+        if (candidate.domain !== domainPart) continue;
+        if (!localPart.startsWith(candidate.visibleLocal)) continue;
+        target = option;
+        matchedVisibleLocal = candidate.visibleLocal;
+        break;
+      }
+    }
+    if (!matchedVisibleLocal && target) {
+      const candidate = parseMaskedEmail(target.value) || parseMaskedEmail(target.label);
+      matchedVisibleLocal = candidate?.visibleLocal || "";
+      hintedMaskedEmail =
+        hintedMaskedEmail || (candidate ? candidate.visibleLocal + (candidate.hasMask ? "***" : "") + "@" + candidate.domain : "");
+    }
+    const missingEmailPart =
+      matchedVisibleLocal && localPart.startsWith(matchedVisibleLocal) ? localPart.slice(matchedVisibleLocal.length) : "";
+    return {
+      hasCodeInput: !!codeInput,
+      codeInputValue: codeInput && "value" in codeInput ? codeInput.value || "" : "",
+      options: optionStates,
+      checkedValue: checkedOption?.value || "",
+      checkedLabel: checkedOption?.label || "",
+      titleText,
+      bodyText,
+      mentionsTarget:
+        titleText.includes(normalizedAddress) ||
+        bodyText.includes("enter the code we sent to " + normalizedAddress) ||
+        bodyText.includes("we sent to " + normalizedAddress),
+      targetId: target?.id || "",
+      targetValue: target?.value || "",
+      targetLabel: target?.label || "",
+      hintedMaskedEmail,
+      emailCompletionValue: localPart || missingEmailPart,
+      missingEmailPart,
+      hasEmailCompletionInput: !!emailCompletionInput,
+    };
+  })()`);
+
+  if (verifyState.options.length === 0) {
+    return false;
+  }
+
+  if (verifyState.mentionsTarget && verifyState.hasCodeInput) {
+    return false;
+  }
+
+  if (!verifyState.targetId) {
+    const challengeState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress || null);
+    if (
+      shouldClassifyMicrosoftUnknownRecoveryEmail({
+        surfaceKind: challengeState.surfaceKind,
+        configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
+        hasPasswordFallback: challengeState.hasPasswordFallback,
+      })
+    ) {
+      throw new Error(
+        `microsoft_unknown_recovery_email:${challengeState.hintedMaskedEmail || verifyState.hintedMaskedEmail || "unknown_recovery_email"}`,
+      );
+    }
+    if (await clickMicrosoftPasswordFallbackAction(page)) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log("login flow: switched Microsoft proof verify prompt to password fallback");
+      return true;
+    }
+    throw new Error(
+      `microsoft_unknown_recovery_email:${verifyState.hintedMaskedEmail || "unknown_recovery_email"}`,
+    );
+  }
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
+  proofState.mailbox = proofMailbox;
+
+  await page.evaluate(
+    (payload: { targetId: string; targetValue: string; missingEmailPart: string; emailCompletionValue: string }) => {
+      const { targetId, targetValue, missingEmailPart, emailCompletionValue } = payload;
+      const input = document.getElementById(targetId);
+      if (!(input instanceof HTMLInputElement)) return;
+      input.click();
+      input.checked = true;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      const hidden = document.querySelector("#iProofOptions");
+      if (hidden instanceof HTMLInputElement || hidden instanceof HTMLSelectElement) {
+        hidden.value = targetValue;
+        hidden.dispatchEvent(new Event("input", { bubbles: true }));
+        hidden.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      const emailCompletion = document.querySelector("#iProofEmail");
+      if (emailCompletion instanceof HTMLInputElement && (emailCompletionValue || missingEmailPart)) {
+        emailCompletion.value = emailCompletionValue || missingEmailPart;
+        emailCompletion.dispatchEvent(new Event("input", { bubbles: true }));
+        emailCompletion.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    },
+    {
+      targetId: verifyState.targetId,
+      targetValue: verifyState.targetValue,
+      emailCompletionValue: verifyState.emailCompletionValue || verifyState.missingEmailPart || "",
+      missingEmailPart: verifyState.missingEmailPart || "",
+    },
+  );
+
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^next$/i, /^send code$/i, /^continue$/i, /^verify$/i, /^下一步$/i, /^发送代码$/i, /^继续$/i, /^验证$/i],
+      'input[type="submit"], button[type="submit"], button',
+    )) || false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  await page.waitForTimeout(1_200);
+  const verifyErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (
+    verifyErrors.some((text) =>
+      /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account/i.test(
+        text,
+      ),
+    )
+  ) {
+    throw new Error(`microsoft_proof_submit_failed:${verifyErrors.join(" | ")}`);
+  }
+  proofState.codeRequestedAt = Date.now();
+  log(`login flow: requested Microsoft proof code via ${proofMailbox.address}`);
+  return true;
+}
+
 async function handleMicrosoftProofEmailPrompt(
   page: any,
   cfg: AppConfig,
   proxyUrl: string | undefined,
-  proofState: { mailbox: MailboxSession | null; startedAt: number | null; codeRequestedAt: number | null },
+  proofState: MicrosoftProofFlowState,
+  password: string,
+  passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
 ): Promise<boolean> {
+  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+    return false;
+  }
+  const confirmationSelectors = [
+    '#proof-confirmation-email-input',
+    'input[id*="proof-confirmation-email" i]',
+    'input[data-testid*="proof-confirmation-email" i]',
+  ];
+  if (await firstVisibleSelector(page, confirmationSelectors)) {
+    return false;
+  }
   const onProofRoute = /account\.live\.com\/proofs\//i.test(page.url());
   const hasProofCopy = await pageContainsAnyText(page, [
     /protect your account/i,
@@ -3806,40 +5346,287 @@ async function handleMicrosoftProofEmailPrompt(
     /让我们来保护你的帐户/i,
     /what security info would you like to add/i,
     /你想添加哪些安全信息/i,
+    /verify your email/i,
+    /验证你的电子邮件/i,
     /verify your identity/i,
     /验证你的身份/i,
   ]);
   if (!onProofRoute && !hasProofCopy) {
     return false;
   }
+  let proofMailbox = proofState.mailbox;
+  let proofMailboxError: Error | null = null;
+  const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
+  const challengeState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
+    hasConfiguredMailbox: !!configuredProofAddress,
+    configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
+    passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+    passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+  });
+  if (
+    shouldClassifyMicrosoftUnknownRecoveryEmail({
+      surfaceKind: challengeState.surfaceKind,
+      configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
+      hasPasswordFallback: challengeState.hasPasswordFallback,
+    })
+  ) {
+    throw new Error(`microsoft_unknown_recovery_email:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`);
+  }
+  if (shouldUsePasswordFallback) {
+    if (await clickMicrosoftPasswordFallbackAction(page)) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log(
+        `login flow: switched Microsoft proof email prompt to password fallback${
+          challengeState.hintedMaskedEmail ? ` (hint=${challengeState.hintedMaskedEmail})` : ""
+        }`,
+      );
+      return true;
+    }
+    if (challengeState.matchesConfiguredMailbox === false) {
+      throw new Error(
+        `microsoft_password_fallback_unavailable:${challengeState.hintedMaskedEmail || "challenge_mismatch"}`,
+      );
+    }
+  }
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
-  const selector = await markBestVisibleControl(
-    page,
-    'input[type="email"], input[type="text"], input:not([type])',
-    [/backup.*email/i, /alternate.*email/i, /备用电子邮件/i, /电子邮件地址/i, /example\.com/i, /email/i],
-    "microsoft-proof-email",
-  );
+  const selector =
+    (await firstVisibleSelector(page, ["#EmailAddress"])) ||
+    (await markBestVisibleControl(
+      page,
+      'input[type="email"], input[type="text"], input:not([type])',
+      [/backup.*email/i, /alternate.*email/i, /备用电子邮件/i, /电子邮件地址/i, /example\.com/i, /email/i],
+      "microsoft-proof-email",
+    )) ||
+    null;
   if (!selector) {
     return false;
   }
-  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
-  proofState.mailbox = proofMailbox;
+  if (!proofMailbox) {
+    try {
+      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
+      proofState.mailbox = proofMailbox;
+    } catch (error) {
+      proofMailboxError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (!proofMailbox) {
+    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
+  }
+  if (/account\.live\.com\/proofs\/Add/i.test(page.url())) {
+    await page
+      .evaluate(() => {
+        const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
+        if (!select) return;
+        if (select.value !== "Email") {
+          select.value = "Email";
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      })
+      .catch(() => {});
+  }
   await clearAuthFieldValidationState(page, selector);
   await ensureDirectInputValue(page, selector, proofMailbox.address, "microsoft_proof_mailbox");
   const submitted =
+    (await submitContainingFormDirectly(page, selector)) ||
+    (selector === "#EmailAddress" ? await clickMatchingAction(page, [/^next$/i, /^continue$/i, /^send code$/i], "#iNext") : false) ||
     (await clickMatchingAction(
       page,
       [/^next$/i, /^continue$/i, /^send code$/i, /^verify$/i, /^下一步$/i, /^继续$/i, /^发送代码$/i, /^验证$/i],
       'input[type="submit"], button[type="submit"], button',
-    )) || false;
+    )) ||
+    false;
   if (!submitted) {
     await dispatchEnterViaCdp(page);
     await page.waitForTimeout(1_000);
   }
+  const postSubmitErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (
+    postSubmitErrors.some((text) =>
+      /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
+        text,
+      ),
+    )
+  ) {
+    if (challengeState.matchesConfiguredMailbox === false) {
+      throw new Error(`microsoft_unknown_recovery_email:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`);
+    }
+    if (await clickMicrosoftPasswordFallbackAction(page)) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log("login flow: switched Microsoft proof email prompt to password fallback after mismatch");
+      return true;
+    }
+    throw new Error(`microsoft_proof_submit_failed:${postSubmitErrors.join(" | ")}`);
+  }
   proofState.codeRequestedAt = Date.now();
   log(`login flow: submitted Microsoft proof mailbox ${proofMailbox.address}`);
+  return true;
+}
+
+async function handleMicrosoftProofConfirmationEmailPrompt(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl: string | undefined,
+  proofState: MicrosoftProofFlowState,
+  password: string,
+  passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
+): Promise<boolean> {
+  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+    return false;
+  }
+  const confirmationSelectors = [
+    "#iProofEmail",
+    '#proof-confirmation-email-input',
+    'input[id*="proof-confirmation-email" i]',
+    'input[data-testid*="proof-confirmation-email" i]',
+  ];
+  const confirmationSelector = confirmationSelectors.join(", ");
+  const hasConfirmationInput = Boolean(await firstVisibleSelector(page, confirmationSelectors));
+  const hasConfirmationCopy = await pageContainsAnyText(page, [
+    /verify your email/i,
+    /we'll send a code to/i,
+    /we[’']?ll send a code to/i,
+    /already received a code/i,
+    /use your password/i,
+    /验证你的电子邮件/i,
+  ]);
+  if (!hasConfirmationCopy && !hasConfirmationInput) {
+    proofState.confirmationSubmissionKey = null;
+    proofState.confirmationSubmittedAt = null;
+    proofState.confirmationSubmittedCount = 0;
+    return false;
+  }
+  const confirmationSurfaceKey = page.url();
+  let proofMailbox = proofState.mailbox;
+  let proofMailboxError: Error | null = null;
+  const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
+  const confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
+    hasConfiguredMailbox: !!configuredProofAddress,
+    configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
+    passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+    passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+  });
+  if (
+    shouldClassifyMicrosoftUnknownRecoveryEmail({
+      surfaceKind: confirmationState.surfaceKind,
+      configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox,
+      hasPasswordFallback: confirmationState.hasPasswordFallback,
+    })
+  ) {
+    throw new Error(`microsoft_unknown_recovery_email:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`);
+  }
+  if (shouldUsePasswordFallback) {
+    if (await clickMicrosoftPasswordFallbackAction(page)) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log(
+        `login flow: switched Microsoft proof confirmation to password fallback${
+          confirmationState.hintedMaskedEmail ? ` (hint=${confirmationState.hintedMaskedEmail})` : ""
+        }`,
+      );
+      return true;
+    }
+    if (confirmationState.matchesConfiguredMailbox === false) {
+      throw new Error(
+        `microsoft_password_fallback_unavailable:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`,
+      );
+    }
+  }
+  const selector =
+    (await markBestVisibleControl(
+      page,
+      confirmationSelector,
+      [/email/i, /proof/i, /验证码/i, /电子邮件/i],
+      "microsoft-proof-confirm-email",
+    )) ||
+    (await firstVisibleSelector(page, confirmationSelectors)) ||
+    null;
+  if (!selector && !proofMailboxError) {
+    return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
+  }
+  if (!proofMailbox) {
+    try {
+      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
+      proofState.mailbox = proofMailbox;
+    } catch (error) {
+      proofMailboxError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (!selector) {
+    throw proofMailboxError || new Error("microsoft_proof_add_email_input_missing");
+  }
+  if (!proofMailbox) {
+    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
+  }
+  if (
+    proofState.confirmationSubmissionKey === confirmationSurfaceKey &&
+    proofState.confirmationSubmittedAt &&
+    proofState.confirmationSubmittedCount > 0
+  ) {
+    const waitElapsedMs = Date.now() - proofState.confirmationSubmittedAt;
+    const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+    if (
+      formErrors.some((text) =>
+        /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
+          text,
+        ),
+      )
+    ) {
+      throw new Error(`microsoft_unknown_recovery_email:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`);
+    }
+    if (formErrors.some((text) => /invalid|incorrect|wrong|match|不正确|无效|匹配|重新输入/i.test(text))) {
+      throw new Error(`microsoft_proof_submit_failed:${formErrors.join(" | ")}`);
+    }
+    if (waitElapsedMs >= 8_000) {
+      throw new Error(`microsoft_proof_submit_failed:confirmation_stalled:${confirmationSurfaceKey}`);
+    }
+    await page.waitForTimeout(1_000);
+    return true;
+  }
+  await clearAuthFieldValidationState(page, selector);
+  await ensureDirectInputValue(page, selector, proofMailbox.address, "microsoft_proof_confirmation_mailbox");
+  const submitted =
+    (await clickMatchingAction(
+      page,
+      [/^send code$/i, /^next$/i, /^continue$/i, /^verify$/i, /^发送代码$/i, /^下一步$/i, /^继续$/i, /^验证$/i],
+      'button[data-testid="primaryButton"], input[type="submit"], button[type="submit"], button',
+    )) ||
+    (await submitContainingFormDirectly(page, selector)) ||
+    false;
+  if (!submitted) {
+    await dispatchEnterViaCdp(page);
+    await page.waitForTimeout(1_000);
+  }
+  proofState.confirmationSubmissionKey = confirmationSurfaceKey;
+  proofState.confirmationSubmittedAt = Date.now();
+  proofState.confirmationSubmittedCount += 1;
+  proofState.codeRequestedAt = Date.now();
+  const postSubmitErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (
+    postSubmitErrors.some((text) =>
+      /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
+        text,
+      ),
+    )
+  ) {
+    throw new Error(`microsoft_unknown_recovery_email:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`);
+  }
+  if (postSubmitErrors.some((text) => /invalid|incorrect|wrong|match|不正确|无效|匹配|重新输入/i.test(text))) {
+    throw new Error(`microsoft_proof_submit_failed:${postSubmitErrors.join(" | ")}`);
+  }
+  log(`login flow: confirmed Microsoft proof mailbox ${proofMailbox.address}`);
   return true;
 }
 
@@ -3847,18 +5634,103 @@ async function handleMicrosoftProofCodePrompt(
   page: any,
   cfg: AppConfig,
   proxyUrl: string | undefined,
-  proofState: { mailbox: MailboxSession | null; startedAt: number | null; codeRequestedAt: number | null },
+  proofState: MicrosoftProofFlowState,
 ): Promise<boolean> {
+  const isStillOnProofCodeSurface = async (): Promise<boolean> => {
+    const currentUrl = page.url();
+    if (/app\.tavily\.com\/home/i.test(currentUrl) || /account\.live\.com\/Consent\/Update/i.test(currentUrl)) {
+      return false;
+    }
+    if (isMicrosoftPasskeyInterruptUrl(currentUrl)) {
+      return false;
+    }
+    if (
+      await pageContainsAnyText(page, [
+        /security code/i,
+        /enter (the|your) code/i,
+        /verify your email/i,
+        /verify your identity/i,
+        /安全代码/i,
+        /输入代码/i,
+        /验证码/i,
+        /验证你的电子邮件/i,
+        /验证你的身份/i,
+      ])
+    ) {
+      return true;
+    }
+    return Boolean(await firstVisibleSelector(page, codeInputSelectors));
+  };
+  const hasAdvancedPastProofCode = async (): Promise<boolean> => {
+    const currentUrl = page.url();
+    if (
+      /app\.tavily\.com\/home/i.test(currentUrl) ||
+      /account\.live\.com\/Consent\/Update/i.test(currentUrl) ||
+      /login\.microsoft\.com\/consumers\/fido\/create/i.test(currentUrl)
+    ) {
+      return true;
+    }
+    return await pageContainsAnyText(page, [
+      /stay signed in/i,
+      /保持登录状态/i,
+      /skip having to sign in every time/i,
+      /让此应用访问你的信息/i,
+      /allow this app to access your info/i,
+      /let this app access your info/i,
+      /needs your permission to/i,
+      /setting up your passkey/i,
+      /finish setting up your passkey/i,
+    ]);
+  };
+  const attemptProofCodeRecovery = async (reason: string): Promise<boolean> => {
+    if (proofState.codeRecoveryCount >= 1) {
+      return false;
+    }
+    const wentBack =
+      (await clickMatchingAction(page, [/^back$/i, /^返回$/i], '#back-button, button[aria-label*="Back" i], button[aria-label*="返回" i]')) ||
+      false;
+    if (!wentBack) {
+      return false;
+    }
+    proofState.codeRecoveryCount += 1;
+    proofState.codeRequestedAt = null;
+    proofState.confirmationSubmissionKey = null;
+    proofState.confirmationSubmittedAt = null;
+    proofState.confirmationSubmittedCount = 0;
+    await page.waitForTimeout(1_200);
+    log(`login flow: retried Microsoft proof code by returning to resend surface (${reason})`);
+    return true;
+  };
+  const codeInputSelectors = [
+    '#iOttText',
+    'input[name="iOttText"]',
+    'input[id^="codeEntry-"]',
+    'input[autocomplete="one-time-code"]',
+    'input[maxlength="1"]',
+    'input[aria-label*="code" i]',
+    'input[placeholder*="code" i]',
+    'input[inputmode="numeric"]',
+    'input[inputmode="decimal"]',
+    'input[type="tel"]',
+    'input[type="number"]',
+    'input[type="text"]',
+    'input[type="password"]',
+    'input:not([type])',
+  ];
+  const visibleCodeSelector = await firstVisibleSelector(page, codeInputSelectors);
   if (
     !(await pageContainsAnyText(page, [
       /security code/i,
-      /enter the code/i,
+      /enter (the|your) code/i,
+      /verify your email/i,
       /verify your identity/i,
       /安全代码/i,
       /输入代码/i,
       /验证码/i,
+      /验证你的电子邮件/i,
       /验证你的身份/i,
-    ]))
+    ])) &&
+    !visibleCodeSelector
   ) {
     return false;
   }
@@ -3867,46 +5739,143 @@ async function handleMicrosoftProofCodePrompt(
     'input[type="tel"], input[type="number"], input[inputmode="numeric"], input[type="text"], input:not([type])',
     [/code/i, /security/i, /验证码/i, /安全代码/i, /verify/i],
     "microsoft-proof-code",
-  );
+  ) || visibleCodeSelector;
   if (!selector) {
     return false;
   }
   const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
   proofState.mailbox = proofMailbox;
-  await clearAuthFieldValidationState(page, selector);
   const notBeforeMs = (proofState.codeRequestedAt || proofState.startedAt || Date.now()) - 10_000;
   const code = await waitForMicrosoftProofCode(proofMailbox, cfg.emailWaitMs, cfg.mailPollMs, proxyUrl, notBeforeMs);
   if (!code) {
+    if (await attemptProofCodeRecovery("timeout")) {
+      return true;
+    }
     throw new Error("microsoft_proof_code_timeout");
   }
   log(`login flow: received Microsoft proof code (${code.length} digits)`);
-  await ensureDirectInputValue(page, selector, code, "microsoft_proof_code");
+  const codeFilled = await fillMicrosoftProofOtpInputs(page, code);
+  if (!codeFilled) {
+    let activeSelector: string | null = selector;
+    const selectorStillVisible = activeSelector ? await hasVisibleElement(page, activeSelector).catch(() => false) : false;
+    if (!selectorStillVisible) {
+      activeSelector =
+        (await markBestVisibleControl(
+          page,
+          'input[type="tel"], input[type="number"], input[inputmode="numeric"], input[type="text"], input:not([type])',
+          [/code/i, /security/i, /验证码/i, /安全代码/i, /verify/i],
+          "microsoft-proof-code-fallback",
+        )) ||
+        (await firstVisibleSelector(page, codeInputSelectors)) ||
+        null;
+    }
+    for (let round = 1; round <= 3; round += 1) {
+      if (await hasAdvancedPastProofCode()) {
+        log("login flow: Microsoft proof code surface advanced before direct code fill");
+        return true;
+      }
+      if (activeSelector || (await isStillOnProofCodeSurface())) {
+        break;
+      }
+      await page.waitForTimeout(400);
+      activeSelector =
+        activeSelector ||
+        (await markBestVisibleControl(
+          page,
+          'input[type="tel"], input[type="number"], input[inputmode="numeric"], input[type="text"], input:not([type])',
+          [/code/i, /security/i, /验证码/i, /安全代码/i, /verify/i],
+          "microsoft-proof-code-recheck",
+        )) ||
+        (await firstVisibleSelector(page, codeInputSelectors)) ||
+        null;
+      if (round === 3 && !(await isStillOnProofCodeSurface())) {
+        log("login flow: Microsoft proof code surface disappeared before code field became available");
+        return true;
+      }
+    }
+    if (!activeSelector) {
+      throw new Error("microsoft_proof_code_input_missing");
+    }
+    await clearAuthFieldValidationState(page, activeSelector);
+    try {
+      await ensureDirectInputValue(page, activeSelector, code, "microsoft_proof_code");
+    } catch (error) {
+      if (await hasAdvancedPastProofCode()) {
+        log("login flow: Microsoft proof code surface advanced while waiting for direct code input");
+        return true;
+      }
+      throw error;
+    }
+  }
+  await page.waitForTimeout(codeFilled ? 1_200 : 400);
+  let formErrors = await collectVisibleFormErrors(page).catch(() => []);
+  if (formErrors.some((text) => /invalid|incorrect|wrong|不正确|无效/i.test(text))) {
+    if (await attemptProofCodeRecovery(`pre_submit_error:${formErrors.join(" | ")}`)) {
+      return true;
+    }
+    throw new Error(`microsoft_proof_submit_failed:${formErrors.join(" | ")}`);
+  }
   const submitted =
     (await clickMatchingAction(
       page,
       [/^next$/i, /^continue$/i, /^verify$/i, /^submit$/i, /^下一步$/i, /^继续$/i, /^验证$/i, /^提交$/i],
       'input[type="submit"], button[type="submit"], button',
-    )) || false;
+    )) ||
+    (!codeFilled ? (await submitContainingFormDirectly(page, selector || 'input[type="tel"], input[type="number"], input[inputmode="numeric"], input[type="text"], input:not([type])')) : false) ||
+    false;
   if (!submitted) {
     await dispatchEnterViaCdp(page);
     await page.waitForTimeout(1_000);
   }
   await page.waitForTimeout(1_500);
-  const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+  formErrors = await collectVisibleFormErrors(page).catch(() => []);
   if (formErrors.some((text) => /invalid|incorrect|wrong|不正确|无效/i.test(text))) {
+    if (await attemptProofCodeRecovery(`post_submit_error:${formErrors.join(" | ")}`)) {
+      return true;
+    }
     throw new Error(`microsoft_proof_submit_failed:${formErrors.join(" | ")}`);
   }
   log("login flow: submitted Microsoft proof code");
   return true;
 }
 
-async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: string): Promise<void> {
+async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: string): Promise<any> {
   const email = cfg.microsoftAccountEmail;
   const password = cfg.microsoftAccountPassword;
   if (!email || !password) {
     throw new Error("microsoft_account_credentials_missing");
   }
-  const proofState = { mailbox: null as MailboxSession | null, startedAt: null as number | null, codeRequestedAt: null as number | null };
+  const proofState: MicrosoftProofFlowState = {
+    mailbox: null as MailboxSession | null,
+    startedAt: null as number | null,
+    codeRequestedAt: null as number | null,
+    codeRecoveryCount: 0,
+    passwordFallbackAttempted: false,
+    passwordFallbackBlocked: false,
+    passwordFallbackReturnUrl: null,
+    confirmationSubmissionKey: null,
+    confirmationSubmittedAt: null,
+    confirmationSubmittedCount: 0,
+    passwordShortcutKey: null,
+    passwordShortcutSubmittedAt: null,
+    passwordShortcutSubmittedCount: 0,
+  };
+  const passwordState = {
+    submissionKey: null as string | null,
+    submittedAt: null as number | null,
+    submittedCount: 0,
+  };
+  const providerState = {
+    submissionKey: null as string | null,
+    submittedAt: null as number | null,
+    submittedCount: 0,
+    challengeRecoveryKey: null as string | null,
+  };
+  const passkeyState: MicrosoftPasskeyState = {
+    homeReturnAttempted: false,
+    tavilyRelaunchCount: 0,
+    lastNonPasskeyUrl: null,
+  };
   const dialogHandler = async (dialog: any) => {
     const message = `${String(dialog?.message?.() || "")} ${String(dialog?.defaultValue?.() || "")}`.trim();
     if (/must provide prefix|break into debugger/i.test(message)) {
@@ -3919,25 +5888,133 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
 
   page.on("dialog", dialogHandler);
   try {
-    for (let step = 1; step <= 40; step += 1) {
+    let lastMicrosoftSurface = "";
+    let networkRecoveryCount = 0;
+    let authorizeShellRecoveryKey: string | null = null;
+    let authorizeShellRecoveryCount = 0;
+    const microsoftLoginDeadline = Date.now() + 120_000;
+    for (let step = 1; Date.now() < microsoftLoginDeadline; step += 1) {
       const currentUrl = page.url();
+      const chromiumNetErrorCode = await detectChromiumNetErrorCode(page);
+      if (chromiumNetErrorCode) {
+        const canRecoverNetwork =
+          networkRecoveryCount < 1 &&
+          /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED/i.test(chromiumNetErrorCode) &&
+          (/^chrome-error:\/\//i.test(currentUrl) || /login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl));
+        if (canRecoverNetwork) {
+          networkRecoveryCount += 1;
+          log(`login flow: recovering transient Microsoft network error ${chromiumNetErrorCode}`);
+          await safeGoto(page, "https://app.tavily.com/home", 120_000).catch(() => {});
+          await page.waitForTimeout(1_200);
+          continue;
+        }
+        throw new Error(`chromium_net_error:${chromiumNetErrorCode}:url=${currentUrl}`);
+      }
+      if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
+        const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);
+        const interrupt = classifyMicrosoftFlowInterrupt(microsoftSurface);
+        if (interrupt) {
+          throw new Error(`${interrupt.code}:${interrupt.message}`);
+        }
+        if (isMicrosoftAuthorizeShellUnready(microsoftSurface)) {
+          const surfaceKey = `${microsoftSurface.url}|${microsoftSurface.title}`;
+          if (authorizeShellRecoveryKey !== surfaceKey) {
+            authorizeShellRecoveryKey = surfaceKey;
+            authorizeShellRecoveryCount = 0;
+          }
+          if (authorizeShellRecoveryCount < 2) {
+            authorizeShellRecoveryCount += 1;
+            log(
+              `login flow: reloading blank Microsoft authorize shell (${authorizeShellRecoveryCount}/2) at ${microsoftSurface.url}`,
+            );
+            await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(async () => {
+              await safeGoto(page, microsoftSurface.url, 60_000).catch(() => {});
+            });
+            await page.waitForTimeout(1_500);
+            continue;
+          }
+        } else {
+          authorizeShellRecoveryKey = null;
+          authorizeShellRecoveryCount = 0;
+        }
+      }
+      if (!isMicrosoftPasskeyInterruptUrl(currentUrl)) {
+        passkeyState.lastNonPasskeyUrl = currentUrl;
+        if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+          passkeyState.tavilyRelaunchCount = 0;
+          passkeyState.homeReturnAttempted = false;
+        }
+      }
+      if (!(await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]'))) {
+        passwordState.submissionKey = null;
+        passwordState.submittedAt = null;
+        passwordState.submittedCount = 0;
+      }
+      if (!/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+        providerState.submissionKey = null;
+        providerState.submittedAt = null;
+        providerState.submittedCount = 0;
+        providerState.challengeRecoveryKey = null;
+      }
       if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
-        return;
+        return page;
       }
 
       if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
-        if (await clickMicrosoftProviderEntry(page)) continue;
+        const authSurfaceKey = buildAuthLoginSurfaceKey(currentUrl);
+        const formErrors = await collectVisibleFormErrors(page).catch(() => []);
+        const errorCodes = await collectVisibleErrorCodes(page).catch(() => []);
+        const explicitRejection = detectExplicitFormRejection(formErrors, errorCodes);
+        if (explicitRejection && explicitRejection !== "invalid_captcha" && explicitRejection !== "challenge_unresponsive") {
+          throw new Error(`${explicitRejection}:${authSurfaceKey}`);
+        }
+        if (await hasAuthChallengeLoadErrorPage(page)) {
+          log("login flow: auth security challenge warning present, ignored for Microsoft provider");
+        }
+        if (providerState.submissionKey === authSurfaceKey && providerState.submittedAt && providerState.submittedCount > 0) {
+          if (Date.now() - providerState.submittedAt >= 8_000) {
+            throw new Error(`microsoft_provider_submit_stalled:${authSurfaceKey}`);
+          }
+          await page.waitForTimeout(1_000);
+          continue;
+        }
+        if (await clickMicrosoftProviderEntry(page)) {
+          providerState.submissionKey = authSurfaceKey;
+          providerState.submittedAt = Date.now();
+          providerState.submittedCount += 1;
+          providerState.challengeRecoveryKey = null;
+          continue;
+        }
       }
 
       if (await handleMicrosoftAccountPicker(page, email)) continue;
+      if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) continue;
+      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftProofMethodPrompt(page, proofState)) continue;
-      if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState)) continue;
+      if (await handleMicrosoftProofVerifyPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
+      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
+      if (await handleMicrosoftProofConfirmationEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
+      if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftEmailPrompt(page, email)) continue;
-      if (await handleMicrosoftPasswordPrompt(page, password)) continue;
-      if (await handleMicrosoftPasskeyInterrupt(page)) continue;
+      if (await handleMicrosoftPasswordPrompt(page, password, passwordState)) continue;
+      const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState);
+      if (passkeyResult) {
+        if (passkeyResult !== true) {
+          page = passkeyResult;
+        }
+        continue;
+      }
       if (await handleMicrosoftKeepSignedInPrompt(page, cfg.microsoftKeepSignedIn)) continue;
       if (await handleMicrosoftConsentPrompt(page)) continue;
+
+      if (/login\.live\.com|account\.live\.com/i.test(currentUrl) && step % 4 === 0) {
+        const summary = await collectPageSurfaceSummary(page);
+        if (summary !== lastMicrosoftSurface) {
+          lastMicrosoftSurface = summary;
+          log(`login flow: waiting on unhandled Microsoft surface (${step}/40): ${summary}`);
+        }
+      }
 
       await page.waitForTimeout(1_000);
     }
@@ -3994,20 +6071,20 @@ async function refreshCaptchaImage(page: any, previousSrc: string): Promise<bool
 }
 
 async function collectVisibleFormErrors(page: any): Promise<string[]> {
-  return await page.evaluate(() => {
-    const visible = (el: Element): boolean => {
-      const style = window.getComputedStyle(el as HTMLElement);
-      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
-    };
+  return await page.evaluate(`(() => {
     const nodes = Array.from(
-      document.querySelectorAll('.ulp-error-info,[data-error-code],#error-element-captcha,[role="alert"],.error,[class*="error"]'),
+      document.querySelectorAll('.ulp-error-info,[data-error-code],#error-element-captcha,[role="alert"],.error,[class*="error"],.fui-Field__validationMessage,[id$="__validationMessage"],[data-testid*="validationMessage" i]'),
     );
-    return nodes
-      .filter(visible)
-      .map((el) => (el.textContent || "").trim())
-      .filter((text) => text.length > 0)
-      .slice(0, 10);
-  });
+    const values = [];
+    for (const el of nodes) {
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+      const text = (el.textContent || "").trim();
+      if (text) values.push(text);
+      if (values.length >= 10) break;
+    }
+    return values;
+  })()`);
 }
 
 function isIgnorableErrorCode(code: string): boolean {
@@ -4015,19 +6092,23 @@ function isIgnorableErrorCode(code: string): boolean {
 }
 
 async function collectVisibleErrorCodes(page: any): Promise<string[]> {
-  return await page.evaluate(() => {
-    const visible = (el: Element): boolean => {
-      const style = window.getComputedStyle(el as HTMLElement);
-      return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
-    };
+  return await page.evaluate(`(() => {
     const nodes = Array.from(document.querySelectorAll("[data-error-code]"));
-    const codes = nodes
-      .filter(visible)
-      .map((el) => (el.getAttribute("data-error-code") || "").trim())
-      .filter((code) => /^[a-z0-9_-]{3,120}$/i.test(code))
-      .filter((code) => !isIgnorableErrorCode(code));
-    return Array.from(new Set(codes)).slice(0, 12);
-  });
+    const seen = new Set();
+    const values = [];
+    for (const el of nodes) {
+      const style = window.getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+      const code = (el.getAttribute("data-error-code") || "").trim();
+      if (!/^[a-z0-9_-]{3,120}$/i.test(code)) continue;
+      if (/^password-policy-/i.test(code)) continue;
+      if (seen.has(code)) continue;
+      seen.add(code);
+      values.push(code);
+      if (values.length >= 12) break;
+    }
+    return values;
+  })()`);
 }
 
 async function collectPasswordStrengthSnapshot(page: any): Promise<PasswordStrengthSnapshot> {
@@ -4094,6 +6175,13 @@ function detectExplicitFormRejection(formErrors: string[], errorCodes: string[])
   }
   if (errorCodes.some((code) => /invalid-captcha/i.test(code))) {
     return "invalid_captcha";
+  }
+  if (
+    formErrors.some((text) =>
+      /couldn[’']t load the security challenge|we couldn[’']t load the security challenge|security challenge/i.test(text),
+    )
+  ) {
+    return "challenge_unresponsive";
   }
   return null;
 }
@@ -4412,6 +6500,32 @@ async function dispatchEnterViaCdp(page: any): Promise<void> {
       code: "Enter",
       windowsVirtualKeyCode: 13,
       nativeVirtualKeyCode: 13,
+    })
+    .catch(() => {});
+}
+
+async function dispatchEscapeViaCdp(page: any): Promise<void> {
+  const pageCdp = await createCdpSession(page);
+  if (!pageCdp) {
+    throw new Error("cdp_session_unavailable");
+  }
+  await pageCdp
+    .send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
+    })
+    .catch(() => {});
+  await page.waitForTimeout(randomInt(35, 90));
+  await pageCdp
+    .send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Escape",
+      code: "Escape",
+      windowsVirtualKeyCode: 27,
+      nativeVirtualKeyCode: 27,
     })
     .catch(() => {});
 }
@@ -6199,52 +8313,68 @@ async function loginAndReachHome(
   mailbox?: MailboxSession | null,
   proxyUrl?: string,
   maxCycles = 5,
-): Promise<void> {
+): Promise<any> {
   const loginProvider = getConfiguredLoginProvider(cfg);
+  const urlTrace: string[] = [];
+  const pushUrlTrace = (label: string): void => {
+    const currentUrl = page.url();
+    const entry = `${label}:${currentUrl}`;
+    if (urlTrace[urlTrace.length - 1] !== entry) {
+      urlTrace.push(entry);
+      if (urlTrace.length > 18) urlTrace.shift();
+    }
+  };
   for (let cycle = 1; cycle <= Math.max(1, maxCycles); cycle += 1) {
     await safeGoto(page, "https://app.tavily.com/home");
     await page.waitForTimeout(1200);
+    pushUrlTrace(`cycle${cycle}:home`);
 
     if (/app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
       await acceptPostSignupConsent(page).catch(() => false);
       if (await waitHomeStable(page, 6500)) {
-        return;
+        return page;
       }
     }
 
     await openAuthFlowEntry(page, "login");
     await page.waitForTimeout(900);
+    pushUrlTrace(`cycle${cycle}:auth-entry`);
 
     if (loginProvider === "microsoft") {
-      await completeMicrosoftLogin(page, cfg, proxyUrl);
+      page = await completeMicrosoftLogin(page, cfg, proxyUrl);
+      pushUrlTrace(`cycle${cycle}:microsoft-return`);
     } else {
       if (/\/u\/login\/identifier/i.test(page.url())) {
         await solveCaptchaForm(page, solver, "login", email, cfg.maxCaptchaRounds);
+        pushUrlTrace(`cycle${cycle}:identifier`);
       }
       if (/\/u\/email-identifier\/challenge/i.test(page.url()) && mailbox) {
         await completeEmailIdentifierChallenge(page, mailbox, cfg, proxyUrl);
         await page.waitForTimeout(1200);
+        pushUrlTrace(`cycle${cycle}:email-challenge`);
       }
 
       if ((await page.locator('input[name="password"]').count()) > 0) {
         await fillInput(page, 'input[name="password"]', password);
         await clickSubmit(page);
         await page.waitForTimeout(1400);
+        pushUrlTrace(`cycle${cycle}:password-submit`);
       }
     }
 
     const current = page.url();
+    pushUrlTrace(`cycle${cycle}:post-login`);
     if (/app\.tavily\.com\/home/i.test(current) && !/auth\.tavily\.com/i.test(current)) {
       await acceptPostSignupConsent(page).catch(() => false);
       if (await waitHomeStable(page, 5000)) {
-        return;
+        return page;
       }
     }
 
     log(`login cycle ${cycle} not yet on home, current=${current}`);
   }
 
-  throw new Error(`login flow did not reach home, last_url=${page.url()}`);
+  throw new Error(`login flow did not reach home, last_url=${page.url()}, trace=${urlTrace.join(" -> ")}`);
 }
 
 async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promise<string | null> {
@@ -6659,7 +8789,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty/i.test(
+  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|moemail_api_key_missing|moemail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
     message,
   );
 }
@@ -6683,6 +8813,29 @@ function getChromeVisualArgs(): string[] {
   return [
     "--window-size=1512,982",
     "--force-device-scale-factor=2",
+  ];
+}
+
+function getChromePasskeyDisableArgs(): string[] {
+  const disabledFeatures = [
+    "WebAuthentication",
+    "WebAuthenticationBle",
+    "WebAuthenticationCable",
+    "WebAuthenticationConditionalUI",
+    "WebAuthenticationPasskeysUI",
+    "WebAuthenticationPasskeysUIExperiment",
+    "WebAuthenticationPhoneSupport",
+    "WebAuthenticationUI",
+    "SecurePaymentConfirmationBrowser",
+    "SecurePaymentConfirmationDebug",
+  ];
+  const disabledBlinkFeatures = [
+    "AutomationControlled",
+    "WebAuthenticationConditionalUI",
+  ];
+  return [
+    `--disable-features=${disabledFeatures.join(",")}`,
+    `--disable-blink-features=${disabledBlinkFeatures.join(",")}`,
   ];
 }
 
@@ -6752,6 +8905,91 @@ function buildBrowserIdentityProfile(locale: string, browserVersion: string): Br
 }
 
 const IDENTITY_BOUND_CONTEXTS = new WeakSet<object>();
+const PASSKEY_SUPPRESSION_BOUND_CONTEXTS = new WeakSet<object>();
+const WORKER_PASSKEY_SUPPRESSION_SCRIPT = `(() => {
+  if ((globalThis).__kohaWorkerPasskeySuppressed) {
+    return true;
+  }
+  (globalThis).__kohaWorkerPasskeySuppressed = true;
+  const notSupportedError = () => {
+    try {
+      return new DOMException("Passkeys disabled by automation", "NotSupportedError");
+    } catch {
+      const error = new Error("Passkeys disabled by automation");
+      error.name = "NotSupportedError";
+      return error;
+    }
+  };
+  const rejectPublicKey = () => Promise.reject(notSupportedError());
+  const patchCredentialMethod = (target, key) => {
+    if (!target) return;
+    const original = typeof target[key] === "function" ? target[key].bind(target) : null;
+    const wrapped = function(options) {
+      if (options && typeof options === "object" && "publicKey" in options) {
+        return rejectPublicKey();
+      }
+      if (original) {
+        return original(options);
+      }
+      return rejectPublicKey();
+    };
+    try {
+      Object.defineProperty(target, key, {
+        configurable: true,
+        writable: true,
+        value: wrapped,
+      });
+      return;
+    } catch {}
+    try {
+      target[key] = wrapped;
+    } catch {}
+  };
+  const credentials = globalThis.navigator?.credentials || null;
+  patchCredentialMethod(credentials, "create");
+  patchCredentialMethod(credentials, "get");
+  const publicKeyCredential = globalThis.PublicKeyCredential;
+  if (publicKeyCredential) {
+    const defineStatic = (key, value) => {
+      try {
+        Object.defineProperty(publicKeyCredential, key, {
+          configurable: true,
+          writable: true,
+          value,
+        });
+      } catch {}
+    };
+    defineStatic("isUserVerifyingPlatformAuthenticatorAvailable", async () => false);
+    defineStatic("isConditionalMediationAvailable", async () => false);
+    defineStatic("getClientCapabilities", async () => ({
+      conditionalCreate: false,
+      conditionalGet: false,
+      hybridTransport: false,
+      userVerifyingPlatformAuthenticator: false,
+    }));
+  } else {
+    try {
+      Object.defineProperty(globalThis, "PublicKeyCredential", {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+    } catch {}
+  }
+  return true;
+})()`;
+
+async function installMicrosoftPasskeySuppression(context: any): Promise<void> {
+  const contextObj = context as object;
+  if (!PASSKEY_SUPPRESSION_BOUND_CONTEXTS.has(contextObj) && typeof context?.addInitScript === "function") {
+    await context.addInitScript({ content: WORKER_PASSKEY_SUPPRESSION_SCRIPT }).catch(() => {});
+    PASSKEY_SUPPRESSION_BOUND_CONTEXTS.add(contextObj);
+  }
+  const pages = typeof context?.pages === "function" ? context.pages() : [];
+  for (const page of pages) {
+    await page.evaluate(WORKER_PASSKEY_SUPPRESSION_SCRIPT).catch(() => {});
+  }
+}
 
 async function applyPageIdentityOverrides(
   context: any,
@@ -6815,6 +9053,7 @@ async function applyBrowserIdentityToContext(
   timezoneId?: string,
   injectNavigatorOverrides = true,
 ): Promise<void> {
+  await installMicrosoftPasskeySuppression(context).catch(() => {});
   await context
     .setExtraHTTPHeaders({
       "Accept-Language": identity.acceptLanguage,
@@ -6903,6 +9142,7 @@ async function applyBrowserIdentityToContext(
   }
 
   const applyToPage = async (page: any): Promise<void> => {
+    await page.evaluate(WORKER_PASSKEY_SUPPRESSION_SCRIPT).catch(() => {});
     await applyPageIdentityOverrides(context, page, identity, timezoneId);
   };
 
@@ -6934,8 +9174,8 @@ async function launchBrowserWithEngine(
     proxy: { server: proxyServer },
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
-      "--disable-blink-features=AutomationControlled",
       `--lang=${locale}`,
+      ...getChromePasskeyDisableArgs(),
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
     ],
@@ -6987,6 +9227,13 @@ function createChildProcessStopper(child: ReturnType<typeof spawn>, profileDir?:
       await cleanupManagedChromeProcesses(profileDir).catch(() => {});
     }
   };
+}
+
+async function awaitCleanupBestEffort(task: Promise<unknown>, timeoutMs = 5_000): Promise<void> {
+  await Promise.race([
+    task.catch(() => {}),
+    delay(timeoutMs),
+  ]);
 }
 
 async function activateMacApp(appName: string): Promise<void> {
@@ -7307,6 +9554,7 @@ async function launchNativeChromeCdp(
       "--no-default-browser-check",
       "--disable-background-mode",
       "--disable-background-networking",
+      ...getChromePasskeyDisableArgs(),
       ...getChromeVisualArgs(),
       ...getChromeWebRtcPolicyArgs(cfg),
       ...getChromeCredentialStoreArgs(),
@@ -7415,10 +9663,10 @@ async function launchChromePersistent(
         proxy: { server: proxyServer },
         ignoreDefaultArgs: ["--enable-automation"],
         args: [
-          "--disable-blink-features=AutomationControlled",
           "--no-first-run",
           "--no-default-browser-check",
           `--lang=${locale}`,
+          ...getChromePasskeyDisableArgs(),
           ...getChromeVisualArgs(),
           ...getChromeWebRtcPolicyArgs(cfg),
           ...getChromeCredentialStoreArgs(),
@@ -7536,6 +9784,7 @@ async function launchNativeChromeInspect(
     `--user-data-dir=${cfg.inspectChromeProfileDir}`,
     `--proxy-server=${proxyServer}`,
     `--lang=${locale}`,
+    ...getChromePasskeyDisableArgs(),
     ...getChromeVisualArgs(),
     ...getChromeWebRtcPolicyArgs(cfg),
     ...getChromeCredentialStoreArgs(),
@@ -7665,6 +9914,16 @@ function collectBlockedIpsFromLedger(taskLedger: TaskLedger | null): Set<string>
   return blockedIps;
 }
 
+function collectBlockedIpsFromUsage(ipEmailUsage: Map<string, Set<string>>): Set<string> {
+  const blockedIps = new Set<string>();
+  for (const [ip, emails] of ipEmailUsage.entries()) {
+    if (emails.size >= 3) {
+      blockedIps.add(ip);
+    }
+  }
+  return blockedIps;
+}
+
 async function preselectTaskProxy(
   cfg: AppConfig,
   args: CliArgs,
@@ -7756,12 +10015,7 @@ async function prepareSignupTask(
   preloadMailbox: boolean,
 ): Promise<PreparedSignupTask> {
   const password = getConfiguredLoginPassword(cfg) || randomPassword();
-  const ipQuotaBlocked = new Set<string>();
-  for (const [ip, emails] of ipEmailUsage.entries()) {
-    if (emails.size >= 3) {
-      ipQuotaBlocked.add(ip);
-    }
-  }
+  const ipQuotaBlocked = collectBlockedIpsFromUsage(ipEmailUsage);
 
   const taskId = `task-${taskOrdinal}-${randomBytes(2).toString("hex")}`;
   const proxyBootstrapAttempts = 6;
@@ -7840,6 +10094,66 @@ async function prepareSignupTask(
   }
 
   throw lastError || new Error("task proxy bootstrap failed");
+}
+
+function shouldRotatePreparedTaskProxy(reason: string): boolean {
+  return /challenge_unresponsive|browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|stage_browser_ip_probe|browser precheck failed|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET/i.test(
+    reason,
+  );
+}
+
+async function rotatePreparedTaskProxy(
+  cfg: AppConfig,
+  args: CliArgs,
+  taskLedger: TaskLedger | null,
+  taskMihomoController: Awaited<ReturnType<typeof startMihomo>>,
+  preparedTask: PreparedSignupTask,
+  runtimeRecentProxyIps: string[],
+  ipEmailUsage: Map<string, Set<string>>,
+  activeProxyNames: Set<string>,
+  activeProxyIps: Set<string>,
+): Promise<void> {
+  const previousName = preparedTask.proxyName;
+  const previousIp = normalizeIp(preparedTask.proxyIp);
+  const blockedIps = collectBlockedIpsFromUsage(ipEmailUsage);
+
+  const nextSelection = await withProxyBootstrapLock(async () => {
+    const proxy = await preselectTaskProxy(
+      cfg,
+      args,
+      "",
+      preparedTask.taskId,
+      taskLedger,
+      blockedIps,
+      runtimeRecentProxyIps,
+      activeProxyNames,
+      activeProxyIps,
+      taskMihomoController,
+    );
+    const proxyIp = normalizeIp(proxy.geo?.ip);
+    if (activeProxyNames.has(proxy.name)) {
+      throw new Error(`proxy_distinct_ip_capacity_exhausted:busy_node:${proxy.name}`);
+    }
+    if (proxyIp && activeProxyIps.has(proxyIp)) {
+      throw new Error(`proxy_distinct_ip_capacity_exhausted:busy_ip:${proxy.name}->${proxyIp}`);
+    }
+    activeProxyNames.add(proxy.name);
+    if (proxyIp) activeProxyIps.add(proxyIp);
+    return { proxy, proxyIp };
+  });
+
+  activeProxyNames.delete(previousName);
+  if (previousIp) activeProxyIps.delete(previousIp);
+  await recordProxyNodeTaskOutcome(previousName, preparedTask.proxyGeo, "fail").catch(() => {});
+
+  preparedTask.proxyName = nextSelection.proxy.name;
+  preparedTask.proxyIp = nextSelection.proxyIp || undefined;
+  preparedTask.proxyGeo = compactGeo(nextSelection.proxy.geo);
+  preparedTask.ipEmailOrdinal = 0;
+
+  log(
+    `task proxy rotated: ${previousName} (${previousIp || "unknown"}) -> ${preparedTask.proxyName} (${preparedTask.proxyIp || "unknown"})`,
+  );
 }
 
 async function runSingleMode(
@@ -7927,7 +10241,7 @@ async function runSingleMode(
     signupChallengeRounds: taskScopedAttempt ? 1 : cfg.maxCaptchaRounds,
     passwordStepRounds: taskScopedAttempt ? 1 : Math.min(cfg.maxCaptchaRounds, 8),
   };
-  const loginCycleMax = taskScopedAttempt ? 1 : 5;
+  const loginCycleMax = taskScopedAttempt ? (configuredLoginProvider === "microsoft" ? 2 : 1) : 5;
   const apiKeyFetchRoundMax = taskScopedAttempt ? 1 : 6;
 
   const { domain: initialEmailDomain, localLen: initialEmailLocalLen } = splitEmail(email);
@@ -7970,6 +10284,43 @@ async function runSingleMode(
     if (taskTimeout) {
       clearTimeout(taskTimeout);
       taskTimeout = null;
+    }
+  };
+  const waitForBrowserInspection = async (): Promise<void> => {
+    if (mode !== "headed") return;
+
+    const keepOnExit = toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false);
+    const keepOnFailure =
+      Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure && toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false);
+    if (!keepOnExit && !keepOnFailure) return;
+
+    const holdUrl = page ? page.url() : "unknown";
+    const reason = keepOnFailure && !keepOnExit ? "failure" : "exit";
+
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        await rl.question(`Browser paused on ${reason} at stage=${failureStage} url=${holdUrl}. Press Enter to close: `);
+      } finally {
+        rl.close();
+      }
+      return;
+    }
+
+    const configuredHoldMs = toInt(process.env.KEEP_BROWSER_OPEN_MS, keepOnFailure ? 0 : 15 * 60_000);
+    const holdMs = keepOnFailure && !keepOnExit ? Math.max(0, configuredHoldMs) : Math.max(30_000, configuredHoldMs);
+    if (holdMs > 0) {
+      log(`keep browser open on ${reason} for ${holdMs}ms at stage=${failureStage} url=${holdUrl}`);
+      await delay(holdMs);
+      return;
+    }
+
+    log(`keep browser open on ${reason} until manually closed at stage=${failureStage} url=${holdUrl}`);
+    while (true) {
+      const pageClosed = !page || (typeof page.isClosed === "function" ? page.isClosed() : false);
+      const browserClosed = !browser || (typeof browser.isConnected === "function" ? !browser.isConnected() : false);
+      if (pageClosed || browserClosed) break;
+      await delay(1000);
     }
   };
 
@@ -8402,12 +10753,20 @@ async function runSingleMode(
       }
       page = null;
       const launchedBrowser = browser;
-      if (launchedBrowser) {
-        await launchedBrowser.close().catch(() => {});
-        browser = null;
+      browser = null;
+      const stopNativeChrome = nativeChromeStop;
+      nativeChromeStop = null;
+      if (useNativeChrome) {
+        if (stopNativeChrome != null) {
+          await awaitCleanupBestEffort((stopNativeChrome as () => Promise<void>)(), 5_000);
+        } else if (launchedBrowser) {
+          await awaitCleanupBestEffort(launchedBrowser.close(), 5_000);
+        }
+      } else if (launchedBrowser) {
+        await awaitCleanupBestEffort(launchedBrowser.close(), 5_000);
       }
-      if (nativeChromeStop != null) {
-        await (nativeChromeStop as () => Promise<void>)().catch(() => {});
+      if (!useNativeChrome && stopNativeChrome != null) {
+        await awaitCleanupBestEffort((stopNativeChrome as () => Promise<void>)(), 5_000);
         nativeChromeStop = null;
       }
       nativeChromeContext = null;
@@ -8590,7 +10949,7 @@ async function runSingleMode(
     }
     let browserIpProbe =
       ipProbePage != null
-        ? await safeCollectIpProbeSnapshot(ipProbePage, SINGLE_BROWSER_IP_PROBE_TARGET, 4500)
+        ? await collectSingleBrowserIpProbe(ipProbePage)
         : context != null
           ? await collectIpProbeSnapshotInContext(context, SINGLE_BROWSER_IP_PROBE_TARGET, 4500)
         : await collectSingleBrowserIpProbe(page);
@@ -8606,42 +10965,55 @@ async function runSingleMode(
       }
     }
     if (!browserObservedIp) {
-      throw new Error(`browser_proxy_ip_missing:${browserIpProbe.error || browserIpProbe.url}`);
+      const cachedProxyIp = normalizeIp(selectedProxy.geo?.ip);
+      if (cachedProxyIp) {
+        browserObservedIp = cachedProxyIp;
+        notes.push(`browser ip probe unresolved, using cached proxy ip ${cachedProxyIp}`);
+        log(`browser ip probe unresolved, using cached proxy ip ${cachedProxyIp}`);
+      } else {
+        notes.push(`browser ip probe unresolved, continuing without observed ip (${browserIpProbe.error || browserIpProbe.url})`);
+        log(`browser ip probe unresolved, continuing without observed ip (${browserIpProbe.error || browserIpProbe.url})`);
+      }
     }
-    const localDirectIp = await resolveLocalEgressIp(8_000);
-    if (localDirectIp && sameIp(localDirectIp, browserObservedIp)) {
-      throw new Error(`browser_proxy_same_as_local_ip:${browserObservedIp}:${selectedProxy.name}`);
+    const browserProxyIdentity = browserObservedIp || `node:${selectedProxy.name}`;
+    if (browserObservedIp) {
+      const localDirectIp = await resolveLocalEgressIp(8_000);
+      if (localDirectIp && sameIp(localDirectIp, browserObservedIp)) {
+        throw new Error(`browser_proxy_same_as_local_ip:${browserObservedIp}:${selectedProxy.name}`);
+      }
+      const expectedProxyIp = normalizeIp(selectedProxy.geo?.ip);
+      if (expectedProxyIp && !sameIp(expectedProxyIp, browserObservedIp)) {
+        notes.push(`browser ip superseded cached ip: expected=${expectedProxyIp} actual=${browserObservedIp}`);
+      }
+      selectedProxy.geo = mergeGeoInfo(
+        { ...(selectedProxy.geo || {}), ip: browserObservedIp } as GeoInfo,
+        await enrichGeoInfo({ ip: browserObservedIp } as GeoInfo, cfg.ipinfoToken),
+      ) as GeoInfo;
+      await syncGeoDerivedBrowserProfile("browser ip probe");
+      ledgerRecord.proxyIp = browserObservedIp;
+    } else {
+      ledgerRecord.proxyIp = undefined;
     }
-    const expectedProxyIp = normalizeIp(selectedProxy.geo?.ip);
-    if (expectedProxyIp && !sameIp(expectedProxyIp, browserObservedIp)) {
-      notes.push(`browser ip superseded cached ip: expected=${expectedProxyIp} actual=${browserObservedIp}`);
-    }
-    selectedProxy.geo = mergeGeoInfo(
-      { ...(selectedProxy.geo || {}), ip: browserObservedIp } as GeoInfo,
-      await enrichGeoInfo({ ip: browserObservedIp } as GeoInfo, cfg.ipinfoToken),
-    ) as GeoInfo;
     selectedGeo = selectedProxy.geo;
-    await syncGeoDerivedBrowserProfile("browser ip probe");
-    ledgerRecord.proxyIp = browserObservedIp;
     if (preparedTask) {
       const previousTaskIp = normalizeIp(preparedTask.proxyIp);
-      if (previousTaskIp && previousTaskIp !== browserObservedIp) {
+      if (previousTaskIp && browserObservedIp && previousTaskIp !== browserObservedIp) {
         ctx.activeProxyIps.delete(previousTaskIp);
       }
-      preparedTask.proxyIp = browserObservedIp;
-      ctx.activeProxyIps.add(browserObservedIp);
-      const existingEmailSet = ctx.ipEmailUsage.get(browserObservedIp);
+      preparedTask.proxyIp = browserObservedIp || preparedTask.proxyIp;
+      ctx.activeProxyIps.add(browserProxyIdentity);
+      const existingEmailSet = ctx.ipEmailUsage.get(browserProxyIdentity);
       if ((!email || !email.trim()) && existingEmailSet && existingEmailSet.size >= 3) {
-        throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+        throw new Error(`proxy_ip_quota_exceeded:${browserProxyIdentity}`);
       }
       if (email) {
         let emailSet = existingEmailSet;
         if (!emailSet) {
           emailSet = new Set<string>();
-          ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+          ctx.ipEmailUsage.set(browserProxyIdentity, emailSet);
         }
         if (!emailSet.has(email) && emailSet.size >= 3) {
-          throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+          throw new Error(`proxy_ip_quota_exceeded:${browserProxyIdentity}`);
         }
         emailSet.add(email);
         preparedTask.ipEmailOrdinal = emailSet.size;
@@ -8649,11 +11021,12 @@ async function runSingleMode(
       }
     }
     precheckPassed = true;
-    notes.push(`browser observed ip: ${browserObservedIp}`);
+    notes.push(`browser observed ip: ${browserObservedIp || "unavailable"}`);
     ledgerRecord.precheckPassed = true;
     ledgerRecord.notesJson = safeJsonStringify(notes);
     ledgerRecord.detailsJson = safeJsonStringify({
       browserIpProbe,
+      browserProxyIdentity,
     });
     persistLedgerRecord("after-browser-ip-probe");
 
@@ -8672,14 +11045,14 @@ async function runSingleMode(
           email = mailbox.address;
           password = password || randomPassword();
           notes.push(`${mailbox.provider} mailbox preloaded via proxy (${mailbox.accountId})`);
-          log(`[${mode}] ${mailbox.provider} mailbox preloaded via proxy ${browserObservedIp}: ${email}`);
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          log(`[${mode}] ${mailbox.provider} mailbox preloaded via proxy ${browserObservedIp || browserProxyIdentity}: ${email}`);
+          let emailSet = ctx.ipEmailUsage.get(browserProxyIdentity);
           if (!emailSet) {
             emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            ctx.ipEmailUsage.set(browserProxyIdentity, emailSet);
           }
           if (!emailSet.has(email) && emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            throw new Error(`proxy_ip_quota_exceeded:${browserProxyIdentity}`);
           }
           emailSet.add(email);
           preparedTask.ipEmailOrdinal = emailSet.size;
@@ -8700,30 +11073,30 @@ async function runSingleMode(
 
       if (!mailbox) {
         if (!email) {
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          let emailSet = ctx.ipEmailUsage.get(browserProxyIdentity);
           if (!emailSet) {
             emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            ctx.ipEmailUsage.set(browserProxyIdentity, emailSet);
           }
           if (emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            throw new Error(`proxy_ip_quota_exceeded:${browserProxyIdentity}`);
           }
         }
         mailbox = await createMailboxSession(cfg, ctx.blockedMailboxDomains, mihomoController.proxyServer);
         email = mailbox.address;
         password = password || randomPassword();
-        log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
+        log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp || browserProxyIdentity}: ${email}`);
         notes.push(`${mailbox.provider} mailbox created via proxy (${mailbox.accountId})`);
         if (preparedTask) {
           preparedTask.mailbox = mailbox;
           preparedTask.email = email;
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+          let emailSet = ctx.ipEmailUsage.get(browserProxyIdentity);
           if (!emailSet) {
             emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            ctx.ipEmailUsage.set(browserProxyIdentity, emailSet);
           }
           if (!emailSet.has(email) && emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            throw new Error(`proxy_ip_quota_exceeded:${browserProxyIdentity}`);
           }
           emailSet.add(email);
           preparedTask.ipEmailOrdinal = emailSet.size;
@@ -8814,7 +11187,7 @@ async function runSingleMode(
     failureStage = "login_home";
     for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
       try {
-        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         notes.push("reached app home");
         break;
@@ -8838,7 +11211,7 @@ async function runSingleMode(
           break;
         }
 
-        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
         await acceptPostSignupConsent(page).catch(() => false);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         await page.waitForTimeout(1500);
@@ -8922,6 +11295,12 @@ async function runSingleMode(
       notes,
     });
     persistLedgerRecord("success");
+    await syncLinkedMicrosoftAccountOutcome(cfg, {
+      status: "succeeded",
+      apiKey,
+    }).catch((error) => {
+      log(`linked account success sync skipped: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     return {
       mode,
@@ -9001,32 +11380,31 @@ async function runSingleMode(
       notes,
     });
     persistLedgerRecord("failure");
+    await syncLinkedMicrosoftAccountOutcome(cfg, {
+      status: "failed",
+      errorCode: localErrorCode || null,
+    }).catch((error) => {
+      log(`linked account failure sync skipped: ${error instanceof Error ? error.message : String(error)}`);
+    });
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     stopTaskWatchers();
-    if (mode === "headed" && toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false)) {
-      const holdUrl = page ? page.url() : "unknown";
-      if (process.stdin.isTTY && process.stdout.isTTY) {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        try {
-          await rl.question(`Browser paused at stage=${failureStage} url=${holdUrl}. Press Enter to close: `);
-        } finally {
-          rl.close();
-        }
-      } else {
-        const holdMs = Math.max(30_000, toInt(process.env.KEEP_BROWSER_OPEN_MS, 15 * 60_000));
-        log(`keep browser open on exit for ${holdMs}ms at stage=${failureStage} url=${holdUrl}`);
-        await delay(holdMs);
-      }
+    const preserveBrowserOnFailure =
+      mode === "headed" &&
+      Boolean(localErrorMessage) &&
+      ctx.keepBrowserOpenOnFailure &&
+      toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false);
+    await waitForBrowserInspection();
+    if (!preserveBrowserOnFailure && context && !useNativeChrome) {
+      await awaitCleanupBestEffort(context.close(), 5_000);
     }
-    if (context && !useNativeChrome) {
-      await context.close().catch(() => {});
+    if (!preserveBrowserOnFailure && useNativeChrome && nativeChromeStop != null) {
+      await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
+    } else if (!preserveBrowserOnFailure && browser) {
+      await awaitCleanupBestEffort(browser.close(), 5_000);
     }
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
-    if (nativeChromeStop != null) {
-      await (nativeChromeStop as () => Promise<void>)().catch(() => {});
+    if (!preserveBrowserOnFailure && !useNativeChrome && nativeChromeStop != null) {
+      await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
     }
     if (!existingMihomoController) {
       await mihomoController.stop();
@@ -9152,13 +11530,15 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     }
   } finally {
     if (context) {
-      await context.close().catch(() => {});
+      await awaitCleanupBestEffort(context.close(), 5_000);
     }
-    if (browser) {
-      await browser.close().catch(() => {});
+    if (useNativeChrome && nativeChromeStop) {
+      await awaitCleanupBestEffort(nativeChromeStop(), 5_000);
+    } else if (browser) {
+      await awaitCleanupBestEffort(browser.close(), 5_000);
     }
-    if (nativeChromeStop) {
-      await nativeChromeStop().catch(() => {});
+    if (!useNativeChrome && nativeChromeStop) {
+      await awaitCleanupBestEffort(nativeChromeStop(), 5_000);
     }
     await mihomoController.stop();
   }
@@ -9260,6 +11640,7 @@ async function run(): Promise<void> {
               {
                 batchId,
                 modeAttempt: attempt,
+                keepBrowserOpenOnFailure: toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false) || attempt === taskRetryMax,
                 taskLedger,
                 runtimeRecentProxyIps,
                 ipEmailUsage,
@@ -9276,6 +11657,32 @@ async function run(): Promise<void> {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             lastError = error instanceof Error ? error : new Error(message);
+            if (attempt < taskRetryMax && preparedTask && shouldRotatePreparedTaskProxy(message)) {
+              try {
+                await rotatePreparedTaskProxy(
+                  cfg,
+                  args,
+                  taskLedger,
+                  taskMihomoController,
+                  preparedTask,
+                  runtimeRecentProxyIps,
+                  ipEmailUsage,
+                  activeProxyNames,
+                  activeProxyIps,
+                );
+                log(
+                  `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed on proxy/browser stage, retrying with fresh proxy ${preparedTask.proxyName} (${preparedTask.proxyIp || "ip-pending"}): ${message}`,
+                );
+                continue;
+              } catch (rotateError) {
+                const rotateMessage = rotateError instanceof Error ? rotateError.message : String(rotateError);
+                log(
+                  `[${requestedMode}] task ${preparedTask.taskId} proxy rotation failed after attempt ${attempt}/${taskRetryMax}: ${rotateMessage}`,
+                );
+                lastError = rotateError instanceof Error ? rotateError : new Error(rotateMessage);
+                break;
+              }
+            }
             if (attempt < taskRetryMax && shouldRetryTaskFailure(message)) {
               log(
                 `[${requestedMode}] task ${preparedTask.taskId} attempt ${attempt}/${taskRetryMax} failed (run=${runIndex}, email=${preparedTask.email}, ip=${preparedTask.proxyIp}), retrying with fresh browser: ${message}`,

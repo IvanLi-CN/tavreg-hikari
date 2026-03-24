@@ -39,14 +39,10 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
 }
 
 function resolveWorkerRuntime(): { command: string; bootstrapArgs: string[] } {
-  if (process.versions.bun) {
-    return {
-      command: process.execPath,
-      bootstrapArgs: ["run", "src/main.ts"],
-    };
-  }
   return {
-    command: process.execPath || "node",
+    // Keep worker attempts on Node.js so native Chrome CDP stays reliable even when
+    // the web admin itself is hosted by Bun.
+    command: process.versions.bun ? process.env.NODE_BINARY || "node" : process.execPath || "node",
     bootstrapArgs: ["--import", "tsx", "src/main.ts"],
   };
 }
@@ -99,6 +95,12 @@ export function buildAttemptRuntimeSpec(input: {
       OUTPUT_ROOT_DIR: input.outputDir,
       CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-profile"),
       INSPECT_CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-inspect-profile"),
+      ...(input.job.runMode === "headed"
+        ? {
+            KEEP_BROWSER_OPEN_ON_FAILURE: inheritedEnv.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
+            KEEP_BROWSER_OPEN_MS: inheritedEnv.KEEP_BROWSER_OPEN_MS || "0",
+          }
+        : {}),
     },
   };
 }
@@ -300,7 +302,7 @@ export class JobScheduler {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
-      const selectedProxyNode = this.db.getSelectedProxyName();
+      const selectedProxyNode = this.db.getPinnedProxyName();
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
         account,

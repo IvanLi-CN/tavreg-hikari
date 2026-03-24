@@ -2,6 +2,7 @@ type JsonRecord = Record<string, unknown>;
 
 export interface MoeMailHttpJsonOptions {
   headers?: Record<string, string>;
+  body?: unknown;
   proxyUrl?: string;
 }
 
@@ -56,14 +57,30 @@ export function extractMicrosoftProofCodeFromPayload(payload: unknown): string |
       .replaceAll("\\u003d", "=")
       .replaceAll("\\u0026", "&")
       .replace(/\s+/g, " ");
-    const matches = Array.from(normalized.matchAll(/\b(\d{6})\b/g));
+    const sanitized = normalized
+      .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, " ")
+      .replace(/\bhttps?:\/\/\S+/gi, " ")
+      .replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+){1,}\b/gi, (value) => (/\d{6}/.test(value) ? " " : value));
+    const strongMatches = [
+      ...sanitized.matchAll(/\b(?:your\s+)?single-use code(?:\s+is|:)?\D{0,16}(\d{6})\b/gi),
+      ...sanitized.matchAll(/\b(?:your\s+)?security code(?:\s+is|:)?\D{0,16}(\d{6})\b/gi),
+      ...sanitized.matchAll(/\b(?:验证码|安全代码)\s*(?:是|为|:)?\D{0,16}(\d{6})\b/g),
+      ...sanitized.matchAll(/\b(\d{6})\b\D{0,24}\b(?:single-use code|security code|验证码|安全代码)\b/gi),
+    ];
+    for (const match of strongMatches) {
+      const code = match[1];
+      if (!code || seen.has(code)) continue;
+      seen.add(code);
+      return code;
+    }
+    const matches = Array.from(sanitized.matchAll(/\b(\d{6})\b/g));
     for (const match of matches) {
       const code = match[1];
       if (!code || seen.has(code)) continue;
       seen.add(code);
       const start = Math.max(0, (match.index || 0) - 96);
-      const end = Math.min(normalized.length, (match.index || 0) + code.length + 96);
-      const context = normalized.slice(start, end);
+      const end = Math.min(sanitized.length, (match.index || 0) + code.length + 96);
+      const context = sanitized.slice(start, end);
       if (/(microsoft|account|security code|安全代码|验证码|code)/i.test(context)) {
         return code;
       }
@@ -146,6 +163,78 @@ function findMailboxIdByAddress(response: unknown, address: string): string | nu
     if (mailboxId) return mailboxId;
   }
   return null;
+}
+
+function collectMoeMailDomains(payload: unknown): string[] {
+  const response = payload && typeof payload === "object" ? (payload as JsonRecord) : null;
+  const explicitDomains = Array.isArray(response?.domains) ? response?.domains : [];
+  const fromEmailDomains =
+    typeof response?.emailDomains === "string"
+      ? response.emailDomains
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [];
+  return Array.from(
+    new Set(
+      [...explicitDomains, ...fromEmailDomains]
+        .map((item) => (typeof item === "string" ? item.trim().toLowerCase() : ""))
+        .filter(Boolean),
+    ),
+  );
+}
+
+function extractGeneratedMailbox(response: unknown): { id: string; address: string } | null {
+  const payload = response && typeof response === "object" ? (response as JsonRecord) : null;
+  if (!payload) return null;
+  const id = String(payload.id || payload.emailId || "").trim();
+  const address = String(payload.email || payload.address || "").trim().toLowerCase();
+  if (!id || !address) return null;
+  return { id, address };
+}
+
+export async function provisionMoeMailMailbox(options: {
+  baseUrl: string;
+  apiKey: string;
+  httpJson: MoeMailHttpJson;
+  proxyUrl?: string;
+  domain?: string;
+  name?: string;
+  expiryTime?: number;
+}): Promise<{ id: string; address: string }> {
+  const apiKey = options.apiKey.trim();
+  if (!apiKey) {
+    throw new Error("moemail_api_key_missing");
+  }
+  const baseUrl = normalizeMoeMailBaseUrl(options.baseUrl);
+  const headers = buildMoeMailAuthHeaders(apiKey);
+
+  let domain = options.domain?.trim().toLowerCase() || "";
+  if (!domain) {
+    const config = await options.httpJson<JsonRecord>("GET", `${baseUrl}/api/config`, {
+      headers,
+      proxyUrl: options.proxyUrl,
+    });
+    domain = collectMoeMailDomains(config)[0] || "";
+  }
+  if (!domain) {
+    throw new Error("moemail_mailbox_provision_failed:no_domain");
+  }
+
+  const response = await options.httpJson<JsonRecord>("POST", `${baseUrl}/api/emails/generate`, {
+    headers,
+    proxyUrl: options.proxyUrl,
+    body: {
+      name: options.name?.trim() || undefined,
+      expiryTime: options.expiryTime ?? 0,
+      domain,
+    },
+  });
+  const mailbox = extractGeneratedMailbox(response);
+  if (!mailbox) {
+    throw new Error("moemail_mailbox_provision_failed:invalid_response");
+  }
+  return mailbox;
 }
 
 export async function resolveMoeMailMailboxId(options: {

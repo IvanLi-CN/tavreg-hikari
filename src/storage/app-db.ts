@@ -1,6 +1,58 @@
-import { Database } from "bun:sqlite";
 import { access, mkdir, readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
+
+const require = createRequire(import.meta.url);
+
+type SqliteBindValue = string | number | boolean | null | undefined;
+type SqliteNamedParams = Record<string, SqliteBindValue>;
+type SqliteStmtParams = [] | [SqliteNamedParams] | SqliteBindValue[];
+
+interface SqliteStatement {
+  run: (...args: SqliteStmtParams) => unknown;
+  get: (...args: SqliteStmtParams) => unknown;
+  all: (...args: SqliteStmtParams) => unknown[];
+}
+
+interface SqliteDatabase {
+  exec: (sql: string) => void;
+  query: (sql: string) => SqliteStatement;
+  close: () => void;
+}
+
+function openSqliteDatabase(dbPath: string): SqliteDatabase {
+  if (typeof Bun !== "undefined") {
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
+    const db = new Database(dbPath, { create: true, strict: true });
+    return {
+      exec: (sql: string) => db.exec(sql),
+      query: (sql: string) => {
+        const stmt = db.query(sql) as any;
+        return {
+          run: (...args: any[]) => stmt.run(...args),
+          get: (...args: any[]) => stmt.get(...args),
+          all: (...args: any[]) => stmt.all(...args),
+        };
+      },
+      close: () => db.close(false),
+    };
+  }
+
+  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
+  const db = new DatabaseSync(dbPath);
+  return {
+    exec: (sql: string) => db.exec(sql),
+    query: (sql: string) => {
+      const stmt = db.prepare(sql) as any;
+      return {
+        run: (...args: any[]) => stmt.run(...args),
+        get: (...args: any[]) => stmt.get(...args),
+        all: (...args: any[]) => stmt.all(...args),
+      };
+    },
+    close: () => db.close(),
+  };
+}
 
 export type AccountStatus =
   | "ready"
@@ -51,6 +103,7 @@ export interface MicrosoftAccountRecord {
   skipReason: string | null;
   groupName: string | null;
   disabledAt: string | null;
+  disabledReason: string | null;
   leaseJobId: number | null;
   leaseStartedAt: string | null;
 }
@@ -130,6 +183,8 @@ interface SettingsRow {
   value_json: string;
 }
 
+const PINNED_PROXY_NODE_SETTING_KEY = "pinnedProxyNodeName";
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -172,6 +227,7 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     skipReason: row.skip_reason == null ? null : String(row.skip_reason),
     groupName: row.group_name == null ? null : String(row.group_name),
     disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
+    disabledReason: row.disabled_reason == null ? null : String(row.disabled_reason),
     leaseJobId: row.lease_job_id == null ? null : Number(row.lease_job_id),
     leaseStartedAt: row.lease_started_at == null ? null : String(row.lease_started_at),
   };
@@ -248,11 +304,11 @@ export function shouldEnterCompleting(job: Pick<JobRecord, "need" | "successCoun
 
 export class AppDatabase {
   readonly dbPath: string;
-  private readonly db: Database;
+  private readonly db: SqliteDatabase;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
-    this.db = new Database(dbPath, { create: true, strict: true });
+    this.db = openSqliteDatabase(dbPath);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA synchronous=NORMAL;");
     this.db.exec("PRAGMA temp_store=MEMORY;");
@@ -272,7 +328,7 @@ export class AppDatabase {
   }
 
   close(): void {
-    this.db.close(false);
+    this.db.close();
   }
 
   private hasSignupTasksTable(): boolean {
@@ -313,6 +369,7 @@ export class AppDatabase {
         skip_reason TEXT,
         group_name TEXT,
         disabled_at TEXT,
+        disabled_reason TEXT,
         lease_job_id INTEGER,
         lease_started_at TEXT
       );
@@ -416,6 +473,9 @@ export class AppDatabase {
     }
     if (!accountColumns.has("proof_mailbox_id")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN proof_mailbox_id TEXT;");
+    }
+    if (!accountColumns.has("disabled_reason")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN disabled_reason TEXT;");
     }
     const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
     const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
@@ -769,6 +829,65 @@ export class AppDatabase {
     };
   }
 
+  updateAccountAvailability(
+    accountId: number,
+    input: {
+      disabled?: boolean;
+      reason?: string | null;
+    },
+  ): MicrosoftAccountRecord {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
+
+    const now = nowIso();
+    const disabled = input.disabled === undefined ? current.disabledAt != null : Boolean(input.disabled);
+    const normalizedReason = disabled ? input.reason?.trim() || current.disabledReason || null : null;
+    const disabledAt = disabled ? current.disabledAt || now : null;
+    const nextStatus: AccountStatus = disabled
+      ? "disabled"
+      : current.hasApiKey
+        ? "skipped_has_key"
+        : current.leaseJobId != null
+          ? "leased"
+          : "ready";
+
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET disabled_at = ?,
+            disabled_reason = ?,
+            last_result_status = ?,
+            last_result_at = ?,
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(disabledAt, normalizedReason, nextStatus, now, now, accountId);
+
+    return this.getAccount(accountId)!;
+  }
+
+  markAccountUnavailable(accountId: number, reason: string, errorCode?: string | null): void {
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET disabled_at = COALESCE(disabled_at, ?),
+            disabled_reason = ?,
+            last_result_status = 'disabled',
+            last_result_at = ?,
+            last_error_code = COALESCE(?, last_error_code),
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(now, reason.trim(), now, errorCode ?? null, now, accountId);
+  }
+
   deleteAccounts(ids: number[]): { deleted: number; blockedIds: number[] } {
     const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
     if (uniqueIds.length === 0) {
@@ -941,7 +1060,10 @@ export class AppDatabase {
             AND COALESCE(skip_reason, '') <> 'has_api_key'
             AND lease_job_id IS NULL
             AND id NOT IN (SELECT account_id FROM job_attempts WHERE job_id = ?)
-          ORDER BY CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END, last_used_at ASC, imported_at ASC
+          ORDER BY
+            CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END,
+            last_used_at ASC,
+            imported_at ASC
           LIMIT 1
         `)
         .get(jobId) as Record<string, unknown> | null;
@@ -1178,6 +1300,38 @@ export class AppDatabase {
     return { job, attempt };
   }
 
+  markAccountDirectSuccess(accountId: number): void {
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET last_result_status = 'succeeded',
+            last_result_at = ?,
+            last_error_code = NULL,
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(now, now, accountId);
+  }
+
+  markAccountDirectFailure(accountId: number, errorCode?: string | null): void {
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
+            last_result_at = ?,
+            last_error_code = ?,
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(now, errorCode ?? null, now, accountId);
+  }
+
   completeAttemptFailure(
     jobId: number,
     attemptId: number,
@@ -1206,7 +1360,7 @@ export class AppDatabase {
     this.db
       .query(`
         UPDATE microsoft_accounts
-        SET last_result_status = 'failed',
+        SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
             last_result_at = ?,
             last_error_code = ?,
             updated_at = ?,
@@ -1314,6 +1468,36 @@ export class AppDatabase {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  clearSelectedProxy(): void {
+    this.db.exec("UPDATE proxy_nodes SET is_selected = 0");
+  }
+
+  getPinnedProxyName(): string | null {
+    const row = this.db.query("SELECT value_json FROM app_settings WHERE key = ?").get(PINNED_PROXY_NODE_SETTING_KEY) as
+      | { value_json?: string }
+      | null;
+    const value = parseJson<string | null>(row?.value_json ?? "null", null);
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  setPinnedProxyName(nodeName: string | null): void {
+    const normalized = typeof nodeName === "string" ? nodeName.trim() : "";
+    if (!normalized) {
+      this.db.query("DELETE FROM app_settings WHERE key = ?").run(PINNED_PROXY_NODE_SETTING_KEY);
+      return;
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        INSERT INTO app_settings (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `)
+      .run(PINNED_PROXY_NODE_SETTING_KEY, JSON.stringify(normalized), now);
   }
 
   recordProxyCheck(input: {

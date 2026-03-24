@@ -21,6 +21,7 @@ export type AccountRecord = {
   skipReason: string | null;
   groupName: string | null;
   disabledAt: string | null;
+  disabledReason: string | null;
 };
 
 export type AccountsPayload = {
@@ -81,6 +82,11 @@ export type AccountImportPayload = {
 };
 
 export type AccountProofMailboxUpdatePayload = {
+  ok: true;
+  account: AccountRecord;
+};
+
+export type AccountUpdatePayload = {
   ok: true;
   account: AccountRecord;
 };
