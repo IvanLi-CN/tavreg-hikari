@@ -66,6 +66,7 @@ export function AccountsView({
   onDeleteSelected,
   onClearSelection,
   onSaveProofMailbox,
+  onSaveAvailability,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -94,6 +95,7 @@ export function AccountsView({
   onDeleteSelected: () => void;
   onClearSelection: () => void;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
+  onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -101,6 +103,11 @@ export function AccountsView({
   const [proofMailboxIdDraft, setProofMailboxIdDraft] = useState("");
   const [proofBusy, setProofBusy] = useState(false);
   const [proofError, setProofError] = useState<string | null>(null);
+  const [availabilityDialogOpen, setAvailabilityDialogOpen] = useState(false);
+  const [availabilityAccount, setAvailabilityAccount] = useState<AccountRecord | null>(null);
+  const [availabilityReasonDraft, setAvailabilityReasonDraft] = useState("");
+  const [availabilityBusy, setAvailabilityBusy] = useState(false);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -155,6 +162,53 @@ export function AccountsView({
       setProofError(error instanceof Error ? error.message : String(error));
     } finally {
       setProofBusy(false);
+    }
+  };
+
+  const openAvailabilityDialog = (account: AccountRecord) => {
+    setAvailabilityAccount(account);
+    setAvailabilityReasonDraft(account.disabledReason || "未知辅助邮箱");
+    setAvailabilityError(null);
+    setAvailabilityDialogOpen(true);
+  };
+
+  const closeAvailabilityDialog = (open: boolean) => {
+    setAvailabilityDialogOpen(open);
+    if (open) return;
+    setAvailabilityAccount(null);
+    setAvailabilityReasonDraft("");
+    setAvailabilityError(null);
+    setAvailabilityBusy(false);
+  };
+
+  const handleSaveAvailability = async () => {
+    if (!availabilityAccount) return;
+    const normalizedReason = availabilityReasonDraft.trim();
+    if (!normalizedReason) {
+      setAvailabilityError("请填写不可用原因。");
+      return;
+    }
+    try {
+      setAvailabilityBusy(true);
+      setAvailabilityError(null);
+      await onSaveAvailability(availabilityAccount.id, true, normalizedReason);
+      closeAvailabilityDialog(false);
+    } catch (error) {
+      setAvailabilityError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAvailabilityBusy(false);
+    }
+  };
+
+  const handleRestoreAvailability = async (account: AccountRecord) => {
+    try {
+      setAvailabilityBusy(true);
+      setAvailabilityError(null);
+      await onSaveAvailability(account.id, false, null);
+    } catch (error) {
+      setAvailabilityError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setAvailabilityBusy(false);
     }
   };
 
@@ -320,9 +374,20 @@ export function AccountsView({
                               </div>
                               <div className="flex shrink-0 flex-col items-end gap-2">
                                 {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
-                                <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
-                                  绑定邮箱
-                                </Button>
+                                <div className="flex flex-wrap justify-end gap-2">
+                                  <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
+                                    绑定邮箱
+                                  </Button>
+                                  {row.disabledAt ? (
+                                    <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
+                                      恢复可用
+                                    </Button>
+                                  ) : (
+                                    <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openAvailabilityDialog(row)}>
+                                      标记不可用
+                                    </Button>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           <dl className="mt-4 grid gap-3 text-sm text-slate-300">
@@ -349,6 +414,10 @@ export function AccountsView({
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">跳过原因</dt>
                               <dd>{row.skipReason || "—"}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">不可用原因</dt>
+                              <dd className="max-w-[18rem] text-right">{row.disabledReason || "—"}</dd>
                             </div>
                           </dl>
                         </div>
@@ -377,6 +446,7 @@ export function AccountsView({
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
                         <TableHead>跳过原因</TableHead>
+                        <TableHead>不可用原因</TableHead>
                         <TableHead className="text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -401,10 +471,22 @@ export function AccountsView({
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>
+                          <TableCell className="min-w-[12rem]">{row.disabledReason || "—"}</TableCell>
                           <TableCell className="text-right">
-                            <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
-                              绑定邮箱
-                            </Button>
+                            <div className="flex justify-end gap-2">
+                              <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
+                                绑定邮箱
+                              </Button>
+                              {row.disabledAt ? (
+                                <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
+                                  恢复可用
+                                </Button>
+                              ) : (
+                                <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openAvailabilityDialog(row)}>
+                                  标记不可用
+                                </Button>
+                              )}
+                            </div>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -574,6 +656,45 @@ export function AccountsView({
             </Button>
             <Button onClick={handleSaveProofMailbox} disabled={proofBusy}>
               {proofBusy ? "保存中…" : "保存映射"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={availabilityDialogOpen} onOpenChange={closeAvailabilityDialog}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>标记账号不可用</DialogTitle>
+            <DialogDescription>
+              停止后续调度使用这个账号，并记录清晰的不可用原因。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 px-6 py-2">
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+              <div className="break-all font-medium text-white">{availabilityAccount?.microsoftEmail || "—"}</div>
+              <div className="mt-1 text-sm text-slate-400">
+                当前状态：{availabilityAccount?.disabledAt ? "已标记不可用" : "可调度"}
+              </div>
+            </div>
+            <label className="space-y-2">
+              <span className="text-xs uppercase tracking-[0.22em] text-slate-500">不可用原因</span>
+              <Textarea
+                value={availabilityReasonDraft}
+                onChange={(event) => setAvailabilityReasonDraft(event.target.value)}
+                placeholder="例如：未知辅助邮箱"
+                className="min-h-28"
+              />
+            </label>
+            {availabilityError ? <div className="text-sm text-rose-300">{availabilityError}</div> : null}
+          </div>
+
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => closeAvailabilityDialog(false)} disabled={availabilityBusy}>
+              取消
+            </Button>
+            <Button onClick={handleSaveAvailability} disabled={availabilityBusy}>
+              {availabilityBusy ? "保存中…" : "保存并停用"}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -4,6 +4,7 @@ import {
   extractFreshMicrosoftProofCodeFromMoeMailResponse,
   extractMicrosoftProofCodeFromPayload,
   normalizeMoeMailBaseUrl,
+  provisionMoeMailMailbox,
   resolveMoeMailMailboxId,
   type MoeMailHttpJson,
   type MoeMailHttpJsonOptions,
@@ -68,6 +69,60 @@ describe("MoeMail OpenAPI", () => {
       }),
     ).rejects.toThrow("moemail_api_key_missing");
   });
+
+  test("provisions a permanent MoeMail mailbox from OpenAPI config + generate endpoints", async () => {
+    const calls: Array<{ method: string; url: string; headers?: Record<string, string>; body?: unknown; proxyUrl?: string }> = [];
+    const httpJson: MoeMailHttpJson = async <T>(method: string, url: string, options?: MoeMailHttpJsonOptions) => {
+      calls.push({ method, url, headers: options?.headers, body: options?.body, proxyUrl: options?.proxyUrl });
+      if (method === "GET") {
+        return {
+          emailDomains: "mail-tw.707079.xyz,mail-us.707079.xyz",
+        } as T;
+      }
+      return {
+        id: "mailbox-new",
+        email: "lzqidy05@mail-tw.707079.xyz",
+      } as T;
+    };
+
+    const mailbox = await provisionMoeMailMailbox({
+      baseUrl: "https://moemail.707079.xyz/",
+      apiKey: " mk-test ",
+      httpJson,
+      proxyUrl: "http://127.0.0.1:8899",
+    });
+
+    expect(mailbox).toEqual({
+      id: "mailbox-new",
+      address: "lzqidy05@mail-tw.707079.xyz",
+    });
+    expect(calls).toEqual([
+      {
+        method: "GET",
+        url: "https://moemail.707079.xyz/api/config",
+        proxyUrl: "http://127.0.0.1:8899",
+        headers: {
+          Accept: "application/json",
+          "X-API-Key": "mk-test",
+        },
+        body: undefined,
+      },
+      {
+        method: "POST",
+        url: "https://moemail.707079.xyz/api/emails/generate",
+        proxyUrl: "http://127.0.0.1:8899",
+        headers: {
+          Accept: "application/json",
+          "X-API-Key": "mk-test",
+        },
+        body: {
+          name: undefined,
+          expiryTime: 0,
+          domain: "mail-tw.707079.xyz",
+        },
+      },
+    ]);
+  });
 });
 
 describe("Microsoft proof code extraction", () => {
@@ -106,6 +161,20 @@ describe("Microsoft proof code extraction", () => {
 
     expect(extractMicrosoftProofCodeFromPayload(localizedPayload)).toBe("481903");
     expect(extractMicrosoftProofCodeFromPayload(unrelatedPayload)).toBeNull();
+  });
+
+  test("prefers the actual single-use code over mailbox-domain digits", () => {
+    const payload = {
+      messages: [
+        {
+          subject: "Your single-use code",
+          content:
+            "Hi odrb6qxa@mail-tw.707079.xyz, We received your request for a single-use code to use with your Microsoft account. Your single-use code is: 136857",
+        },
+      ],
+    };
+
+    expect(extractMicrosoftProofCodeFromPayload(payload)).toBe("136857");
   });
 
   test("ignores stale Microsoft proof codes when MoeMail returns old persistent messages", () => {
