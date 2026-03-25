@@ -1,5 +1,7 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -7,7 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
+import type { AccountExtractorProvider, EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
 function Field(props: { label: string; children: React.ReactNode }) {
@@ -23,15 +25,33 @@ export function DashboardView({
   job,
   events,
   jobDraft,
+  extractorAvailability,
   onJobDraftChange,
   onJobAction,
 }: {
   job: JobSnapshot;
   events: EventRecord[];
   jobDraft: JobDraft;
+  extractorAvailability: {
+    zhanghaoya: boolean;
+    shanyouxiang: boolean;
+  };
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
 }) {
+  const toggleExtractorSource = (provider: AccountExtractorProvider, checked: boolean) => {
+    const current = new Set(jobDraft.autoExtractSources);
+    if (checked) current.add(provider);
+    else current.delete(provider);
+    onJobDraftChange({ autoExtractSources: Array.from(current) });
+  };
+
+  const autoExtractHint = job.autoExtractState
+    ? `${job.autoExtractState.phase} · accepted ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · raw ${job.autoExtractState.rawAttemptCount}/${job.autoExtractState.attemptBudget} · wait ${job.autoExtractState.remainingWaitSec}s`
+    : jobDraft.autoExtractSources.length > 0
+      ? `idle · wait ${jobDraft.autoExtractMaxWaitSec}s · usable ${jobDraft.autoExtractQuantity}`
+      : "未启用自动提取";
+
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
       <div className="min-w-0 space-y-4">
@@ -73,6 +93,73 @@ export function DashboardView({
               <Field label="Max Attempts">
                 <Input type="number" min={1} value={jobDraft.maxAttempts} onChange={(event) => onJobDraftChange({ maxAttempts: Number(event.target.value) || 1 })} />
               </Field>
+            </div>
+            <div className="rounded-[24px] border border-cyan-400/18 bg-cyan-400/[0.04] p-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium text-white">自动提取微软账号</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    缺号时按 1 秒 1 个请求轮询号源，单轮最多比目标多尝试 3 次，但可用补号数不会超过当前任务剩余需求。
+                  </div>
+                </div>
+                <Badge variant={jobDraft.autoExtractSources.length > 0 ? "info" : "neutral"}>{autoExtractHint}</Badge>
+              </div>
+              <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,0.6fr)]">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {([
+                    ["zhanghaoya", "账号鸭", extractorAvailability.zhanghaoya],
+                    ["shanyouxiang", "闪邮箱", extractorAvailability.shanyouxiang],
+                  ] as const).map(([provider, label, available]) => {
+                    const checked = jobDraft.autoExtractSources.includes(provider);
+                    return (
+                      <label
+                        key={provider}
+                        className={`flex items-start gap-3 rounded-2xl border px-4 py-3 ${
+                          checked ? "border-cyan-300/30 bg-cyan-300/8" : "border-white/8 bg-white/[0.03]"
+                        } ${!available && !checked ? "opacity-60" : ""}`}
+                      >
+                        <Checkbox
+                          checked={checked}
+                          disabled={!available && !checked}
+                          onCheckedChange={(value) => toggleExtractorSource(provider, value === true)}
+                          aria-label={`toggle-${provider}`}
+                        />
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-white">{label}</div>
+                          <div className="mt-1 text-xs text-slate-400">{available ? "KEY 已配置" : "缺少 KEY，请先去微软账号页配置"}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+                <Field label="Auto Quantity">
+                  <Input
+                    type="number"
+                    min={1}
+                    disabled={jobDraft.autoExtractSources.length === 0}
+                    value={jobDraft.autoExtractQuantity}
+                    onChange={(event) => onJobDraftChange({ autoExtractQuantity: Number(event.target.value) || 1 })}
+                  />
+                </Field>
+                <Field label="Max Wait Sec">
+                  <Input
+                    type="number"
+                    min={1}
+                    disabled={jobDraft.autoExtractSources.length === 0}
+                    value={jobDraft.autoExtractMaxWaitSec}
+                    onChange={(event) => onJobDraftChange({ autoExtractMaxWaitSec: Number(event.target.value) || 1 })}
+                  />
+                </Field>
+                <Field label="Account Type">
+                  <Input value={jobDraft.autoExtractAccountType} readOnly />
+                </Field>
+              </div>
+              {job.autoExtractState?.lastMessage ? (
+                <div className="mt-3 text-sm text-slate-400">
+                  最近提取状态：{job.autoExtractState.lastProvider ? `${job.autoExtractState.lastProvider} · ` : ""}
+                  {job.autoExtractState.lastMessage}
+                </div>
+              ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => onJobAction("start")}>启动</Button>

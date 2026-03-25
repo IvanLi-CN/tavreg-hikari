@@ -1,6 +1,8 @@
 export type PageKey = "dashboard" | "accounts" | "apiKeys" | "proxies";
 
 export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
+export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang";
+export type AccountExtractorAccountType = "outlook";
 
 export type AccountRecord = {
   id: number;
@@ -14,6 +16,8 @@ export type AccountRecord = {
   importedAt: string;
   updatedAt: string;
   importSource: string;
+  accountSource: "manual" | "zhanghaoya" | "shanyouxiang";
+  sourceRawPayload: string | null;
   lastUsedAt: string | null;
   lastResultStatus: string;
   lastResultAt: string | null;
@@ -153,6 +157,10 @@ export type JobSnapshot = {
     failureCount: number;
     skipCount: number;
     launchedCount: number;
+    autoExtractSources: AccountExtractorProvider[];
+    autoExtractQuantity: number;
+    autoExtractMaxWaitSec: number;
+    autoExtractAccountType: AccountExtractorAccountType;
     startedAt: string;
     pausedAt: string | null;
     completedAt: string | null;
@@ -161,6 +169,23 @@ export type JobSnapshot = {
   activeAttempts: AttemptRecord[];
   recentAttempts: AttemptRecord[];
   eligibleCount: number;
+  autoExtractState: AutoExtractState | null;
+};
+
+export type AutoExtractState = {
+  phase: "idle" | "waiting" | "extracting";
+  enabledSources: AccountExtractorProvider[];
+  accountType: AccountExtractorAccountType;
+  currentRoundTarget: number;
+  acceptedCount: number;
+  rawAttemptCount: number;
+  attemptBudget: number;
+  remainingWaitSec: number;
+  maxWaitSec: number;
+  startedAt: string | null;
+  lastProvider: AccountExtractorProvider | null;
+  lastMessage: string | null;
+  updatedAt: string | null;
 };
 
 export type ProxySettings = {
@@ -213,6 +238,74 @@ export type JobDraft = {
   need: number;
   parallel: number;
   maxAttempts: number;
+  autoExtractSources: AccountExtractorProvider[];
+  autoExtractQuantity: number;
+  autoExtractMaxWaitSec: number;
+  autoExtractAccountType: AccountExtractorAccountType;
+};
+
+export type AccountExtractorSettings = {
+  extractorZhanghaoyaKey: string;
+  extractorShanyouxiangKey: string;
+  defaultAutoExtractSources: AccountExtractorProvider[];
+  defaultAutoExtractQuantity: number;
+  defaultAutoExtractMaxWaitSec: number;
+  defaultAutoExtractAccountType: AccountExtractorAccountType;
+  availability: {
+    zhanghaoya: boolean;
+    shanyouxiang: boolean;
+  };
+};
+
+export type AccountExtractorSettingsPayload = {
+  ok: true;
+  settings: AccountExtractorSettings;
+};
+
+export type AccountExtractHistoryItem = {
+  id: number;
+  batchId: number;
+  provider: AccountExtractorProvider;
+  rawPayload: string;
+  email: string | null;
+  password: string | null;
+  parseStatus: "parsed" | "invalid";
+  acceptStatus: "accepted" | "rejected";
+  rejectReason: string | null;
+  importedAccountId: number | null;
+  createdAt: string;
+};
+
+export type AccountExtractHistoryBatch = {
+  id: number;
+  jobId: number | null;
+  provider: AccountExtractorProvider;
+  accountType: AccountExtractorAccountType;
+  requestedUsableCount: number;
+  attemptBudget: number;
+  acceptedCount: number;
+  status: "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
+  errorMessage: string | null;
+  rawResponse: string | null;
+  maskedKey: string | null;
+  startedAt: string;
+  completedAt: string | null;
+  items: AccountExtractHistoryItem[];
+};
+
+export type AccountExtractorHistoryPayload = {
+  rows: AccountExtractHistoryBatch[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
+export type AccountExtractorHistoryQuery = {
+  provider: "" | AccountExtractorProvider;
+  status: string;
+  q: string;
+  page: number;
+  pageSize: number;
 };
 
 export type AccountQuery = {

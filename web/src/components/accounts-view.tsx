@@ -18,7 +18,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { GroupCombobox } from "@/components/group-combobox";
 import { StatusBadge } from "@/components/status-badge";
-import type { AccountImportPreviewPayload, AccountQuery, AccountRecord, AccountsPayload } from "@/lib/app-types";
+import type {
+  AccountExtractorHistoryPayload,
+  AccountExtractorHistoryQuery,
+  AccountExtractorSettings,
+  AccountImportPreviewPayload,
+  AccountQuery,
+  AccountRecord,
+  AccountsPayload,
+} from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -38,6 +46,15 @@ function ImportDecisionBadge({ decision }: { decision: string }) {
   return <Badge variant="danger">无效</Badge>;
 }
 
+function ExtractHistoryStatusBadge({ status }: { status: string }) {
+  if (status === "accepted") return <Badge variant="success">accepted</Badge>;
+  if (status === "rejected") return <Badge variant="warning">rejected</Badge>;
+  if (status === "invalid_key") return <Badge variant="danger">invalid_key</Badge>;
+  if (status === "insufficient_stock") return <Badge variant="warning">insufficient_stock</Badge>;
+  if (status === "parse_failed") return <Badge variant="danger">parse_failed</Badge>;
+  return <Badge variant="neutral">{status}</Badge>;
+}
+
 export function AccountsView({
   accounts,
   importContent,
@@ -52,6 +69,11 @@ export function AccountsView({
   importBusy,
   previewBusy,
   batchBusy,
+  extractorSettings,
+  extractorSettingsBusy,
+  extractorHistory,
+  extractorHistoryQuery,
+  extractorHistoryBusy,
   allCurrentPageSelected,
   onImportContentChange,
   onImportGroupChange,
@@ -67,6 +89,9 @@ export function AccountsView({
   onClearSelection,
   onSaveProofMailbox,
   onSaveAvailability,
+  onSaveExtractorSettings,
+  onExtractorHistoryQueryChange,
+  onRefreshExtractorHistory,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -81,6 +106,11 @@ export function AccountsView({
   importBusy: boolean;
   previewBusy: boolean;
   batchBusy: boolean;
+  extractorSettings: AccountExtractorSettings | null;
+  extractorSettingsBusy: boolean;
+  extractorHistory: AccountExtractorHistoryPayload;
+  extractorHistoryQuery: AccountExtractorHistoryQuery;
+  extractorHistoryBusy: boolean;
   allCurrentPageSelected: boolean;
   onImportContentChange: (value: string) => void;
   onImportGroupChange: (value: string) => void;
@@ -96,6 +126,9 @@ export function AccountsView({
   onClearSelection: () => void;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
+  onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
+  onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
+  onRefreshExtractorHistory: () => Promise<void>;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -108,12 +141,20 @@ export function AccountsView({
   const [availabilityReasonDraft, setAvailabilityReasonDraft] = useState("");
   const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [extractorDialogOpen, setExtractorDialogOpen] = useState(false);
+  const [zhanghaoyaKeyDraft, setZhanghaoyaKeyDraft] = useState("");
+  const [shanyouxiangKeyDraft, setShanyouxiangKeyDraft] = useState("");
+  const [extractorSaveError, setExtractorSaveError] = useState<string | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
   const disabledCount = accounts.summary.disabled;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
+  const extractHistoryPageCount = Math.max(
+    1,
+    Math.ceil(Math.max(1, extractorHistory.total) / Math.max(1, extractorHistory.pageSize)),
+  );
   const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>
     plaintext || revealedPasswordsById[accountId] || fallbackMasked;
   const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "moemail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
@@ -213,41 +254,94 @@ export function AccountsView({
     }
   };
 
+  const openExtractorDialog = () => {
+    setZhanghaoyaKeyDraft(extractorSettings?.extractorZhanghaoyaKey || "");
+    setShanyouxiangKeyDraft(extractorSettings?.extractorShanyouxiangKey || "");
+    setExtractorSaveError(null);
+    setExtractorDialogOpen(true);
+  };
+
+  const handleSaveExtractorKeys = async () => {
+    try {
+      setExtractorSaveError(null);
+      await onSaveExtractorSettings({
+        extractorZhanghaoyaKey: zhanghaoyaKeyDraft,
+        extractorShanyouxiangKey: shanyouxiangKeyDraft,
+      });
+      setExtractorDialogOpen(false);
+    } catch (error) {
+      setExtractorSaveError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   return (
     <>
       <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]">
-        <Card>
-          <CardHeader>
-            <CardTitle>导入微软账号</CardTitle>
-            <CardDescription>
-              每行一个账号。支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code>、
-              <code>email password</code>、<code>email----password</code>，也会自动纠正邮箱前后顺序。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <Textarea
-              name="account-import"
-              className="min-h-72"
-              placeholder={"example@outlook.com,password123\nexample@outlook.com----password123\npassword123 example@outlook.com"}
-              value={importContent}
-              onChange={(event) => onImportContentChange(event.target.value)}
-            />
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="min-w-0 flex-1">
-                <GroupCombobox
-                  groups={accounts.groups}
-                  value={importGroupName}
-                  onChange={onImportGroupChange}
-                  placeholder="导入分组（可直接新建）"
-                  emptyLabel="不设置分组"
-                />
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>导入微软账号</CardTitle>
+              <CardDescription>
+                每行一个账号。支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code>、
+                <code>email password</code>、<code>email----password</code>，也会自动纠正邮箱前后顺序。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Textarea
+                name="account-import"
+                className="min-h-72"
+                placeholder={"example@outlook.com,password123\nexample@outlook.com----password123\npassword123 example@outlook.com"}
+                value={importContent}
+                onChange={(event) => onImportContentChange(event.target.value)}
+              />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1">
+                  <GroupCombobox
+                    groups={accounts.groups}
+                    value={importGroupName}
+                    onChange={onImportGroupChange}
+                    placeholder="导入分组（可直接新建）"
+                    emptyLabel="不设置分组"
+                  />
+                </div>
+                <Button onClick={onOpenPreview} disabled={!importContent.trim() || previewBusy} className="sm:self-stretch">
+                  {previewBusy ? "解析中…" : "导入预览"}
+                </Button>
               </div>
-              <Button onClick={onOpenPreview} disabled={!importContent.trim() || previewBusy} className="sm:self-stretch">
-                {previewBusy ? "解析中…" : "导入预览"}
+            </CardContent>
+          </Card>
+
+          <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
+            <CardHeader>
+              <CardTitle>提取器设置</CardTitle>
+              <CardDescription>
+                配置账号鸭 / 闪邮箱 KEY，并查询本地提取历史。这里只读取 SQLite 本地记录，不直连远端历史接口。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="text-sm font-medium text-white">账号鸭</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    {extractorSettings?.availability.zhanghaoya ? "KEY 已配置" : "KEY 未配置"}
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="text-sm font-medium text-white">闪邮箱</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    {extractorSettings?.availability.shanyouxiang ? "KEY 已配置" : "KEY 未配置"}
+                  </div>
+                </div>
+              </div>
+              <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-400">
+                本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
+              </div>
+              <Button variant="outline" onClick={openExtractorDialog} className="w-full sm:w-auto">
+                打开提取器设置
               </Button>
-            </div>
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        </div>
 
         <Card>
           <CardHeader>
@@ -585,6 +679,264 @@ export function AccountsView({
             </Button>
             <Button onClick={onConfirmImport} disabled={previewCommitCount === 0 || importBusy}>
               {importBusy ? "导入中…" : `确认导入 ${previewCommitCount} 条`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={extractorDialogOpen}
+        onOpenChange={(open) => {
+          setExtractorDialogOpen(open);
+          if (!open) setExtractorSaveError(null);
+        }}
+      >
+        <DialogContent className="w-[min(96vw,84rem)]">
+          <DialogHeader>
+            <DialogTitle>微软账号提取器设置</DialogTitle>
+            <DialogDescription>
+              分别维护账号鸭与闪邮箱的 KEY，并查询本地提取历史。历史数据来自当前机器上的 SQLite，不依赖站点远端记录。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 px-6 py-2 xl:grid-cols-[minmax(20rem,0.72fr)_minmax(0,1.28fr)]">
+            <div className="space-y-4">
+              <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+                <div className="text-sm font-medium text-white">站点 KEY</div>
+                <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY。</div>
+              </div>
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">账号鸭 KEY</span>
+                <Input
+                  value={zhanghaoyaKeyDraft}
+                  onChange={(event) => setZhanghaoyaKeyDraft(event.target.value)}
+                  placeholder="请输入 zhanghaoya key"
+                />
+              </label>
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">闪邮箱 KEY</span>
+                <Input
+                  value={shanyouxiangKeyDraft}
+                  onChange={(event) => setShanyouxiangKeyDraft(event.target.value)}
+                  placeholder="请输入 shanyouxiang key"
+                />
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/8 bg-[#08111d]/88 p-4 text-sm text-slate-400">
+                  账号鸭：{extractorSettings?.availability.zhanghaoya ? "已配置" : "未配置"}
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-[#08111d]/88 p-4 text-sm text-slate-400">
+                  闪邮箱：{extractorSettings?.availability.shanyouxiang ? "已配置" : "未配置"}
+                </div>
+              </div>
+              {extractorSaveError ? (
+                <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">{extractorSaveError}</div>
+              ) : null}
+            </div>
+
+            <div className="space-y-4">
+              <div className="grid gap-3 md:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)_auto_auto]">
+                <FilterField label="Provider">
+                  <Select
+                    value={extractorHistoryQuery.provider || "__all__"}
+                    onValueChange={(value) =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        provider: value === "__all__" ? "" : (value as AccountExtractorHistoryQuery["provider"]),
+                        page: 1,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="全部来源" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">全部来源</SelectItem>
+                      <SelectItem value="zhanghaoya">账号鸭</SelectItem>
+                      <SelectItem value="shanyouxiang">闪邮箱</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <FilterField label="Status">
+                  <Select
+                    value={extractorHistoryQuery.status || "__all__"}
+                    onValueChange={(value) =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        status: value === "__all__" ? "" : value,
+                        page: 1,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="全部状态" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">全部状态</SelectItem>
+                      <SelectItem value="accepted">accepted</SelectItem>
+                      <SelectItem value="rejected">rejected</SelectItem>
+                      <SelectItem value="invalid_key">invalid_key</SelectItem>
+                      <SelectItem value="insufficient_stock">insufficient_stock</SelectItem>
+                      <SelectItem value="parse_failed">parse_failed</SelectItem>
+                      <SelectItem value="error">error</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <FilterField label="Search">
+                  <Input
+                    value={extractorHistoryQuery.q}
+                    onChange={(event) =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        q: event.target.value,
+                        page: 1,
+                      })
+                    }
+                    placeholder="邮箱 / 原始行 / 拒绝原因"
+                  />
+                </FilterField>
+                <FilterField label="Page Size">
+                  <Select
+                    value={String(extractorHistoryQuery.pageSize)}
+                    onValueChange={(value) =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        pageSize: Number(value),
+                        page: 1,
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="每页条数" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="5">5 / 页</SelectItem>
+                      <SelectItem value="10">10 / 页</SelectItem>
+                      <SelectItem value="20">20 / 页</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FilterField>
+                <div className="flex items-end">
+                  <Button variant="outline" onClick={() => void onRefreshExtractorHistory()} disabled={extractorHistoryBusy}>
+                    {extractorHistoryBusy ? "刷新中…" : "刷新"}
+                  </Button>
+                </div>
+              </div>
+
+              <ScrollArea className="max-h-[56vh] rounded-[24px] border border-white/8 bg-[#08111d]/88">
+                <div className="space-y-4 p-4">
+                  {extractorHistory.rows.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-slate-500">
+                      当前筛选下还没有本地提取记录。
+                    </div>
+                  ) : (
+                    extractorHistory.rows.map((batch) => (
+                      <article key={batch.id} className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-white">
+                              #{batch.id} · {batch.provider} · {batch.accountType}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-400">
+                              job {batch.jobId || "—"} · requested {batch.requestedUsableCount} · accepted {batch.acceptedCount} ·
+                              raw {batch.attemptBudget} · {formatDate(batch.startedAt)}
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <ExtractHistoryStatusBadge status={batch.status} />
+                            <Badge variant="neutral">{batch.maskedKey || "no-key"}</Badge>
+                          </div>
+                        </div>
+                        {batch.errorMessage ? (
+                          <div className="mt-3 rounded-2xl border border-white/8 bg-[#0d1728]/70 px-4 py-3 text-sm text-slate-300">
+                            {batch.errorMessage}
+                          </div>
+                        ) : null}
+                        {batch.rawResponse ? (
+                          <pre className="mt-3 max-h-32 overflow-auto rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
+                            {batch.rawResponse}
+                          </pre>
+                        ) : null}
+                        <div className="mt-3 overflow-x-auto">
+                          <Table className="min-w-[760px]">
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>邮箱</TableHead>
+                                <TableHead>密码</TableHead>
+                                <TableHead>Parse</TableHead>
+                                <TableHead>Accept</TableHead>
+                                <TableHead>Reject Reason</TableHead>
+                                <TableHead>Raw Payload</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {batch.items.length === 0 ? (
+                                <TableRow>
+                                  <TableCell colSpan={6} className="text-center text-sm text-slate-500">
+                                    本批次没有可展示的明细行。
+                                  </TableCell>
+                                </TableRow>
+                              ) : (
+                                batch.items.map((item) => (
+                                  <TableRow key={item.id}>
+                                    <TableCell className="min-w-[14rem] break-all">{item.email || "—"}</TableCell>
+                                    <TableCell className="font-mono text-sm text-slate-300">{item.password || "—"}</TableCell>
+                                    <TableCell>{item.parseStatus}</TableCell>
+                                    <TableCell>{item.acceptStatus}</TableCell>
+                                    <TableCell className="min-w-[12rem]">{item.rejectReason || "—"}</TableCell>
+                                    <TableCell className="min-w-[18rem] break-all text-slate-400">{item.rawPayload}</TableCell>
+                                  </TableRow>
+                                ))
+                              )}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </ScrollArea>
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-sm text-slate-400">
+                  第 {extractorHistory.page} / {extractHistoryPageCount} 页，共 {extractorHistory.total} 条批次记录。
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        page: Math.max(1, extractorHistory.page - 1),
+                      })
+                    }
+                    disabled={extractorHistory.page <= 1}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      onExtractorHistoryQueryChange({
+                        ...extractorHistoryQuery,
+                        page: Math.min(extractHistoryPageCount, extractorHistory.page + 1),
+                      })
+                    }
+                    disabled={extractorHistory.page >= extractHistoryPageCount}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setExtractorDialogOpen(false)} disabled={extractorSettingsBusy}>
+              关闭
+            </Button>
+            <Button onClick={handleSaveExtractorKeys} disabled={extractorSettingsBusy}>
+              {extractorSettingsBusy ? "保存中…" : "保存 KEY"}
             </Button>
           </DialogFooter>
         </DialogContent>

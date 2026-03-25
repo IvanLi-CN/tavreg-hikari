@@ -9,7 +9,13 @@ import {
 } from "../moemail-openapi.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
-import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import {
+  AppDatabase,
+  type AccountExtractorProvider,
+  type AppSettings,
+  type JobAttemptRecord,
+  type MicrosoftAccountRecord,
+} from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
@@ -196,6 +202,37 @@ function normalizeLoopbackHost(host: string | undefined): string {
   return "127.0.0.1";
 }
 
+function normalizeExtractorSources(value: unknown): AccountExtractorProvider[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(value.filter((item): item is AccountExtractorProvider => item === "zhanghaoya" || item === "shanyouxiang")),
+  );
+}
+
+function toOptionalPositiveInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(1, Math.trunc(value));
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return Math.max(1, parsed);
+  }
+  return undefined;
+}
+
+function serializeExtractorSettings(settings: AppSettings) {
+  return {
+    extractorZhanghaoyaKey: settings.extractorZhanghaoyaKey,
+    extractorShanyouxiangKey: settings.extractorShanyouxiangKey,
+    defaultAutoExtractSources: settings.defaultAutoExtractSources,
+    defaultAutoExtractQuantity: settings.defaultAutoExtractQuantity,
+    defaultAutoExtractMaxWaitSec: settings.defaultAutoExtractMaxWaitSec,
+    defaultAutoExtractAccountType: settings.defaultAutoExtractAccountType,
+    availability: {
+      zhanghaoya: Boolean(settings.extractorZhanghaoyaKey.trim()),
+      shanyouxiang: Boolean(settings.extractorShanyouxiangKey.trim()),
+    },
+  };
+}
+
 function getDefaultSettings(): AppSettings {
   return {
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
@@ -212,6 +249,17 @@ function getDefaultSettings(): AppSettings {
     defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, 1),
     defaultParallel: toInt(process.env.WEB_DEFAULT_PARALLEL, 1),
     defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, 5),
+    extractorZhanghaoyaKey: (process.env.EXTRACTOR_ZHANGHAOYA_KEY || "").trim(),
+    extractorShanyouxiangKey: (process.env.EXTRACTOR_SHANYOUXIANG_KEY || "").trim(),
+    defaultAutoExtractSources: normalizeExtractorSources(
+      (process.env.WEB_DEFAULT_AUTO_EXTRACT_SOURCES || "")
+        .split(",")
+        .map((item: string) => item.trim())
+        .filter(Boolean),
+    ),
+    defaultAutoExtractQuantity: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_QUANTITY, 1),
+    defaultAutoExtractMaxWaitSec: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_MAX_WAIT_SEC, 60),
+    defaultAutoExtractAccountType: "outlook",
   };
 }
 
@@ -237,6 +285,8 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     importedAt: row.importedAt,
     updatedAt: row.updatedAt,
     importSource: row.importSource,
+    accountSource: row.accountSource,
+    sourceRawPayload: row.sourceRawPayload,
     lastUsedAt: row.lastUsedAt,
     lastResultStatus: row.lastResultStatus,
     lastResultAt: row.lastResultAt,
@@ -265,6 +315,7 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       activeAttempts: [],
       recentAttempts: [],
       eligibleCount: 0,
+      autoExtractState: null,
     };
   }
   return {
@@ -275,6 +326,7 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       .slice(0, 20)
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: db.countEligibleAccounts(job.id),
+    autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
   };
 }
 
@@ -652,6 +704,62 @@ async function main(): Promise<void> {
         return json(serializeJobSnapshot(db, scheduler));
       }
 
+        if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
+        const settings = db.getSettings(getDefaultSettings());
+        return json({
+          ok: true,
+          settings: serializeExtractorSettings(settings),
+        });
+      }
+
+        if (pathname === "/api/account-extractors/settings" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
+        const current = db.getSettings(getDefaultSettings());
+        const next = buildNextSettings(current, {
+          extractorZhanghaoyaKey: typeof body?.extractorZhanghaoyaKey === "string" ? body.extractorZhanghaoyaKey : undefined,
+          extractorShanyouxiangKey:
+            typeof body?.extractorShanyouxiangKey === "string" ? body.extractorShanyouxiangKey : undefined,
+          defaultAutoExtractSources:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractSources")
+              ? normalizeExtractorSources(body.defaultAutoExtractSources)
+              : undefined,
+          defaultAutoExtractQuantity:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractQuantity")
+              ? toOptionalPositiveInt(body.defaultAutoExtractQuantity)
+              : undefined,
+          defaultAutoExtractMaxWaitSec:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractMaxWaitSec")
+              ? toOptionalPositiveInt(body.defaultAutoExtractMaxWaitSec)
+              : undefined,
+          defaultAutoExtractAccountType:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractAccountType") && body.defaultAutoExtractAccountType === "outlook"
+              ? "outlook"
+              : undefined,
+        });
+        db.setSettings(next);
+        return json({
+          ok: true,
+          settings: serializeExtractorSettings(next),
+        });
+      }
+
+        if (pathname === "/api/account-extractors/history" && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const providerParam = url.searchParams.get("provider");
+        const provider =
+          providerParam === "zhanghaoya" || providerParam === "shanyouxiang" ? providerParam : undefined;
+        return json(
+          db.listAccountExtractHistory({
+            provider,
+            status: url.searchParams.get("status") || undefined,
+            q: url.searchParams.get("q") || undefined,
+            page,
+            pageSize,
+          }),
+        );
+      }
+
         if (pathname === "/api/jobs/current/control" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
         const action = String(body?.action || "");
@@ -664,6 +772,12 @@ async function main(): Promise<void> {
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
               parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
               maxAttempts: Math.max(1, Number(body?.maxAttempts || settings.defaultMaxAttempts)),
+              autoExtractSources: normalizeExtractorSources(body?.autoExtractSources ?? settings.defaultAutoExtractSources),
+              autoExtractQuantity:
+                toOptionalPositiveInt(body?.autoExtractQuantity) ?? settings.defaultAutoExtractQuantity,
+              autoExtractMaxWaitSec:
+                toOptionalPositiveInt(body?.autoExtractMaxWaitSec) ?? settings.defaultAutoExtractMaxWaitSec,
+              autoExtractAccountType: "outlook",
             });
             return json({ ok: true, job });
           }
@@ -678,6 +792,22 @@ async function main(): Promise<void> {
               parallel: body?.parallel == null ? undefined : Number(body.parallel),
               need: body?.need == null ? undefined : Number(body.need),
               maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
+              autoExtractSources:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractSources")
+                  ? normalizeExtractorSources(body.autoExtractSources)
+                  : undefined,
+              autoExtractQuantity:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractQuantity")
+                  ? toOptionalPositiveInt(body.autoExtractQuantity)
+                  : undefined,
+              autoExtractMaxWaitSec:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractMaxWaitSec")
+                  ? toOptionalPositiveInt(body.autoExtractMaxWaitSec)
+                  : undefined,
+              autoExtractAccountType:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractAccountType") && body.autoExtractAccountType === "outlook"
+                  ? "outlook"
+                  : undefined,
             });
             return json({ ok: true, job });
           }

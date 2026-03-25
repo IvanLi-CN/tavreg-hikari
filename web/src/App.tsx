@@ -7,6 +7,10 @@ import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import type {
+  AccountExtractorHistoryPayload,
+  AccountExtractorHistoryQuery,
+  AccountExtractorSettings,
+  AccountExtractorSettingsPayload,
   AccountImportPayload,
   AccountImportPreviewPayload,
   AccountUpdatePayload,
@@ -66,7 +70,13 @@ function mergeIds(current: number[], next: number[]): number[] {
 
 export function App() {
   const { pathname, navigate } = usePathname();
-  const [job, setJob] = useState<JobSnapshot>({ job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 });
+  const [job, setJob] = useState<JobSnapshot>({
+    job: null,
+    activeAttempts: [],
+    recentAttempts: [],
+    eligibleCount: 0,
+    autoExtractState: null,
+  });
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -84,6 +94,13 @@ export function App() {
     groups: [],
   });
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
+  const [extractorSettings, setExtractorSettings] = useState<AccountExtractorSettings | null>(null);
+  const [extractorHistory, setExtractorHistory] = useState<AccountExtractorHistoryPayload>({
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: 10,
+  });
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [importContent, setImportContent] = useState("");
@@ -94,9 +111,25 @@ export function App() {
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [selectedApiKeyIds, setSelectedApiKeyIds] = useState<number[]>([]);
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
-  const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
+  const [jobDraft, setJobDraft] = useState<JobDraft>({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 5,
+    autoExtractSources: [],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "outlook",
+  });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
   const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", groupName: "", page: 1, pageSize: 20 });
+  const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>({
+    provider: "",
+    status: "",
+    q: "",
+    page: 1,
+    pageSize: 10,
+  });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -105,6 +138,8 @@ export function App() {
   const [apiKeyExportOpen, setApiKeyExportOpen] = useState(false);
   const [apiKeyExportContent, setApiKeyExportContent] = useState("");
   const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
+  const [extractorSettingsBusy, setExtractorSettingsBusy] = useState(false);
+  const [extractorHistoryBusy, setExtractorHistoryBusy] = useState(false);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
 
@@ -114,6 +149,8 @@ export function App() {
   );
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
+  const extractorHistoryQueryRef = useRef(extractorHistoryQuery);
+  const activePageRef = useRef(activePage);
   const importCommitEntries = useMemo(
     () => buildImportCommitEntries(importPreview, importGroupName),
     [importGroupName, importPreview],
@@ -158,22 +195,63 @@ export function App() {
     const payload = await api<ProxyPayload>("/api/proxies");
     setProxies(payload);
   };
+  const refreshExtractorSettings = async () => {
+    const payload = await api<AccountExtractorSettingsPayload>("/api/account-extractors/settings");
+    setExtractorSettings(payload.settings);
+  };
+  const refreshExtractorHistory = async (nextQuery = extractorHistoryQuery) => {
+    try {
+      setExtractorHistoryBusy(true);
+      const params = new URLSearchParams();
+      if (nextQuery.provider) params.set("provider", nextQuery.provider);
+      if (nextQuery.status) params.set("status", nextQuery.status);
+      if (nextQuery.q) params.set("q", nextQuery.q);
+      params.set("page", String(nextQuery.page));
+      params.set("pageSize", String(nextQuery.pageSize));
+      const payload = await api<AccountExtractorHistoryPayload>(`/api/account-extractors/history?${params.toString()}`);
+      if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
+        setExtractorHistoryQuery((current) => ({ ...current, page: current.page - 1 }));
+        return;
+      }
+      setExtractorHistory(payload);
+    } finally {
+      setExtractorHistoryBusy(false);
+    }
+  };
 
   useEffect(() => {
-    void Promise.all([refreshJob(), refreshAccounts(), refreshApiKeys(), refreshProxies()]).catch((err) => {
+    void Promise.all([refreshJob(), refreshAccounts(), refreshApiKeys(), refreshProxies(), refreshExtractorSettings(), refreshExtractorHistory()]).catch((err) => {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
 
   useEffect(() => {
-    if (!proxies || jobDraftTouched) return;
+    if (job.job || !proxies || !extractorSettings || jobDraftTouched) return;
     setJobDraft({
       runMode: proxies.settings.defaultRunMode,
       need: proxies.settings.defaultNeed,
       parallel: proxies.settings.defaultParallel,
       maxAttempts: proxies.settings.defaultMaxAttempts,
+      autoExtractSources: extractorSettings.defaultAutoExtractSources,
+      autoExtractQuantity: extractorSettings.defaultAutoExtractQuantity,
+      autoExtractMaxWaitSec: extractorSettings.defaultAutoExtractMaxWaitSec,
+      autoExtractAccountType: extractorSettings.defaultAutoExtractAccountType,
     });
-  }, [jobDraftTouched, proxies]);
+  }, [extractorSettings, job.job, jobDraftTouched, proxies]);
+
+  useEffect(() => {
+    if (!job.job || jobDraftTouched) return;
+    setJobDraft({
+      runMode: job.job.runMode,
+      need: job.job.need,
+      parallel: job.job.parallel,
+      maxAttempts: job.job.maxAttempts,
+      autoExtractSources: job.job.autoExtractSources,
+      autoExtractQuantity: job.job.autoExtractQuantity,
+      autoExtractMaxWaitSec: job.job.autoExtractMaxWaitSec,
+      autoExtractAccountType: job.job.autoExtractAccountType,
+    });
+  }, [job.job, jobDraftTouched]);
 
   useEffect(() => {
     accountQueryRef.current = accountQuery;
@@ -182,6 +260,14 @@ export function App() {
   useEffect(() => {
     apiKeyQueryRef.current = apiKeyQuery;
   }, [apiKeyQuery]);
+
+  useEffect(() => {
+    extractorHistoryQueryRef.current = extractorHistoryQuery;
+  }, [extractorHistoryQuery]);
+
+  useEffect(() => {
+    activePageRef.current = activePage;
+  }, [activePage]);
 
   useEffect(() => {
     const socket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/events/ws`);
@@ -194,6 +280,9 @@ export function App() {
       if (next.type === "account.updated") {
         void refreshAccounts(accountQueryRef.current);
         void refreshApiKeys(apiKeyQueryRef.current);
+      }
+      if ((next.type === "job.updated" || next.type === "account.updated") && activePageRef.current === "accounts") {
+        void refreshExtractorHistory(extractorHistoryQueryRef.current);
       }
       if (next.type === "proxy.updated" || next.type === "proxy.check.completed") {
         void refreshProxies();
@@ -210,6 +299,10 @@ export function App() {
   useEffect(() => {
     void refreshApiKeys().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [apiKeyQuery]);
+
+  useEffect(() => {
+    void refreshExtractorHistory(extractorHistoryQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [extractorHistoryQuery]);
 
   const handleOpenImportPreview = async () => {
     const parsed = parseImportContent(importContent);
@@ -284,6 +377,23 @@ export function App() {
       await refreshJob();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleSaveExtractorSettings = async (patch: Partial<AccountExtractorSettings>) => {
+    try {
+      setExtractorSettingsBusy(true);
+      setError(null);
+      const payload = await api<AccountExtractorSettingsPayload>("/api/account-extractors/settings", {
+        method: "POST",
+        body: JSON.stringify(patch),
+      });
+      setExtractorSettings(payload.settings);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setExtractorSettingsBusy(false);
     }
   };
 
@@ -508,6 +618,7 @@ export function App() {
           job={job}
           events={events}
           jobDraft={jobDraft}
+          extractorAvailability={extractorSettings?.availability || { zhanghaoya: false, shanyouxiang: false }}
           onJobDraftChange={updateJobDraft}
           onJobAction={handleJobAction}
         />
@@ -528,6 +639,11 @@ export function App() {
           importBusy={importBusy}
           previewBusy={previewBusy}
           batchBusy={batchBusy}
+          extractorSettings={extractorSettings}
+          extractorSettingsBusy={extractorSettingsBusy}
+          extractorHistory={extractorHistory}
+          extractorHistoryQuery={extractorHistoryQuery}
+          extractorHistoryBusy={extractorHistoryBusy}
           allCurrentPageSelected={allCurrentPageSelected}
           onImportContentChange={setImportContent}
           onImportGroupChange={setImportGroupName}
@@ -546,6 +662,9 @@ export function App() {
           onClearSelection={() => setSelectedAccountIds([])}
           onSaveProofMailbox={handleSaveProofMailbox}
           onSaveAvailability={handleSaveAvailability}
+          onSaveExtractorSettings={handleSaveExtractorSettings}
+          onExtractorHistoryQueryChange={setExtractorHistoryQuery}
+          onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
         />
       ) : null}
 

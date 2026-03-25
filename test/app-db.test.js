@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
 import { JobScheduler, buildAttemptRuntimeSpec, resolveAttemptProxyNode } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
@@ -9,6 +10,33 @@ import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/st
 import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
+const originalFetch = globalThis.fetch;
+
+function createSchedulerSettings(overrides = {}) {
+  return {
+    subscriptionUrl: "https://example.com/sub.yaml",
+    groupName: "CODEX_AUTO",
+    routeGroupName: "CODEX_ROUTE",
+    checkUrl: "https://example.com/trace",
+    timeoutMs: 1000,
+    maxLatencyMs: 1000,
+    apiPort: 39090,
+    mixedPort: 49090,
+    serverHost: "127.0.0.1",
+    serverPort: 3717,
+    defaultRunMode: "headed",
+    defaultNeed: 1,
+    defaultParallel: 1,
+    defaultMaxAttempts: 1,
+    extractorZhanghaoyaKey: "",
+    extractorShanyouxiangKey: "",
+    defaultAutoExtractSources: [],
+    defaultAutoExtractQuantity: 1,
+    defaultAutoExtractMaxWaitSec: 60,
+    defaultAutoExtractAccountType: "outlook",
+    ...overrides,
+  };
+}
 
 async function createTempDb() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-"));
@@ -19,6 +47,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -401,9 +430,113 @@ describe("AppDatabase account import", () => {
 
     appDb.close();
   });
+
+  test("stores extractor source fields and local extract history", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts(
+      [{ email: "from-extractor@outlook.com", password: "extract-pass" }],
+      {
+        source: "extractor",
+        accountSource: "zhanghaoya",
+        rawPayloadByEmail: {
+          "from-extractor@outlook.com": "from-extractor@outlook.com:extract-pass",
+        },
+      },
+    );
+    const account = appDb.getAccount(imported.affectedIds[0]);
+
+    expect(account).toMatchObject({
+      importSource: "extractor",
+      accountSource: "zhanghaoya",
+      sourceRawPayload: "from-extractor@outlook.com:extract-pass",
+    });
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const batch = appDb.createAccountExtractBatch({
+      jobId: job.id,
+      provider: "zhanghaoya",
+      requestedUsableCount: 1,
+      attemptBudget: 4,
+      acceptedCount: 1,
+      status: "accepted",
+      rawResponse: "{\"Code\":200,\"Data\":\"from-extractor@outlook.com:extract-pass\"}",
+      maskedKey: "zhya********0001",
+      completedAt: new Date().toISOString(),
+    });
+    appDb.createAccountExtractItem({
+      batchId: batch.id,
+      provider: "zhanghaoya",
+      rawPayload: "from-extractor@outlook.com:extract-pass",
+      email: "from-extractor@outlook.com",
+      password: "extract-pass",
+      parseStatus: "parsed",
+      acceptStatus: "accepted",
+      importedAccountId: account.id,
+    });
+
+    const history = appDb.listAccountExtractHistory({ q: "from-extractor@", page: 1, pageSize: 10 });
+    expect(history.total).toBe(1);
+    expect(history.rows[0]).toMatchObject({
+      provider: "zhanghaoya",
+      acceptedCount: 1,
+      status: "accepted",
+    });
+    expect(history.rows[0]?.items[0]).toMatchObject({
+      email: "from-extractor@outlook.com",
+      acceptStatus: "accepted",
+      importedAccountId: account.id,
+    });
+
+    appDb.close();
+  });
 });
 
 describe("scheduler helpers", () => {
+  test("normalizes extractor upstream responses", async () => {
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (href.includes("zhanghaoya")) {
+        return new Response(
+          JSON.stringify({
+            Code: 200,
+            Message: "Success",
+            Data: "mail-a@outlook.com:pass-a<br>mail-b@outlook.com:pass-b",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ status: -1, msg: "库存不足！" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const zhanghaoya = await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config: {
+        zhanghaoyaKey: "zhya-demo-key-001",
+        shanyouxiangKey: "",
+      },
+    });
+    expect(zhanghaoya.ok).toBe(true);
+    expect(zhanghaoya.candidates[0]).toMatchObject({
+      provider: "zhanghaoya",
+      email: "mail-a@outlook.com",
+      password: "pass-a",
+      parseStatus: "parsed",
+    });
+
+    const shanyouxiang = await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config: {
+        zhanghaoyaKey: "",
+        shanyouxiangKey: "shan-demo-key-001",
+      },
+    });
+    expect(shanyouxiang.ok).toBe(false);
+    expect(shanyouxiang.failureCode).toBe("insufficient_stock");
+  });
+
   test("computes launch capacity and completing state", () => {
     expect(
       computeLaunchCapacity(
@@ -447,22 +580,7 @@ describe("scheduler helpers", () => {
       appDb,
       process.cwd(),
       dbPath,
-      () => ({
-        subscriptionUrl: "",
-        groupName: "CODEX_AUTO",
-        routeGroupName: "CODEX_ROUTE",
-        checkUrl: "https://example.com/trace",
-        timeoutMs: 1000,
-        maxLatencyMs: 1000,
-        apiPort: 39090,
-        mixedPort: 49090,
-        serverHost: "127.0.0.1",
-        serverPort: 3717,
-        defaultRunMode: "headed",
-        defaultNeed: 1,
-        defaultParallel: 1,
-        defaultMaxAttempts: 1,
-      }),
+      () => createSchedulerSettings({ subscriptionUrl: "" }),
       () => undefined,
     );
 
@@ -485,22 +603,7 @@ describe("scheduler helpers", () => {
       appDb,
       process.cwd(),
       dbPath,
-      () => ({
-        subscriptionUrl: "https://example.com/sub.yaml",
-        groupName: "CODEX_AUTO",
-        routeGroupName: "CODEX_ROUTE",
-        checkUrl: "https://example.com/trace",
-        timeoutMs: 1000,
-        maxLatencyMs: 1000,
-        apiPort: 39090,
-        mixedPort: 49090,
-        serverHost: "127.0.0.1",
-        serverPort: 3717,
-        defaultRunMode: "headed",
-        defaultNeed: 1,
-        defaultParallel: 1,
-        defaultMaxAttempts: 1,
-      }),
+      () => createSchedulerSettings(),
       () => undefined,
     );
 
@@ -510,6 +613,81 @@ describe("scheduler helpers", () => {
     expect(() => scheduler.pauseCurrentJob()).toThrow("current job is already completed");
     expect(() => scheduler.resumeCurrentJob()).toThrow("current job is already completed");
     expect(() => scheduler.updateCurrentJobLimits({ parallel: 2 })).toThrow("current job is already completed");
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("rejects auto extract starts when provider keys are missing", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+    await expect(
+      scheduler.startJob({
+        runMode: "headed",
+        need: 1,
+        parallel: 1,
+        maxAttempts: 1,
+        autoExtractSources: ["zhanghaoya"],
+        autoExtractQuantity: 1,
+        autoExtractMaxWaitSec: 30,
+        autoExtractAccountType: "outlook",
+      }),
+    ).rejects.toThrow("extractor key missing");
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("caps auto extracted usable accounts to the current job need", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          Code: 200,
+          Message: "Success",
+          Data: "cap-a@outlook.com:pass-a<br>cap-b@outlook.com:pass-b",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+      () => undefined,
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 3,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    const decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "ready" });
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["cap-a@outlook.com"]);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.rows[0]).toMatchObject({
+      status: "accepted",
+      acceptedCount: 1,
+    });
+    expect(history.rows[0]?.items).toHaveLength(2);
+    expect(history.rows[0]?.items[1]).toMatchObject({
+      email: "cap-b@outlook.com",
+      acceptStatus: "rejected",
+      rejectReason: "need_reached",
+    });
 
     await scheduler.shutdown();
     appDb.close();

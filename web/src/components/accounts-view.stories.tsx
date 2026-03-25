@@ -4,7 +4,7 @@ import { expect, fn, userEvent, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
 import { buildImportCommitEntries } from "@/lib/account-import";
 import type { AccountImportPreviewPayload, AccountQuery, AccountsPayload } from "@/lib/app-types";
-import { sampleAccounts } from "@/stories/fixtures";
+import { sampleAccounts, sampleExtractorHistory, sampleExtractorSettings } from "@/stories/fixtures";
 
 function createDefaultQuery(): AccountQuery {
   return { q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 };
@@ -93,6 +93,11 @@ const baseArgs = {
   importBusy: false,
   previewBusy: false,
   batchBusy: false,
+  extractorSettings: sampleExtractorSettings,
+  extractorSettingsBusy: false,
+  extractorHistory: sampleExtractorHistory,
+  extractorHistoryQuery: { provider: "" as const, status: "", q: "", page: 1, pageSize: 10 },
+  extractorHistoryBusy: false,
   allCurrentPageSelected: false,
   onImportContentChange: fn(),
   onImportGroupChange: fn(),
@@ -108,6 +113,9 @@ const baseArgs = {
   onClearSelection: fn(),
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
+  onSaveExtractorSettings: fn(async () => undefined),
+  onExtractorHistoryQueryChange: fn(),
+  onRefreshExtractorHistory: fn(async () => undefined),
 };
 
 function AccountsStorySurface(props: {
@@ -140,6 +148,11 @@ function AccountsStorySurface(props: {
       importBusy={Boolean(props.importBusy)}
       previewBusy={Boolean(props.previewBusy)}
       batchBusy={Boolean(props.batchBusy)}
+      extractorSettings={sampleExtractorSettings}
+      extractorSettingsBusy={false}
+      extractorHistory={sampleExtractorHistory}
+      extractorHistoryQuery={{ provider: "" as const, status: "", q: "", page: 1, pageSize: 10 }}
+      extractorHistoryBusy={false}
       allCurrentPageSelected={selectedIds.length > 0 && selectedIds.length === (props.accounts || sampleAccounts).rows.length}
       onImportContentChange={setContent}
       onImportGroupChange={setImportGroupName}
@@ -155,6 +168,9 @@ function AccountsStorySurface(props: {
       onClearSelection={() => setSelectedIds([])}
       onSaveProofMailbox={async () => undefined}
       onSaveAvailability={async () => undefined}
+      onSaveExtractorSettings={async () => undefined}
+      onExtractorHistoryQueryChange={() => undefined}
+      onRefreshExtractorHistory={async () => undefined}
     />
   );
 }
@@ -218,5 +234,15 @@ export const ImportPreviewPlay: Story = {
     await expect(trigger).toBeEnabled();
     await userEvent.click(trigger);
     await expect(within(document.body).getByRole("dialog", { name: "导入预览" })).toBeInTheDocument();
+  },
+};
+
+export const ExtractorSettingsEntry: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+    await expect(within(document.body).getByRole("dialog", { name: "微软账号提取器设置" })).toBeInTheDocument();
   },
 };

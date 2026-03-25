@@ -66,6 +66,19 @@ export type JobStatus = "idle" | "running" | "paused" | "completing" | "complete
 export type AttemptStatus = "running" | "succeeded" | "failed";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "moemail";
+export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang";
+export type AccountImportSource = "manual" | "extractor";
+export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang";
+export type AccountExtractorAccountType = "outlook";
+export type AccountExtractBatchStatus =
+  | "accepted"
+  | "rejected"
+  | "invalid_key"
+  | "insufficient_stock"
+  | "parse_failed"
+  | "error";
+export type AccountExtractItemParseStatus = "parsed" | "invalid";
+export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -82,6 +95,12 @@ export interface AppSettings extends Record<string, unknown> {
   defaultNeed: number;
   defaultParallel: number;
   defaultMaxAttempts: number;
+  extractorZhanghaoyaKey: string;
+  extractorShanyouxiangKey: string;
+  defaultAutoExtractSources: AccountExtractorProvider[];
+  defaultAutoExtractQuantity: number;
+  defaultAutoExtractMaxWaitSec: number;
+  defaultAutoExtractAccountType: AccountExtractorAccountType;
 }
 
 export interface MicrosoftAccountRecord {
@@ -95,7 +114,9 @@ export interface MicrosoftAccountRecord {
   apiKeyId: number | null;
   importedAt: string;
   updatedAt: string;
-  importSource: string;
+  importSource: AccountImportSource;
+  accountSource: AccountSource;
+  sourceRawPayload: string | null;
   lastUsedAt: string | null;
   lastResultStatus: AccountStatus;
   lastResultAt: string | null;
@@ -139,11 +160,45 @@ export interface JobRecord {
   failureCount: number;
   skipCount: number;
   launchedCount: number;
+  autoExtractSources: AccountExtractorProvider[];
+  autoExtractQuantity: number;
+  autoExtractMaxWaitSec: number;
+  autoExtractAccountType: AccountExtractorAccountType;
   startedAt: string;
   pausedAt: string | null;
   completedAt: string | null;
   lastError: string | null;
   updatedAt: string;
+}
+
+export interface AccountExtractBatchRecord {
+  id: number;
+  jobId: number | null;
+  provider: AccountExtractorProvider;
+  accountType: AccountExtractorAccountType;
+  requestedUsableCount: number;
+  attemptBudget: number;
+  acceptedCount: number;
+  status: AccountExtractBatchStatus;
+  errorMessage: string | null;
+  rawResponse: string | null;
+  maskedKey: string | null;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface AccountExtractItemRecord {
+  id: number;
+  batchId: number;
+  provider: AccountExtractorProvider;
+  rawPayload: string;
+  email: string | null;
+  password: string | null;
+  parseStatus: AccountExtractItemParseStatus;
+  acceptStatus: AccountExtractItemAcceptStatus;
+  rejectReason: string | null;
+  importedAccountId: number | null;
+  createdAt: string;
 }
 
 export interface JobAttemptRecord {
@@ -219,7 +274,9 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     apiKeyId: row.api_key_id == null ? null : Number(row.api_key_id),
     importedAt: String(row.imported_at),
     updatedAt: String(row.updated_at),
-    importSource: String(row.import_source || "manual"),
+    importSource: String(row.import_source || "manual") as AccountImportSource,
+    accountSource: String(row.account_source || "manual") as AccountSource,
+    sourceRawPayload: row.source_raw_payload == null ? null : String(row.source_raw_payload),
     lastUsedAt: row.last_used_at == null ? null : String(row.last_used_at),
     lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
     lastResultAt: row.last_result_at == null ? null : String(row.last_result_at),
@@ -260,11 +317,52 @@ function mapJobRow(row: Record<string, unknown>): JobRecord {
     failureCount: Number(row.failure_count || 0),
     skipCount: Number(row.skip_count || 0),
     launchedCount: Number(row.launched_count || 0),
+    autoExtractSources: parseJson<AccountExtractorProvider[]>(
+      typeof row.auto_extract_sources_json === "string" ? row.auto_extract_sources_json : "[]",
+      [],
+    ),
+    autoExtractQuantity: Number(row.auto_extract_quantity || 0),
+    autoExtractMaxWaitSec: Number(row.auto_extract_max_wait_sec || 0),
+    autoExtractAccountType: String(row.auto_extract_account_type || "outlook") as AccountExtractorAccountType,
     startedAt: String(row.started_at),
     pausedAt: row.paused_at == null ? null : String(row.paused_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
     lastError: row.last_error == null ? null : String(row.last_error),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function mapAccountExtractBatchRow(row: Record<string, unknown>): AccountExtractBatchRecord {
+  return {
+    id: Number(row.id),
+    jobId: row.job_id == null ? null : Number(row.job_id),
+    provider: String(row.provider) as AccountExtractorProvider,
+    accountType: String(row.account_type || "outlook") as AccountExtractorAccountType,
+    requestedUsableCount: Number(row.requested_usable_count || 0),
+    attemptBudget: Number(row.attempt_budget || 0),
+    acceptedCount: Number(row.accepted_count || 0),
+    status: String(row.status || "error") as AccountExtractBatchStatus,
+    errorMessage: row.error_message == null ? null : String(row.error_message),
+    rawResponse: row.raw_response == null ? null : String(row.raw_response),
+    maskedKey: row.masked_key == null ? null : String(row.masked_key),
+    startedAt: String(row.started_at),
+    completedAt: row.completed_at == null ? null : String(row.completed_at),
+  };
+}
+
+function mapAccountExtractItemRow(row: Record<string, unknown>): AccountExtractItemRecord {
+  return {
+    id: Number(row.id),
+    batchId: Number(row.batch_id),
+    provider: String(row.provider) as AccountExtractorProvider,
+    rawPayload: String(row.raw_payload || ""),
+    email: row.email == null ? null : String(row.email),
+    password: row.password == null ? null : String(row.password),
+    parseStatus: String(row.parse_status || "invalid") as AccountExtractItemParseStatus,
+    acceptStatus: String(row.accept_status || "rejected") as AccountExtractItemAcceptStatus,
+    rejectReason: row.reject_reason == null ? null : String(row.reject_reason),
+    importedAccountId: row.imported_account_id == null ? null : Number(row.imported_account_id),
+    createdAt: String(row.created_at),
   };
 }
 
@@ -362,6 +460,8 @@ export class AppDatabase {
         imported_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         import_source TEXT NOT NULL DEFAULT 'manual',
+        account_source TEXT NOT NULL DEFAULT 'manual',
+        source_raw_payload TEXT,
         last_used_at TEXT,
         last_result_status TEXT NOT NULL DEFAULT 'ready',
         last_result_at TEXT,
@@ -396,6 +496,10 @@ export class AppDatabase {
         failure_count INTEGER NOT NULL DEFAULT 0,
         skip_count INTEGER NOT NULL DEFAULT 0,
         launched_count INTEGER NOT NULL DEFAULT 0,
+        auto_extract_sources_json TEXT NOT NULL DEFAULT '[]',
+        auto_extract_quantity INTEGER NOT NULL DEFAULT 0,
+        auto_extract_max_wait_sec INTEGER NOT NULL DEFAULT 0,
+        auto_extract_account_type TEXT NOT NULL DEFAULT 'outlook',
         started_at TEXT NOT NULL,
         paused_at TEXT,
         completed_at TEXT,
@@ -446,6 +550,36 @@ export class AppDatabase {
         error TEXT,
         checked_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS account_extract_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        provider TEXT NOT NULL,
+        account_type TEXT NOT NULL DEFAULT 'outlook',
+        requested_usable_count INTEGER NOT NULL DEFAULT 0,
+        attempt_budget INTEGER NOT NULL DEFAULT 0,
+        accepted_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        error_message TEXT,
+        raw_response TEXT,
+        masked_key TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS account_extract_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        batch_id INTEGER NOT NULL REFERENCES account_extract_batches(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL,
+        raw_payload TEXT NOT NULL,
+        email TEXT,
+        password TEXT,
+        parse_status TEXT NOT NULL,
+        accept_status TEXT NOT NULL,
+        reject_reason TEXT,
+        imported_account_id INTEGER REFERENCES microsoft_accounts(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL
+      );
     `);
 
     const signupTaskTableExists = this.hasSignupTasksTable();
@@ -477,6 +611,26 @@ export class AppDatabase {
     if (!accountColumns.has("disabled_reason")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN disabled_reason TEXT;");
     }
+    if (!accountColumns.has("account_source")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN account_source TEXT NOT NULL DEFAULT 'manual';");
+    }
+    if (!accountColumns.has("source_raw_payload")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN source_raw_payload TEXT;");
+    }
+    const jobTableInfo = this.db.query("PRAGMA table_info(jobs);").all() as Array<Record<string, unknown>>;
+    const jobColumns = new Set(jobTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!jobColumns.has("auto_extract_sources_json")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_sources_json TEXT NOT NULL DEFAULT '[]';");
+    }
+    if (!jobColumns.has("auto_extract_quantity")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_quantity INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!jobColumns.has("auto_extract_max_wait_sec")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_max_wait_sec INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!jobColumns.has("auto_extract_account_type")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_account_type TEXT NOT NULL DEFAULT 'outlook';");
+    }
     const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
     const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!apiKeyColumns.has("extracted_ip")) {
@@ -487,10 +641,15 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_skip_reason ON microsoft_accounts(skip_reason, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_group_name ON microsoft_accounts(group_name, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_proof_mailbox ON microsoft_accounts(proof_mailbox_address, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_source ON microsoft_accounts(account_source, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_attempts_job_status ON job_attempts(job_id, status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_checks_node_checked ON proxy_checks(node_name, checked_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_job_started ON account_extract_batches(job_id, started_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_provider_started ON account_extract_batches(provider, started_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_batch_created ON account_extract_items(batch_id, created_at ASC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_email ON account_extract_items(email, created_at DESC);");
     if (signupTaskTableExists) {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_job_account ON signup_tasks(job_id, account_id, started_at DESC);");
     }
@@ -612,7 +771,12 @@ export class AppDatabase {
 
   importAccounts(
     entries: Array<{ email: string; password: string }>,
-    options?: { source?: string; groupName?: string | null },
+    options?: {
+      source?: AccountImportSource;
+      accountSource?: AccountSource;
+      groupName?: string | null;
+      rawPayloadByEmail?: Record<string, string | null | undefined>;
+    },
   ): ImportAccountsResult {
     const deduped = new Map<string, string>();
     for (const entry of entries) {
@@ -624,22 +788,26 @@ export class AppDatabase {
 
     const now = nowIso();
     const source = options?.source || "manual";
+    const accountSource = options?.accountSource || "manual";
     const normalizedGroupName = options?.groupName?.trim() ? options.groupName.trim() : null;
+    const rawPayloadByEmail = options?.rawPayloadByEmail || {};
     let created = 0;
     let updated = 0;
     const affectedIds: number[] = [];
     const selectStmt = this.db.query("SELECT * FROM microsoft_accounts WHERE microsoft_email = ?");
     const insertStmt = this.db.query(`
       INSERT INTO microsoft_accounts (
-        microsoft_email, password_plaintext, has_api_key, api_key_id, imported_at, updated_at, import_source, group_name,
+        microsoft_email, password_plaintext, has_api_key, api_key_id, imported_at, updated_at, import_source, account_source, source_raw_payload, group_name,
         last_result_status, skip_reason
-      ) VALUES (?, ?, 0, NULL, ?, ?, ?, ?, 'ready', NULL)
+      ) VALUES (?, ?, 0, NULL, ?, ?, ?, ?, ?, ?, 'ready', NULL)
     `);
     const updateStmt = this.db.query(`
       UPDATE microsoft_accounts
       SET password_plaintext = ?,
           updated_at = ?,
           import_source = ?,
+          account_source = ?,
+          source_raw_payload = ?,
           group_name = COALESCE(?, group_name),
           skip_reason = CASE WHEN has_api_key = 1 THEN 'has_api_key' ELSE NULL END,
           last_result_status = CASE
@@ -655,8 +823,9 @@ export class AppDatabase {
     try {
       for (const [email, password] of deduped.entries()) {
         const existing = selectStmt.get(email) as Record<string, unknown> | null;
+        const rawPayload = rawPayloadByEmail[email] == null ? null : String(rawPayloadByEmail[email] || "");
         if (!existing) {
-          insertStmt.run(email, password, now, now, source, normalizedGroupName);
+          insertStmt.run(email, password, now, now, source, accountSource, rawPayload, normalizedGroupName);
           const inserted = selectStmt.get(email) as Record<string, unknown> | null;
           if (inserted?.id != null) {
             affectedIds.push(Number(inserted.id));
@@ -664,7 +833,7 @@ export class AppDatabase {
           created += 1;
           continue;
         }
-        updateStmt.run(password, now, source, normalizedGroupName, Number(existing.id));
+        updateStmt.run(password, now, source, accountSource, rawPayload, normalizedGroupName, Number(existing.id));
         affectedIds.push(Number(existing.id));
         updated += 1;
       }
@@ -994,7 +1163,16 @@ export class AppDatabase {
     return uniqueIds.map((id) => byId.get(id)).filter((row): row is ApiKeyRecord => Boolean(row));
   }
 
-  createJob(input: { runMode: "headed" | "headless"; need: number; parallel: number; maxAttempts: number }): JobRecord {
+  createJob(input: {
+    runMode: "headed" | "headless";
+    need: number;
+    parallel: number;
+    maxAttempts: number;
+    autoExtractSources?: AccountExtractorProvider[];
+    autoExtractQuantity?: number;
+    autoExtractMaxWaitSec?: number;
+    autoExtractAccountType?: AccountExtractorAccountType;
+  }): JobRecord {
     const active = this.getCurrentJob();
     if (active && ["running", "paused", "completing"].includes(active.status)) {
       throw new Error(`active job exists: ${active.id}`);
@@ -1004,11 +1182,23 @@ export class AppDatabase {
       .query(`
         INSERT INTO jobs (
           status, run_mode, need, parallel, max_attempts, success_count, failure_count, skip_count, launched_count,
+          auto_extract_sources_json, auto_extract_quantity, auto_extract_max_wait_sec, auto_extract_account_type,
           started_at, paused_at, completed_at, last_error, updated_at
-        ) VALUES ('running', ?, ?, ?, ?, 0, 0, 0, 0, ?, NULL, NULL, NULL, ?)
+        ) VALUES ('running', ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
         RETURNING *
       `)
-      .get(input.runMode, input.need, input.parallel, input.maxAttempts, now, now) as Record<string, unknown>;
+      .get(
+        input.runMode,
+        input.need,
+        input.parallel,
+        input.maxAttempts,
+        JSON.stringify(input.autoExtractSources || []),
+        Math.max(0, Number(input.autoExtractQuantity || 0)),
+        Math.max(0, Number(input.autoExtractMaxWaitSec || 0)),
+        (input.autoExtractAccountType || "outlook") as AccountExtractorAccountType,
+        now,
+        now,
+      ) as Record<string, unknown>;
     return mapJobRow(result);
   }
 
@@ -1024,7 +1214,29 @@ export class AppDatabase {
     return row ? mapJobRow(row) : null;
   }
 
-  updateJobState(jobId: number, patch: Partial<Pick<JobRecord, "status" | "parallel" | "need" | "maxAttempts" | "pausedAt" | "completedAt" | "lastError" | "successCount" | "failureCount" | "skipCount" | "launchedCount">>): JobRecord {
+  updateJobState(
+    jobId: number,
+    patch: Partial<
+      Pick<
+        JobRecord,
+        | "status"
+        | "parallel"
+        | "need"
+        | "maxAttempts"
+        | "autoExtractSources"
+        | "autoExtractQuantity"
+        | "autoExtractMaxWaitSec"
+        | "autoExtractAccountType"
+        | "pausedAt"
+        | "completedAt"
+        | "lastError"
+        | "successCount"
+        | "failureCount"
+        | "skipCount"
+        | "launchedCount"
+      >
+    >,
+  ): JobRecord {
     const current = this.getJob(jobId);
     if (!current) throw new Error(`job not found: ${jobId}`);
     const next: JobRecord = {
@@ -1036,7 +1248,8 @@ export class AppDatabase {
       .query(`
         UPDATE jobs
         SET status = ?, parallel = ?, need = ?, max_attempts = ?, success_count = ?, failure_count = ?,
-            skip_count = ?, launched_count = ?, paused_at = ?, completed_at = ?, last_error = ?, updated_at = ?
+            skip_count = ?, launched_count = ?, auto_extract_sources_json = ?, auto_extract_quantity = ?, auto_extract_max_wait_sec = ?,
+            auto_extract_account_type = ?, paused_at = ?, completed_at = ?, last_error = ?, updated_at = ?
         WHERE id = ?
       `)
       .run(
@@ -1048,6 +1261,10 @@ export class AppDatabase {
         next.failureCount,
         next.skipCount,
         next.launchedCount,
+        JSON.stringify(next.autoExtractSources),
+        next.autoExtractQuantity,
+        next.autoExtractMaxWaitSec,
+        next.autoExtractAccountType,
         next.pausedAt,
         next.completedAt,
         next.lastError,
@@ -1117,6 +1334,19 @@ export class AppDatabase {
     return row ? mapAccountRow(row) : null;
   }
 
+  isAccountSchedulableForJob(jobId: number, accountId: number): boolean {
+    const account = this.getAccount(accountId);
+    if (!account) return false;
+    if (account.disabledAt != null) return false;
+    if (account.hasApiKey) return false;
+    if ((account.skipReason || "") === "has_api_key") return false;
+    if (account.leaseJobId != null) return false;
+    const attempted = this.db
+      .query("SELECT 1 AS ok FROM job_attempts WHERE job_id = ? AND account_id = ? LIMIT 1")
+      .get(jobId, accountId) as { ok?: number } | null;
+    return !Boolean(attempted?.ok);
+  }
+
   createAttempt(jobId: number, accountId: number, outputDir: string): JobAttemptRecord {
     const now = nowIso();
     const row = this.db
@@ -1178,6 +1408,193 @@ export class AppDatabase {
       .query(`SELECT * FROM job_attempts WHERE job_id = ? ${where} ORDER BY started_at DESC`)
       .all(jobId) as Record<string, unknown>[];
     return rows.map(mapAttemptRow);
+  }
+
+  createAccountExtractBatch(input: {
+    jobId?: number | null;
+    provider: AccountExtractorProvider;
+    accountType?: AccountExtractorAccountType;
+    requestedUsableCount: number;
+    attemptBudget: number;
+    acceptedCount?: number;
+    status: AccountExtractBatchStatus;
+    errorMessage?: string | null;
+    rawResponse?: string | null;
+    maskedKey?: string | null;
+    startedAt?: string;
+    completedAt?: string | null;
+  }): AccountExtractBatchRecord {
+    const row = this.db
+      .query(`
+        INSERT INTO account_extract_batches (
+          job_id, provider, account_type, requested_usable_count, attempt_budget, accepted_count, status,
+          error_message, raw_response, masked_key, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING *
+      `)
+      .get(
+        input.jobId ?? null,
+        input.provider,
+        input.accountType || "outlook",
+        Math.max(0, input.requestedUsableCount),
+        Math.max(0, input.attemptBudget),
+        Math.max(0, input.acceptedCount || 0),
+        input.status,
+        input.errorMessage ?? null,
+        input.rawResponse ?? null,
+        input.maskedKey ?? null,
+        input.startedAt || nowIso(),
+        input.completedAt ?? null,
+      ) as Record<string, unknown>;
+    return mapAccountExtractBatchRow(row);
+  }
+
+  updateAccountExtractBatch(
+    batchId: number,
+    patch: Partial<Pick<AccountExtractBatchRecord, "acceptedCount" | "status" | "errorMessage" | "rawResponse" | "maskedKey" | "completedAt">>,
+  ): AccountExtractBatchRecord {
+    const current = this.db.query("SELECT * FROM account_extract_batches WHERE id = ?").get(batchId) as Record<string, unknown> | null;
+    if (!current) {
+      throw new Error(`account extract batch not found: ${batchId}`);
+    }
+    const next = {
+      ...mapAccountExtractBatchRow(current),
+      ...patch,
+    };
+    this.db
+      .query(`
+        UPDATE account_extract_batches
+        SET accepted_count = ?,
+            status = ?,
+            error_message = ?,
+            raw_response = ?,
+            masked_key = ?,
+            completed_at = ?
+        WHERE id = ?
+      `)
+      .run(next.acceptedCount, next.status, next.errorMessage, next.rawResponse, next.maskedKey, next.completedAt, batchId);
+    return mapAccountExtractBatchRow(this.db.query("SELECT * FROM account_extract_batches WHERE id = ?").get(batchId) as Record<string, unknown>);
+  }
+
+  createAccountExtractItem(input: {
+    batchId: number;
+    provider: AccountExtractorProvider;
+    rawPayload: string;
+    email?: string | null;
+    password?: string | null;
+    parseStatus: AccountExtractItemParseStatus;
+    acceptStatus: AccountExtractItemAcceptStatus;
+    rejectReason?: string | null;
+    importedAccountId?: number | null;
+    createdAt?: string;
+  }): AccountExtractItemRecord {
+    const row = this.db
+      .query(`
+        INSERT INTO account_extract_items (
+          batch_id, provider, raw_payload, email, password, parse_status, accept_status, reject_reason, imported_account_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING *
+      `)
+      .get(
+        input.batchId,
+        input.provider,
+        input.rawPayload,
+        input.email ?? null,
+        input.password ?? null,
+        input.parseStatus,
+        input.acceptStatus,
+        input.rejectReason ?? null,
+        input.importedAccountId ?? null,
+        input.createdAt || nowIso(),
+      ) as Record<string, unknown>;
+    return mapAccountExtractItemRow(row);
+  }
+
+  listAccountExtractHistory(filters: {
+    provider?: AccountExtractorProvider;
+    status?: string;
+    q?: string;
+    page?: number;
+    pageSize?: number;
+  }): {
+    rows: Array<AccountExtractBatchRecord & { items: AccountExtractItemRecord[] }>;
+    total: number;
+    page: number;
+    pageSize: number;
+  } {
+    const page = Math.max(1, filters.page || 1);
+    const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filters.provider) {
+      where.push("b.provider = ?");
+      params.push(filters.provider);
+    }
+    if (filters.status?.trim()) {
+      where.push("b.status = ?");
+      params.push(filters.status.trim());
+    }
+    if (filters.q?.trim()) {
+      const pattern = `%${filters.q.trim().toLowerCase()}%`;
+      where.push(`
+        EXISTS (
+          SELECT 1
+          FROM account_extract_items i
+          WHERE i.batch_id = b.id
+            AND (
+              LOWER(COALESCE(i.email, '')) LIKE ?
+              OR LOWER(COALESCE(i.raw_payload, '')) LIKE ?
+              OR LOWER(COALESCE(i.reject_reason, '')) LIKE ?
+            )
+        )
+      `);
+      params.push(pattern, pattern, pattern);
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const total = Number(
+      (
+        this.db
+          .query(`SELECT COUNT(*) AS count FROM account_extract_batches b ${whereSql}`)
+          .get(...(params as any[])) as { count?: number } | null
+      )?.count || 0,
+    );
+    const batchRows = this.db
+      .query(`
+        SELECT b.*
+        FROM account_extract_batches b
+        ${whereSql}
+        ORDER BY b.started_at DESC, b.id DESC
+        LIMIT ? OFFSET ?
+      `)
+      .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
+    const batches = batchRows.map(mapAccountExtractBatchRow);
+    if (batches.length === 0) {
+      return { rows: [], total, page, pageSize };
+    }
+    const placeholders = batches.map(() => "?").join(", ");
+    const itemRows = this.db
+      .query(`
+        SELECT *
+        FROM account_extract_items
+        WHERE batch_id IN (${placeholders})
+        ORDER BY created_at ASC, id ASC
+      `)
+      .all(...batches.map((row) => row.id)) as Record<string, unknown>[];
+    const itemsByBatch = new Map<number, AccountExtractItemRecord[]>();
+    for (const row of itemRows.map(mapAccountExtractItemRow)) {
+      const current = itemsByBatch.get(row.batchId) || [];
+      current.push(row);
+      itemsByBatch.set(row.batchId, current);
+    }
+    return {
+      rows: batches.map((batch) => ({
+        ...batch,
+        items: itemsByBatch.get(batch.id) || [],
+      })),
+      total,
+      page,
+      pageSize,
+    };
   }
 
   getLatestSignupTask(jobId: number, accountId: number): Record<string, unknown> | null {

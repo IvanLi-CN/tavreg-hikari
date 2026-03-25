@@ -2,6 +2,14 @@ import type { AppSettings } from "../storage/app-db.js";
 
 export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSettings> {
   const next: Partial<AppSettings> = {};
+  const normalizeSources = (value: unknown): AppSettings["defaultAutoExtractSources"] => {
+    if (!Array.isArray(value)) return [];
+    return Array.from(
+      new Set(
+        value.filter((item): item is "zhanghaoya" | "shanyouxiang" => item === "zhanghaoya" || item === "shanyouxiang"),
+      ),
+    );
+  };
   if (typeof input.subscriptionUrl === "string") next.subscriptionUrl = input.subscriptionUrl.trim();
   if (typeof input.groupName === "string") next.groupName = input.groupName.trim();
   if (typeof input.routeGroupName === "string") next.routeGroupName = input.routeGroupName.trim();
@@ -16,6 +24,16 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   if (typeof input.defaultNeed === "number" && Number.isFinite(input.defaultNeed)) next.defaultNeed = Math.max(1, input.defaultNeed);
   if (typeof input.defaultParallel === "number" && Number.isFinite(input.defaultParallel)) next.defaultParallel = Math.max(1, input.defaultParallel);
   if (typeof input.defaultMaxAttempts === "number" && Number.isFinite(input.defaultMaxAttempts)) next.defaultMaxAttempts = Math.max(1, input.defaultMaxAttempts);
+  if (typeof input.extractorZhanghaoyaKey === "string") next.extractorZhanghaoyaKey = input.extractorZhanghaoyaKey.trim();
+  if (typeof input.extractorShanyouxiangKey === "string") next.extractorShanyouxiangKey = input.extractorShanyouxiangKey.trim();
+  if (Array.isArray(input.defaultAutoExtractSources)) next.defaultAutoExtractSources = normalizeSources(input.defaultAutoExtractSources);
+  if (typeof input.defaultAutoExtractQuantity === "number" && Number.isFinite(input.defaultAutoExtractQuantity)) {
+    next.defaultAutoExtractQuantity = Math.max(1, input.defaultAutoExtractQuantity);
+  }
+  if (typeof input.defaultAutoExtractMaxWaitSec === "number" && Number.isFinite(input.defaultAutoExtractMaxWaitSec)) {
+    next.defaultAutoExtractMaxWaitSec = Math.max(1, input.defaultAutoExtractMaxWaitSec);
+  }
+  if (input.defaultAutoExtractAccountType === "outlook") next.defaultAutoExtractAccountType = input.defaultAutoExtractAccountType;
   return next;
 }
 
