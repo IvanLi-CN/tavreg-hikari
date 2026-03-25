@@ -30,3 +30,9 @@ test("scheduled workers defer successful account finalization to the scheduler e
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
 });
+
+test("proof-add handler only provisions mailboxes on the actual add route", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute })");
+  expect(source).toContain("if (!onAddRoute && !emailSelector) {");
+});
