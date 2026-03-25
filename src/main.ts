@@ -2711,10 +2711,12 @@ async function syncLinkedMicrosoftAccountOutcome(
   cfg: AppConfig,
   outcome: { status: "succeeded"; apiKey: string } | { status: "failed"; errorCode?: string | null },
 ): Promise<void> {
+  const envJobId = Number.parseInt((process.env.TASK_LEDGER_JOB_ID || "").trim(), 10);
   const envAccountId = Number.parseInt((process.env.TASK_LEDGER_ACCOUNT_ID || "").trim(), 10);
   if (!Number.isInteger(envAccountId) || envAccountId < 1) {
     return;
   }
+  const preserveLease = Number.isInteger(envJobId) && envJobId > 0 && outcome.status === "failed";
   const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
   const db = new AppDatabase(dbPath);
   try {
@@ -2725,10 +2727,14 @@ async function syncLinkedMicrosoftAccountOutcome(
     }
     const unavailableReason = deriveLinkedMicrosoftUnavailableReason(outcome.errorCode ?? null);
     if (unavailableReason) {
-      db.markAccountUnavailable(envAccountId, unavailableReason, outcome.errorCode ?? null);
+      db.markAccountUnavailable(envAccountId, unavailableReason, outcome.errorCode ?? null, {
+        releaseLease: !preserveLease,
+      });
       return;
     }
-    db.markAccountDirectFailure(envAccountId, outcome.errorCode ?? null);
+    db.markAccountDirectFailure(envAccountId, outcome.errorCode ?? null, {
+      releaseLease: !preserveLease,
+    });
   } finally {
     db.close();
   }
@@ -11127,17 +11133,12 @@ async function runSingleMode(
       }
     }
     if (!browserObservedIp) {
-      const cachedProxyIp = normalizeIp(selectedProxy.geo?.ip);
-      if (cachedProxyIp) {
-        browserObservedIp = cachedProxyIp;
-        notes.push(`browser ip probe unresolved, using cached proxy ip ${cachedProxyIp}`);
-        log(`browser ip probe unresolved, using cached proxy ip ${cachedProxyIp}`);
-      } else {
-        notes.push(`browser ip probe unresolved, continuing without observed ip (${browserIpProbe.error || browserIpProbe.url})`);
-        log(`browser ip probe unresolved, continuing without observed ip (${browserIpProbe.error || browserIpProbe.url})`);
-      }
+      const probeReason = browserIpProbe.error || browserIpProbe.url || selectedProxy.name;
+      notes.push(`browser ip probe unresolved: ${probeReason}`);
+      log(`browser ip probe unresolved: ${probeReason}`);
+      throw new Error(`browser_proxy_ip_missing:${probeReason}`);
     }
-    const browserProxyIdentity = browserObservedIp || `node:${selectedProxy.name}`;
+    const browserProxyIdentity = browserObservedIp;
     if (browserObservedIp) {
       const localDirectIp = await resolveLocalEgressIp(8_000);
       if (localDirectIp && sameIp(localDirectIp, browserObservedIp)) {

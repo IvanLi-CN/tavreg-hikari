@@ -39,10 +39,17 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
 }
 
 function resolveWorkerRuntime(): { command: string; bootstrapArgs: string[] } {
+  const explicitNodeBinary = process.env.NODE_BINARY?.trim();
+  if (process.versions.bun && !explicitNodeBinary) {
+    return {
+      command: process.execPath,
+      bootstrapArgs: ["run", "src/main.ts"],
+    };
+  }
   return {
-    // Keep worker attempts on Node.js so native Chrome CDP stays reliable even when
-    // the web admin itself is hosted by Bun.
-    command: process.versions.bun ? process.env.NODE_BINARY || "node" : process.execPath || "node",
+    // Prefer Node.js when it is explicitly configured, but keep the Bun-hosted
+    // scheduler deployable on environments that only ship Bun.
+    command: explicitNodeBinary || process.execPath || "node",
     bootstrapArgs: ["--import", "tsx", "src/main.ts"],
   };
 }

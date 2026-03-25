@@ -870,8 +870,14 @@ export class AppDatabase {
     return this.getAccount(accountId)!;
   }
 
-  markAccountUnavailable(accountId: number, reason: string, errorCode?: string | null): void {
+  markAccountUnavailable(
+    accountId: number,
+    reason: string,
+    errorCode?: string | null,
+    options?: { releaseLease?: boolean },
+  ): void {
     const now = nowIso();
+    const releaseLease = options?.releaseLease !== false;
     this.db
       .query(`
         UPDATE microsoft_accounts
@@ -880,9 +886,13 @@ export class AppDatabase {
             last_result_status = 'disabled',
             last_result_at = ?,
             last_error_code = COALESCE(?, last_error_code),
-            updated_at = ?,
+            updated_at = ?${
+              releaseLease
+                ? `,
             lease_job_id = NULL,
-            lease_started_at = NULL
+            lease_started_at = NULL`
+                : ""
+            }
         WHERE id = ?
       `)
       .run(now, reason.trim(), now, errorCode ?? null, now, accountId);
@@ -1316,17 +1326,22 @@ export class AppDatabase {
       .run(now, now, accountId);
   }
 
-  markAccountDirectFailure(accountId: number, errorCode?: string | null): void {
+  markAccountDirectFailure(accountId: number, errorCode?: string | null, options?: { releaseLease?: boolean }): void {
     const now = nowIso();
+    const releaseLease = options?.releaseLease !== false;
     this.db
       .query(`
         UPDATE microsoft_accounts
         SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
             last_result_at = ?,
             last_error_code = ?,
-            updated_at = ?,
+            updated_at = ?${
+              releaseLease
+                ? `,
             lease_job_id = NULL,
-            lease_started_at = NULL
+            lease_started_at = NULL`
+                : ""
+            }
         WHERE id = ?
       `)
       .run(now, errorCode ?? null, now, accountId);
