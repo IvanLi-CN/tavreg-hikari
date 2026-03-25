@@ -28,6 +28,7 @@ import type {
   AccountsPayload,
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -53,6 +54,15 @@ function ExtractHistoryStatusBadge({ status }: { status: string }) {
   if (status === "insufficient_stock") return <Badge variant="warning">insufficient_stock</Badge>;
   if (status === "parse_failed") return <Badge variant="danger">parse_failed</Badge>;
   return <Badge variant="neutral">{status}</Badge>;
+}
+
+function ExtractHistoryItemField(props: { label: string; value: ReactNode; className?: string; valueClassName?: string }) {
+  return (
+    <div className={cn("min-w-0 space-y-1", props.className)}>
+      <div className="text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">{props.label}</div>
+      <div className={cn("break-all text-sm text-slate-100", props.valueClassName)}>{props.value}</div>
+    </div>
+  );
 }
 
 export function AccountsView({
@@ -824,16 +834,16 @@ export function AccountsView({
               </div>
 
               <ScrollArea className="max-h-[56vh] min-w-0 rounded-[24px] border border-white/8 bg-[#08111d]/88">
-                <div className="min-w-0 space-y-4 p-4">
+                <div className="min-w-0 space-y-4 p-4 pr-6">
                   {extractorHistory.rows.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-slate-500">
                       当前筛选下还没有本地提取记录。
                     </div>
                   ) : (
                     extractorHistory.rows.map((batch) => (
-                      <article key={batch.id} className="min-w-0 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
-                        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
+                      <article key={batch.id} className="min-w-0 overflow-hidden rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+                        <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                          <div className="min-w-0 flex-1">
                             <div className="text-sm font-medium text-white">
                               #{batch.id} · {batch.provider} · {batch.accountType}
                             </div>
@@ -842,9 +852,11 @@ export function AccountsView({
                               raw {batch.attemptBudget} · {formatDate(batch.startedAt)}
                             </div>
                           </div>
-                          <div className="flex shrink-0 flex-wrap gap-2">
+                          <div className="flex min-w-0 flex-wrap gap-2 lg:max-w-[18rem] lg:justify-end">
                             <ExtractHistoryStatusBadge status={batch.status} />
-                            <Badge variant="neutral">{batch.maskedKey || "no-key"}</Badge>
+                            <Badge variant="neutral" className="max-w-full break-all text-left normal-case tracking-[0.08em]">
+                              {batch.maskedKey || "no-key"}
+                            </Badge>
                           </div>
                         </div>
                         {batch.errorMessage ? (
@@ -853,43 +865,30 @@ export function AccountsView({
                           </div>
                         ) : null}
                         {batch.rawResponse ? (
-                          <pre className="mt-3 max-h-32 min-w-0 overflow-auto rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
+                          <pre className="mt-3 max-h-32 min-w-0 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
                             {batch.rawResponse}
                           </pre>
                         ) : null}
-                        <div className="mt-3 min-w-0 overflow-x-auto">
-                          <Table className="min-w-[760px]">
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>邮箱</TableHead>
-                                <TableHead>密码</TableHead>
-                                <TableHead>Parse</TableHead>
-                                <TableHead>Accept</TableHead>
-                                <TableHead>Reject Reason</TableHead>
-                                <TableHead>Raw Payload</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {batch.items.length === 0 ? (
-                                <TableRow>
-                                  <TableCell colSpan={6} className="text-center text-sm text-slate-500">
-                                    本批次没有可展示的明细行。
-                                  </TableCell>
-                                </TableRow>
-                              ) : (
-                                batch.items.map((item) => (
-                                  <TableRow key={item.id}>
-                                    <TableCell className="min-w-[14rem] break-all">{item.email || "—"}</TableCell>
-                                    <TableCell className="font-mono text-sm text-slate-300">{item.password || "—"}</TableCell>
-                                    <TableCell>{item.parseStatus}</TableCell>
-                                    <TableCell>{item.acceptStatus}</TableCell>
-                                    <TableCell className="min-w-[12rem]">{item.rejectReason || "—"}</TableCell>
-                                    <TableCell className="min-w-[18rem] break-all text-slate-400">{item.rawPayload}</TableCell>
-                                  </TableRow>
-                                ))
-                              )}
-                            </TableBody>
-                          </Table>
+                        <div className="mt-3 grid min-w-0 gap-3">
+                          {batch.items.length === 0 ? (
+                            <div className="rounded-2xl border border-dashed border-white/10 px-4 py-6 text-center text-sm text-slate-500">
+                              本批次没有可展示的明细行。
+                            </div>
+                          ) : (
+                            batch.items.map((item) => (
+                              <div
+                                key={item.id}
+                                className="grid min-w-0 gap-3 rounded-2xl border border-white/8 bg-[#0d1728]/55 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.72fr)_minmax(0,0.56fr)_minmax(0,0.62fr)_minmax(0,0.88fr)_minmax(0,1.12fr)]"
+                              >
+                                <ExtractHistoryItemField label="邮箱" value={item.email || "—"} />
+                                <ExtractHistoryItemField label="密码" value={item.password || "—"} valueClassName="font-mono text-slate-300" />
+                                <ExtractHistoryItemField label="Parse" value={item.parseStatus} />
+                                <ExtractHistoryItemField label="Accept" value={item.acceptStatus} />
+                                <ExtractHistoryItemField label="Reject Reason" value={item.rejectReason || "—"} />
+                                <ExtractHistoryItemField label="Raw Payload" value={item.rawPayload} valueClassName="text-slate-400" />
+                              </div>
+                            ))
+                          )}
                         </div>
                       </article>
                     ))
