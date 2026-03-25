@@ -5311,8 +5311,8 @@ async function handleMicrosoftProofVerifyPrompt(
     const titleText = normalize(document.title || "");
     const codeInput = document.querySelector('#iOttText, input[name="iOttText"], input[aria-label*="code" i], input[placeholder*="code" i]');
     const emailCompletionInput = document.querySelector('#iProofEmail');
-    let target = optionStates.find((option) => normalize(option.value).includes(normalizedAddress)) || null;
-    if (!target) {
+    let target = normalizedAddress ? optionStates.find((option) => normalize(option.value).includes(normalizedAddress)) || null : null;
+    if (!target && normalizedAddress) {
       target = optionStates.find((option) => normalize(option.label).includes(normalizedAddress)) || null;
     }
     let matchedVisibleLocal = "";
@@ -5357,7 +5357,7 @@ async function handleMicrosoftProofVerifyPrompt(
       targetValue: target?.value || "",
       targetLabel: target?.label || "",
       hintedMaskedEmail,
-      emailCompletionValue: localPart || missingEmailPart,
+      emailCompletionValue: missingEmailPart || localPart,
       missingEmailPart,
       hasEmailCompletionInput: !!emailCompletionInput,
     };
