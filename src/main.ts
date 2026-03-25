@@ -5156,35 +5156,35 @@ async function handleMicrosoftProofAddPrompt(
   proofState: MicrosoftProofFlowState,
 ): Promise<boolean> {
   const onAddRoute = /account\.live\.com\/proofs\/Add/i.test(page.url());
-  const hasAddForm =
-    (await hasVisibleElement(page, "#iProofOptions").catch(() => false)) ||
-    (await hasVisibleElement(page, "#EmailAddress").catch(() => false)) ||
-    (await hasVisibleElement(page, 'input[name="EmailAddress"]').catch(() => false));
-  if (!onAddRoute && !hasAddForm) {
+  const hasProofOptionSelector = await hasVisibleElement(page, "#iProofOptions").catch(() => false);
+  let emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
+  if (!onAddRoute && !emailSelector) {
     return false;
   }
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
-  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute }));
   proofState.mailbox = proofMailbox;
 
-  await page
-    .evaluate(() => {
-      const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
-      if (!select) return;
-      if (select.value !== "Email") {
-        select.value = "Email";
-        select.dispatchEvent(new Event("input", { bubbles: true }));
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      }
-    })
-    .catch(() => {});
-  await page.waitForTimeout(250);
+  if (onAddRoute && hasProofOptionSelector) {
+    await page
+      .evaluate(() => {
+        const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
+        if (!select) return;
+        if (select.value !== "Email") {
+          select.value = "Email";
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      })
+      .catch(() => {});
+    await page.waitForTimeout(250);
+    emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
+  }
 
-  const emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
   if (!emailSelector) {
-    return true;
+    return false;
   }
 
   await clearAuthFieldValidationState(page, emailSelector);
