@@ -38,8 +38,8 @@ function openSqliteDatabase(dbPath: string): SqliteDatabase {
     };
   }
 
-  const { DatabaseSync } = require("node:sqlite") as typeof import("node:sqlite");
-  const db = new DatabaseSync(dbPath);
+  const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+  const db = new Database(dbPath);
   return {
     exec: (sql: string) => db.exec(sql),
     query: (sql: string) => {

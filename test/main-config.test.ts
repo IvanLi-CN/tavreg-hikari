@@ -21,9 +21,15 @@ test("CLI rejects MAIL_PROVIDER=moemail because MoeMail is proof-only", () => {
 });
 
 test("CLI defers AppDatabase loading until proof sync needs it", async () => {
-  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).not.toContain('from "./storage/app-db.js"');
-  expect(source).toContain('await import("./storage/app-db.js")');
+  const mainSource = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const appDbSource = await readFile(path.join(repoRoot, "src/storage/app-db.ts"), "utf8");
+  const taskLedgerSource = await readFile(path.join(repoRoot, "src/storage/task-ledger.ts"), "utf8");
+  expect(mainSource).not.toContain('from "./storage/app-db.js"');
+  expect(mainSource).toContain('await import("./storage/app-db.js")');
+  expect(appDbSource).toContain('require("better-sqlite3")');
+  expect(appDbSource).not.toContain('require("node:sqlite")');
+  expect(taskLedgerSource).toContain('await import("better-sqlite3")');
+  expect(taskLedgerSource).not.toContain('await import("node:sqlite")');
 });
 
 test("scheduled workers defer successful account finalization to the scheduler exit path", async () => {

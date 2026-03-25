@@ -35,10 +35,10 @@ async function openSqliteDatabase(dbPath: string, create: boolean): Promise<Sqli
     };
   }
 
-  const { DatabaseSync } = await import("node:sqlite");
-  const db = new DatabaseSync(dbPath, {
-    open: true,
-    readOnly: !create,
+  const { default: Database } = await import("better-sqlite3");
+  const db = new Database(dbPath, {
+    fileMustExist: !create,
+    readonly: !create,
   });
   return {
     exec: (sql: string) => db.exec(sql),
