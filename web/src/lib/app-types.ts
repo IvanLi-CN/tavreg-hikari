@@ -33,6 +33,7 @@ export type AccountsPayload = {
     ready: number;
     linked: number;
     failed: number;
+    disabled: number;
   };
   groups: string[];
 };

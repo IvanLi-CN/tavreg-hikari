@@ -72,7 +72,7 @@ export function App() {
     total: 0,
     page: 1,
     pageSize: 20,
-    summary: { ready: 0, linked: 0, failed: 0 },
+    summary: { ready: 0, linked: 0, failed: 0, disabled: 0 },
     groups: [],
   });
   const [apiKeys, setApiKeys] = useState<ApiKeysPayload>({

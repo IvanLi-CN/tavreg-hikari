@@ -1,6 +1,12 @@
 import { config as loadDotenv } from "dotenv";
 import path from "node:path";
 import process from "node:process";
+import {
+  normalizeMoeMailBaseUrl,
+  provisionMoeMailMailbox,
+  resolveMoeMailMailboxId,
+  type MoeMailHttpJson,
+} from "../moemail-openapi.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
@@ -42,6 +48,91 @@ function json(data: unknown, init?: ResponseInit): Response {
 
 function badRequest(message: string, status = 400): Response {
   return json({ error: message }, { status });
+}
+
+function parseBody(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+const serverHttpJson: MoeMailHttpJson = async (method, url, options) => {
+  const headers: Record<string, string> = { ...(options?.headers || {}) };
+  let body: string | undefined;
+  if (typeof options?.body === "string") {
+    body = options.body;
+  } else if (options?.body !== undefined) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    body = JSON.stringify(options.body);
+  }
+  const resp = await fetch(url, {
+    method,
+    headers,
+    body,
+  });
+  const text = await resp.text();
+  const parsed = parseBody(text);
+  if (!resp.ok) {
+    throw new Error(`http_failed:${resp.status}:${typeof parsed === "string" ? parsed : JSON.stringify(parsed)}`);
+  }
+  return parsed as never;
+};
+
+function splitEmailAddress(email: string): { local: string; domain: string } | null {
+  const normalized = email.trim().toLowerCase();
+  const atIndex = normalized.indexOf("@");
+  if (atIndex <= 0 || atIndex === normalized.length - 1) {
+    return null;
+  }
+  return {
+    local: normalized.slice(0, atIndex),
+    domain: normalized.slice(atIndex + 1),
+  };
+}
+
+async function ensureSavedProofMailbox(input: {
+  address: string;
+  mailboxId?: string | null;
+}): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
+  const address = input.address.trim().toLowerCase();
+  const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error("moemail_api_key_missing");
+  }
+  const baseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
+  let mailboxId = (await resolveMoeMailMailboxId({
+    baseUrl,
+    apiKey,
+    address,
+    httpJson: serverHttpJson,
+  })) || "";
+  if (!mailboxId) {
+    const parts = splitEmailAddress(address);
+    if (!parts) {
+      throw new Error("invalid proof mailbox address");
+    }
+    const provisioned = await provisionMoeMailMailbox({
+      baseUrl,
+      apiKey,
+      httpJson: serverHttpJson,
+      name: parts.local,
+      domain: parts.domain,
+      expiryTime: 0,
+    });
+    if (provisioned.address.trim().toLowerCase() !== address) {
+      throw new Error(`moemail_mailbox_not_found:${address}`);
+    }
+    mailboxId = provisioned.id;
+  }
+  return {
+    provider: "moemail",
+    address,
+    mailboxId,
+  };
 }
 
 function parseBool(value: string | null): boolean | undefined {
@@ -396,10 +487,25 @@ async function main(): Promise<void> {
         }
         try {
           if (rawProvider !== undefined || proofMailboxAddress !== undefined || proofMailboxId !== undefined) {
+            const nextProofMailbox: {
+              provider?: "moemail" | null;
+              address?: string | null;
+              mailboxId?: string | null;
+            } =
+              proofMailboxAddress == null
+                ? {
+                    provider: rawProvider === "moemail" ? "moemail" : rawProvider === null ? null : undefined,
+                    address: proofMailboxAddress,
+                    mailboxId: proofMailboxId,
+                  }
+                : await ensureSavedProofMailbox({
+                    address: proofMailboxAddress,
+                    mailboxId: proofMailboxId,
+                  });
             db.updateAccountProofMailbox(accountId, {
-              provider: rawProvider === undefined ? undefined : rawProvider,
-              address: proofMailboxAddress,
-              mailboxId: proofMailboxId,
+              provider: nextProofMailbox.provider,
+              address: nextProofMailbox.address,
+              mailboxId: nextProofMailbox.mailboxId,
             });
           }
           if (disabled !== undefined || disabledReason !== undefined) {

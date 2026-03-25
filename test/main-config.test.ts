@@ -37,3 +37,11 @@ test("proof-add handler only provisions mailboxes on the actual add route", asyn
   expect(source).toContain("if (!onAddRoute && !emailSelector) {");
   expect(source).toContain("if (!emailSelector) {\n    return false;\n  }\n\n  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession");
 });
+
+test("accounts workflow exposes disabled rows and validates proof mailbox saves", async () => {
+  const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const accountsViewSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
+  expect(serverSource).toContain("await ensureSavedProofMailbox");
+  expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
+  expect(accountsViewSource).toContain("disabled · {disabledCount}");
+});

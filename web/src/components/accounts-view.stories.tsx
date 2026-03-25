@@ -194,6 +194,7 @@ export const Empty: Story = {
           ready: 0,
           linked: 0,
           failed: 0,
+          disabled: 0,
         },
         groups: [],
       }}
