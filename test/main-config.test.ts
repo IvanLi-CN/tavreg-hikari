@@ -46,3 +46,11 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });
+
+test("last-attempt headed failures honor the resolved keep-browser flag without rechecking env", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;");
+  expect(source).toContain(
+    "const preserveBrowserOnFailure = mode === \"headed\" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;",
+  );
+});

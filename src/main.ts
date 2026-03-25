@@ -10470,8 +10470,7 @@ async function runSingleMode(
     if (mode !== "headed") return;
 
     const keepOnExit = toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false);
-    const keepOnFailure =
-      Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure && toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false);
+    const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
     if (!keepOnExit && !keepOnFailure) return;
 
     const holdUrl = page ? page.url() : "unknown";
@@ -11564,11 +11563,7 @@ async function runSingleMode(
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     stopTaskWatchers();
-    const preserveBrowserOnFailure =
-      mode === "headed" &&
-      Boolean(localErrorMessage) &&
-      ctx.keepBrowserOpenOnFailure &&
-      toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false);
+    const preserveBrowserOnFailure = mode === "headed" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
     await waitForBrowserInspection();
     if (!preserveBrowserOnFailure && context && !useNativeChrome) {
       await awaitCleanupBestEffort(context.close(), 5_000);
