@@ -478,7 +478,7 @@ function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
 function parseMailProvider(raw: string | undefined): MailProvider | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
-  if (value === "duckmail" || value === "gptmail" || value === "vmail") return value;
+  if (value === "duckmail" || value === "gptmail" || value === "vmail" || value === "moemail") return value;
   return null;
 }
 
@@ -1465,6 +1465,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/moemail_api_key_missing/i.test(message)) return "moemail_api_key_missing";
   if (/moemail_mailbox_not_found/i.test(message)) return "moemail_mailbox_not_found";
   if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
+  if (/microsoft_password_fallback_unavailable/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_account_locked/i.test(message)) return "microsoft_account_locked";
   if (/microsoft_auth_try_again_later/i.test(message)) return "microsoft_auth_try_again_later";
   if (/microsoft_password_rate_limited/i.test(message)) return "microsoft_password_rate_limited";
@@ -1718,8 +1719,8 @@ function extractPublicIpList(text: string): string[] {
 
 async function collectIpProbeSnapshot(page: any, target: IpProbeTarget, waitMs = 6500): Promise<IpProbeSnapshot> {
   const expectedHost = new URL(target.url).hostname.toLowerCase();
-  const navigationTimeout = Math.max(4_000, Math.min(8_000, waitMs + 2_000));
-  const loadStateTimeout = Math.max(4_000, Math.min(10_000, waitMs + 3_000));
+  const navigationTimeout = Math.max(6_000, Math.min(15_000, waitMs + 8_500));
+  const loadStateTimeout = Math.max(10_000, Math.min(60_000, waitMs + 54_500));
   await safeGoto(page, target.url, navigationTimeout);
   await page.waitForLoadState("domcontentloaded", { timeout: loadStateTimeout });
   await page.waitForTimeout(waitMs);
