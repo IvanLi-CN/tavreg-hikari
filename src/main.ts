@@ -2718,7 +2718,11 @@ async function syncLinkedMicrosoftAccountOutcome(
   if (!Number.isInteger(envAccountId) || envAccountId < 1) {
     return;
   }
-  const preserveLease = Number.isInteger(envJobId) && envJobId > 0 && outcome.status === "failed";
+  const isScheduledWorker = Number.isInteger(envJobId) && envJobId > 0;
+  if (isScheduledWorker && outcome.status === "succeeded") {
+    return;
+  }
+  const preserveLease = isScheduledWorker && outcome.status === "failed";
   const { AppDatabase } = await import("./storage/app-db.js");
   const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
   const db = new AppDatabase(dbPath);

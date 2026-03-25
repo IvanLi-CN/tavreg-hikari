@@ -1446,6 +1446,7 @@ export class AppDatabase {
     const normalizedNodes = [...new Set(nodes.map((name) => name.trim()).filter(Boolean))];
     const normalizedSelectedName =
       typeof selectedName === "string" && normalizedNodes.includes(selectedName.trim()) ? selectedName.trim() : null;
+    const pinnedProxyName = this.getPinnedProxyName();
     const stmt = this.db.query(`
       INSERT INTO proxy_nodes (node_name, is_selected, last_selected_at)
       VALUES (?, ?, ?)
@@ -1464,6 +1465,9 @@ export class AppDatabase {
       this.db.query("UPDATE proxy_nodes SET is_selected = 0").run();
       for (const name of normalizedNodes) {
         stmt.run(name, name === normalizedSelectedName ? 1 : 0, name === normalizedSelectedName ? now : null);
+      }
+      if (pinnedProxyName && !normalizedNodes.includes(pinnedProxyName)) {
+        this.db.query("DELETE FROM app_settings WHERE key = ?").run(PINNED_PROXY_NODE_SETTING_KEY);
       }
       this.db.exec("COMMIT;");
     } catch (error) {
@@ -1561,5 +1565,12 @@ export class AppDatabase {
       .query("SELECT node_name FROM proxy_nodes WHERE is_selected = 1 ORDER BY last_selected_at DESC LIMIT 1")
       .get() as { node_name?: string } | null;
     return row?.node_name || null;
+  }
+
+  hasProxyNode(nodeName: string): boolean {
+    const normalized = nodeName.trim();
+    if (!normalized) return false;
+    const row = this.db.query("SELECT 1 AS present FROM proxy_nodes WHERE node_name = ? LIMIT 1").get(normalized) as { present?: number } | null;
+    return row?.present === 1;
   }
 }

@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
-import { JobScheduler, buildAttemptRuntimeSpec } from "../src/server/scheduler.ts";
+import { JobScheduler, buildAttemptRuntimeSpec, resolveAttemptProxyNode } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -367,6 +367,20 @@ describe("AppDatabase account import", () => {
     });
 
     reopened.close();
+  });
+
+  test("clears stale pinned proxy names when inventory drops them", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["JP1", "US1"], "JP1");
+    appDb.setPinnedProxyName("JP1");
+
+    expect(appDb.getPinnedProxyName()).toBe("JP1");
+
+    appDb.upsertProxyInventory(["US1"], "US1");
+
+    expect(appDb.getPinnedProxyName()).toBeNull();
+
+    appDb.close();
   });
 });
 
@@ -913,5 +927,20 @@ describe("scheduler runtime spec", () => {
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
+  });
+
+  test("only forwards pinned proxy nodes that still exist in inventory", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+
+    appDb.setPinnedProxyName("Tokyo-01");
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
+
+    appDb.upsertProxyInventory(["Tokyo-02"], "Tokyo-02");
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+
+    appDb.close();
   });
 });
