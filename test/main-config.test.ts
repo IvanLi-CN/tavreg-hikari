@@ -35,4 +35,5 @@ test("proof-add handler only provisions mailboxes on the actual add route", asyn
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute })");
   expect(source).toContain("if (!onAddRoute && !emailSelector) {");
+  expect(source).toContain("if (!emailSelector) {\n    return false;\n  }\n\n  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession");
 });

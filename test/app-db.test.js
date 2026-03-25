@@ -303,6 +303,24 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("preserves active leases when availability is edited mid-run", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+
+    expect(leased?.id).toBe(accountId);
+
+    const disabled = appDb.updateAccountAvailability(accountId, { disabled: true, reason: "manual hold" });
+    expect(disabled.leaseJobId).toBe(job.id);
+
+    const reenabled = appDb.updateAccountAvailability(accountId, { disabled: false, reason: null });
+    expect(reenabled.leaseJobId).toBe(job.id);
+
+    appDb.close();
+  });
+
   test("can keep the active lease while syncing an in-flight worker failure", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);

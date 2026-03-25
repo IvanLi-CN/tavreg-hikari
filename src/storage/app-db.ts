@@ -860,9 +860,7 @@ export class AppDatabase {
             disabled_reason = ?,
             last_result_status = ?,
             last_result_at = ?,
-            updated_at = ?,
-            lease_job_id = NULL,
-            lease_started_at = NULL
+            updated_at = ?
         WHERE id = ?
       `)
       .run(disabledAt, normalizedReason, nextStatus, now, now, accountId);

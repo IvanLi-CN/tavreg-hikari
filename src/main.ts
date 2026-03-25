@@ -5164,8 +5164,6 @@ async function handleMicrosoftProofAddPrompt(
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
-  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute }));
-  proofState.mailbox = proofMailbox;
 
   if (onAddRoute && hasProofOptionSelector) {
     await page
@@ -5186,6 +5184,9 @@ async function handleMicrosoftProofAddPrompt(
   if (!emailSelector) {
     return false;
   }
+
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute }));
+  proofState.mailbox = proofMailbox;
 
   await clearAuthFieldValidationState(page, emailSelector);
   await ensureDirectInputValue(page, emailSelector, proofMailbox.address, "microsoft_proof_mailbox");
