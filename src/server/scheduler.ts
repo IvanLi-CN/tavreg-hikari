@@ -309,7 +309,7 @@ export class JobScheduler {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
-      const selectedProxyNode = this.db.getPinnedProxyName();
+      const selectedProxyNode = this.db.getPinnedProxyName() || this.db.getSelectedProxyName();
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
         account,
