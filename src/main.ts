@@ -5153,7 +5153,7 @@ async function handleMicrosoftProofAddPrompt(
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
-  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: true }));
+  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
   proofState.mailbox = proofMailbox;
 
   await page

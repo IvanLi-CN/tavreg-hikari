@@ -131,6 +131,9 @@ export function shouldAttemptMicrosoftProofPasswordFallback(
   if (input.passwordFallbackBlocked || input.passwordFallbackAttempted) {
     return false;
   }
+  if (input.hasConfiguredMailbox && input.configuredMailboxMatchesChallenge === true) {
+    return false;
+  }
   return true;
 }
 

@@ -78,7 +78,7 @@ describe("Microsoft login state", () => {
     expect(changedQueryAndBody).toBe(base);
   });
 
-  test("still prefers password fallback even when a proof mailbox mapping is configured", () => {
+  test("prefers the configured proof mailbox when the challenge matches it", () => {
     expect(
       shouldAttemptMicrosoftProofPasswordFallback({
         hasConfiguredMailbox: true,
@@ -86,7 +86,7 @@ describe("Microsoft login state", () => {
         passwordFallbackAttempted: false,
         passwordFallbackBlocked: false,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("only uses password fallback when no proof mailbox mapping is available", () => {
