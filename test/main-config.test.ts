@@ -61,3 +61,10 @@ test("last-attempt headed failures honor the resolved keep-browser flag without 
     "const preserveBrowserOnFailure = mode === \"headed\" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;",
   );
 });
+
+test("proof verify only auto-matches non-empty configured mailboxes and fills the masked suffix", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("let target = normalizedAddress ? optionStates.find((option) => normalize(option.value).includes(normalizedAddress)) || null : null;");
+  expect(source).toContain("if (!target && normalizedAddress) {");
+  expect(source).toContain("emailCompletionValue: missingEmailPart || localPart,");
+});
