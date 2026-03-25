@@ -5726,6 +5726,22 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     proofState.confirmationSubmittedAt &&
     proofState.confirmationSubmittedCount > 0
   ) {
+    const inlineCodeSelector = await firstVisibleSelector(page, [
+      "#iOttText",
+      'input[name="iOttText"]',
+      'input[id^="codeEntry-"]',
+      'input[autocomplete="one-time-code"]',
+      'input[aria-label*="code" i]',
+      'input[placeholder*="code" i]',
+      'input[inputmode="numeric"]',
+      'input[inputmode="decimal"]',
+      'input[type="tel"]',
+      'input[type="number"]',
+    ]);
+    if (inlineCodeSelector) {
+      proofState.codeRequestedAt ||= proofState.confirmationSubmittedAt;
+      return false;
+    }
     const waitElapsedMs = Date.now() - proofState.confirmationSubmittedAt;
     const formErrors = await collectVisibleFormErrors(page).catch(() => []);
     if (

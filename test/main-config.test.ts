@@ -50,6 +50,8 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain("await ensureSavedProofMailbox");
   expect(serverSource).toContain("const unchangedSavedProofMailbox =");
   expect(serverSource).toContain("currentAccount.proofMailboxId === requestedProofMailboxId");
+  expect(serverSource).toContain("if (hintedMailboxId && canFallbackToHintedProofMailboxId(error))");
+  expect(serverSource).toContain("mailboxId: proofMailboxId,");
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });
@@ -67,4 +69,6 @@ test("proof verify only auto-matches non-empty configured mailboxes and fills th
   expect(source).toContain("let target = normalizedAddress ? optionStates.find((option) => normalize(option.value).includes(normalizedAddress)) || null : null;");
   expect(source).toContain("if (!target && normalizedAddress) {");
   expect(source).toContain("emailCompletionValue: missingEmailPart || localPart,");
+  expect(source).toContain("proofState.codeRequestedAt ||= proofState.confirmationSubmittedAt;");
+  expect(source).toContain("if (inlineCodeSelector) {");
 });
