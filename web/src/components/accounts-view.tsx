@@ -691,7 +691,7 @@ export function AccountsView({
           if (!open) setExtractorSaveError(null);
         }}
       >
-        <DialogContent className="w-[min(96vw,84rem)]">
+        <DialogContent className="w-[min(96vw,84rem)] max-w-[96vw]">
           <DialogHeader>
             <DialogTitle>微软账号提取器设置</DialogTitle>
             <DialogDescription>
@@ -734,8 +734,8 @@ export function AccountsView({
               ) : null}
             </div>
 
-            <div className="space-y-4">
-              <div className="grid gap-3 md:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)_auto_auto]">
+            <div className="min-w-0 space-y-4">
+              <div className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)_auto_auto]">
                 <FilterField label="Provider">
                   <Select
                     value={extractorHistoryQuery.provider || "__all__"}
@@ -816,24 +816,24 @@ export function AccountsView({
                     </SelectContent>
                   </Select>
                 </FilterField>
-                <div className="flex items-end">
+                <div className="flex min-w-0 items-end">
                   <Button variant="outline" onClick={() => void onRefreshExtractorHistory()} disabled={extractorHistoryBusy}>
                     {extractorHistoryBusy ? "刷新中…" : "刷新"}
                   </Button>
                 </div>
               </div>
 
-              <ScrollArea className="max-h-[56vh] rounded-[24px] border border-white/8 bg-[#08111d]/88">
-                <div className="space-y-4 p-4">
+              <ScrollArea className="max-h-[56vh] min-w-0 rounded-[24px] border border-white/8 bg-[#08111d]/88">
+                <div className="min-w-0 space-y-4 p-4">
                   {extractorHistory.rows.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-slate-500">
                       当前筛选下还没有本地提取记录。
                     </div>
                   ) : (
                     extractorHistory.rows.map((batch) => (
-                      <article key={batch.id} className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div>
+                      <article key={batch.id} className="min-w-0 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+                        <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
+                          <div className="min-w-0">
                             <div className="text-sm font-medium text-white">
                               #{batch.id} · {batch.provider} · {batch.accountType}
                             </div>
@@ -842,7 +842,7 @@ export function AccountsView({
                               raw {batch.attemptBudget} · {formatDate(batch.startedAt)}
                             </div>
                           </div>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex shrink-0 flex-wrap gap-2">
                             <ExtractHistoryStatusBadge status={batch.status} />
                             <Badge variant="neutral">{batch.maskedKey || "no-key"}</Badge>
                           </div>
@@ -853,11 +853,11 @@ export function AccountsView({
                           </div>
                         ) : null}
                         {batch.rawResponse ? (
-                          <pre className="mt-3 max-h-32 overflow-auto rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
+                          <pre className="mt-3 max-h-32 min-w-0 overflow-auto rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
                             {batch.rawResponse}
                           </pre>
                         ) : null}
-                        <div className="mt-3 overflow-x-auto">
+                        <div className="mt-3 min-w-0 overflow-x-auto">
                           <Table className="min-w-[760px]">
                             <TableHeader>
                               <TableRow>

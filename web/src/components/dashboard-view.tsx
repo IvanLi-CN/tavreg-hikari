@@ -95,14 +95,19 @@ export function DashboardView({
               </Field>
             </div>
             <div className="rounded-[24px] border border-cyan-400/18 bg-cyan-400/[0.04] p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
                   <div className="text-sm font-medium text-white">自动提取微软账号</div>
                   <div className="mt-1 text-sm text-slate-400">
                     缺号时按 1 秒 1 个请求轮询号源，单轮最多比目标多尝试 3 次，但可用补号数不会超过当前任务剩余需求。
                   </div>
                 </div>
-                <Badge variant={jobDraft.autoExtractSources.length > 0 ? "info" : "neutral"}>{autoExtractHint}</Badge>
+                <Badge
+                  variant={jobDraft.autoExtractSources.length > 0 ? "info" : "neutral"}
+                  className="max-w-full whitespace-normal break-words px-3 py-1.5 text-left text-[0.68rem] leading-5 normal-case tracking-[0.08em]"
+                >
+                  {autoExtractHint}
+                </Badge>
               </div>
               <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,0.6fr)]">
                 <div className="grid gap-3 sm:grid-cols-2">
