@@ -99,6 +99,7 @@ async function ensureSavedProofMailbox(input: {
   mailboxId?: string | null;
 }): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
   const address = input.address.trim().toLowerCase();
+  const hintedMailboxId = String(input.mailboxId || "").trim();
   const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
   if (!apiKey) {
     throw new Error("moemail_api_key_missing");
@@ -110,6 +111,9 @@ async function ensureSavedProofMailbox(input: {
     address,
     httpJson: serverHttpJson,
   })) || "";
+  if (!mailboxId && hintedMailboxId) {
+    mailboxId = hintedMailboxId;
+  }
   if (!mailboxId) {
     const parts = splitEmailAddress(address);
     if (!parts) {
