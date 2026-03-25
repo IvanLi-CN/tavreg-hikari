@@ -96,7 +96,9 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
 
 function canFallbackToHintedProofMailboxId(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /moemail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(message);
+  return /moemail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
+    message,
+  );
 }
 
 async function ensureSavedProofMailbox(input: {
@@ -509,9 +511,12 @@ async function main(): Promise<void> {
           disabled?: boolean;
           disabledReason?: string | null;
         } | null;
-        const proofMailboxAddress = body?.proofMailboxAddress == null ? undefined : String(body.proofMailboxAddress).trim() || null;
-        const proofMailboxId = body?.proofMailboxId == null ? undefined : String(body.proofMailboxId).trim() || null;
-        const rawProvider = body?.proofMailboxProvider == null ? undefined : String(body.proofMailboxProvider).trim().toLowerCase() || null;
+        const hasProofMailboxAddress = !!body && Object.prototype.hasOwnProperty.call(body, "proofMailboxAddress");
+        const hasProofMailboxId = !!body && Object.prototype.hasOwnProperty.call(body, "proofMailboxId");
+        const hasProofMailboxProvider = !!body && Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider");
+        const proofMailboxAddress = !hasProofMailboxAddress ? undefined : body?.proofMailboxAddress == null ? null : String(body.proofMailboxAddress).trim() || null;
+        const proofMailboxId = !hasProofMailboxId ? undefined : body?.proofMailboxId == null ? null : String(body.proofMailboxId).trim() || null;
+        const rawProvider = !hasProofMailboxProvider ? undefined : body?.proofMailboxProvider == null ? null : String(body.proofMailboxProvider).trim().toLowerCase() || null;
         const disabled = body?.disabled == null ? undefined : Boolean(body.disabled);
         const disabledReason = body?.disabledReason == null ? undefined : String(body.disabledReason).trim() || null;
         if (rawProvider != null && rawProvider !== "moemail") {

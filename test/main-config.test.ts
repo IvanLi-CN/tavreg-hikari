@@ -52,6 +52,9 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain("currentAccount.proofMailboxId === requestedProofMailboxId");
   expect(serverSource).toContain("if (hintedMailboxId && canFallbackToHintedProofMailboxId(error))");
   expect(serverSource).toContain("mailboxId: proofMailboxId,");
+  expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxAddress")');
+  expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxId")');
+  expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider")');
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });
@@ -62,6 +65,7 @@ test("last-attempt headed failures honor the resolved keep-browser flag without 
   expect(source).toContain(
     "const preserveBrowserOnFailure = mode === \"headed\" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;",
   );
+  expect(source).toContain("(attempt === taskRetryMax && process.stdin.isTTY && process.stdout.isTTY)");
 });
 
 test("proof verify only auto-matches non-empty configured mailboxes and fills the masked suffix", async () => {

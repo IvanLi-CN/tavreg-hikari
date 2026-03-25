@@ -11826,7 +11826,9 @@ async function run(): Promise<void> {
               {
                 batchId,
                 modeAttempt: attempt,
-                keepBrowserOpenOnFailure: toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false) || attempt === taskRetryMax,
+                keepBrowserOpenOnFailure:
+                  toBool(process.env.KEEP_BROWSER_OPEN_ON_FAILURE, false) ||
+                  (attempt === taskRetryMax && process.stdin.isTTY && process.stdout.isTTY),
                 taskLedger,
                 runtimeRecentProxyIps,
                 ipEmailUsage,
