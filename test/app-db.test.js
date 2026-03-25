@@ -303,6 +303,36 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("can keep the active lease while syncing an in-flight worker failure", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+
+    expect(leased?.leaseJobId).toBe(job.id);
+
+    appDb.markAccountDirectFailure(accountId, "network_connection_closed", { releaseLease: false });
+    let account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "failed",
+      lastErrorCode: "network_connection_closed",
+      leaseJobId: job.id,
+    });
+
+    appDb.markAccountUnavailable(accountId, "未知辅助邮箱", "microsoft_unknown_recovery_email", {
+      releaseLease: false,
+    });
+    account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "disabled",
+      disabledReason: "未知辅助邮箱",
+      leaseJobId: job.id,
+    });
+
+    appDb.close();
+  });
+
   test("ignores proof mailbox mappings when leasing the next account", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
@@ -843,7 +873,8 @@ describe("scheduler runtime spec", () => {
       },
     });
 
-    expect(runtime.command).toBe(process.versions.bun ? process.env.NODE_BINARY || "node" : process.execPath);
+    const explicitNodeBinary = process.env.NODE_BINARY?.trim();
+    expect(runtime.command).toBe(process.versions.bun && !explicitNodeBinary ? process.execPath : explicitNodeBinary || process.execPath);
     expect(runtime.args.slice(-8)).toEqual([
       "--mode",
       "headed",
@@ -854,7 +885,7 @@ describe("scheduler runtime spec", () => {
       "--proxy-node",
       "Tokyo-01",
     ]);
-    expect(runtime.args.slice(0, 3)).toEqual(["--import", "tsx", "src/main.ts"]);
+    expect(runtime.args.slice(0, 3)).toEqual(process.versions.bun && !explicitNodeBinary ? ["run", "src/main.ts", "--mode"] : ["--import", "tsx", "src/main.ts"]);
     expect(runtime.env).toMatchObject({
       MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
       MIHOMO_GROUP_NAME: "WEB_AUTO",
