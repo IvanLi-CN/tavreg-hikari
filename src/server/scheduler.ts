@@ -58,12 +58,18 @@ function isTerminalJobStatus(status: JobRecord["status"]): boolean {
   return status === "completed" || status === "failed";
 }
 
-export function resolveAttemptProxyNode(db: Pick<AppDatabase, "getPinnedProxyName" | "hasProxyNode">): string | null {
+export function resolveAttemptProxyNode(
+  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "hasProxyNode">,
+): string | null {
   const pinnedProxyNode = db.getPinnedProxyName();
-  if (!pinnedProxyNode) {
+  if (pinnedProxyNode) {
+    return db.hasProxyNode(pinnedProxyNode) ? pinnedProxyNode : null;
+  }
+  const selectedProxyNode = db.getSelectedProxyName();
+  if (!selectedProxyNode) {
     return null;
   }
-  return db.hasProxyNode(pinnedProxyNode) ? pinnedProxyNode : null;
+  return db.hasProxyNode(selectedProxyNode) ? selectedProxyNode : null;
 }
 
 export function buildAttemptRuntimeSpec(input: {

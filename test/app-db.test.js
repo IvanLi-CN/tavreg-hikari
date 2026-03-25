@@ -952,13 +952,22 @@ describe("scheduler runtime spec", () => {
     const { appDb } = await createTempDb();
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
 
-    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
 
     appDb.setPinnedProxyName("Tokyo-01");
     expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
 
     appDb.upsertProxyInventory(["Tokyo-02"], "Tokyo-02");
-    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
+
+    appDb.close();
+  });
+
+  test("falls back to the selected proxy node when no pinned override exists", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
 
     appDb.close();
   });
