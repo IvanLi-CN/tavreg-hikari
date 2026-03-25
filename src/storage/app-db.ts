@@ -685,7 +685,7 @@ export class AppDatabase {
     groupName?: string;
     page?: number;
     pageSize?: number;
-  }): { rows: MicrosoftAccountRecord[]; total: number; summary: { ready: number; linked: number; failed: number } } {
+  }): { rows: MicrosoftAccountRecord[]; total: number; summary: { ready: number; linked: number; failed: number; disabled: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
@@ -719,11 +719,12 @@ export class AppDatabase {
           COUNT(*) AS total,
           SUM(CASE WHEN last_result_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
           SUM(CASE WHEN has_api_key = 1 THEN 1 ELSE 0 END) AS linked_count,
-          SUM(CASE WHEN last_result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count
+          SUM(CASE WHEN last_result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+          SUM(CASE WHEN last_result_status = 'disabled' THEN 1 ELSE 0 END) AS disabled_count
         FROM microsoft_accounts
         ${whereSql}
       `)
-      .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number } | null;
+      .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number; disabled_count?: number } | null;
     const total = Number(summaryRow?.total || 0);
     const rows = this.db
       .query(`SELECT * FROM microsoft_accounts ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
@@ -735,6 +736,7 @@ export class AppDatabase {
         ready: Number(summaryRow?.ready_count || 0),
         linked: Number(summaryRow?.linked_count || 0),
         failed: Number(summaryRow?.failed_count || 0),
+        disabled: Number(summaryRow?.disabled_count || 0),
       },
     };
   }

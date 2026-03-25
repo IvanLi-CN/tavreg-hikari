@@ -99,7 +99,8 @@ export const sampleAccounts = {
   summary: {
     ready: 1,
     linked: 1,
-    failed: 1,
+    failed: 0,
+    disabled: 1,
   },
   groups: ["default", "linked", "failed-pool"],
   rows: [

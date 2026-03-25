@@ -211,6 +211,7 @@ describe("AppDatabase account import", () => {
       ready: 1,
       linked: 1,
       failed: 1,
+      disabled: 0,
     });
 
     appDb.close();

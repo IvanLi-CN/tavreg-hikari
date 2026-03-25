@@ -111,6 +111,7 @@ export function AccountsView({
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
+  const disabledCount = accounts.summary.disabled;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>
@@ -260,6 +261,7 @@ export function AccountsView({
               <Badge variant="info">ready · {readyCount}</Badge>
               <Badge variant="success">linked · {linkedCount}</Badge>
               <Badge variant="danger">failed · {failedCount}</Badge>
+              <Badge variant="warning">disabled · {disabledCount}</Badge>
             </div>
 
             <div className="flex flex-col gap-3 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
@@ -316,6 +318,7 @@ export function AccountsView({
                     <SelectItem value="running">running</SelectItem>
                     <SelectItem value="succeeded">succeeded</SelectItem>
                     <SelectItem value="failed">failed</SelectItem>
+                    <SelectItem value="disabled">disabled</SelectItem>
                     <SelectItem value="skipped_has_key">skipped_has_key</SelectItem>
                   </SelectContent>
                 </Select>
