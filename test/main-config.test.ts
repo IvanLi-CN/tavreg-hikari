@@ -42,6 +42,7 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   const accountsViewSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
   expect(serverSource).toContain("await ensureSavedProofMailbox");
+  expect(serverSource).toContain("if (!mailboxId && hintedMailboxId)");
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });
