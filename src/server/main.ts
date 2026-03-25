@@ -94,32 +94,73 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
   };
 }
 
-async function ensureSavedProofMailbox(input: { address: string }): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
+function canFallbackToHintedProofMailboxId(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /moemail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(message);
+}
+
+async function ensureSavedProofMailbox(input: {
+  address: string;
+  mailboxId?: string | null;
+}): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
   const address = input.address.trim().toLowerCase();
+  const hintedMailboxId = String(input.mailboxId || "").trim();
   const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
   if (!apiKey) {
+    if (hintedMailboxId) {
+      return {
+        provider: "moemail",
+        address,
+        mailboxId: hintedMailboxId,
+      };
+    }
     throw new Error("moemail_api_key_missing");
   }
   const baseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
-  let mailboxId = (await resolveMoeMailMailboxId({
-    baseUrl,
-    apiKey,
-    address,
-    httpJson: serverHttpJson,
-  })) || "";
+  let mailboxId = "";
+  try {
+    mailboxId =
+      (await resolveMoeMailMailboxId({
+        baseUrl,
+        apiKey,
+        address,
+        httpJson: serverHttpJson,
+      })) || "";
+  } catch (error) {
+    if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
+      return {
+        provider: "moemail",
+        address,
+        mailboxId: hintedMailboxId,
+      };
+    }
+    throw error;
+  }
   if (!mailboxId) {
     const parts = splitEmailAddress(address);
     if (!parts) {
       throw new Error("invalid proof mailbox address");
     }
-    const provisioned = await provisionMoeMailMailbox({
-      baseUrl,
-      apiKey,
-      httpJson: serverHttpJson,
-      name: parts.local,
-      domain: parts.domain,
-      expiryTime: 0,
-    });
+    let provisioned;
+    try {
+      provisioned = await provisionMoeMailMailbox({
+        baseUrl,
+        apiKey,
+        httpJson: serverHttpJson,
+        name: parts.local,
+        domain: parts.domain,
+        expiryTime: 0,
+      });
+    } catch (error) {
+      if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
+        return {
+          provider: "moemail",
+          address,
+          mailboxId: hintedMailboxId,
+        };
+      }
+      throw error;
+    }
     if (provisioned.address.trim().toLowerCase() !== address) {
       throw new Error(`moemail_mailbox_not_found:${address}`);
     }
@@ -514,6 +555,7 @@ async function main(): Promise<void> {
                     }
                   : await ensureSavedProofMailbox({
                       address: proofMailboxAddress,
+                      mailboxId: proofMailboxId,
                     });
             db.updateAccountProofMailbox(accountId, {
               provider: nextProofMailbox.provider,
