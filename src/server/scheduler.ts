@@ -58,6 +58,14 @@ function isTerminalJobStatus(status: JobRecord["status"]): boolean {
   return status === "completed" || status === "failed";
 }
 
+export function resolveAttemptProxyNode(db: Pick<AppDatabase, "getPinnedProxyName" | "hasProxyNode">): string | null {
+  const pinnedProxyNode = db.getPinnedProxyName();
+  if (!pinnedProxyNode) {
+    return null;
+  }
+  return db.hasProxyNode(pinnedProxyNode) ? pinnedProxyNode : null;
+}
+
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
   account: Pick<
@@ -309,7 +317,7 @@ export class JobScheduler {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
-      const selectedProxyNode = this.db.getPinnedProxyName() || this.db.getSelectedProxyName();
+      const selectedProxyNode = resolveAttemptProxyNode(this.db);
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
         account,

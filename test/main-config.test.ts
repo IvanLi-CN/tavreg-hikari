@@ -25,3 +25,8 @@ test("CLI defers AppDatabase loading until proof sync needs it", async () => {
   expect(source).not.toContain('from "./storage/app-db.js"');
   expect(source).toContain('await import("./storage/app-db.js")');
 });
+
+test("scheduled workers defer successful account finalization to the scheduler exit path", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
+});
