@@ -1440,6 +1440,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   const normalized = (message || "").toLowerCase();
   if (/native_cdp_unavailable/i.test(message)) return "native_cdp_unavailable";
   if (/task_attempt_timeout/i.test(message)) return "task_attempt_timeout";
+  if (/ERR_TIMED_OUT/i.test(message)) return "network_timeout";
   if (/ERR_CONNECTION_CLOSED/i.test(message)) return "network_connection_closed";
   if (/ERR_CONNECTION_RESET/i.test(message)) return "network_connection_reset";
   if (/auth_session_invalid_request/i.test(message)) return "auth_session_invalid_request";
@@ -1464,6 +1465,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/moemail_api_key_missing/i.test(message)) return "moemail_api_key_missing";
   if (/moemail_mailbox_not_found/i.test(message)) return "moemail_mailbox_not_found";
   if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
+  if (/microsoft_account_locked/i.test(message)) return "microsoft_account_locked";
   if (/microsoft_auth_try_again_later/i.test(message)) return "microsoft_auth_try_again_later";
   if (/microsoft_password_rate_limited/i.test(message)) return "microsoft_password_rate_limited";
   if (/microsoft_password_incorrect/i.test(message)) return "microsoft_password_incorrect";
@@ -2734,14 +2736,17 @@ async function syncLinkedMicrosoftAccountOutcome(
 
 function deriveLinkedMicrosoftUnavailableReason(errorCode: string | null | undefined): string | null {
   const normalized = String(errorCode || "").trim();
-  if (!/^microsoft_unknown_recovery_email/i.test(normalized)) {
-    return null;
+  if (/^microsoft_account_locked/i.test(normalized)) {
+    return "微软账户已锁定";
   }
-  const detail = normalized.split(":").slice(1).join(":").trim();
-  if (!detail || /challenge_mismatch|unknown_recovery_email/i.test(detail)) {
-    return "未知辅助邮箱";
+  if (/^microsoft_unknown_recovery_email/i.test(normalized)) {
+    const detail = normalized.split(":").slice(1).join(":").trim();
+    if (!detail || /challenge_mismatch|unknown_recovery_email/i.test(detail)) {
+      return "未知辅助邮箱";
+    }
+    return `未知辅助邮箱：${detail}`;
   }
-  return `未知辅助邮箱：${detail}`;
+  return null;
 }
 
 async function provisionMicrosoftProofMailbox(cfg: AppConfig, proxyUrl?: string): Promise<{ address: string; mailboxId: string }> {
@@ -2785,6 +2790,12 @@ async function resolveMicrosoftProofMailboxSession(
   let address = cfg.microsoftProofMailboxAddress?.trim() || "";
   if (!address) {
     if (!options?.allowProvision) {
+      const callerStack = new Error("microsoft_proof_mailbox_missing")
+        .stack?.split("\n")
+        .slice(1, 4)
+        .map((line) => line.trim())
+        .join(" | ");
+      log(`login flow: configured Microsoft proof mailbox missing (${callerStack || "stack unavailable"})`);
       throw new Error("microsoft_proof_mailbox_missing");
     }
     const provisioned = await provisionMicrosoftProofMailbox(cfg, proxyUrl);
@@ -4319,7 +4330,7 @@ async function handleMicrosoftAccountPicker(page: any, email: string): Promise<b
 }
 
 async function isMicrosoftProofConfirmationSurface(page: any): Promise<boolean> {
-  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+  if (await isMicrosoftLikelyPasswordSurface(page)) {
     return false;
   }
   if (await firstVisibleSelector(page, ["#iProofEmail", '#proof-confirmation-email-input', 'input[name="proof"]'])) {
@@ -4337,7 +4348,51 @@ async function isMicrosoftProofConfirmationSurface(page: any): Promise<boolean> 
   ]);
 }
 
-async function handleMicrosoftEmailPrompt(page: any, email: string): Promise<boolean> {
+async function waitForMicrosoftPostEmailSurface(page: any, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    if (await isMicrosoftLikelyPasswordSurface(page)) {
+      return;
+    }
+    if (await hasVisibleMicrosoftPasswordShortcut(page)) {
+      return;
+    }
+    if (await isMicrosoftProofConfirmationSurface(page)) {
+      return;
+    }
+    if (
+      /account\.live\.com\/proofs\/Add|account\.live\.com\/identity\/confirm|account\.live\.com\/proofs\/verify/i.test(
+        page.url(),
+      )
+    ) {
+      return;
+    }
+    if (
+      await pageContainsAnyText(page, [
+        /help us protect your account/i,
+        /let.?s protect your account/i,
+        /verify your email/i,
+        /verify your identity/i,
+        /stay signed in/i,
+        /allow this app to access your info/i,
+        /let this app access your info/i,
+        /使用密码/i,
+        /验证你的电子邮件/i,
+        /验证你的身份/i,
+        /保持登录状态/i,
+      ])
+    ) {
+      return;
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
+async function handleMicrosoftEmailPrompt(
+  page: any,
+  email: string,
+  proofState?: Pick<MicrosoftProofFlowState, "postEmailPasswordPriorityUntil">,
+): Promise<boolean> {
   if (/account\.live\.com\/proofs\//i.test(page.url())) {
     return false;
   }
@@ -4370,6 +4425,12 @@ async function handleMicrosoftEmailPrompt(page: any, email: string): Promise<boo
     await dispatchEnterViaCdp(page);
     await page.waitForTimeout(1_000);
   }
+  if (proofState) {
+    proofState.postEmailPasswordPriorityUntil = Date.now() + 6_000;
+    log("login flow: armed Microsoft password-priority grace window after email submit");
+  }
+  await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
+  await waitForMicrosoftPostEmailSurface(page, 6_000).catch(() => {});
   log("login flow: submitted Microsoft account email");
   return true;
 }
@@ -4395,6 +4456,53 @@ async function collectMicrosoftPasswordErrors(page: any): Promise<string[]> {
     })
     .catch(() => [] as string[]);
   return Array.from(new Set([...visibleErrors, ...bodySignals]));
+}
+
+async function collectMicrosoftPasswordPromptState(page: any): Promise<{
+  hasVisibleInput: boolean;
+  likelySurface: boolean;
+}> {
+  return await page
+    .evaluate(() => {
+      const isVisible = (node: Element | null): node is HTMLElement => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      };
+      const normalize = (value: string | null | undefined) =>
+        String(value || "")
+          .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase();
+      const visiblePasswordInput = Array.from(
+        document.querySelectorAll('input[type="password"], input[autocomplete="current-password"], input[name="passwd"]'),
+      ).some((node) => isVisible(node));
+      const bodyText = normalize(document.body?.innerText || "");
+      const titleText = normalize(document.title || "");
+      const hasPasswordCopy =
+        /enter your password|forgot your password|输入你的密码|忘记密码/i.test(bodyText) ||
+        /enter your password|输入你的密码/i.test(titleText);
+      const hasPasswordForm =
+        !!document.querySelector('form[data-testid="passwordEntryForm"]') ||
+        !!document.querySelector('input[name="passwd"]') ||
+        !!document.querySelector("#passwordEntry");
+      return {
+        hasVisibleInput: visiblePasswordInput,
+        likelySurface: visiblePasswordInput || (hasPasswordCopy && hasPasswordForm),
+      };
+    })
+    .catch(() => ({
+      hasVisibleInput: false,
+      likelySurface: false,
+    }));
+}
+
+async function isMicrosoftLikelyPasswordSurface(page: any): Promise<boolean> {
+  const state = await collectMicrosoftPasswordPromptState(page);
+  return state.likelySurface;
 }
 
 async function collectMicrosoftPasswordSurfaceKey(page: any): Promise<string> {
@@ -4533,8 +4641,20 @@ async function handleMicrosoftPasswordPrompt(
   password: string,
   state: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
 ): Promise<boolean> {
-  const selector = 'input[type="password"], input[autocomplete="current-password"]';
-  if (!(await hasVisibleElement(page, selector))) return false;
+  const selector = '#passwordEntry, input[name="passwd"], input[type="password"], input[autocomplete="current-password"]';
+  const promptState = await collectMicrosoftPasswordPromptState(page);
+  const hasPasswordCopy =
+    promptState.likelySurface ||
+    (await pageContainsAnyText(page, [
+      /enter your password/i,
+      /forgot your password/i,
+      /输入你的密码/i,
+      /忘记密码/i,
+    ]));
+  if (!promptState.hasVisibleInput && !hasPasswordCopy) return false;
+  await page.waitForSelector(selector, { timeout: hasPasswordCopy ? 8_000 : 2_000 }).catch(() => {});
+  const hasPasswordField = (await page.locator(selector).count().catch(() => 0)) > 0;
+  if (!hasPasswordField) return false;
   const surfaceKey = await collectMicrosoftPasswordSurfaceKey(page);
   const visibleErrors = await collectMicrosoftPasswordErrors(page);
   const classifiedError = classifyMicrosoftPasswordError(visibleErrors);
@@ -4696,6 +4816,7 @@ interface MicrosoftProofFlowState {
   startedAt: number | null;
   codeRequestedAt: number | null;
   codeRecoveryCount: number;
+  postEmailPasswordPriorityUntil: number | null;
   passwordFallbackAttempted: boolean;
   passwordFallbackBlocked: boolean;
   passwordFallbackReturnUrl: string | null;
@@ -5327,7 +5448,7 @@ async function handleMicrosoftProofEmailPrompt(
   password: string,
   passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
 ): Promise<boolean> {
-  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+  if (await isMicrosoftLikelyPasswordSurface(page)) {
     return false;
   }
   const confirmationSelectors = [
@@ -5415,6 +5536,14 @@ async function handleMicrosoftProofEmailPrompt(
     }
   }
   if (!proofMailbox) {
+    const surface = await collectMicrosoftSurfaceSnapshot(page).catch(() => ({
+      url: page.url(),
+      title: "",
+      bodyText: "",
+    }));
+    log(
+      `login flow: proof email prompt missing configured mailbox on surface title=${surface.title || "(empty)"} body=${surface.bodyText.slice(0, 160) || "(empty)"}`,
+    );
     throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
   if (/account\.live\.com\/proofs\/Add/i.test(page.url())) {
@@ -5478,7 +5607,7 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
   password: string,
   passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number },
 ): Promise<boolean> {
-  if (await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]')) {
+  if (await isMicrosoftLikelyPasswordSurface(page)) {
     return false;
   }
   const confirmationSelectors = [
@@ -5568,6 +5697,14 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     throw proofMailboxError || new Error("microsoft_proof_add_email_input_missing");
   }
   if (!proofMailbox) {
+    const surface = await collectMicrosoftSurfaceSnapshot(page).catch(() => ({
+      url: page.url(),
+      title: "",
+      bodyText: "",
+    }));
+    log(
+      `login flow: proof confirmation prompt missing configured mailbox on surface title=${surface.title || "(empty)"} body=${surface.bodyText.slice(0, 160) || "(empty)"}`,
+    );
     throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
   if (
@@ -5636,6 +5773,9 @@ async function handleMicrosoftProofCodePrompt(
   proxyUrl: string | undefined,
   proofState: MicrosoftProofFlowState,
 ): Promise<boolean> {
+  if (await isMicrosoftLikelyPasswordSurface(page)) {
+    return false;
+  }
   const isStillOnProofCodeSurface = async (): Promise<boolean> => {
     const currentUrl = page.url();
     if (/app\.tavily\.com\/home/i.test(currentUrl) || /account\.live\.com\/Consent\/Update/i.test(currentUrl)) {
@@ -5714,7 +5854,6 @@ async function handleMicrosoftProofCodePrompt(
     'input[type="tel"]',
     'input[type="number"]',
     'input[type="text"]',
-    'input[type="password"]',
     'input:not([type])',
   ];
   const visibleCodeSelector = await firstVisibleSelector(page, codeInputSelectors);
@@ -5850,6 +5989,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
     startedAt: null as number | null,
     codeRequestedAt: null as number | null,
     codeRecoveryCount: 0,
+    postEmailPasswordPriorityUntil: null as number | null,
     passwordFallbackAttempted: false,
     passwordFallbackBlocked: false,
     passwordFallbackReturnUrl: null,
@@ -5899,7 +6039,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       if (chromiumNetErrorCode) {
         const canRecoverNetwork =
           networkRecoveryCount < 1 &&
-          /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED/i.test(chromiumNetErrorCode) &&
+          /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED|ERR_TIMED_OUT/i.test(chromiumNetErrorCode) &&
           (/^chrome-error:\/\//i.test(currentUrl) || /login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl));
         if (canRecoverNetwork) {
           networkRecoveryCount += 1;
@@ -5945,7 +6085,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
           passkeyState.homeReturnAttempted = false;
         }
       }
-      if (!(await hasVisibleElement(page, 'input[type="password"], input[autocomplete="current-password"]'))) {
+      if (!(await isMicrosoftLikelyPasswordSurface(page))) {
         passwordState.submissionKey = null;
         passwordState.submittedAt = null;
         passwordState.submittedCount = 0;
@@ -5988,7 +6128,26 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       }
 
       if (await handleMicrosoftAccountPicker(page, email)) continue;
-      if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) continue;
+      if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) {
+        proofState.postEmailPasswordPriorityUntil = null;
+        continue;
+      }
+      if (await handleMicrosoftPasswordPrompt(page, password, passwordState)) {
+        proofState.postEmailPasswordPriorityUntil = null;
+        continue;
+      }
+      if (
+        proofState.postEmailPasswordPriorityUntil &&
+        Date.now() < proofState.postEmailPasswordPriorityUntil
+      ) {
+        log(
+          `login flow: waiting for password-priority grace window (${proofState.postEmailPasswordPriorityUntil - Date.now()}ms remaining)`,
+        );
+        await page.waitForLoadState("domcontentloaded", { timeout: 1_500 }).catch(() => {});
+        await page.waitForTimeout(300);
+        continue;
+      }
+      proofState.postEmailPasswordPriorityUntil = null;
       if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftProofMethodPrompt(page, proofState)) continue;
       if (await handleMicrosoftProofVerifyPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
@@ -5996,8 +6155,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       if (await handleMicrosoftProofConfirmationEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
-      if (await handleMicrosoftEmailPrompt(page, email)) continue;
-      if (await handleMicrosoftPasswordPrompt(page, password, passwordState)) continue;
+      if (await handleMicrosoftEmailPrompt(page, email, proofState)) continue;
       const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState);
       if (passkeyResult) {
         if (passkeyResult !== true) {
@@ -6022,6 +6180,10 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
     page.off("dialog", dialogHandler);
   }
 
+  const terminalChromiumNetErrorCode = await detectChromiumNetErrorCode(page);
+  if (terminalChromiumNetErrorCode) {
+    throw new Error(`chromium_net_error:${terminalChromiumNetErrorCode}:url=${page.url()}`);
+  }
   throw new Error(`microsoft login flow did not reach home, last_url=${page.url()}`);
 }
 
@@ -8783,13 +8945,13 @@ function isRecoverableBrowserError(reason: string): boolean {
 }
 
 function shouldRetryModeFailure(message: string): boolean {
-  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|captcha_ocr_unstable|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|invalid_captcha|native_cdp_unavailable|timeout|network|fetch failed|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
+  return /proxy_node_unavailable|proxy_no_distinct_egress_ip|browser precheck failed|ip\.skk did not expose an IP address|expected proxy IP not observed|cross-site IP mismatch|golden ip mismatch|webrtc probe candidates do not include expected proxy IP|captcha failed|captcha_ocr_unstable|signup_password_captcha_missing|signup password step failed|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|invalid_captcha|native_cdp_unavailable|timeout|network|fetch failed|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_TIMED_OUT|Target closed|context has been closed|Failed to launch the browser process|browser has been closed/i.test(
     message,
   );
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|moemail_api_key_missing|moemail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
+  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|moemail_api_key_missing|moemail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
     message,
   );
 }

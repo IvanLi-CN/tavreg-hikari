@@ -45,6 +45,21 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("classifies locked Microsoft account abuse page", () => {
+    const classification = classifyMicrosoftFlowInterrupt({
+      url: "https://account.live.com/Abuse?mkt=EN-US",
+      title: "Microsoft account",
+      bodyText:
+        "Your account has been locked We've detected some activity that violates our Microsoft Services Agreement and have locked your account.",
+    });
+
+    expect(classification).toEqual({
+      code: "microsoft_account_locked",
+      message:
+        "microsoft account | your account has been locked we've detected some activity that violates our microsoft services agreement and have locked your account.",
+    });
+  });
+
   test("normalizes password surface keys across query churn and inline errors", () => {
     const base = buildMicrosoftPasswordSurfaceKey({
       url: "https://login.live.com/ppsecure/post.srf?client_id=1&context=a",

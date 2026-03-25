@@ -4,7 +4,7 @@ export interface MicrosoftPasswordErrorClassification {
 }
 
 export interface MicrosoftFlowInterruptClassification {
-  code: "microsoft_auth_try_again_later";
+  code: "microsoft_auth_try_again_later" | "microsoft_account_locked";
   message: string;
 }
 
@@ -95,6 +95,17 @@ export function classifyMicrosoftFlowInterrupt(input: {
   ) {
     return {
       code: "microsoft_auth_try_again_later",
+      message: combined,
+    };
+  }
+  if (
+    /account\.live\.com\/abuse/i.test(url) ||
+    /your account has been locked|we've detected some activity that violates our microsoft services agreement and have locked your account|account has been locked|帐户已被锁定|账户已被锁定/i.test(
+      combined,
+    )
+  ) {
+    return {
+      code: "microsoft_account_locked",
       message: combined,
     };
   }
