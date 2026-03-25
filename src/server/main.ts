@@ -94,12 +94,8 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
   };
 }
 
-async function ensureSavedProofMailbox(input: {
-  address: string;
-  mailboxId?: string | null;
-}): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
+async function ensureSavedProofMailbox(input: { address: string }): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
   const address = input.address.trim().toLowerCase();
-  const hintedMailboxId = String(input.mailboxId || "").trim();
   const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
   if (!apiKey) {
     throw new Error("moemail_api_key_missing");
@@ -111,9 +107,6 @@ async function ensureSavedProofMailbox(input: {
     address,
     httpJson: serverHttpJson,
   })) || "";
-  if (!mailboxId && hintedMailboxId) {
-    mailboxId = hintedMailboxId;
-  }
   if (!mailboxId) {
     const parts = splitEmailAddress(address);
     if (!parts) {
@@ -489,8 +482,19 @@ async function main(): Promise<void> {
         if (disabled === true && !disabledReason) {
           return badRequest("disabled reason is required");
         }
+        const currentAccount = db.getAccount(accountId);
+        if (!currentAccount) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
         try {
           if (rawProvider !== undefined || proofMailboxAddress !== undefined || proofMailboxId !== undefined) {
+            const requestedProofMailboxId = proofMailboxId?.trim() || null;
+            const requestedProofMailboxAddress = proofMailboxAddress?.trim().toLowerCase() || null;
+            const unchangedSavedProofMailbox =
+              requestedProofMailboxAddress != null &&
+              requestedProofMailboxId != null &&
+              currentAccount.proofMailboxAddress?.trim().toLowerCase() === requestedProofMailboxAddress &&
+              currentAccount.proofMailboxId === requestedProofMailboxId;
             const nextProofMailbox: {
               provider?: "moemail" | null;
               address?: string | null;
@@ -502,10 +506,15 @@ async function main(): Promise<void> {
                     address: proofMailboxAddress,
                     mailboxId: proofMailboxId,
                   }
-                : await ensureSavedProofMailbox({
-                    address: proofMailboxAddress,
-                    mailboxId: proofMailboxId,
-                  });
+                : unchangedSavedProofMailbox
+                  ? {
+                      provider: currentAccount.proofMailboxProvider || "moemail",
+                      address: currentAccount.proofMailboxAddress,
+                      mailboxId: currentAccount.proofMailboxId,
+                    }
+                  : await ensureSavedProofMailbox({
+                      address: proofMailboxAddress,
+                    });
             db.updateAccountProofMailbox(accountId, {
               provider: nextProofMailbox.provider,
               address: nextProofMailbox.address,
