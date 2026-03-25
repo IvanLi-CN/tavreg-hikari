@@ -32,13 +32,13 @@ import {
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
-import { AppDatabase } from "./storage/app-db.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
 type BrowserEngine = "chrome";
-type MailProvider = "duckmail" | "gptmail" | "vmail" | "moemail";
+type MailProvider = "duckmail" | "gptmail" | "vmail";
+type MailboxSessionProvider = MailProvider | "moemail";
 type AuthLoginProvider = "password" | "microsoft";
 
 interface GptmailAuthPayload {
@@ -133,7 +133,7 @@ interface AppConfig {
 }
 
 interface MailboxSession {
-  provider: MailProvider;
+  provider: MailboxSessionProvider;
   baseUrl: string;
   address: string;
   accountId: string;
@@ -478,7 +478,7 @@ function parseBrowserEngine(raw: string | undefined): BrowserEngine | null {
 function parseMailProvider(raw: string | undefined): MailProvider | null {
   if (!raw) return null;
   const value = raw.trim().toLowerCase();
-  if (value === "duckmail" || value === "gptmail" || value === "vmail" || value === "moemail") return value;
+  if (value === "duckmail" || value === "gptmail" || value === "vmail") return value;
   return null;
 }
 
@@ -2695,6 +2695,7 @@ async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: str
   if (!Number.isInteger(envAccountId) || envAccountId < 1) {
     return;
   }
+  const { AppDatabase } = await import("./storage/app-db.js");
   const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
   const db = new AppDatabase(dbPath);
   try {
@@ -2718,6 +2719,7 @@ async function syncLinkedMicrosoftAccountOutcome(
     return;
   }
   const preserveLease = Number.isInteger(envJobId) && envJobId > 0 && outcome.status === "failed";
+  const { AppDatabase } = await import("./storage/app-db.js");
   const dbPath = path.resolve(process.env.TASK_LEDGER_DB_PATH || cfg.taskLedger.dbPath);
   const db = new AppDatabase(dbPath);
   try {
@@ -8796,7 +8798,11 @@ function loadConfig(): AppConfig {
   }
   const envBrowserEngine = parseBrowserEngine(process.env.BROWSER_ENGINE) || "chrome";
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
-  const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "gptmail";
+  const rawMailProvider = (process.env.MAIL_PROVIDER || "").trim();
+  const envMailProvider = parseMailProvider(rawMailProvider || undefined) || "gptmail";
+  if (rawMailProvider && !parseMailProvider(rawMailProvider)) {
+    throw new Error(`Invalid env MAIL_PROVIDER: ${rawMailProvider}. Supported values: gptmail|duckmail|vmail`);
+  }
   const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
   const moemailBaseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
