@@ -637,6 +637,7 @@ describe("scheduler runtime spec", () => {
         apiPort: 40123,
         mixedPort: 40124,
       },
+      targets: ["tavily"],
       selectedProxyNode: "Tokyo-01",
       baseEnv: {
         PATH: process.env.PATH,
@@ -648,12 +649,12 @@ describe("scheduler runtime spec", () => {
 
     expect(runtime.command).toBe(process.execPath);
     expect(runtime.args.slice(-8)).toEqual([
-      "--mode",
-      "headed",
       "--parallel",
       "1",
       "--need",
       "1",
+      "--targets",
+      "tavily",
       "--proxy-node",
       "Tokyo-01",
     ]);
@@ -673,6 +674,7 @@ describe("scheduler runtime spec", () => {
       PROXY_LATENCY_MAX_MS: "987",
       MICROSOFT_ACCOUNT_EMAIL: "worker@outlook.com",
       MICROSOFT_ACCOUNT_PASSWORD: "worker-pass",
+      TARGETS: "tavily",
       TASK_LEDGER_JOB_ID: "8",
       TASK_LEDGER_ACCOUNT_ID: "21",
       TASK_LEDGER_DB_PATH: "/tmp/tavreg/app.sqlite",

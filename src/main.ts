@@ -13,6 +13,16 @@ import path from "node:path";
 import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  DEFAULT_TARGETS,
+  defaultArtifactTypeForTarget,
+  normalizeProviderTargets,
+  parseProviderTargetsCsv,
+  providerTargetsToCsv,
+  type ProviderTarget,
+  type TargetArtifactType,
+  type TargetRunStatus,
+} from "./provider-targets.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
@@ -39,6 +49,7 @@ interface CliArgs {
   printSecrets: boolean;
   parallel: number;
   need: number;
+  targets: ProviderTarget[];
 }
 
 interface AppConfig {
@@ -107,6 +118,7 @@ interface AppConfig {
   inspectKeepOpenMs: number;
   inspectChromeNative: boolean;
   inspectChromeProfileDir: string;
+  defaultTargets: ProviderTarget[];
   taskLedger: TaskLedgerConfig;
 }
 
@@ -156,10 +168,51 @@ interface ResultPayload {
   password: string;
   verificationLink: string | null;
   apiKey: string | null;
+  accessToken: string | null;
   model: string;
   precheckPassed: boolean;
   verifyPassed: boolean;
+  targets: ProviderTarget[];
+  targetResults: TargetResultPayload[];
   failureStage?: string;
+  notes: string[];
+}
+
+interface TargetArtifactPayload {
+  target: ProviderTarget;
+  artifactType: TargetArtifactType;
+  secretValue: string;
+  preview: string;
+  metadataJson?: string | null;
+  status?: "active" | "revoked" | "unknown";
+}
+
+interface TargetResultPayload {
+  target: ProviderTarget;
+  status: TargetRunStatus;
+  stage: string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  runId?: string | null;
+  proxyNode?: string | null;
+  proxyIp?: string | null;
+  durationMs?: number | null;
+  artifact?: TargetArtifactPayload | null;
+}
+
+interface AttemptResultPayload {
+  ok: boolean;
+  mode: RunMode;
+  email: string;
+  password: string;
+  targets: ProviderTarget[];
+  targetResults: TargetResultPayload[];
+  precheckPassed: boolean;
+  verifyPassed: boolean;
+  verificationLink: string | null;
+  apiKey: string | null;
+  accessToken: string | null;
+  model: string;
   notes: string[];
 }
 
@@ -384,10 +437,12 @@ function renderAccountSummaryLine(index: number, result: ResultPayload, includeS
     return `ACCOUNT_${index}=${JSON.stringify({
       email: result.email,
       password: result.password,
+      targets: result.targets,
       apiKey: result.apiKey,
+      accessToken: result.accessToken,
     })}`;
   }
-  return `ACCOUNT_${index}=${JSON.stringify({ email: result.email })}`;
+  return `ACCOUNT_${index}=${JSON.stringify({ email: result.email, targets: result.targets })}`;
 }
 
 function delay(ms: number): Promise<void> {
@@ -478,6 +533,7 @@ function parseArgs(argv: string[]): CliArgs {
   let printSecrets = false;
   let parallel = 1;
   let need = 1;
+  let targets = parseProviderTargetsCsv(process.env.TARGETS);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     if (arg === "--proxy-node" && argv[i + 1]) {
@@ -569,6 +625,15 @@ function parseArgs(argv: string[]): CliArgs {
       need = parsed;
       continue;
     }
+    if (arg === "--targets" && argv[i + 1]) {
+      targets = parseProviderTargetsCsv(argv[i + 1]);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith("--targets=")) {
+      targets = parseProviderTargetsCsv(arg.slice("--targets=".length));
+      continue;
+    }
   }
   return {
     proxyNode: proxyNode?.trim() || undefined,
@@ -579,6 +644,7 @@ function parseArgs(argv: string[]): CliArgs {
     printSecrets,
     parallel,
     need,
+    targets,
   };
 }
 
@@ -3548,22 +3614,81 @@ async function handleMicrosoftConsentPrompt(page: any): Promise<boolean> {
   return true;
 }
 
-async function completeMicrosoftLogin(page: any, cfg: AppConfig): Promise<void> {
+async function isTavilyHome(page: any): Promise<boolean> {
+  const currentUrl = page.url();
+  return /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl);
+}
+
+async function isChatGptHome(page: any): Promise<boolean> {
+  const currentUrl = page.url();
+  if (!/chatgpt\.com/i.test(currentUrl)) return false;
+  if (/auth\.openai\.com|chatgpt\.com\/auth|\/login/i.test(currentUrl)) return false;
+  const text = await getNormalizedBodyText(page);
+  if (/new chat|temporary chat|message chatgpt|what can i help with/i.test(text)) {
+    return true;
+  }
+  return (
+    (await hasVisibleElement(page, 'textarea, [data-testid*="composer"], [contenteditable="true"]')) ||
+    (await hasVisibleElement(page, 'nav a[href*="/c/"], button[aria-label*="new chat" i], a[href="/"]'))
+  );
+}
+
+async function prepareChatGptMicrosoftProviderEntry(page: any): Promise<boolean> {
+  if (await isChatGptHome(page)) return false;
+  const clickedLogin =
+    (await clickMatchingAction(
+      page,
+      [/^log in$/i, /^login$/i, /^continue$/i, /^sign in$/i, /^登录$/i],
+      'a, button, [role="button"]',
+    )) || false;
+  if (clickedLogin) {
+    log("login flow: opened ChatGPT login entry");
+    return true;
+  }
+  const clickedProvider = await clickMatchingAction(
+    page,
+    [/^continue with microsoft$/i, /^continue with microsoft account$/i, /^microsoft$/i, /continue with microsoft/i],
+    'button, a, [role="button"]',
+  );
+  if (clickedProvider) {
+    log("login flow: selected ChatGPT Microsoft provider");
+    return true;
+  }
+  return false;
+}
+
+async function completeMicrosoftLogin(
+  page: any,
+  cfg: AppConfig,
+  options?: {
+    done?: (page: any) => Promise<boolean>;
+    prepareProviderEntry?: (page: any) => Promise<boolean>;
+    homeLabel?: string;
+  },
+): Promise<void> {
   const email = cfg.microsoftAccountEmail;
   const password = cfg.microsoftAccountPassword;
   if (!email || !password) {
     throw new Error("microsoft_account_credentials_missing");
   }
+  const done = options?.done || isTavilyHome;
+  const prepareProviderEntry =
+    options?.prepareProviderEntry ||
+    (async (targetPage: any) => {
+      const currentUrl = targetPage.url();
+      if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+        return await clickMicrosoftProviderEntry(targetPage);
+      }
+      return false;
+    });
+  const homeLabel = options?.homeLabel || "home";
 
   for (let step = 1; step <= 24; step += 1) {
-    const currentUrl = page.url();
-    if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+    if (await done(page)) {
       return;
     }
 
-    if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
-      if (await clickMicrosoftProviderEntry(page)) continue;
-    }
+    if (await prepareProviderEntry(page)) continue;
 
     if (await handleMicrosoftAccountPicker(page, email)) continue;
     if (await handleMicrosoftEmailPrompt(page, email)) continue;
@@ -3575,7 +3700,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig): Promise<void> 
     await page.waitForTimeout(1_000);
   }
 
-  throw new Error(`microsoft login flow did not reach home, last_url=${page.url()}`);
+  throw new Error(`microsoft login flow did not reach ${homeLabel}, last_url=${page.url()}`);
 }
 
 async function getProcessedCaptchaPng(page: any): Promise<Buffer> {
@@ -6038,6 +6163,115 @@ async function getDefaultApiKey(page: any, cfg: AppConfig, maxRounds = 6): Promi
   return null;
 }
 
+function maskSecretPreview(secret: string, visible = 6): string {
+  const trimmed = (secret || "").trim();
+  if (!trimmed) return "";
+  if (trimmed.length <= visible) return "*".repeat(trimmed.length);
+  return `${trimmed.slice(0, Math.min(visible, trimmed.length))}${"*".repeat(Math.max(4, trimmed.length - visible * 2))}${trimmed.slice(-visible)}`;
+}
+
+function redactChatGptMetadata(input: JsonRecord): JsonRecord {
+  const next: JsonRecord = { ...input };
+  if (typeof next.email === "string") {
+    next.emailMasked = maskEmailHint(next.email);
+    delete next.email;
+  }
+  return next;
+}
+
+async function openChatGptLogin(page: any): Promise<void> {
+  const candidates = ["https://chatgpt.com/auth/login", "https://chatgpt.com/"];
+  for (const url of candidates) {
+    await safeGoto(page, url, 90_000);
+    await page.waitForTimeout(1_200);
+    if ((await isChatGptHome(page)) || /chatgpt\.com|auth\.openai\.com/i.test(page.url())) {
+      return;
+    }
+  }
+}
+
+async function extractChatGptAccessToken(page: any): Promise<{ accessToken: string; metadata: JsonRecord } | null> {
+  const payload = await page.evaluate(`async () => {
+    const safeFetch = async (url) => {
+      try {
+        const resp = await fetch(url, { credentials: "include" });
+        const text = await resp.text();
+        let body = null;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          body = text;
+        }
+        return { ok: resp.ok, status: resp.status, body };
+      } catch (error) {
+        return { ok: false, status: 0, body: { error: String(error) } };
+      }
+    };
+
+    const candidates = ["/api/auth/session", "https://chatgpt.com/api/auth/session"];
+    for (const endpoint of candidates) {
+      const response = await safeFetch(endpoint);
+      const body = response.body && typeof response.body === "object" ? response.body : null;
+      const token = typeof body?.accessToken === "string" ? body.accessToken.trim() : "";
+      if (!token) continue;
+      const user = body?.user && typeof body.user === "object" ? body.user : null;
+      const organizations = Array.isArray(body?.accounts) ? body.accounts.length : Array.isArray(body?.organizations) ? body.organizations.length : null;
+      return {
+        accessToken: token,
+        metadata: {
+          endpoint,
+          status: response.status,
+          expires: typeof body?.expires === "string" ? body.expires : null,
+          idp: typeof body?.idp === "string" ? body.idp : typeof user?.idp === "string" ? user.idp : null,
+          userId: typeof user?.id === "string" ? user.id : null,
+          email: typeof user?.email === "string" ? user.email : null,
+          name: typeof user?.name === "string" ? user.name : null,
+          organizations,
+        },
+      };
+    }
+    return null;
+  }`);
+  if (!payload || typeof payload !== "object") return null;
+  const accessToken = typeof (payload as JsonRecord).accessToken === "string" ? String((payload as JsonRecord).accessToken) : "";
+  const metadata = ((payload as JsonRecord).metadata || {}) as JsonRecord;
+  if (!accessToken.trim()) return null;
+  return {
+    accessToken: accessToken.trim(),
+    metadata: redactChatGptMetadata(metadata),
+  };
+}
+
+async function loginChatGptAndExtractAccessToken(page: any, cfg: AppConfig): Promise<{ accessToken: string; metadata: JsonRecord }> {
+  for (let cycle = 1; cycle <= 5; cycle += 1) {
+    await openChatGptLogin(page);
+    await page.waitForTimeout(900);
+
+    if (!(await isChatGptHome(page))) {
+      await prepareChatGptMicrosoftProviderEntry(page).catch(() => false);
+      await page.waitForTimeout(900);
+      if (!(await isChatGptHome(page))) {
+        await completeMicrosoftLogin(page, cfg, {
+          done: isChatGptHome,
+          prepareProviderEntry: prepareChatGptMicrosoftProviderEntry,
+          homeLabel: "ChatGPT home",
+        });
+      }
+    }
+
+    if (await isChatGptHome(page)) {
+      const session = await extractChatGptAccessToken(page);
+      if (session?.accessToken) {
+        return session;
+      }
+    }
+
+    log(`chatgpt cycle ${cycle} did not yield access token, current=${page.url()}`);
+    await page.waitForTimeout(1_000);
+  }
+  throw new Error(`chatgpt access token not found, last_url=${page.url()}`);
+}
+
 async function confirmHumanControl(cfg: AppConfig, email: string, stage: string): Promise<void> {
   if (!cfg.humanConfirmBeforeSignup) return;
 
@@ -6129,6 +6363,7 @@ function loadConfig(): AppConfig {
   const envInspectBrowserEngine = parseBrowserEngine(process.env.INSPECT_BROWSER_ENGINE) || "chrome";
   const envMailProvider = parseMailProvider(process.env.MAIL_PROVIDER) || "gptmail";
   const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
+  const defaultTargets = parseProviderTargetsCsv(process.env.TARGETS);
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
   const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
   if (envMailProvider === "vmail" && !vmailBaseUrl) {
@@ -6209,7 +6444,7 @@ function loadConfig(): AppConfig {
     verifyHostAllowlist:
       verifyHostAllowlist.length > 0
         ? verifyHostAllowlist
-        : ["tavily.com", "auth.tavily.com", "app.tavily.com"],
+        : ["tavily.com", "auth.tavily.com", "app.tavily.com", "chatgpt.com", "auth.openai.com", "openai.com"],
     modeRetryMax: Math.max(1, toInt(process.env.MODE_RETRY_MAX, 3)),
     browserLaunchRetryMax: Math.max(1, toInt(process.env.BROWSER_LAUNCH_RETRY_MAX, 3)),
     taskAttemptTimeoutMs: Math.max(60_000, toInt(process.env.TASK_ATTEMPT_TIMEOUT_MS, 8 * 60_000)),
@@ -6227,6 +6462,7 @@ function loadConfig(): AppConfig {
     inspectKeepOpenMs: Math.max(30_000, toInt(process.env.INSPECT_KEEP_OPEN_MS, 15 * 60_000)),
     inspectChromeNative: toBool(process.env.INSPECT_CHROME_NATIVE, true),
     inspectChromeProfileDir: path.resolve(process.env.INSPECT_CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-inspect-profile")),
+    defaultTargets,
     taskLedger: {
       enabled: toBool(process.env.TASK_LEDGER_ENABLED, true),
       dbPath: path.resolve(process.env.TASK_LEDGER_DB_PATH || path.join(OUTPUT_PATH, "registry", "signup-tasks.sqlite")),
@@ -7460,6 +7696,7 @@ async function runSingleMode(
   existingMihomoController?: Awaited<ReturnType<typeof startMihomo>>,
 ): Promise<ResultPayload> {
   const notes: string[] = [];
+  const selectedTargets = normalizeProviderTargets(args.targets);
   let failureStage = "init";
   const runId = preparedTask
     ? `${preparedTask.taskId}-attempt-${ctx.modeAttempt}-${randomBytes(3).toString("hex")}`
@@ -7472,8 +7709,10 @@ async function runSingleMode(
   let password = preparedTask?.password || getConfiguredLoginPassword(cfg) || "";
   let verificationLink: string | null = null;
   let apiKey: string | null = null;
+  let accessToken: string | null = null;
   let verifyPassed = false;
   let precheckPassed = !cfg.browserPrecheckEnabled || args.skipPrecheck;
+  const targetResults: TargetResultPayload[] = [];
 
   const configuredLoginProvider = getConfiguredLoginProvider(cfg);
   const envJobId = Number.parseInt((process.env.TASK_LEDGER_JOB_ID || "").trim(), 10);
@@ -7484,6 +7723,7 @@ async function runSingleMode(
     log(`[${mode}] configured ${configuredLoginProvider} account mode: ${email}`);
     notes.push(`configured ${configuredLoginProvider} account mode enabled`);
   }
+  notes.push(`targets: ${providerTargetsToCsv(selectedTargets)}`);
   if (preparedTask) {
     notes.push(`task id: ${preparedTask.taskId}`);
     notes.push(`task retry: ${ctx.modeAttempt}/3`);
@@ -8264,225 +8504,266 @@ async function runSingleMode(
     });
     persistLedgerRecord("after-browser-ip-probe");
 
-    if (configuredLoginProvider) {
-      notes.push(`skip signup (${configuredLoginProvider} account)`);
-    } else {
-      if (!mailbox && preparedTask?.mailboxPromise) {
-        try {
-          const mailboxResult = await preparedTask.mailboxPromise;
-          preparedTask.mailboxPromise = null;
-          if (!mailboxResult.ok) {
-            throw mailboxResult.error;
+    if (selectedTargets.includes("tavily")) {
+      if (configuredLoginProvider) {
+        notes.push(`skip signup (${configuredLoginProvider} account)`);
+      } else {
+        if (!mailbox && preparedTask?.mailboxPromise) {
+          try {
+            const mailboxResult = await preparedTask.mailboxPromise;
+            preparedTask.mailboxPromise = null;
+            if (!mailboxResult.ok) {
+              throw mailboxResult.error;
+            }
+            mailbox = mailboxResult.mailbox;
+            preparedTask.mailbox = mailbox;
+            email = mailbox.address;
+            password = password || randomPassword();
+            notes.push(`${mailbox.provider} mailbox preloaded via proxy (${mailbox.accountId})`);
+            log(`[${mode}] ${mailbox.provider} mailbox preloaded via proxy ${browserObservedIp}: ${email}`);
+            let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+            if (!emailSet) {
+              emailSet = new Set<string>();
+              ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            }
+            if (!emailSet.has(email) && emailSet.size >= 3) {
+              throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            }
+            emailSet.add(email);
+            preparedTask.ipEmailOrdinal = emailSet.size;
+            notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
+            ledgerRecord.emailAddress = email;
+            const mailboxSplit = splitEmail(email);
+            ledgerRecord.emailDomain = mailboxSplit.domain;
+            ledgerRecord.emailLocalLen = mailboxSplit.localLen;
+            ledgerRecord.password = password;
+            ledgerRecord.notesJson = safeJsonStringify(notes);
+            persistLedgerRecord("after-mailbox-preload");
+          } catch (error) {
+            preparedTask.mailboxPromise = null;
+            const message = error instanceof Error ? error.message : String(error);
+            notes.push(`mailbox preload failed: ${message.split("\n")[0]}`);
           }
-          mailbox = mailboxResult.mailbox;
-          preparedTask.mailbox = mailbox;
+        }
+
+        if (!mailbox) {
+          if (!email) {
+            let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+            if (!emailSet) {
+              emailSet = new Set<string>();
+              ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            }
+            if (emailSet.size >= 3) {
+              throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            }
+          }
+          mailbox = await createMailboxSession(cfg, ctx.blockedMailboxDomains, mihomoController.proxyServer);
           email = mailbox.address;
           password = password || randomPassword();
-          notes.push(`${mailbox.provider} mailbox preloaded via proxy (${mailbox.accountId})`);
-          log(`[${mode}] ${mailbox.provider} mailbox preloaded via proxy ${browserObservedIp}: ${email}`);
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
-          if (!emailSet) {
-            emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+          log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
+          notes.push(`${mailbox.provider} mailbox created via proxy (${mailbox.accountId})`);
+          if (preparedTask) {
+            preparedTask.mailbox = mailbox;
+            preparedTask.email = email;
+            let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
+            if (!emailSet) {
+              emailSet = new Set<string>();
+              ctx.ipEmailUsage.set(browserObservedIp, emailSet);
+            }
+            if (!emailSet.has(email) && emailSet.size >= 3) {
+              throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
+            }
+            emailSet.add(email);
+            preparedTask.ipEmailOrdinal = emailSet.size;
+            notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
           }
-          if (!emailSet.has(email) && emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
-          }
-          emailSet.add(email);
-          preparedTask.ipEmailOrdinal = emailSet.size;
-          notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
           ledgerRecord.emailAddress = email;
           const mailboxSplit = splitEmail(email);
           ledgerRecord.emailDomain = mailboxSplit.domain;
           ledgerRecord.emailLocalLen = mailboxSplit.localLen;
           ledgerRecord.password = password;
           ledgerRecord.notesJson = safeJsonStringify(notes);
-          persistLedgerRecord("after-mailbox-preload");
-        } catch (error) {
-          preparedTask.mailboxPromise = null;
-          const message = error instanceof Error ? error.message : String(error);
-          notes.push(`mailbox preload failed: ${message.split("\n")[0]}`);
+          persistLedgerRecord("after-mailbox-create");
+        }
+
+        failureStage = "signup";
+        if (cfg.humanConfirmBeforeSignup) {
+          await confirmHumanControl(cfg, email, "before signup");
+          notes.push("human confirmation accepted before signup");
+        }
+
+        for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
+          try {
+            const signupResult = await completeSignup(
+              page,
+              solver,
+              email,
+              password,
+              mailbox!,
+              cfg,
+              diagOutputDir,
+              signupAttemptPolicy,
+              mihomoController.proxyServer,
+              {
+                onPasswordSnapshot: (snapshot) => {
+                  passwordStepSnapshots.push(snapshot);
+                  if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
+                },
+                onFingerprintSnapshot: (snapshot) => {
+                  browserFingerprintSnapshots.push(snapshot);
+                  if (browserFingerprintSnapshots.length > 20) browserFingerprintSnapshots.shift();
+                },
+              },
+            );
+            password = signupResult.password;
+            notes.push("signup flow submitted");
+            if (signupResult.emailVerifiedInFlow) {
+              verifyPassed = true;
+              verificationLink = "email-code";
+              notes.push("email verification confirmed via code challenge");
+            }
+            ledgerRecord.signupSubmitted = true;
+            ledgerRecord.password = password;
+            ledgerRecord.notesJson = safeJsonStringify(notes);
+            persistLedgerRecord("after-signup-submit");
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (!isRecoverableBrowserError(message) || attempt === 2) {
+              throw error;
+            }
+            log(`[${mode}] signup retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
+            await rebuildPageWithRecovery("signup retry");
+          }
+        }
+
+        if (!verifyPassed) {
+          failureStage = "email_verify_wait";
+          verificationLink = await waitForVerificationLink(
+            mailbox!,
+            cfg.emailWaitMs,
+            cfg.mailPollMs,
+            cfg.verifyHostAllowlist,
+            mihomoController.proxyServer,
+          );
+          if (!verificationLink) {
+            throw new Error("verification email not found within timeout");
+          }
+
+          failureStage = "email_verify_open";
+          await safeGoto(page, verificationLink, 120000);
+          verifyPassed = await verifyVerificationLanding(page);
+          if (!verifyPassed) {
+            throw new Error(`verification link opened but success signal missing, current=${page.url()}`);
+          }
+          notes.push("email verification confirmed");
         }
       }
 
-      if (!mailbox) {
-        if (!email) {
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
-          if (!emailSet) {
-            emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
-          }
-          if (emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
-          }
-        }
-        mailbox = await createMailboxSession(cfg, ctx.blockedMailboxDomains, mihomoController.proxyServer);
-        email = mailbox.address;
-        password = password || randomPassword();
-        log(`[${mode}] ${mailbox.provider} mailbox via proxy ${browserObservedIp}: ${email}`);
-        notes.push(`${mailbox.provider} mailbox created via proxy (${mailbox.accountId})`);
-        if (preparedTask) {
-          preparedTask.mailbox = mailbox;
-          preparedTask.email = email;
-          let emailSet = ctx.ipEmailUsage.get(browserObservedIp);
-          if (!emailSet) {
-            emailSet = new Set<string>();
-            ctx.ipEmailUsage.set(browserObservedIp, emailSet);
-          }
-          if (!emailSet.has(email) && emailSet.size >= 3) {
-            throw new Error(`proxy_ip_quota_exceeded:${browserObservedIp}`);
-          }
-          emailSet.add(email);
-          preparedTask.ipEmailOrdinal = emailSet.size;
-          notes.push(`task ip-email ordinal confirmed: ${preparedTask.ipEmailOrdinal}/3`);
-        }
-        ledgerRecord.emailAddress = email;
-        const mailboxSplit = splitEmail(email);
-        ledgerRecord.emailDomain = mailboxSplit.domain;
-        ledgerRecord.emailLocalLen = mailboxSplit.localLen;
-        ledgerRecord.password = password;
-        ledgerRecord.notesJson = safeJsonStringify(notes);
-        persistLedgerRecord("after-mailbox-create");
-      }
-
-      failureStage = "signup";
-      if (cfg.humanConfirmBeforeSignup) {
-        await confirmHumanControl(cfg, email, "before signup");
-        notes.push("human confirmation accepted before signup");
-      }
-
+      failureStage = "login_home";
       for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
         try {
-          const signupResult = await completeSignup(
-            page,
-            solver,
-            email,
-            password,
-            mailbox!,
-            cfg,
-            diagOutputDir,
-            signupAttemptPolicy,
-            mihomoController.proxyServer,
-            {
-            onPasswordSnapshot: (snapshot) => {
-              passwordStepSnapshots.push(snapshot);
-              if (passwordStepSnapshots.length > 120) passwordStepSnapshots.shift();
-            },
-            onFingerprintSnapshot: (snapshot) => {
-              browserFingerprintSnapshots.push(snapshot);
-              if (browserFingerprintSnapshots.length > 20) browserFingerprintSnapshots.shift();
-            },
-          });
-          password = signupResult.password;
-          notes.push("signup flow submitted");
-          if (signupResult.emailVerifiedInFlow) {
-            verifyPassed = true;
-            verificationLink = "email-code";
-            notes.push("email verification confirmed via code challenge");
-          }
-          ledgerRecord.signupSubmitted = true;
-          ledgerRecord.password = password;
-          ledgerRecord.notesJson = safeJsonStringify(notes);
-          persistLedgerRecord("after-signup-submit");
+          await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+          await dismissCookieBannerBestEffort(page).catch(() => {});
+          notes.push("reached app home");
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (!isRecoverableBrowserError(message) || attempt === 2) {
             throw error;
           }
-          log(`[${mode}] signup retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
-          await rebuildPageWithRecovery("signup retry");
+          log(`[${mode}] login retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
+          await rebuildPageWithRecovery("login retry");
         }
       }
 
-      if (!verifyPassed) {
-        failureStage = "email_verify_wait";
-        verificationLink = await waitForVerificationLink(
-          mailbox!,
-          cfg.emailWaitMs,
-          cfg.mailPollMs,
-          cfg.verifyHostAllowlist,
-          mihomoController.proxyServer,
-        );
-        if (!verificationLink) {
-          throw new Error("verification email not found within timeout");
-        }
+      failureStage = "api_key";
+      let lastKeyError: Error | null = null;
+      for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 5); attempt += 1) {
+        try {
+          const sampled = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
+          if (sampled) {
+            apiKey = sampled;
+            break;
+          }
 
-        failureStage = "email_verify_open";
-        await safeGoto(page, verificationLink, 120000);
-        verifyPassed = await verifyVerificationLanding(page);
-        if (!verifyPassed) {
-          throw new Error(`verification link opened but success signal missing, current=${page.url()}`);
-        }
-        notes.push("email verification confirmed");
-      }
-    }
+          await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+          await acceptPostSignupConsent(page).catch(() => false);
+          await dismissCookieBannerBestEffort(page).catch(() => {});
+          await page.waitForTimeout(1500);
+          if (attempt === 1) {
+            await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
+            await writeJson(new URL(`network_${mode}.json`, diagOutputDir), networkLog.slice(-120));
+          }
 
-    failureStage = "login_home";
-    for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
-      try {
-        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
-        await dismissCookieBannerBestEffort(page).catch(() => {});
-        notes.push("reached app home");
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!isRecoverableBrowserError(message) || attempt === 2) {
-          throw error;
-        }
-        log(`[${mode}] login retry after browser reset (attempt=${attempt}): ${message.split("\n")[0]}`);
-        await rebuildPageWithRecovery("login retry");
-      }
-    }
+          apiKey = await getDefaultApiKey(page, cfg, apiKeyFetchRoundMax);
+          if (apiKey) break;
 
-    failureStage = "api_key";
-    let lastKeyError: Error | null = null;
-    for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 5); attempt += 1) {
-      try {
-        const sampled = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
-        if (sampled) {
-          apiKey = sampled;
+          const sampledAfter = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
+          if (sampledAfter) {
+            apiKey = sampledAfter;
+            break;
+          }
+
+          log(`[${mode}] api key not found on attempt ${attempt}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (isRecoverableBrowserError(message) && attempt < 5) {
+            log(`[${mode}] api-key retry after browser reset (attempt=${attempt})`);
+            await rebuildPageWithRecovery("api-key retry");
+            continue;
+          }
+          lastKeyError = error instanceof Error ? error : new Error(message);
           break;
         }
-
-        await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
-        await acceptPostSignupConsent(page).catch(() => false);
-        await dismissCookieBannerBestEffort(page).catch(() => {});
-        await page.waitForTimeout(1500);
-        if (attempt === 1) {
-          await writeFile(new URL(`home_${mode}.html`, diagOutputDir), await page.content(), "utf8");
-          await writeJson(new URL(`network_${mode}.json`, diagOutputDir), networkLog.slice(-120));
-        }
-
-        apiKey = await getDefaultApiKey(page, cfg, apiKeyFetchRoundMax);
-        if (apiKey) break;
-
-        const sampledAfter = Array.from(observedApiKeys).find((key) => isLikelyTavilyKey(key));
-        if (sampledAfter) {
-          apiKey = sampledAfter;
-          break;
-        }
-
-        log(`[${mode}] api key not found on attempt ${attempt}`);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (isRecoverableBrowserError(message) && attempt < 5) {
-          log(`[${mode}] api-key retry after browser reset (attempt=${attempt})`);
-          await rebuildPageWithRecovery("api-key retry");
-          continue;
-        }
-        lastKeyError = error instanceof Error ? error : new Error(message);
-        break;
       }
+
+      if (lastKeyError) {
+        throw lastKeyError;
+      }
+      if (!apiKey) {
+        throw new Error("default api key missing from app responses");
+      }
+      notes.push("default api key fetched");
+      targetResults.push({
+        target: "tavily",
+        status: "succeeded",
+        stage: "completed",
+        runId,
+        proxyNode: selectedProxy?.name || null,
+        proxyIp: browserObservedIp,
+        artifact: {
+          target: "tavily",
+          artifactType: "api_key",
+          secretValue: apiKey,
+          preview: apiKey.slice(0, Math.min(apiKey.length, 12)),
+          status: "active",
+        },
+      });
     }
 
-    if (lastKeyError) {
-      throw lastKeyError;
+    if (selectedTargets.includes("chatgpt")) {
+      failureStage = "chatgpt_login";
+      const session = await loginChatGptAndExtractAccessToken(page, cfg);
+      accessToken = session.accessToken;
+      notes.push("chatgpt access token fetched");
+      targetResults.push({
+        target: "chatgpt",
+        status: "succeeded",
+        stage: "completed",
+        runId,
+        proxyNode: selectedProxy?.name || null,
+        proxyIp: browserObservedIp,
+        artifact: {
+          target: "chatgpt",
+          artifactType: "access_token",
+          secretValue: session.accessToken,
+          preview: maskSecretPreview(session.accessToken),
+          metadataJson: JSON.stringify(session.metadata),
+          status: "active",
+        },
+      });
     }
-    if (!apiKey) {
-      throw new Error("default api key missing from app responses");
-    }
-    notes.push("default api key fetched");
 
     const successRisk = summarizeRiskSignals(requestLog, networkLog);
     ledgerRecord.status = "succeeded";
@@ -8502,8 +8783,10 @@ async function runSingleMode(
     ledgerRecord.captchaSubmitCount = successRisk.captchaSubmitCount;
     ledgerRecord.maxCaptchaLength = successRisk.maxCaptchaLength;
     ledgerRecord.password = password;
-    ledgerRecord.apiKey = apiKey;
-    ledgerRecord.apiKeyPrefix = apiKey.slice(0, Math.min(apiKey.length, 12));
+    if (apiKey) {
+      ledgerRecord.apiKey = apiKey;
+      ledgerRecord.apiKeyPrefix = apiKey.slice(0, Math.min(apiKey.length, 12));
+    }
     ledgerRecord.notesJson = safeJsonStringify(notes);
     if (selectedProxy?.name) {
       await recordProxyNodeTaskOutcome(selectedProxy.name, selectedProxy.geo, "ok");
@@ -8512,6 +8795,14 @@ async function runSingleMode(
       risk: successRisk,
       snippets: successRisk.snippets,
       verificationLink,
+      accessToken: accessToken ? { preview: maskSecretPreview(accessToken) } : null,
+      targets: selectedTargets,
+      targetResults: targetResults.map((item) => ({
+        target: item.target,
+        status: item.status,
+        stage: item.stage,
+        artifactType: item.artifact?.artifactType || null,
+      })),
       selectedProxy: selectedProxy
         ? {
             name: selectedProxy.name,
@@ -8530,15 +8821,35 @@ async function runSingleMode(
     });
     persistLedgerRecord("success");
 
+    const attemptResult: AttemptResultPayload = {
+      ok: true,
+      mode,
+      email,
+      password,
+      targets: selectedTargets,
+      targetResults,
+      precheckPassed,
+      verifyPassed: verifyPassed || hasConfiguredLoginAccount(cfg),
+      verificationLink,
+      apiKey,
+      accessToken,
+      model: resolvedModel,
+      notes,
+    };
+    await writeJson(new URL("attempt-result.json", diagOutputDir), attemptResult);
+
     return {
       mode,
       email,
       password,
       verificationLink,
       apiKey,
+      accessToken,
       model: resolvedModel,
       precheckPassed,
       verifyPassed: verifyPassed || hasConfiguredLoginAccount(cfg),
+      targets: selectedTargets,
+      targetResults,
       notes,
     };
   } catch (error) {
@@ -8547,6 +8858,22 @@ async function runSingleMode(
     const risk = summarizeRiskSignals(requestLog, networkLog);
     localErrorCode = deriveErrorCode(message, failureStage, risk);
     localErrorMessage = message;
+    const failedTarget: ProviderTarget =
+      /^chatgpt/i.test(failureStage) || (!selectedTargets.includes("tavily") && selectedTargets.includes("chatgpt"))
+        ? "chatgpt"
+        : "tavily";
+    if (!targetResults.some((item) => item.target === failedTarget && item.status === "failed")) {
+      targetResults.push({
+        target: failedTarget,
+        status: "failed",
+        stage: failureStage,
+        errorCode: localErrorCode || null,
+        errorMessage: message,
+        runId,
+        proxyNode: selectedProxy?.name || null,
+        proxyIp: ledgerRecord.proxyIp || null,
+      });
+    }
     try {
       await writeJson(new URL(`network_fail_${mode}.json`, diagOutputDir), networkLog.slice(-180));
       await writeJson(new URL(`request_fail_${mode}.json`, diagOutputDir), requestLog.slice(-180));
@@ -8562,6 +8889,21 @@ async function runSingleMode(
       if (page) {
         await writeFile(new URL(`failure_page_${mode}.html`, diagOutputDir), await page.content(), "utf8");
       }
+      await writeJson(new URL("attempt-result.json", diagOutputDir), {
+        ok: false,
+        mode,
+        email,
+        password,
+        targets: selectedTargets,
+        targetResults,
+        precheckPassed,
+        verifyPassed,
+        verificationLink,
+        apiKey,
+        accessToken,
+        model: resolvedModel,
+        notes,
+      } satisfies AttemptResultPayload);
     } catch {
       // best effort diagnostics only
     }
@@ -8807,7 +9149,7 @@ async function run(): Promise<void> {
     const requestedMode = args.mode || cfg.runMode;
     const batchEnabled = args.need > 1 || args.parallel > 1;
     log(
-      `start mode=${requestedMode} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"} need=${args.need} parallel=${args.parallel}`,
+      `start mode=${requestedMode} targets=${providerTargetsToCsv(args.targets.length ? args.targets : cfg.defaultTargets)} precheck=${cfg.browserPrecheckEnabled && !args.skipPrecheck ? "on" : "off"} need=${args.need} parallel=${args.parallel}`,
     );
 
     const resolvedModel = "disabled";
@@ -8980,6 +9322,7 @@ async function run(): Promise<void> {
       requestedMode,
       completedAt: new Date().toISOString(),
       model: resolvedModel,
+      targets: args.targets,
       need: args.need,
       parallel: args.parallel,
       successCount: results.length,

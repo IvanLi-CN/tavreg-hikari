@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
-import { AppDatabase, computeLaunchCapacity, type AppSettings, type JobAttemptRecord, type JobRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import { AppDatabase, computeLaunchCapacity, type AppSettings, type JobAttemptRecord, type JobRecord, type MicrosoftAccountRecord, type WorkerAttemptResultInput } from "../storage/app-db.js";
+import { normalizeProviderTargets, providerTargetsToCsv, type ProviderTarget } from "../provider-targets.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
@@ -25,6 +26,7 @@ const STRIPPED_ATTEMPT_ENV_KEYS = [
   "MICROSOFT_ACCOUNT_EMAIL",
   "MICROSOFT_ACCOUNT_PASSWORD",
   "CHROME_REMOTE_DEBUGGING_PORT",
+  "TARGETS",
 ] as const;
 
 function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
@@ -54,6 +56,7 @@ function isTerminalJobStatus(status: JobRecord["status"]): boolean {
 
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
+  targets: ProviderTarget[];
   account: Pick<MicrosoftAccountRecord, "id" | "microsoftEmail" | "passwordPlaintext">;
   outputDir: string;
   sharedLedgerPath: string;
@@ -64,6 +67,7 @@ export function buildAttemptRuntimeSpec(input: {
 }): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
   const runtime = resolveWorkerRuntime();
   const args = [...runtime.bootstrapArgs, "--mode", input.job.runMode, "--parallel", "1", "--need", "1"];
+  args.push("--targets", providerTargetsToCsv(input.targets));
   if (input.selectedProxyNode?.trim()) {
     args.push("--proxy-node", input.selectedProxyNode.trim());
   }
@@ -74,6 +78,7 @@ export function buildAttemptRuntimeSpec(input: {
     env: {
       ...inheritedEnv,
       RUN_MODE: input.job.runMode,
+      TARGETS: providerTargetsToCsv(input.targets),
       MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
       MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
       MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
@@ -138,12 +143,13 @@ export class JobScheduler {
     need: number;
     parallel: number;
     maxAttempts: number;
+    targets: ProviderTarget[];
   }): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
       throw new Error("configure a Mihomo subscription before starting a job");
     }
-    const job = this.db.createJob(params);
+    const job = this.db.createJob({ ...params, targets: normalizeProviderTargets(params.targets) });
     this.emit("job.updated", { job });
     this.emit("toast", { level: "info", message: `job #${job.id} started` });
     this.ensureLoop(job.id);
@@ -244,7 +250,8 @@ export class JobScheduler {
         const account = this.db.leaseNextAccount(jobId);
         if (!account) break;
         const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${job.id}`, `attempt-${Date.now()}-${account.id}`);
-        const attempt = this.db.createAttempt(job.id, account.id, attemptOutputDir);
+        const firstTarget = job.targets.find((target) => !this.db.getAccountTargetState(account.id, target).hasArtifact) || job.targets[0] || "tavily";
+        const attempt = this.db.createAttempt(job.id, account.id, attemptOutputDir, firstTarget, 1);
         try {
           await this.spawnAttempt(job, account, attempt, attemptOutputDir);
           this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
@@ -292,8 +299,12 @@ export class JobScheduler {
         mixedPort: portLeases.mixedPort.port,
       };
       const selectedProxyNode = this.db.getSelectedProxyName();
+      const attemptTargets = normalizeProviderTargets(
+        job.targets.filter((target) => !this.db.getAccountTargetState(account.id, target).hasArtifact),
+      );
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
+        targets: attemptTargets,
         account,
         outputDir,
         sharedLedgerPath: this.sharedLedgerPath,
@@ -390,6 +401,7 @@ export class JobScheduler {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Promise<void> {
+    const attemptResult = await readJsonFile<WorkerAttemptResultInput & { email?: string; password?: string }>(path.join(outputDir, "attempt-result.json"));
     const result = await readJsonFile<{ apiKey?: string | null; email?: string; password?: string }>(path.join(outputDir, "result.json"));
     const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
     const signupTask = this.db.getLatestSignupTask(jobId, accountId);
@@ -410,12 +422,41 @@ export class JobScheduler {
       this.emit("proxy.updated", { nodes: this.db.listProxyNodes() });
     }
 
-    if (code === 0 && signal == null && apiKey) {
-      const { job, attempt } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
-      this.emit("attempt.updated", { attempt });
+    let normalizedOutcome = attemptResult;
+    if (!normalizedOutcome && code === 0 && signal == null && apiKey) {
+      normalizedOutcome = {
+        ok: true,
+        targetResults: [
+          {
+            target: "tavily",
+            status: "succeeded",
+            stage: "completed",
+            runId: signupTask?.run_id ? String(signupTask.run_id) : null,
+            proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
+            proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
+            artifact: {
+              target: "tavily",
+              artifactType: "api_key",
+              secretValue: apiKey,
+              preview: apiKey.slice(0, Math.min(apiKey.length, 12)),
+              status: "active",
+            },
+          },
+        ],
+      };
+    }
+
+    if (normalizedOutcome && normalizedOutcome.targetResults.length > 0) {
+      const { job, attempts } = this.db.processWorkerAttemptResult(jobId, attemptId, accountId, normalizedOutcome, outputDir);
+      for (const attempt of attempts) {
+        this.emit("attempt.updated", { attempt });
+      }
       this.emit("account.updated", { account: this.db.getAccount(accountId) });
       this.emit("job.updated", { job });
-      this.emit("toast", { level: "success", message: `attempt #${attempt.id} succeeded for account #${accountId}` });
+      this.emit("toast", {
+        level: normalizedOutcome.ok ? "success" : "error",
+        message: `attempt #${attemptId} ${normalizedOutcome.ok ? "completed" : "finished with target failures"} for account #${accountId}`,
+      });
       return;
     }
 

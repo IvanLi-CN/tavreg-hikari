@@ -1,12 +1,27 @@
 import type {
   AccountRecord,
   AccountsPayload,
-  ApiKeyRecord,
   ApiKeysPayload,
   EventRecord,
   JobSnapshot,
+  ProviderTarget,
   ProxyPayload,
 } from "@/lib/app-types";
+
+function createTargetState(target: ProviderTarget, overrides: Partial<AccountRecord["targetStates"]["tavily"]> = {}): AccountRecord["targetStates"]["tavily"] {
+  return {
+    target,
+    status: "ready",
+    hasArtifact: false,
+    artifactId: null,
+    artifactType: null,
+    artifactPreview: null,
+    lastResultAt: null,
+    lastErrorCode: null,
+    skipReason: null,
+    ...overrides,
+  };
+}
 
 export const sampleJob: JobSnapshot = {
   job: {
@@ -24,6 +39,7 @@ export const sampleJob: JobSnapshot = {
     pausedAt: null,
     completedAt: null,
     lastError: null,
+    targets: ["tavily", "chatgpt"],
   },
   activeAttempts: [
     {
@@ -38,6 +54,8 @@ export const sampleJob: JobSnapshot = {
       errorMessage: null,
       startedAt: "2026-03-18T07:23:00.000Z",
       completedAt: null,
+      target: "chatgpt",
+      sequenceIndex: 2,
     },
   ],
   recentAttempts: [
@@ -53,6 +71,8 @@ export const sampleJob: JobSnapshot = {
       errorMessage: "OAuth redirect timed out",
       startedAt: "2026-03-18T07:18:00.000Z",
       completedAt: "2026-03-18T07:19:00.000Z",
+      target: "tavily",
+      sequenceIndex: 1,
     },
     {
       id: 197,
@@ -66,9 +86,13 @@ export const sampleJob: JobSnapshot = {
       errorMessage: null,
       startedAt: "2026-03-18T07:10:00.000Z",
       completedAt: "2026-03-18T07:14:00.000Z",
+      target: "tavily",
+      sequenceIndex: 1,
     },
   ],
   eligibleCount: 22,
+  completedTargetSteps: 6,
+  totalTargetSteps: 10,
 };
 
 export const sampleEvents: EventRecord[] = [
@@ -119,6 +143,10 @@ export const sampleAccounts = {
       skipReason: null,
       groupName: "default",
       disabledAt: null,
+      targetStates: {
+        tavily: createTargetState("tavily"),
+        chatgpt: createTargetState("chatgpt"),
+      },
     },
     {
       id: 2,
@@ -136,6 +164,18 @@ export const sampleAccounts = {
       skipReason: "linked_api_key",
       groupName: "linked",
       disabledAt: null,
+      targetStates: {
+        tavily: createTargetState("tavily", {
+          status: "succeeded",
+          hasArtifact: true,
+          artifactId: 1,
+          artifactType: "api_key",
+          artifactPreview: "tvly-prod••••",
+          lastResultAt: "2026-03-18T07:14:00.000Z",
+          skipReason: "linked_api_key",
+        }),
+        chatgpt: createTargetState("chatgpt"),
+      },
     },
     {
       id: 3,
@@ -153,6 +193,21 @@ export const sampleAccounts = {
       skipReason: null,
       groupName: "failed-pool",
       disabledAt: null,
+      targetStates: {
+        tavily: createTargetState("tavily", {
+          status: "failed",
+          lastResultAt: "2026-03-18T07:01:00.000Z",
+          lastErrorCode: "password-invalid",
+        }),
+        chatgpt: createTargetState("chatgpt", {
+          status: "succeeded",
+          hasArtifact: true,
+          artifactId: 2,
+          artifactType: "access_token",
+          artifactPreview: "sess-••••z9Q",
+          lastResultAt: "2026-03-18T07:02:00.000Z",
+        }),
+      },
     },
   ],
 } satisfies AccountsPayload;
@@ -170,21 +225,25 @@ export const sampleApiKeys: ApiKeysPayload = {
       id: 1,
       accountId: 2,
       microsoftEmail: "beta@outlook.com",
-      apiKeyMasked: "tvly-****-af3x",
-      apiKeyPrefix: "tvly-prod",
+      target: "tavily",
+      artifactType: "api_key",
+      preview: "tvly-prod••••af3x",
       status: "active",
       extractedAt: "2026-03-18T07:14:00.000Z",
       lastVerifiedAt: "2026-03-18T07:16:00.000Z",
+      metadataJson: null,
     },
     {
       id: 2,
       accountId: 7,
       microsoftEmail: "omega@outlook.com",
-      apiKeyMasked: "tvly-****-mm9p",
-      apiKeyPrefix: "tvly-sbx",
+      target: "chatgpt",
+      artifactType: "access_token",
+      preview: "sess-••••mm9p",
       status: "revoked",
       extractedAt: "2026-03-17T15:40:00.000Z",
       lastVerifiedAt: "2026-03-18T00:10:00.000Z",
+      metadataJson: "{\"provider\":\"microsoft\"}",
     },
   ],
 };

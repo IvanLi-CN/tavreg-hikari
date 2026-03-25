@@ -7,7 +7,7 @@ import type { PageKey } from "@/lib/app-types";
 const pageItems: Array<{ key: PageKey; label: string }> = [
   { key: "dashboard", label: "主流程" },
   { key: "accounts", label: "微软账号" },
-  { key: "apiKeys", label: "API Keys" },
+  { key: "apiKeys", label: "Artifacts" },
   { key: "proxies", label: "代理节点" },
 ];
 

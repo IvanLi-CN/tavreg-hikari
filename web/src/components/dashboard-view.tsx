@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -7,8 +8,13 @@ import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
+import type { EventRecord, JobDraft, JobSnapshot, ProviderTarget } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+
+const targetLabels: Record<ProviderTarget, string> = {
+  tavily: "Tavily",
+  chatgpt: "ChatGPT",
+};
 
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
@@ -32,6 +38,16 @@ export function DashboardView({
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
 }) {
+  const currentTargets = job.job?.targets || jobDraft.targets;
+  const toggleTarget = (target: ProviderTarget, checked: boolean) => {
+    if (checked) {
+      onJobDraftChange({ targets: Array.from(new Set([...jobDraft.targets, target])) });
+      return;
+    }
+    if (jobDraft.targets.length <= 1) return;
+    onJobDraftChange({ targets: jobDraft.targets.filter((item) => item !== target) });
+  };
+
   return (
     <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
       <div className="space-y-4">
@@ -42,7 +58,7 @@ export function DashboardView({
             tone={job.job?.status === "completed" ? "good" : job.job?.status === "failed" ? "bad" : "default"}
           />
           <MetricCard label="成功 / 目标" value={`${job.job?.successCount || 0} / ${job.job?.need || 0}`} tone="good" />
-          <MetricCard label="并行 / 已发起" value={`${job.job?.parallel || 0} / ${job.job?.launchedCount || 0}`} tone="warn" />
+          <MetricCard label="目标步骤" value={`${job.completedTargetSteps} / ${job.totalTargetSteps}`} tone="warn" />
           <MetricCard label="待派发账号" value={job.eligibleCount} />
         </div>
 
@@ -73,6 +89,22 @@ export function DashboardView({
               <Field label="Max Attempts">
                 <Input type="number" min={1} value={jobDraft.maxAttempts} onChange={(event) => onJobDraftChange({ maxAttempts: Number(event.target.value) || 1 })} />
               </Field>
+            </div>
+            <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
+              <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Targets</div>
+              <div className="mt-3 flex flex-wrap gap-4">
+                {(["tavily", "chatgpt"] as ProviderTarget[]).map((target) => (
+                  <label key={target} className="flex items-center gap-3 rounded-full border border-white/8 px-4 py-2 text-sm text-slate-200">
+                    <Checkbox
+                      checked={jobDraft.targets.includes(target)}
+                      onCheckedChange={(checked) => toggleTarget(target, checked === true)}
+                      aria-label={`target-${target}`}
+                    />
+                    <span>{targetLabels[target]}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="mt-3 text-sm text-slate-400">当前任务目标：{currentTargets.map((target) => targetLabels[target]).join(" / ")}</div>
             </div>
             <div className="flex flex-wrap gap-2">
               <Button onClick={() => onJobAction("start")}>启动</Button>
@@ -111,6 +143,10 @@ export function DashboardView({
                           <dd>{attempt.stage}</dd>
                         </div>
                         <div className="flex items-center justify-between gap-3">
+                          <dt className="text-slate-500">目标</dt>
+                          <dd>{attempt.target || "—"}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
                           <dt className="text-slate-500">代理节点</dt>
                           <dd>{attempt.proxyNode || "—"}</dd>
                         </div>
@@ -134,6 +170,7 @@ export function DashboardView({
                         <TableHead>账号</TableHead>
                         <TableHead>状态</TableHead>
                         <TableHead>阶段</TableHead>
+                        <TableHead>目标</TableHead>
                         <TableHead>代理节点</TableHead>
                         <TableHead>出口 IP</TableHead>
                         <TableHead>开始时间</TableHead>
@@ -146,6 +183,7 @@ export function DashboardView({
                           <TableCell className="break-all">{attempt.accountEmail || `#${attempt.accountId}`}</TableCell>
                           <TableCell><StatusBadge status={attempt.status} /></TableCell>
                           <TableCell>{attempt.stage}</TableCell>
+                          <TableCell>{attempt.target || "—"}</TableCell>
                           <TableCell>{attempt.proxyNode || "—"}</TableCell>
                           <TableCell>{attempt.proxyIp || "—"}</TableCell>
                           <TableCell>{formatDate(attempt.startedAt)}</TableCell>
@@ -179,7 +217,7 @@ export function DashboardView({
                     <StatusBadge status={attempt.status} />
                   </div>
                   <div className="mt-3 text-sm text-slate-300">
-                    {attempt.accountEmail || `账号 #${attempt.accountId}`} · {attempt.proxyNode || "未绑定代理"}
+                    {attempt.accountEmail || `账号 #${attempt.accountId}`} · {attempt.target || "unknown"} · {attempt.proxyNode || "未绑定代理"}
                   </div>
                   <div className="mt-2 text-xs text-slate-500">{attempt.errorCode || attempt.stage}</div>
                 </article>

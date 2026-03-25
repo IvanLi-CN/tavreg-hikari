@@ -1,6 +1,20 @@
 export type PageKey = "dashboard" | "accounts" | "apiKeys" | "proxies";
+export type ProviderTarget = "tavily" | "chatgpt";
+export type ArtifactType = "api_key" | "access_token";
 
 export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
+
+export type AccountTargetState = {
+  target: ProviderTarget;
+  status: string;
+  hasArtifact: boolean;
+  artifactId: number | null;
+  artifactType: ArtifactType | null;
+  artifactPreview: string | null;
+  lastResultAt: string | null;
+  lastErrorCode: string | null;
+  skipReason: string | null;
+};
 
 export type AccountRecord = {
   id: number;
@@ -18,6 +32,7 @@ export type AccountRecord = {
   skipReason: string | null;
   groupName: string | null;
   disabledAt: string | null;
+  targetStates: Record<ProviderTarget, AccountTargetState>;
 };
 
 export type AccountsPayload = {
@@ -88,8 +103,21 @@ export type ApiKeyRecord = {
   lastVerifiedAt: string | null;
 };
 
+export type ArtifactRecord = {
+  id: number;
+  accountId: number;
+  microsoftEmail: string;
+  target: ProviderTarget;
+  artifactType: ArtifactType;
+  preview: string;
+  status: string;
+  extractedAt: string;
+  lastVerifiedAt: string | null;
+  metadataJson: string | null;
+};
+
 export type ApiKeysPayload = {
-  rows: ApiKeyRecord[];
+  rows: ArtifactRecord[];
   total: number;
   page: number;
   pageSize: number;
@@ -111,6 +139,8 @@ export type AttemptRecord = {
   errorMessage: string | null;
   startedAt: string;
   completedAt: string | null;
+  target: ProviderTarget | null;
+  sequenceIndex: number;
 };
 
 export type JobSnapshot = {
@@ -129,10 +159,13 @@ export type JobSnapshot = {
     pausedAt: string | null;
     completedAt: string | null;
     lastError: string | null;
+    targets: ProviderTarget[];
   };
   activeAttempts: AttemptRecord[];
   recentAttempts: AttemptRecord[];
   eligibleCount: number;
+  completedTargetSteps: number;
+  totalTargetSteps: number;
 };
 
 export type ProxySettings = {
@@ -185,6 +218,7 @@ export type JobDraft = {
   need: number;
   parallel: number;
   maxAttempts: number;
+  targets: ProviderTarget[];
 };
 
 export type AccountQuery = {
@@ -199,6 +233,8 @@ export type AccountQuery = {
 export type ApiKeyQuery = {
   q: string;
   status: string;
+  target: string;
+  artifactType: string;
   page: number;
   pageSize: number;
 };

@@ -38,6 +38,18 @@ function ImportDecisionBadge({ decision }: { decision: string }) {
   return <Badge variant="danger">无效</Badge>;
 }
 
+function TargetStateSummary({ label, state }: { label: string; state: AccountsPayload["rows"][number]["targetStates"]["tavily"] }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <dt className="text-slate-500">{label}</dt>
+      <dd className="flex items-center gap-2">
+        <StatusBadge status={state.status} />
+        {state.artifactPreview ? <span className="max-w-[11rem] truncate text-xs text-slate-400">{state.artifactPreview}</span> : null}
+      </dd>
+    </div>
+  );
+}
+
 export function AccountsView({
   accounts,
   importContent,
@@ -272,6 +284,8 @@ export function AccountsView({
                               <dt className="text-slate-500">最近状态</dt>
                               <dd><StatusBadge status={row.lastResultStatus} /></dd>
                             </div>
+                            <TargetStateSummary label="Tavily" state={row.targetStates.tavily} />
+                            <TargetStateSummary label="ChatGPT" state={row.targetStates.chatgpt} />
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">导入时间</dt>
                               <dd>{formatDate(row.importedAt)}</dd>
@@ -307,6 +321,8 @@ export function AccountsView({
                         <TableHead>分组</TableHead>
                         <TableHead>Has Key</TableHead>
                         <TableHead>最近状态</TableHead>
+                        <TableHead>Tavily</TableHead>
+                        <TableHead>ChatGPT</TableHead>
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
                         <TableHead>跳过原因</TableHead>
@@ -329,6 +345,22 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
+                          <TableCell className="min-w-[12rem]">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={row.targetStates.tavily.status} />
+                              {row.targetStates.tavily.artifactPreview ? (
+                                <span className="truncate text-xs text-slate-400">{row.targetStates.tavily.artifactPreview}</span>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                          <TableCell className="min-w-[12rem]">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={row.targetStates.chatgpt.status} />
+                              {row.targetStates.chatgpt.artifactPreview ? (
+                                <span className="truncate text-xs text-slate-400">{row.targetStates.chatgpt.artifactPreview}</span>
+                              ) : null}
+                            </div>
+                          </TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>

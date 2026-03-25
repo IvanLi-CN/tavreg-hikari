@@ -1,7 +1,7 @@
 import type { AppDatabase, JobAttemptRecord } from "../storage/app-db.js";
 
 export function serializeAttemptForApi(db: AppDatabase, row: JobAttemptRecord): Record<string, unknown> {
-  const signupTask = db.getLatestSignupTask(row.jobId, row.accountId);
+  const signupTask = row.target == null || row.target === "tavily" ? db.getLatestSignupTask(row.jobId, row.accountId) : null;
   return {
     ...row,
     runId: signupTask?.run_id ? String(signupTask.run_id) : row.runId,

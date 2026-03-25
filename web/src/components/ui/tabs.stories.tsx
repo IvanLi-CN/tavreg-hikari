@@ -31,7 +31,7 @@ export const NavigationTabs: Story = {
           </TabsList>
           <TabsContent value="dashboard" className="pt-4 text-sm text-slate-300">当前在主流程面板。</TabsContent>
           <TabsContent value="accounts" className="pt-4 text-sm text-slate-300">当前在账号池面板。</TabsContent>
-          <TabsContent value="apiKeys" className="pt-4 text-sm text-slate-300">当前在 API keys 面板。</TabsContent>
+          <TabsContent value="apiKeys" className="pt-4 text-sm text-slate-300">当前在 Artifacts 面板。</TabsContent>
         </Tabs>
       </div>
     );

@@ -12,11 +12,11 @@ import type {
   AccountsPayload,
   ApiKeysPayload,
   ApiKeyQuery,
-  ApiKeyRecord,
   EventRecord,
   JobDraft,
   JobSnapshot,
   PageKey,
+  ProviderTarget,
   ProxyCheckScope,
   ProxyPayload,
   ProxySettings,
@@ -64,7 +64,14 @@ function mergeIds(current: number[], next: number[]): number[] {
 
 export function App() {
   const { pathname, navigate } = usePathname();
-  const [job, setJob] = useState<JobSnapshot>({ job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 });
+  const [job, setJob] = useState<JobSnapshot>({
+    job: null,
+    activeAttempts: [],
+    recentAttempts: [],
+    eligibleCount: 0,
+    completedTargetSteps: 0,
+    totalTargetSteps: 0,
+  });
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -90,9 +97,9 @@ export function App() {
   const [importPreviewOpen, setImportPreviewOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
-  const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5 });
+  const [jobDraft, setJobDraft] = useState<JobDraft>({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 5, targets: ["tavily"] });
   const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
-  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", page: 1, pageSize: 20 });
+  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", target: "", artifactType: "", page: 1, pageSize: 20 });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -137,9 +144,11 @@ export function App() {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.status) params.set("status", nextQuery.status);
+    if (nextQuery.target) params.set("target", nextQuery.target);
+    if (nextQuery.artifactType) params.set("artifactType", nextQuery.artifactType);
     params.set("page", String(nextQuery.page));
     params.set("pageSize", String(nextQuery.pageSize));
-    const payload = await api<ApiKeysPayload>(`/api/api-keys?${params.toString()}`);
+    const payload = await api<ApiKeysPayload>(`/api/artifacts?${params.toString()}`);
     if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
       setApiKeyQuery((current) => ({ ...current, page: current.page - 1 }));
       return;
@@ -164,6 +173,7 @@ export function App() {
       need: proxies.settings.defaultNeed,
       parallel: proxies.settings.defaultParallel,
       maxAttempts: proxies.settings.defaultMaxAttempts,
+      targets: ["tavily"],
     });
   }, [jobDraftTouched, proxies]);
 
@@ -386,7 +396,7 @@ export function App() {
       });
       setSelectedAccountIds(payload.blockedIds);
       if (payload.blockedIds.length > 0) {
-        setError("部分账号无法删除：这些账号正在运行中或已经关联 API key。");
+        setError("部分账号无法删除：这些账号正在运行中或已经关联产物。");
       }
       await refreshAccounts();
     } catch (err) {

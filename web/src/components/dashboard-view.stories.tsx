@@ -25,12 +25,12 @@ export const Running: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9, targets: ["tavily", "chatgpt"] },
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
   render: () => {
-    const [draft, setDraft] = useState<JobDraft>({ runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 });
+    const [draft, setDraft] = useState<JobDraft>({ runMode: "headed", need: 5, parallel: 2, maxAttempts: 9, targets: ["tavily", "chatgpt"] });
     return (
       <DashboardView
         job={sampleJob}
@@ -45,9 +45,9 @@ export const Running: Story = {
 
 export const Empty: Story = {
   args: {
-    job: { job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 },
+    job: { job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, completedTargetSteps: 0, totalTargetSteps: 0 },
     events: [],
-    jobDraft: { runMode: "headless", need: 1, parallel: 1, maxAttempts: 3 },
+    jobDraft: { runMode: "headless", need: 1, parallel: 1, maxAttempts: 3, targets: ["tavily"] },
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -57,7 +57,7 @@ export const ControlPlay: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9, targets: ["tavily", "chatgpt"] },
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },

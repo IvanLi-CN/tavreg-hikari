@@ -33,8 +33,8 @@ export function ApiKeysView({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>API Keys</CardTitle>
-        <CardDescription>共 {apiKeys.total} 条 key 记录，默认展示前缀与遮罩值。</CardDescription>
+        <CardTitle>Artifacts</CardTitle>
+        <CardDescription>共 {apiKeys.total} 条目标产物记录，默认展示脱敏预览，不返回完整凭证。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap gap-2">
@@ -42,13 +42,13 @@ export function ApiKeysView({
           <Badge variant="warning">revoked · {revokedCount}</Badge>
           <Badge variant="info">total · {apiKeys.total}</Badge>
         </div>
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <FilterField label="搜索">
             <Input
               name="api-key-query"
               value={query.q}
               onChange={(event) => onQueryChange({ ...query, q: event.target.value, page: 1 })}
-              placeholder="邮箱或前缀"
+              placeholder="邮箱或预览"
             />
           </FilterField>
           <FilterField label="状态">
@@ -64,11 +64,38 @@ export function ApiKeysView({
               </SelectContent>
             </Select>
           </FilterField>
+          <FilterField label="Target">
+            <Select value={query.target || "__all__"} onValueChange={(value) => onQueryChange({ ...query, target: value === "__all__" ? "" : value, page: 1 })}>
+              <SelectTrigger>
+                <SelectValue placeholder="全部" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">全部</SelectItem>
+                <SelectItem value="tavily">tavily</SelectItem>
+                <SelectItem value="chatgpt">chatgpt</SelectItem>
+              </SelectContent>
+            </Select>
+          </FilterField>
+          <FilterField label="Artifact Type">
+            <Select
+              value={query.artifactType || "__all__"}
+              onValueChange={(value) => onQueryChange({ ...query, artifactType: value === "__all__" ? "" : value, page: 1 })}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="全部" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">全部</SelectItem>
+                <SelectItem value="api_key">api_key</SelectItem>
+                <SelectItem value="access_token">access_token</SelectItem>
+              </SelectContent>
+            </Select>
+          </FilterField>
         </div>
 
         {apiKeys.rows.length === 0 ? (
           <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
-            还没有 API key 记录。
+            还没有 artifact 记录。
           </div>
         ) : (
           <>
@@ -78,14 +105,17 @@ export function ApiKeysView({
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
-                      <div className="mt-1 text-sm text-slate-400">{row.apiKeyPrefix}</div>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        <Badge variant="info">{row.target}</Badge>
+                        <Badge variant="neutral">{row.artifactType}</Badge>
+                      </div>
                     </div>
                     <StatusBadge status={row.status} />
                   </div>
                   <dl className="mt-4 grid gap-3 text-sm text-slate-300">
                     <div className="flex items-center justify-between gap-3">
-                      <dt className="text-slate-500">遮罩</dt>
-                      <dd>{row.apiKeyMasked}</dd>
+                      <dt className="text-slate-500">预览</dt>
+                      <dd className="break-all text-right">{row.preview}</dd>
                     </div>
                     <div className="flex items-center justify-between gap-3">
                       <dt className="text-slate-500">提取时间</dt>
@@ -104,8 +134,9 @@ export function ApiKeysView({
                 <TableHeader>
                   <TableRow>
                     <TableHead>账号</TableHead>
-                    <TableHead>Key 前缀</TableHead>
-                    <TableHead>Key 遮罩</TableHead>
+                    <TableHead>Target</TableHead>
+                    <TableHead>Artifact</TableHead>
+                    <TableHead>预览</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>提取时间</TableHead>
                     <TableHead>最近验证</TableHead>
@@ -115,8 +146,9 @@ export function ApiKeysView({
                   {apiKeys.rows.map((row) => (
                     <TableRow key={row.id}>
                       <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
-                      <TableCell>{row.apiKeyPrefix}</TableCell>
-                      <TableCell>{row.apiKeyMasked}</TableCell>
+                      <TableCell>{row.target}</TableCell>
+                      <TableCell>{row.artifactType}</TableCell>
+                      <TableCell className="max-w-[18rem] break-all">{row.preview}</TableCell>
                       <TableCell><StatusBadge status={row.status} /></TableCell>
                       <TableCell>{formatDate(row.extractedAt)}</TableCell>
                       <TableCell>{formatDate(row.lastVerifiedAt)}</TableCell>

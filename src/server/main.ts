@@ -4,6 +4,7 @@ import process from "node:process";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import { normalizeProviderTargets, type ProviderTarget } from "../provider-targets.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
@@ -112,6 +113,22 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   };
 }
 
+function serializeTargetState(db: AppDatabase, accountId: number, target: ProviderTarget): Record<string, unknown> {
+  const state = db.getAccountTargetState(accountId, target);
+  const artifact = state.hasArtifact ? db.getArtifact(accountId, target) : null;
+  return {
+    target,
+    status: state.lastResultStatus,
+    hasArtifact: state.hasArtifact,
+    artifactId: state.artifactId,
+    artifactType: artifact?.artifactType || null,
+    artifactPreview: artifact?.preview || null,
+    lastResultAt: state.lastResultAt,
+    lastErrorCode: state.lastErrorCode,
+    skipReason: state.skipReason,
+  };
+}
+
 function serializeImportedAccount(row: MicrosoftAccountRecord): Record<string, unknown> {
   return {
     id: row.id,
@@ -129,8 +146,19 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       activeAttempts: [],
       recentAttempts: [],
       eligibleCount: 0,
+      completedTargetSteps: 0,
+      totalTargetSteps: 0,
     };
   }
+  const allAttempts = db.listAttempts(job.id, false);
+  const launchedAccountIds = Array.from(new Set(allAttempts.map((row) => row.accountId)));
+  const totalTargetSteps = Math.max(1, job.need) * Math.max(1, job.targets.length);
+  const completedTargetSteps = Math.min(
+    totalTargetSteps,
+    launchedAccountIds.reduce((count, accountId) => {
+      return count + job.targets.filter((target) => db.getAccountTargetState(accountId, target).hasArtifact).length;
+    }, 0),
+  );
   return {
     job,
     activeAttempts: scheduler.activeAttemptRows().map((row) => serializeAttemptForApi(db, row)),
@@ -139,6 +167,8 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       .slice(0, 20)
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: db.countEligibleAccounts(job.id),
+    completedTargetSteps,
+    totalTargetSteps,
   };
 }
 
@@ -345,7 +375,13 @@ async function main(): Promise<void> {
           pageSize,
           summary: data.summary,
           groups: db.listAccountGroups(),
-          rows: data.rows.map((row) => serializeAccount(row)),
+          rows: data.rows.map((row) => ({
+            ...serializeAccount(row),
+            targetStates: {
+              tavily: serializeTargetState(db, row.id, "tavily"),
+              chatgpt: serializeTargetState(db, row.id, "chatgpt"),
+            },
+          })),
         });
       }
 
@@ -376,9 +412,11 @@ async function main(): Promise<void> {
       if (pathname === "/api/api-keys" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
-        const data = db.listApiKeys({
+        const data = db.listArtifacts({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
+          target: "tavily",
+          artifactType: "api_key",
           page,
           pageSize,
         });
@@ -388,9 +426,47 @@ async function main(): Promise<void> {
           pageSize,
           summary: data.summary,
           rows: data.rows.map((row) => ({
-            ...row,
-            apiKeyMasked: maskSecret(row.apiKey),
-            apiKey: undefined,
+            id: row.id,
+            accountId: row.accountId,
+            microsoftEmail: row.microsoftEmail,
+            apiKeyMasked: row.preview || maskSecret(row.secretValue),
+            apiKeyPrefix: row.preview,
+            status: row.status,
+            extractedAt: row.extractedAt,
+            lastVerifiedAt: row.lastVerifiedAt,
+          })),
+        });
+      }
+
+      if (pathname === "/api/artifacts" && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const targetParam = url.searchParams.get("target");
+        const artifactTypeParam = url.searchParams.get("artifactType");
+        const data = db.listArtifacts({
+          q: url.searchParams.get("q") || undefined,
+          status: url.searchParams.get("status") || undefined,
+          target: targetParam === "tavily" || targetParam === "chatgpt" ? targetParam : "",
+          artifactType: artifactTypeParam === "api_key" || artifactTypeParam === "access_token" ? artifactTypeParam : "",
+          page,
+          pageSize,
+        });
+        return json({
+          total: data.total,
+          page,
+          pageSize,
+          summary: data.summary,
+          rows: data.rows.map((row) => ({
+            id: row.id,
+            accountId: row.accountId,
+            microsoftEmail: row.microsoftEmail,
+            target: row.target,
+            artifactType: row.artifactType,
+            preview: row.preview,
+            status: row.status,
+            extractedAt: row.extractedAt,
+            lastVerifiedAt: row.lastVerifiedAt,
+            metadataJson: row.metadataJson,
           })),
         });
       }
@@ -406,11 +482,13 @@ async function main(): Promise<void> {
           if (action === "start") {
             const settings = db.getSettings(getDefaultSettings());
             const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
+            const requestedTargets = normalizeProviderTargets(Array.isArray(body?.targets) ? body.targets.map((item) => String(item || "")) : []);
             const job = await scheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
               parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
               maxAttempts: Math.max(1, Number(body?.maxAttempts || settings.defaultMaxAttempts)),
+              targets: requestedTargets,
             });
             return json({ ok: true, job });
           }
