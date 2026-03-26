@@ -3426,6 +3426,32 @@ async function safeGoto(page: any, url: string, timeout = 90000): Promise<void> 
       return;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const recoveredAfterTimeout = /Timeout \d+ms exceeded/i.test(message)
+        ? await page
+            .evaluate((targetUrl: string) => {
+              const normalize = (value: string) => {
+                try {
+                  const parsed = new URL(value);
+                  return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+                } catch {
+                  return value.trim();
+                }
+              };
+              const current = normalize(window.location.href);
+              const target = normalize(targetUrl);
+              const readyState = document.readyState || "";
+              const bodyLength = (document.body?.innerText || document.body?.textContent || "").trim().length;
+              return current === target && readyState !== "loading" && bodyLength > 0;
+            }, url)
+            .catch(() => false)
+        : false;
+      if (recoveredAfterTimeout) {
+        const browserErrorCode = await collectBrowserNavigationErrorCode(page);
+        if (!browserErrorCode) {
+          log(`safeGoto recovered after timeout (${url}) via ready target document`);
+          return;
+        }
+      }
       const transient = /NS_BINDING_ABORTED|ERR_ABORTED|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|interrupted by another navigation|frame was detached/i.test(
         message,
       );
@@ -3691,6 +3717,24 @@ async function waitForAuthEntrySurface(page: any, kind: "signup" | "login", time
   log(`${kind} entry surface still empty after wait: ${await collectPageSurfaceSummary(page)}`);
 }
 
+async function hasAuthenticatedHomeSignal(page: any): Promise<boolean> {
+  if (await pageContainsAnyText(page, [/overview/i, /api keys/i, /billing/i, /settings/i, /\bdefault\b/i])) {
+    return true;
+  }
+  return await page
+    .evaluate(`async () => {
+      try {
+        const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
+        if (!response.ok) return false;
+        const text = await response.text();
+        return /@|email|name|picture|user/i.test(text);
+      } catch {
+        return false;
+      }
+    }`)
+    .catch(() => false);
+}
+
 async function waitForSignUpEntryReady(page: any, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + Math.max(1_000, timeoutMs);
   while (Date.now() < deadline) {
@@ -3760,7 +3804,7 @@ async function openAuthFlowEntry(
   const successPattern =
     kind === "signup"
       ? /\/u\/login\/identifier|\/u\/signup\/identifier|\/u\/signup\/password/i
-      : /\/u\/login\/identifier|\/u\/login\/password|app\.tavily\.com\/home/i;
+      : /\/u\/login\/identifier|\/u\/login\/password/i;
   let lastError: Error | null = null;
 
   const tryNavigation = async (label: string, url: string): Promise<boolean> => {
@@ -3774,7 +3818,12 @@ async function openAuthFlowEntry(
         await page.waitForTimeout(1_200);
         await waitForAuthEntrySurface(page, kind, 10_000);
       }
-      if (kind === "login" && /app\.tavily\.com\/home/i.test(page.url()) && !/auth\.tavily\.com/i.test(page.url())) {
+      if (
+        kind === "login" &&
+        /app\.tavily\.com\/home/i.test(page.url()) &&
+        !/auth\.tavily\.com/i.test(page.url()) &&
+        (await hasAuthenticatedHomeSignal(page))
+      ) {
         return true;
       }
       if (successPattern.test(page.url())) {
@@ -3866,23 +3915,6 @@ async function openAuthFlowEntry(
 }
 
 async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
-  const hasAuthenticatedHomeSignal = async (): Promise<boolean> => {
-    if (await pageContainsAnyText(page, [/overview/i, /api keys/i, /billing/i, /settings/i, /\bdefault\b/i])) {
-      return true;
-    }
-    return await page
-      .evaluate(`async () => {
-        try {
-          const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
-          if (!response.ok) return false;
-          const text = await response.text();
-          return /@|email|name|picture|user/i.test(text);
-        } catch {
-          return false;
-        }
-      }`)
-      .catch(() => false);
-  };
   const step = 800;
   const rounds = Math.max(1, Math.floor(stableMs / step));
   let sawAuthenticatedSignal = false;
@@ -3891,7 +3923,7 @@ async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
     if (!/app\.tavily\.com\/home/i.test(url) || /auth\.tavily\.com/i.test(url)) {
       return false;
     }
-    if (await hasAuthenticatedHomeSignal()) {
+    if (await hasAuthenticatedHomeSignal(page)) {
       sawAuthenticatedSignal = true;
     }
     await page.waitForTimeout(step);
@@ -4034,6 +4066,62 @@ async function clickMatchingAction(
   return true;
 }
 
+async function clickMatchingActionDirectly(
+  page: any,
+  patterns: RegExp[],
+  selector = 'a, button, [role="button"], input[type="button"], input[type="submit"]',
+): Promise<boolean> {
+  try {
+    const patternPayload = patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags }));
+    return await page.evaluate(
+      (compiledPatterns: Array<{ source: string; flags: string }>, rawSelector: string) => {
+        const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+        const collectDeepElements = (root: ParentNode, targetSelector: string): Element[] => {
+          const matches = Array.from(root.querySelectorAll(targetSelector));
+          const descendants = Array.from(root.querySelectorAll("*"));
+          for (const el of descendants) {
+            const shadowRoot = (el as HTMLElement & { shadowRoot?: ShadowRoot | null }).shadowRoot;
+            if (shadowRoot) {
+              matches.push(...collectDeepElements(shadowRoot, targetSelector));
+            }
+          }
+          return matches;
+        };
+        const isVisible = (el: Element): el is HTMLElement => {
+          if (!(el instanceof HTMLElement)) return false;
+          const rect = el.getBoundingClientRect();
+          if (rect.width <= 0 || rect.height <= 0) return false;
+          const style = window.getComputedStyle(el);
+          return style.visibility !== "hidden" && style.display !== "none";
+        };
+        const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+        const candidates = collectDeepElements(document, rawSelector)
+          .filter(isVisible)
+          .map((el) => {
+            const text = normalize(
+              [
+                el.textContent || "",
+                el.getAttribute("aria-label") || "",
+                el.getAttribute("title") || "",
+                el.getAttribute("value") || "",
+              ].join(" "),
+            );
+            const href = normalize(el.getAttribute("href") || "");
+            return { el, text, href };
+          });
+        const winner = candidates.find((candidate) => matchers.some((matcher) => matcher.test(candidate.text) || matcher.test(candidate.href)));
+        if (!winner) return false;
+        winner.el.click();
+        return true;
+      },
+      patternPayload,
+      selector,
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function clickMicrosoftPasswordFallbackAction(page: any): Promise<boolean> {
   const patterns = [/^use your password$/i, /^sign in with password$/i, /use.*password/i, /使用密码/i];
   const patternPayload = patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags }));
@@ -4123,6 +4211,7 @@ async function syncAuthProviderFormHiddenFields(page: any, provider: string): Pr
       const globalState = window as Window & {
         __kohaLastAuthCaptcha?: string;
         __kohaLastChallengeToken?: string;
+        __kohaReadAuthChallengeToken?: () => string;
       };
       const primaryForm =
         (document.querySelector('form[data-form-primary="true"]') as HTMLFormElement | null) ||
@@ -4143,8 +4232,18 @@ async function syncAuthProviderFormHiddenFields(page: any, provider: string): Pr
             | HTMLTextAreaElement
             | null
         )?.value?.trim() || "";
+      const runtimeChallengeToken =
+        typeof globalState.__kohaReadAuthChallengeToken === "function"
+          ? String(globalState.__kohaReadAuthChallengeToken() || "").trim()
+          : "";
       const challengeToken =
-        pageTurnstile || pageRecaptcha || pageHCaptcha || globalState.__kohaLastChallengeToken || pageCaptcha || "";
+        pageTurnstile ||
+        pageRecaptcha ||
+        pageHCaptcha ||
+        runtimeChallengeToken ||
+        globalState.__kohaLastChallengeToken ||
+        pageCaptcha ||
+        "";
       const captchaToken = pageCaptcha || challengeToken || globalState.__kohaLastAuthCaptcha || "";
       if (challengeToken) {
         globalState.__kohaLastChallengeToken = challengeToken;
@@ -4201,11 +4300,12 @@ async function submitAuthProviderForm(
   logLabel: string,
 ): Promise<boolean> {
   const baselineUrl = page.url();
+  const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
   const confirmProviderTransition = async (): Promise<boolean> => {
-    const deadline = Date.now() + 4_000;
+    const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
       const currentUrl = page.url();
-      if (currentUrl !== baselineUrl && !/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+      if (currentUrl !== baselineUrl && !authProviderSurfacePattern.test(currentUrl)) {
         return true;
       }
       const stillShowingProvider = await page
@@ -4214,12 +4314,13 @@ async function submitAuthProviderForm(
           return elements.some((el) => /continue with microsoft account/i.test((el.textContent || "").replace(/\s+/g, " ").trim()));
         })
         .catch(() => false);
-      if (stillShowingProvider && /auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
-        return false;
+      if (stillShowingProvider && authProviderSurfacePattern.test(currentUrl)) {
+        await page.waitForTimeout(250);
+        continue;
       }
       await page.waitForTimeout(250);
     }
-    return page.url() !== baselineUrl && !/auth\.tavily\.com\/u\/login\/identifier/i.test(page.url());
+    return page.url() !== baselineUrl && !authProviderSurfacePattern.test(page.url());
   };
   const syncedHiddenFields = await syncAuthFormHiddenFields(page);
   const syncedProviderFields = await syncAuthProviderFormHiddenFields(page, provider);
@@ -4233,6 +4334,40 @@ async function submitAuthProviderForm(
   if (touchedChallengeFields.length > 0) {
     log(`${logLabel} refreshed challenge fields via events: ${touchedChallengeFields.join(", ")}`);
     await page.waitForTimeout(randomInt(120, 260));
+  }
+
+  const clickedDirectly = await clickMatchingActionDirectly(page, buttonPatterns, 'button, a, [role="button"]');
+  if (clickedDirectly) {
+    const submitSignal = await waitForAuthSubmitSignal(page, submitPostPattern, 3_500, baselineUrl);
+    if (submitSignal !== "none") {
+      const transitioned = submitSignal === "navigation" ? true : await confirmProviderTransition();
+      if (!transitioned) {
+        log(`${logLabel} direct provider click bounced back to login surface`);
+        return false;
+      }
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after direct provider click`);
+      }
+      log(`${logLabel} submit via direct provider click`);
+      return true;
+    }
+  }
+
+  const clicked = await clickMatchingAction(page, buttonPatterns, 'button, a, [role="button"]');
+  if (clicked) {
+    const submitSignal = await waitForAuthSubmitSignal(page, submitPostPattern, 3_500, baselineUrl);
+    if (submitSignal !== "none") {
+      const transitioned = submitSignal === "navigation" ? true : await confirmProviderTransition();
+      if (!transitioned) {
+        log(`${logLabel} provider click bounced back to login surface`);
+        return false;
+      }
+      if (submitSignal === "navigation") {
+        log(`${logLabel} navigation detected after provider click`);
+      }
+      log(`${logLabel} submit via provider click`);
+      return true;
+    }
   }
 
   try {
@@ -4269,52 +4404,24 @@ async function submitAuthProviderForm(
         log(`${logLabel} submit via provider form`);
         return true;
       }
+      log(`${logLabel} provider form submit emitted no signal`);
     }
+    return false;
   } catch {
-    // fall through to cdp-based click
+    return clicked;
   }
-
-  const clicked = await clickMatchingAction(page, buttonPatterns, 'button, a, [role="button"]');
-  if (clicked) {
-    const submitSignal = await waitForAuthSubmitSignal(page, submitPostPattern, 3_500, baselineUrl);
-    if (submitSignal !== "none") {
-      const transitioned = submitSignal === "navigation" ? true : await confirmProviderTransition();
-      if (!transitioned) {
-        log(`${logLabel} provider click bounced back to login surface`);
-        return false;
-      }
-      if (submitSignal === "navigation") {
-        log(`${logLabel} navigation detected after provider click`);
-      }
-      log(`${logLabel} submit via provider click`);
-      return true;
-    }
-  }
-  return clicked;
 }
 
 async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
   const preSubmitManaged = await collectAuthChallengeSnapshot(page).catch(() => null);
   if (hasManagedAuthChallenge(preSubmitManaged)) {
-    const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, "login");
-    if (
-      tokenOutcome.status === "rejected" &&
-      tokenOutcome.rejection &&
-      tokenOutcome.rejection !== "invalid_captcha" &&
-      tokenOutcome.rejection !== "challenge_unresponsive"
-    ) {
-      throw new Error(tokenOutcome.rejection);
-    }
-    if (tokenOutcome.status === "timeout" && tokenOutcome.snapshot && hasManagedAuthChallenge(tokenOutcome.snapshot)) {
-      log("login provider microsoft: managed challenge token unavailable, continuing with provider submit");
-    }
-    await waitForAuthCaptchaValue(page, tokenOutcome.status === "token_ready" ? 8_000 : 3_000).catch(() => "");
+    log("login provider microsoft: bypassing identifier challenge and submitting provider directly");
   }
   const clicked = await submitAuthProviderForm(
     page,
     "windowslive",
     [/^continue with microsoft account$/i, /^microsoft account$/i, /continue with microsoft/i, /microsoft/i],
-    /\/u\/login\/identifier/i,
+    /\/u\/(?:login|signup)\/identifier/i,
     "login provider microsoft",
   );
   if (clicked) {
@@ -4323,11 +4430,78 @@ async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
   return clicked;
 }
 
+async function waitForPassiveMicrosoftProviderReadiness(
+  page: any,
+  formKind: "signup" | "login",
+  timeoutMs: number,
+): Promise<"ready" | "skipped" | "wait"> {
+  let latest = await collectAuthChallengeSnapshot(page).catch(() => null);
+  if (!hasManagedAuthChallenge(latest)) {
+    return "skipped";
+  }
+  const hasConcreteChallengeSurface = (snapshot: AuthChallengeSnapshot | null | undefined): boolean =>
+    Boolean(snapshot?.hasChallengeFrame || snapshot?.hasChallengeCheckbox || getChallengeTokenLength(snapshot) > 0);
+  if (!hasConcreteChallengeSurface(latest)) {
+    return "ready";
+  }
+  if (isManagedChallengeStableForSubmit(latest)) {
+    return "ready";
+  }
+
+  log(`${formKind} provider submit: waiting for passive managed challenge readiness`);
+  const deadline = Date.now() + Math.max(1_500, timeoutMs);
+  while (Date.now() < deadline) {
+    latest = await collectAuthChallengeSnapshot(page).catch(() => latest);
+    if (!hasManagedAuthChallenge(latest)) {
+      return "skipped";
+    }
+    if (!hasConcreteChallengeSurface(latest)) {
+      return "ready";
+    }
+    if (isManagedChallengeStableForSubmit(latest)) {
+      log(
+        `${formKind} provider submit: passive managed challenge became ready (captcha=${latest?.captchaValueLength || 0}, turnstile=${
+          latest?.turnstileValueLength || 0
+        }, frame=${latest?.hasChallengeFrame ? 1 : 0}, checkbox=${latest?.hasChallengeCheckbox ? 1 : 0})`,
+      );
+      return "ready";
+    }
+    await page.waitForTimeout(400);
+  }
+
+  if (latest && hasManagedAuthChallenge(latest)) {
+    log(
+      `${formKind} provider submit: passive managed challenge still not ready (captcha=${latest.captchaValueLength || 0}, turnstile=${
+        latest.turnstileValueLength || 0
+      }, frame=${latest.hasChallengeFrame ? 1 : 0}, checkbox=${latest.hasChallengeCheckbox ? 1 : 0})`,
+    );
+  }
+  return "wait";
+}
+
 async function handleMicrosoftAccountPicker(page: any, email: string): Promise<boolean> {
+  const currentUrl = page.url();
+  if (
+    /account\.live\.com\/username\/recover/i.test(currentUrl) ||
+    /account\.live\.com\/identity\/confirm/i.test(currentUrl) ||
+    /account\.live\.com\/proofs\//i.test(currentUrl) ||
+    /login\.live\.com\/logout\.srf/i.test(currentUrl)
+  ) {
+    return false;
+  }
+  if (await hasVisibleElement(page, 'input[type="email"], input[autocomplete="username"], input[name="loginfmt"], input[name="fmt"]')) {
+    return false;
+  }
   const emailPattern = new RegExp(escapeRegExp(email), "i");
-  if (await clickMatchingAction(page, [emailPattern], 'button, a, [role="button"]')) {
-    log("login flow: selected remembered Microsoft account");
-    return true;
+  const looksLikeAccountPicker = await pageContainsAnyText(page, [
+    /pick an account/i,
+    /choose an account/i,
+    /select an account/i,
+    /pick up where you left off/i,
+    /选择帐户/i,
+  ]);
+  if (!looksLikeAccountPicker) {
+    return false;
   }
   if (
     await clickMatchingAction(
@@ -4337,6 +4511,10 @@ async function handleMicrosoftAccountPicker(page: any, email: string): Promise<b
     )
   ) {
     log("login flow: switched Microsoft picker to another account");
+    return true;
+  }
+  if (looksLikeAccountPicker && (await clickMatchingAction(page, [emailPattern], 'button, a, [role="button"]'))) {
+    log("login flow: selected remembered Microsoft account");
     return true;
   }
   return false;
@@ -6058,13 +6236,21 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
 
   page.on("dialog", dialogHandler);
   try {
+    const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
+    const socialSignupContinuationPattern = /auth\.tavily\.com\/u\/(?:signup\/identifier|signup\/password|email-identifier\/challenge)/i;
     let lastMicrosoftSurface = "";
+    let lastFlowSurfaceUrl = "";
     let networkRecoveryCount = 0;
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
+    let visitedMicrosoftAccountSurface = false;
     const microsoftLoginDeadline = Date.now() + 120_000;
     for (let step = 1; Date.now() < microsoftLoginDeadline; step += 1) {
       const currentUrl = page.url();
+      if (currentUrl && currentUrl !== lastFlowSurfaceUrl) {
+        lastFlowSurfaceUrl = currentUrl;
+        log(`login flow: main surface -> ${currentUrl}`);
+      }
       const chromiumNetErrorCode = await detectChromiumNetErrorCode(page);
       if (chromiumNetErrorCode) {
         const canRecoverNetwork =
@@ -6081,6 +6267,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         throw new Error(`chromium_net_error:${chromiumNetErrorCode}:url=${currentUrl}`);
       }
       if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
+        visitedMicrosoftAccountSurface = true;
         const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);
         const interrupt = classifyMicrosoftFlowInterrupt(microsoftSurface);
         if (interrupt) {
@@ -6120,7 +6307,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         passwordState.submittedAt = null;
         passwordState.submittedCount = 0;
       }
-      if (!/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+      if (!authProviderSurfacePattern.test(currentUrl)) {
         providerState.submissionKey = null;
         providerState.submittedAt = null;
         providerState.submittedCount = 0;
@@ -6129,8 +6316,12 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
         return page;
       }
+      if (visitedMicrosoftAccountSurface && socialSignupContinuationPattern.test(currentUrl)) {
+        log(`login flow: returned to Tavily social signup continuation ${currentUrl}`);
+        return page;
+      }
 
-      if (/auth\.tavily\.com\/u\/login\/identifier/i.test(currentUrl)) {
+      if (authProviderSurfacePattern.test(currentUrl)) {
         const authSurfaceKey = buildAuthLoginSurfaceKey(currentUrl);
         const formErrors = await collectVisibleFormErrors(page).catch(() => []);
         const errorCodes = await collectVisibleErrorCodes(page).catch(() => []);
@@ -6148,6 +6339,19 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
           await page.waitForTimeout(1_000);
           continue;
         }
+        if (/\/u\/(?:login|signup)\/identifier/i.test(currentUrl)) {
+          const providerReady = await waitForPassiveMicrosoftProviderReadiness(
+            page,
+            /\/u\/signup\/identifier/i.test(currentUrl) ? "signup" : "login",
+            12_000,
+          );
+          if (providerReady === "wait") {
+            providerState.challengeRecoveryKey = authSurfaceKey;
+            await page.waitForTimeout(1_000);
+            continue;
+          }
+          providerState.challengeRecoveryKey = null;
+        }
         if (await clickMicrosoftProviderEntry(page)) {
           providerState.submissionKey = authSurfaceKey;
           providerState.submittedAt = Date.now();
@@ -6157,7 +6361,6 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         }
       }
 
-      if (await handleMicrosoftAccountPicker(page, email)) continue;
       if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) {
         proofState.postEmailPasswordPriorityUntil = null;
         continue;
@@ -6178,6 +6381,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         continue;
       }
       proofState.postEmailPasswordPriorityUntil = null;
+      if (await handleMicrosoftAccountPicker(page, email)) continue;
       if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftProofMethodPrompt(page, proofState)) continue;
       if (await handleMicrosoftProofVerifyPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
@@ -6429,6 +6633,10 @@ async function collectPasswordStepSnapshot(page: any): Promise<PasswordStepSnaps
 
 async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSnapshot> {
   const payload = await page.evaluate(() => {
+    const readRuntimeToken =
+      typeof (globalThis as any).__kohaReadAuthChallengeToken === "function"
+        ? String((globalThis as any).__kohaReadAuthChallengeToken() || "").trim()
+        : "";
     const captchaContainer = document.querySelector("div[data-captcha-sitekey]");
     const sitekey = (captchaContainer?.getAttribute("data-captcha-sitekey") || "").trim();
     const captchaInput = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
@@ -6443,7 +6651,7 @@ async function collectAuthChallengeSnapshot(page: any): Promise<AuthChallengeSna
       url: window.location.href,
       hasCaptchaInput: !!captchaInput,
       captchaValueLength: captchaInput?.value?.length || 0,
-      turnstileValueLength: turnstileInput?.value?.length || 0,
+      turnstileValueLength: Math.max(turnstileInput?.value?.length || 0, readRuntimeToken.length),
       recaptchaValueLength: recaptchaInput?.value?.length || 0,
       hcaptchaValueLength: hcaptchaInput?.value?.length || 0,
       hasCaptchaImage: !!document.querySelector('img[alt="captcha"]'),
@@ -6536,10 +6744,7 @@ function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSna
   if (snapshot.hasChallengeCheckbox) {
     return snapshot.challengeCheckboxChecked === true;
   }
-  return (
-    snapshot.hasChallengeFrame ||
-    snapshot.hasTurnstileApi
-  );
+  return false;
 }
 
 function isManagedChallengeStableForSubmit(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
@@ -6852,6 +7057,7 @@ async function findClickablePointByActionText(
     const patternPayload = patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags }));
     const point = await page.evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
       const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const wantsSignupAction = compiledPatterns.some((item) => /sign\s*up|signup|create\s*account|register|get\s*started/i.test(item.source));
       const collectDeepElements = (root: ParentNode, selector: string): Element[] => {
         const matches = Array.from(root.querySelectorAll(selector));
         const descendants = Array.from(root.querySelectorAll("*"));
@@ -6895,8 +7101,8 @@ async function findClickablePointByActionText(
           if (matcher.test(candidate.href)) score = Math.max(score, 100);
           if (matcher.test(candidate.text)) score = Math.max(score, 80);
         }
-        if (/signup|register/i.test(candidate.href)) score = Math.max(score, 95);
-        if (/sign up|create account|register|start for free|get started/i.test(candidate.text)) {
+        if (wantsSignupAction && /signup|register/i.test(candidate.href)) score = Math.max(score, 95);
+        if (wantsSignupAction && /sign up|create account|register|start for free|get started/i.test(candidate.text)) {
           score = Math.max(score, 70);
         }
         return score;
@@ -7046,7 +7252,7 @@ async function waitForManagedChallengeReady(
     if (!latest || !hasManagedAuthChallenge(latest)) {
       return latest;
     }
-    if (getChallengeTokenLength(latest) > 0 || latest.hasChallengeCheckbox || latest.hasChallengeFrame || latest.hasTurnstileApi) {
+    if (canSubmitManagedChallengeWithoutVisibleToken(latest)) {
       return latest;
     }
     await page.waitForTimeout(250);
@@ -7131,6 +7337,10 @@ async function waitForAuthCaptchaValue(
           const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
           return typeof field?.value === "string" ? field.value.trim() : "";
         };
+        const readRuntimeToken =
+          typeof (globalThis as any).__kohaReadAuthChallengeToken === "function"
+            ? String((globalThis as any).__kohaReadAuthChallengeToken() || "").trim()
+            : "";
         const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
         const directCaptcha = pickValue('input[name="captcha"]');
         if (directCaptcha) return directCaptcha;
@@ -7139,6 +7349,7 @@ async function waitForAuthCaptchaValue(
           pickValue('input[name="g-recaptcha-response"]') ||
           pickValue('textarea[name="h-captcha-response"]') ||
           pickValue('input[name="h-captcha-response"]') ||
+          readRuntimeToken ||
           String((globalThis as any).__kohaLastChallengeToken || "").trim();
         if (captchaField && fallbackToken) {
           captchaField.value = fallbackToken;
@@ -7499,6 +7710,7 @@ async function syncAuthFormHiddenFields(page: any): Promise<string[]> {
         __kohaLastAuthPassword?: string;
         __kohaLastEmailCode?: string;
         __kohaAuthFormPatched?: boolean;
+        __kohaReadAuthChallengeToken?: () => string;
       };
       const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
       const turnstileField = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
@@ -7517,7 +7729,10 @@ async function syncAuthFormHiddenFields(page: any): Promise<string[]> {
       const challengeToken =
         (typeof turnstileField?.value === "string" ? turnstileField.value.trim() : "") ||
         (typeof recaptchaField?.value === "string" ? recaptchaField.value.trim() : "") ||
-        (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "");
+        (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "") ||
+        (typeof globalState.__kohaReadAuthChallengeToken === "function"
+          ? String(globalState.__kohaReadAuthChallengeToken() || "").trim()
+          : "");
       if (captchaValue) {
         globalState.__kohaLastAuthCaptcha = captchaValue;
       }
@@ -7647,6 +7862,12 @@ async function collectAuthSubmitFields(
       (await pickLocatorValue('input[name="g-recaptcha-response"]')) ||
       (await pickLocatorValue('textarea[name="h-captcha-response"]')) ||
       (await pickLocatorValue('input[name="h-captcha-response"]')) ||
+      (await page
+        .evaluate(() => {
+          const reader = (globalThis as any).__kohaReadAuthChallengeToken;
+          return typeof reader === "function" ? reader() || undefined : undefined;
+        })
+        .catch(() => undefined)) ||
       (await page.evaluate(() => (globalThis as any).__kohaLastChallengeToken || undefined).catch(() => undefined));
     const captcha =
       (await pickLocatorValue('input[name="captcha"]')) ||
@@ -8136,25 +8357,33 @@ async function completeSignup(
   solver: CaptchaSolver,
   email: string,
   password: string,
-  mailbox: MailboxSession,
+  mailbox: MailboxSession | null,
   cfg: AppConfig,
-  outputDir: URL,
+  outputDir: URL | null,
   policy: SignupAttemptPolicy,
   proxyUrl?: string,
   hooks?: SignupDiagHooks,
 ): Promise<SignupFlowResult> {
   let emailVerifiedInFlow = false;
-  await openAuthFlowEntry(page, "signup");
+  const currentSurface = page.url();
+  const existingSignupSurface = /\/u\/signup\/identifier|\/u\/signup\/password|\/u\/email-identifier\/challenge/i.test(currentSurface);
+  if (!existingSignupSurface) {
+    await openAuthFlowEntry(page, "signup");
 
-  if (!/\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
-    if (/\/u\/login\/identifier/i.test(page.url())) {
-      await clickSignUp(page);
-    } else {
-      await safeGoto(page, "https://auth.tavily.com/u/signup/identifier");
+    if (!/\/u\/signup\/identifier|\/u\/signup\/password/i.test(page.url())) {
+      if (/\/u\/login\/identifier/i.test(page.url())) {
+        await clickSignUp(page);
+      } else {
+        await safeGoto(page, "https://auth.tavily.com/u/signup/identifier");
+      }
     }
+  } else {
+    log(`signup flow: continuing existing auth surface ${currentSurface}`);
   }
 
-  await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password/i, { timeout: 90000 });
+  await page.waitForURL(/\/u\/signup\/identifier|\/u\/signup\/password|\/u\/email-identifier\/challenge|app\.tavily\.com\/home/i, {
+    timeout: 90000,
+  });
   if (/\/u\/signup\/identifier/i.test(page.url())) {
     await solveCaptchaForm(page, solver, "signup", email, Math.max(1, policy.signupChallengeRounds));
     await page.waitForTimeout(1200);
@@ -8164,6 +8393,9 @@ async function completeSignup(
     return { password, emailVerifiedInFlow };
   }
   if (/\/u\/email-identifier\/challenge/i.test(page.url())) {
+    if (!mailbox) {
+      throw new Error(`social_signup_email_challenge_unexpected:${page.url()}`);
+    }
     emailVerifiedInFlow = await completeEmailIdentifierChallenge(page, mailbox, cfg, proxyUrl);
     await page.waitForTimeout(1200);
   }
@@ -8187,7 +8419,9 @@ async function completeSignup(
         if (fingerprintSnapshot) {
           hooks?.onFingerprintSnapshot?.(fingerprintSnapshot);
         }
-        await writePageArtifactsBestEffort(page, outputDir, "signup_password_before");
+        if (outputDir) {
+          await writePageArtifactsBestEffort(page, outputDir, "signup_password_before");
+        }
       }
 
       const passwordInputs = page.locator('input[type="password"]');
@@ -8353,7 +8587,9 @@ async function completeSignup(
       await page.waitForTimeout(2200);
 
       if (attempt === 1) {
-        await writePageArtifactsBestEffort(page, outputDir, "signup_password_after1");
+        if (outputDir) {
+          await writePageArtifactsBestEffort(page, outputDir, "signup_password_after1");
+        }
       }
 
         if (!/\/u\/signup\/password/i.test(page.url())) {
@@ -8505,6 +8741,7 @@ async function loginAndReachHome(
   mailbox?: MailboxSession | null,
   proxyUrl?: string,
   maxCycles = 5,
+  outputDir?: URL | null,
 ): Promise<any> {
   const loginProvider = getConfiguredLoginProvider(cfg);
   const urlTrace: string[] = [];
@@ -8535,6 +8772,25 @@ async function loginAndReachHome(
     if (loginProvider === "microsoft") {
       page = await completeMicrosoftLogin(page, cfg, proxyUrl);
       pushUrlTrace(`cycle${cycle}:microsoft-return`);
+      if (/auth\.tavily\.com\/u\/(?:signup\/identifier|signup\/password|email-identifier\/challenge)/i.test(page.url())) {
+        log(`login flow: continuing Tavily social signup after Microsoft return ${page.url()}`);
+        const socialSignupResult = await completeSignup(
+          page,
+          solver,
+          email,
+          password,
+          mailbox || null,
+          cfg,
+          outputDir || null,
+          {
+            signupChallengeRounds: Math.max(1, Math.min(cfg.maxCaptchaRounds, 2)),
+            passwordStepRounds: Math.max(1, Math.min(cfg.maxCaptchaRounds, 3)),
+          },
+          proxyUrl,
+        );
+        password = socialSignupResult.password;
+        pushUrlTrace(`cycle${cycle}:social-signup`);
+      }
     } else {
       if (/\/u\/login\/identifier/i.test(page.url())) {
         await solveCaptchaForm(page, solver, "login", email, cfg.maxCaptchaRounds);
@@ -9952,10 +10208,11 @@ async function configureNativeChromePage(
 
 function shouldUseNativeChromeAutomation(
   browserEngine: BrowserEngine,
-  _mode: "headed" | "headless",
+  mode: "headed" | "headless",
   enabled: boolean,
 ): boolean {
   if (browserEngine !== "chrome" || !enabled) return false;
+  if (process.platform === "darwin" && mode === "headed") return false;
   return true;
 }
 
@@ -10046,9 +10303,133 @@ async function applyEngineStealth(
       __kohaLastAuthPassword?: string;
       __kohaLastEmailCode?: string;
       __kohaAuthFieldWatcherInstalled?: boolean;
+      __kohaTurnstileWidgetIds?: Array<string | number>;
+      __kohaReadAuthChallengeToken?: () => string;
     };
     if (!globalState.__kohaAuthFieldWatcherInstalled) {
       globalState.__kohaAuthFieldWatcherInstalled = true;
+      const ensureTokenField = (name: string, value: string): void => {
+        if (!value) return;
+        const primaryForm =
+          (document.querySelector('form[data-form-primary="true"]') as HTMLFormElement | null) ||
+          (document.querySelector("form") as HTMLFormElement | null);
+        let field = document.querySelector(`[name="${name}"]`) as HTMLInputElement | HTMLTextAreaElement | null;
+        if (!field && primaryForm) {
+          const created = document.createElement("input");
+          created.type = "hidden";
+          created.name = name;
+          primaryForm.appendChild(created);
+          field = created;
+        }
+        if (!field) return;
+        if ((field.value || "") !== value) {
+          field.value = value;
+        }
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      const rememberChallengeToken = (rawValue: unknown): string => {
+        const token = typeof rawValue === "string" ? rawValue.trim() : "";
+        if (!token) return "";
+        globalState.__kohaLastChallengeToken = token;
+        globalState.__kohaLastAuthCaptcha = token;
+        ensureTokenField("cf-turnstile-response", token);
+        ensureTokenField("captcha", token);
+        return token;
+      };
+      const readTurnstileRuntimeToken = (): string => {
+        const directToken =
+          (document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null)?.value?.trim() ||
+          (document.querySelector('input[name="g-recaptcha-response"]') as HTMLInputElement | null)?.value?.trim() ||
+          (
+            document.querySelector('textarea[name="h-captcha-response"], input[name="h-captcha-response"]') as
+              | HTMLInputElement
+              | HTMLTextAreaElement
+              | null
+          )?.value?.trim() ||
+          (document.querySelector('input[name="captcha"]') as HTMLInputElement | null)?.value?.trim() ||
+          "";
+        if (directToken) return rememberChallengeToken(directToken);
+        const turnstileApi = (window as Window & { turnstile?: { getResponse?: (...args: unknown[]) => unknown } }).turnstile;
+        if (turnstileApi && typeof turnstileApi.getResponse === "function") {
+          const widgetIds = Array.isArray(globalState.__kohaTurnstileWidgetIds) ? globalState.__kohaTurnstileWidgetIds : [];
+          for (const candidate of [undefined, ...widgetIds]) {
+            try {
+              const response =
+                candidate === undefined ? turnstileApi.getResponse() : turnstileApi.getResponse(candidate);
+              if (typeof response === "string" && response.trim()) {
+                return rememberChallengeToken(response);
+              }
+            } catch {
+              // ignore widget lookup failures
+            }
+          }
+        }
+        return String(globalState.__kohaLastChallengeToken || globalState.__kohaLastAuthCaptcha || "").trim();
+      };
+      const registerTurnstileApi = (api: unknown): void => {
+        if (!api || typeof api !== "object") return;
+        const turnstileApi = api as {
+          render?: (...args: unknown[]) => unknown;
+          getResponse?: (...args: unknown[]) => unknown;
+        };
+        if (typeof turnstileApi.render === "function" && !(turnstileApi.render as any).__kohaWrapped) {
+          const originalRender = turnstileApi.render.bind(turnstileApi);
+          const wrappedRender = (...args: unknown[]) => {
+            const maybeOptions = args[1];
+            if (maybeOptions && typeof maybeOptions === "object") {
+              const options = maybeOptions as Record<string, unknown>;
+              const callback = options.callback;
+              if (typeof callback === "function") {
+                options.callback = (token: unknown, ...cbArgs: unknown[]) => {
+                  rememberChallengeToken(token);
+                  return (callback as (...innerArgs: unknown[]) => unknown)(token, ...cbArgs);
+                };
+              }
+            }
+            const widgetId = originalRender(...args);
+            if (
+              (typeof widgetId === "string" || typeof widgetId === "number") &&
+              (!Array.isArray(globalState.__kohaTurnstileWidgetIds) ||
+                !globalState.__kohaTurnstileWidgetIds.includes(widgetId))
+            ) {
+              globalState.__kohaTurnstileWidgetIds = [...(globalState.__kohaTurnstileWidgetIds || []), widgetId];
+            }
+            readTurnstileRuntimeToken();
+            return widgetId;
+          };
+          (wrappedRender as any).__kohaWrapped = true;
+          turnstileApi.render = wrappedRender;
+        }
+        if (typeof turnstileApi.getResponse === "function" && !(turnstileApi.getResponse as any).__kohaWrapped) {
+          const originalGetResponse = turnstileApi.getResponse.bind(turnstileApi);
+          const wrappedGetResponse = (...args: unknown[]) => {
+            const response = originalGetResponse(...args);
+            if (typeof response === "string" && response.trim()) {
+              rememberChallengeToken(response);
+            }
+            return response;
+          };
+          (wrappedGetResponse as any).__kohaWrapped = true;
+          turnstileApi.getResponse = wrappedGetResponse;
+        }
+      };
+      globalState.__kohaReadAuthChallengeToken = () => readTurnstileRuntimeToken();
+      let currentTurnstile = (window as Window & { turnstile?: unknown }).turnstile;
+      if (currentTurnstile) registerTurnstileApi(currentTurnstile);
+      const turnstileDescriptor = Object.getOwnPropertyDescriptor(window, "turnstile");
+      if (!turnstileDescriptor || turnstileDescriptor.configurable) {
+        Object.defineProperty(window, "turnstile", {
+          configurable: true,
+          enumerable: turnstileDescriptor?.enumerable ?? true,
+          get: () => currentTurnstile,
+          set: (value) => {
+            currentTurnstile = value;
+            registerTurnstileApi(value);
+            readTurnstileRuntimeToken();
+          },
+        });
+      }
       const syncFields = (): void => {
         const captchaField = document.querySelector('input[name="captcha"]') as HTMLInputElement | null;
         const turnstileField = document.querySelector('input[name="cf-turnstile-response"]') as HTMLInputElement | null;
@@ -10060,10 +10441,12 @@ async function applyEngineStealth(
         const passwordField = document.querySelector('input[name="password"], input[type="password"]') as HTMLInputElement | null;
         const codeField = document.querySelector('input[name="code"]') as HTMLInputElement | null;
         const captchaValue = typeof captchaField?.value === "string" ? captchaField.value.trim() : "";
+        const runtimeChallengeToken = readTurnstileRuntimeToken();
         const challengeToken =
           (typeof turnstileField?.value === "string" ? turnstileField.value.trim() : "") ||
           (typeof recaptchaField?.value === "string" ? recaptchaField.value.trim() : "") ||
-          (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "");
+          (typeof hcaptchaField?.value === "string" ? hcaptchaField.value.trim() : "") ||
+          runtimeChallengeToken;
         const emailValue = typeof emailField?.value === "string" ? emailField.value.trim() : "";
         const passwordValue = typeof passwordField?.value === "string" ? passwordField.value : "";
         const codeValue = typeof codeField?.value === "string" ? codeField.value.trim() : "";
@@ -10704,9 +11087,17 @@ async function runSingleMode(
         const contentType = String(headers["content-type"] || "");
         const payload = parseRequestPayload(String(req.postData?.() || ""), contentType);
         let touched = false;
+        const requestUrl = String(req.url?.() || "");
+        const isProviderConnectionSubmit =
+          /\/u\/(?:signup|login)\/identifier/i.test(requestUrl) &&
+          typeof payload["connection"] === "string" &&
+          String(payload["connection"]).trim().length > 0;
+        if (isProviderConnectionSubmit) {
+          await route.continue();
+          return;
+        }
         const cachedFields = (page && typeof page === "object" ? authSubmitFieldCache.get(page) : undefined) || {};
         const fallbackEmail = cachedFields.email || email;
-        const requestUrl = String(req.url?.() || "");
         const challengeToken =
           cachedFields.challengeToken ||
           cachedFields.captcha ||
@@ -10716,12 +11107,17 @@ async function runSingleMode(
                 const field = document.querySelector(selector) as HTMLInputElement | HTMLTextAreaElement | null;
                 return typeof field?.value === "string" ? field.value.trim() : "";
               };
+              const runtimeToken =
+                typeof (globalThis as any).__kohaReadAuthChallengeToken === "function"
+                  ? String((globalThis as any).__kohaReadAuthChallengeToken() || "").trim()
+                  : "";
               return (
                 pickValue('input[name="captcha"]') ||
                 pickValue('input[name="cf-turnstile-response"]') ||
                 pickValue('input[name="g-recaptcha-response"]') ||
                 pickValue('textarea[name="h-captcha-response"]') ||
                 pickValue('input[name="h-captcha-response"]') ||
+                runtimeToken ||
                 String((globalThis as any).__kohaLastAuthCaptcha || "").trim() ||
                 String((globalThis as any).__kohaLastChallengeToken || "").trim()
               );
@@ -10749,12 +11145,20 @@ async function runSingleMode(
               return typeof field?.value === "string" ? field.value.trim() : "";
             })
             .catch(() => "")) || "";
-        if ((!payload["email"] || !String(payload["email"]).trim()) && fallbackEmail) {
+        if (!isProviderConnectionSubmit && (!payload["email"] || !String(payload["email"]).trim()) && fallbackEmail) {
           payload["email"] = fallbackEmail;
           touched = true;
         }
-        if ((!payload["captcha"] || !String(payload["captcha"]).trim()) && challengeToken) {
+        if (!isProviderConnectionSubmit && (!payload["captcha"] || !String(payload["captcha"]).trim()) && challengeToken) {
           payload["captcha"] = challengeToken;
+          touched = true;
+        }
+        if (
+          !isProviderConnectionSubmit &&
+          (!payload["cf-turnstile-response"] || !String(payload["cf-turnstile-response"]).trim()) &&
+          challengeToken
+        ) {
+          payload["cf-turnstile-response"] = challengeToken;
           touched = true;
         }
         if ((!payload["state"] || !String(payload["state"]).trim()) && cachedFields.state) {
@@ -11377,7 +11781,7 @@ async function runSingleMode(
     failureStage = "login_home";
     for (let attempt = 1; attempt <= (taskScopedAttempt ? 1 : 2); attempt += 1) {
       try {
-        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax, diagOutputDir);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         notes.push("reached app home");
         break;
@@ -11401,7 +11805,7 @@ async function runSingleMode(
           break;
         }
 
-        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax);
+        page = await loginAndReachHome(page, solver, email, password, cfg, mailbox, mihomoController.proxyServer, loginCycleMax, diagOutputDir);
         await acceptPostSignupConsent(page).catch(() => false);
         await dismissCookieBannerBestEffort(page).catch(() => {});
         await page.waitForTimeout(1500);
