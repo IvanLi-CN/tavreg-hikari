@@ -233,22 +233,48 @@ function serializeExtractorSettings(settings: AppSettings) {
   };
 }
 
-function getDefaultSettings(): AppSettings {
+function buildSettingsCodeDefaults(): AppSettings {
   return {
+    subscriptionUrl: "",
+    groupName: "CODEX_AUTO",
+    routeGroupName: "CODEX_ROUTE",
+    checkUrl: "https://www.cloudflare.com/cdn-cgi/trace",
+    timeoutMs: 8000,
+    maxLatencyMs: 3000,
+    apiPort: 39090,
+    mixedPort: 49090,
+    serverHost: "127.0.0.1",
+    serverPort: 3717,
+    defaultRunMode: "headed",
+    defaultNeed: 1,
+    defaultParallel: 1,
+    defaultMaxAttempts: 5,
+    extractorZhanghaoyaKey: "",
+    extractorShanyouxiangKey: "",
+    defaultAutoExtractSources: [],
+    defaultAutoExtractQuantity: 1,
+    defaultAutoExtractMaxWaitSec: 60,
+    defaultAutoExtractAccountType: "outlook",
+  };
+}
+
+function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
+  return {
+    ...baseDefaults,
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
-    groupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
-    routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
-    checkUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
-    timeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, 8000),
-    maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, 3000),
-    apiPort: toInt(process.env.MIHOMO_API_PORT, 39090),
-    mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, 49090),
-    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || "127.0.0.1"),
-    serverPort: toInt(process.env.WEB_PORT, 3717),
-    defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : "headed",
-    defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, 1),
-    defaultParallel: toInt(process.env.WEB_DEFAULT_PARALLEL, 1),
-    defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, 5),
+    groupName: (process.env.MIHOMO_GROUP_NAME || baseDefaults.groupName).trim() || baseDefaults.groupName,
+    routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || baseDefaults.routeGroupName).trim() || baseDefaults.routeGroupName,
+    checkUrl: (process.env.PROXY_CHECK_URL || baseDefaults.checkUrl).trim(),
+    timeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, baseDefaults.timeoutMs),
+    maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, baseDefaults.maxLatencyMs),
+    apiPort: toInt(process.env.MIHOMO_API_PORT, baseDefaults.apiPort),
+    mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, baseDefaults.mixedPort),
+    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || baseDefaults.serverHost),
+    serverPort: toInt(process.env.WEB_PORT, baseDefaults.serverPort),
+    defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : baseDefaults.defaultRunMode,
+    defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, baseDefaults.defaultNeed),
+    defaultParallel: toInt(process.env.WEB_DEFAULT_PARALLEL, baseDefaults.defaultParallel),
+    defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, baseDefaults.defaultMaxAttempts),
     extractorZhanghaoyaKey: (process.env.EXTRACTOR_ZHANGHAOYA_KEY || "").trim(),
     extractorShanyouxiangKey: (process.env.EXTRACTOR_SHANYOUXIANG_KEY || "").trim(),
     defaultAutoExtractSources: normalizeExtractorSources(
@@ -257,9 +283,8 @@ function getDefaultSettings(): AppSettings {
         .map((item: string) => item.trim())
         .filter(Boolean),
     ),
-    defaultAutoExtractQuantity: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_QUANTITY, 1),
-    defaultAutoExtractMaxWaitSec: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_MAX_WAIT_SEC, 60),
-    defaultAutoExtractAccountType: "outlook",
+    defaultAutoExtractQuantity: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_QUANTITY, baseDefaults.defaultAutoExtractQuantity),
+    defaultAutoExtractMaxWaitSec: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_MAX_WAIT_SEC, baseDefaults.defaultAutoExtractMaxWaitSec),
   };
 }
 
@@ -392,11 +417,14 @@ async function serveStatic(req: Request): Promise<Response> {
 
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
-  const defaults = db.ensureSettings(getDefaultSettings());
+  const settingsDefaults = buildSettingsCodeDefaults();
+  const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
+  const defaults = db.ensureSettings(bootstrapSettings);
+  const readSettings = () => db.getSettings(settingsDefaults);
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
   const runExclusiveProxyOp = createExclusiveRunner();
-  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, () => db.getSettings(getDefaultSettings()), (event) => {
+  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, (event) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
       ws.send(message);
@@ -704,17 +732,17 @@ async function main(): Promise<void> {
         return json(serializeJobSnapshot(db, scheduler));
       }
 
-        if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
-        const settings = db.getSettings(getDefaultSettings());
+      if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
+        const settings = readSettings();
         return json({
           ok: true,
           settings: serializeExtractorSettings(settings),
         });
       }
 
-        if (pathname === "/api/account-extractors/settings" && req.method === "POST") {
+      if (pathname === "/api/account-extractors/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
-        const current = db.getSettings(getDefaultSettings());
+        const current = readSettings();
         const next = buildNextSettings(current, {
           extractorZhanghaoyaKey: typeof body?.extractorZhanghaoyaKey === "string" ? body.extractorZhanghaoyaKey : undefined,
           extractorShanyouxiangKey:
@@ -765,7 +793,7 @@ async function main(): Promise<void> {
         const action = String(body?.action || "");
         try {
           if (action === "start") {
-            const settings = db.getSettings(getDefaultSettings());
+            const settings = readSettings();
             const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
             const job = await scheduler.startJob({
               runMode: requestedRunMode,
@@ -817,8 +845,8 @@ async function main(): Promise<void> {
         }
       }
 
-        if (pathname === "/api/proxies" && req.method === "GET") {
-        const settings = db.getSettings(getDefaultSettings());
+      if (pathname === "/api/proxies" && req.method === "GET") {
+        const settings = readSettings();
         if (!settings.subscriptionUrl.trim()) {
           return json({
             settings,
@@ -847,9 +875,9 @@ async function main(): Promise<void> {
         }
       }
 
-        if (pathname === "/api/proxies/settings" && req.method === "POST") {
+      if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
-        const current = db.getSettings(getDefaultSettings());
+        const current = readSettings();
         const optimisticNext = buildNextSettings(current, body);
         if (!optimisticNext.subscriptionUrl.trim()) {
           db.setSettings(optimisticNext);
@@ -875,14 +903,14 @@ async function main(): Promise<void> {
         return json({ ok: true, settings: next, selectedName: inventory.selected, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
       }
 
-        if (pathname === "/api/proxies/select" && req.method === "POST") {
+      if (pathname === "/api/proxies/select" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { nodeName?: string } | null;
         const nodeName = String(body?.nodeName || "").trim();
         if (!nodeName) {
           db.setPinnedProxyName(null);
           return json({ ok: true, selectedName: db.getSelectedProxyName(), pinnedName: null, nodes: db.listProxyNodes() });
         }
-        const settings = db.getSettings(getDefaultSettings());
+        const settings = readSettings();
         return await runExclusiveProxyOp(async () => {
           const controller = await createProxyController(settings);
           try {
@@ -897,9 +925,9 @@ async function main(): Promise<void> {
         });
       }
 
-        if (pathname === "/api/proxies/check" && req.method === "POST") {
+      if (pathname === "/api/proxies/check" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
-        const settings = db.getSettings(getDefaultSettings());
+        const settings = readSettings();
         const { response, event } = await runExclusiveProxyOp(async () => {
           const controller = await createProxyController(settings);
           let response: Response | null = null;

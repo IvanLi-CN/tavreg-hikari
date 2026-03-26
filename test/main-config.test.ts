@@ -76,3 +76,13 @@ test("proof verify only auto-matches non-empty configured mailboxes and fills th
   expect(source).toContain("proofState.codeRequestedAt ||= proofState.confirmationSubmittedAt;");
   expect(source).toContain("if (inlineCodeSelector) {");
 });
+
+test("web admin settings use env only for bootstrap and DB for runtime reads", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain("function buildSettingsCodeDefaults(): AppSettings {");
+  expect(source).toContain("function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {");
+  expect(source).toContain("const settingsDefaults = buildSettingsCodeDefaults();");
+  expect(source).toContain("const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);");
+  expect(source).toContain("const readSettings = () => db.getSettings(settingsDefaults);");
+  expect(source).not.toContain("db.getSettings(getDefaultSettings())");
+});
