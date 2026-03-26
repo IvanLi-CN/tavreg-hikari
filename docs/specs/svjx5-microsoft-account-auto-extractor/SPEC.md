@@ -172,6 +172,17 @@
 - state: extractor settings dialog
 - evidence_note: 验证微软账号页新增提取器设置入口、双站点 KEY 配置与本地提取历史查询结果。
 
+![微软账号列表密码点击复制](./assets/accounts-password-copy.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: element
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/Password Copy Play
+- state: password copied feedback
+- evidence_note: 验证微软账号列表中的密码列支持直接点击复制，并在按钮内回显“已复制”反馈，不再出现竖排溢出。
+
 ## 里程碑
 
 - [x] M1: 建立 spec 并冻结接口与数据模型

@@ -301,6 +301,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
+    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     proofMailboxProvider: row.proofMailboxProvider,
     proofMailboxAddress: row.proofMailboxAddress,

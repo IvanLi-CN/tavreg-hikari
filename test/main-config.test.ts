@@ -48,7 +48,9 @@ test("proof-add handler only provisions mailboxes on the actual add route", asyn
 test("accounts workflow exposes disabled rows and validates proof mailbox saves", async () => {
   const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   const accountsViewSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
+  const accountsStoriesSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.stories.tsx"), "utf8");
   expect(serverSource).toContain("await ensureSavedProofMailbox");
+  expect(serverSource).toContain("passwordPlaintext: row.passwordPlaintext,");
   expect(serverSource).toContain("const unchangedSavedProofMailbox =");
   expect(serverSource).toContain("currentAccount.proofMailboxId === requestedProofMailboxId");
   expect(serverSource).toContain("if (hintedMailboxId && canFallbackToHintedProofMailboxId(error))");
@@ -56,6 +58,10 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxAddress")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxId")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider")');
+  expect(accountsViewSource).toContain("async function copyTextToClipboard");
+  expect(accountsViewSource).toContain("aria-label={`复制 ${props.accountEmail} 密码`}");
+  expect(accountsStoriesSource).toContain("export const PasswordCopyPlay");
+  expect(accountsStoriesSource).toContain('await expect(writeText).toHaveBeenCalledWith("pass-456");');
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });

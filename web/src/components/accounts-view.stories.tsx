@@ -246,3 +246,20 @@ export const ExtractorSettingsEntry: Story = {
     await expect(within(document.body).getByRole("dialog", { name: "微软账号提取器设置" })).toBeInTheDocument();
   },
 };
+
+export const PasswordCopyPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  play: async ({ canvasElement }) => {
+    const writeText = fn(async () => undefined);
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: "复制 alpha@outlook.com 密码" });
+    await userEvent.click(trigger);
+    await expect(writeText).toHaveBeenCalledWith("pass-456");
+    await expect(within(trigger).getByText("已复制")).toBeInTheDocument();
+  },
+};

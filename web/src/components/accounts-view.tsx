@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -62,6 +62,71 @@ function ExtractHistoryItemField(props: { label: string; value: ReactNode; class
       <div className="text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">{props.label}</div>
       <div className={cn("break-all text-sm text-slate-100", props.valueClassName)}>{props.value}</div>
     </div>
+  );
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  if (typeof document === "undefined") {
+    throw new Error("clipboard unavailable");
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const succeeded = document.execCommand("copy");
+  textarea.remove();
+  if (!succeeded) {
+    throw new Error("clipboard unavailable");
+  }
+}
+
+function PasswordCopyButton(props: {
+  accountEmail: string;
+  displayValue: string;
+  copyStatus: "idle" | "copied" | "failed";
+  disabled?: boolean;
+  onCopy: () => void;
+}) {
+  const feedbackLabel = props.copyStatus === "copied" ? "已复制" : props.copyStatus === "failed" ? "复制失败" : "点击复制";
+  return (
+    <button
+      type="button"
+      className={cn(
+        "group inline-flex max-w-full items-center gap-2 rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-2 text-left transition",
+        props.disabled
+          ? "cursor-not-allowed opacity-60"
+          : "cursor-pointer hover:border-cyan-300/30 hover:bg-cyan-300/[0.06] hover:text-cyan-100",
+      )}
+      onClick={props.onCopy}
+      disabled={props.disabled}
+      aria-label={`复制 ${props.accountEmail} 密码`}
+      title={props.disabled ? "当前没有可复制的密码" : `点击复制 ${props.accountEmail} 的密码`}
+    >
+      <span className="max-w-[8.5rem] truncate whitespace-nowrap font-mono text-sm text-slate-200 sm:max-w-[10rem]">
+        {props.displayValue}
+      </span>
+      <span
+        className={cn(
+          "shrink-0 text-[0.68rem] uppercase tracking-[0.18em]",
+          props.copyStatus === "copied"
+            ? "text-emerald-300"
+            : props.copyStatus === "failed"
+              ? "text-rose-200"
+              : "text-cyan-300/80 group-hover:text-cyan-200",
+        )}
+      >
+        {feedbackLabel}
+      </span>
+    </button>
   );
 }
 
@@ -155,6 +220,11 @@ export function AccountsView({
   const [zhanghaoyaKeyDraft, setZhanghaoyaKeyDraft] = useState("");
   const [shanyouxiangKeyDraft, setShanyouxiangKeyDraft] = useState("");
   const [extractorSaveError, setExtractorSaveError] = useState<string | null>(null);
+  const [passwordCopyFeedback, setPasswordCopyFeedback] = useState<{
+    accountId: number | null;
+    status: "idle" | "copied" | "failed";
+  }>({ accountId: null, status: "idle" });
+  const passwordCopyResetTimerRef = useRef<number | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -165,8 +235,43 @@ export function AccountsView({
     1,
     Math.ceil(Math.max(1, extractorHistory.total) / Math.max(1, extractorHistory.pageSize)),
   );
-  const getPasswordDisplay = (accountId: number, fallbackMasked: string, plaintext?: string | null) =>
-    plaintext || revealedPasswordsById[accountId] || fallbackMasked;
+  useEffect(() => {
+    return () => {
+      if (passwordCopyResetTimerRef.current != null) {
+        window.clearTimeout(passwordCopyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  const queuePasswordCopyFeedbackReset = () => {
+    if (passwordCopyResetTimerRef.current != null) {
+      window.clearTimeout(passwordCopyResetTimerRef.current);
+    }
+    passwordCopyResetTimerRef.current = window.setTimeout(() => {
+      setPasswordCopyFeedback({ accountId: null, status: "idle" });
+      passwordCopyResetTimerRef.current = null;
+    }, 1800);
+  };
+
+  const getPasswordDisplay = (accountId: number, fallbackMasked: string) => revealedPasswordsById[accountId] || fallbackMasked;
+  const getPasswordCopyValue = (accountId: number, plaintext?: string | null) => plaintext || revealedPasswordsById[accountId] || "";
+  const getPasswordCopyStatus = (accountId: number) =>
+    passwordCopyFeedback.accountId === accountId ? passwordCopyFeedback.status : "idle";
+  const handleCopyPassword = async (account: AccountRecord) => {
+    const copyValue = getPasswordCopyValue(account.id, account.passwordPlaintext);
+    if (!copyValue.trim()) {
+      setPasswordCopyFeedback({ accountId: account.id, status: "failed" });
+      queuePasswordCopyFeedbackReset();
+      return;
+    }
+    try {
+      await copyTextToClipboard(copyValue);
+      setPasswordCopyFeedback({ accountId: account.id, status: "copied" });
+    } catch {
+      setPasswordCopyFeedback({ accountId: account.id, status: "failed" });
+    }
+    queuePasswordCopyFeedbackReset();
+  };
   const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "moemail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
 
   const openProofDialog = (account: AccountRecord) => {
@@ -475,8 +580,13 @@ export function AccountsView({
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0">
                                 <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
-                                <div className="mt-1 break-all font-mono text-sm text-slate-300">
-                                  {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                                <div className="mt-1">
+                                  <PasswordCopyButton
+                                    accountEmail={row.microsoftEmail}
+                                    displayValue={getPasswordDisplay(row.id, row.passwordMasked)}
+                                    copyStatus={getPasswordCopyStatus(row.id)}
+                                    onCopy={() => void handleCopyPassword(row)}
+                                  />
                                 </div>
                               </div>
                               <div className="flex shrink-0 flex-col items-end gap-2">
@@ -545,7 +655,7 @@ export function AccountsView({
                           />
                         </TableHead>
                         <TableHead>邮箱</TableHead>
-                        <TableHead>密码</TableHead>
+                        <TableHead className="w-[12rem] min-w-[12rem]">密码</TableHead>
                         <TableHead>分组</TableHead>
                         <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
@@ -568,8 +678,13 @@ export function AccountsView({
                             />
                           </TableCell>
                           <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
-                          <TableCell className="font-mono text-sm text-slate-200">
-                            {getPasswordDisplay(row.id, row.passwordMasked, row.passwordPlaintext)}
+                          <TableCell className="w-[12rem] min-w-[12rem]">
+                            <PasswordCopyButton
+                              accountEmail={row.microsoftEmail}
+                              displayValue={getPasswordDisplay(row.id, row.passwordMasked)}
+                              copyStatus={getPasswordCopyStatus(row.id)}
+                              onCopy={() => void handleCopyPassword(row)}
+                            />
                           </TableCell>
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
