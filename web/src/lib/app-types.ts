@@ -180,6 +180,7 @@ export type AutoExtractState = {
   acceptedCount: number;
   rawAttemptCount: number;
   attemptBudget: number;
+  inFlightCount: number;
   remainingWaitSec: number;
   maxWaitSec: number;
   startedAt: string | null;

@@ -41,14 +41,25 @@ interface AutoExtractState {
   attemptBudget: number;
   acceptedCount: number;
   rawAttemptCount: number;
+  inFlightCount: number;
   nextProviderIndex: number;
-  nextAttemptAtMs: number;
+  providerNextAttemptAtMs: Record<AccountExtractorProvider, number>;
   phase: AutoExtractPhase;
   startedAt: string | null;
   lastProvider: AccountExtractorProvider | null;
   lastMessage: string | null;
   updatedAt: string;
   lastBudgetTickMs: number | null;
+}
+
+interface AutoExtractRequestContext {
+  jobId: number;
+  provider: AccountExtractorProvider;
+  accountType: AccountExtractorAccountType;
+  requestedUsableCount: number;
+  attemptBudget: number;
+  dispatchStartedAt: string;
+  roundStartedAt: string | null;
 }
 
 export interface AutoExtractSnapshot {
@@ -59,6 +70,7 @@ export interface AutoExtractSnapshot {
   acceptedCount: number;
   rawAttemptCount: number;
   attemptBudget: number;
+  inFlightCount: number;
   remainingWaitSec: number;
   maxWaitSec: number;
   startedAt: string | null;
@@ -71,6 +83,10 @@ type AutoExtractDecision =
   | { status: "ready" }
   | { status: "waiting" }
   | { status: "unavailable"; reason: string };
+
+const AUTO_EXTRACT_REQUEST_INTERVAL_MS = 500;
+const AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS = 4;
+const AUTO_EXTRACT_OVERFETCH_ALLOWANCE = AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS - 1;
 
 const STRIPPED_ATTEMPT_ENV_KEYS = [
   "EXISTING_EMAIL",
@@ -213,6 +229,13 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
+  return {
+    zhanghaoya: 0,
+    shanyouxiang: 0,
+  };
+}
+
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
   try {
     const raw = await readFile(filePath, "utf8");
@@ -257,6 +280,7 @@ export class JobScheduler {
       acceptedCount: state.acceptedCount,
       rawAttemptCount: state.rawAttemptCount,
       attemptBudget: state.attemptBudget,
+      inFlightCount: state.inFlightCount,
       remainingWaitSec: Math.max(0, Math.ceil(state.remainingWaitMs / 1000)),
       maxWaitSec: Math.max(0, Math.ceil(state.maxWaitMs / 1000)),
       startedAt: state.startedAt,
@@ -399,7 +423,7 @@ export class JobScheduler {
       const activeCount = this.activeAttempts.size;
 
       if (job.status === "paused") {
-        await delay(300);
+        await delay(100);
         continue;
       }
 
@@ -410,12 +434,12 @@ export class JobScheduler {
         }
         if (activeCount === 0) {
           const completed = this.db.completeJob(jobId, true);
-          this.autoExtractStates.delete(jobId);
+          this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: completed });
           this.emit("toast", { level: "success", message: `job #${job.id} completed` });
           return;
         }
-        await delay(300);
+        await delay(100);
         continue;
       }
 
@@ -441,36 +465,39 @@ export class JobScheduler {
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
       const eligible = this.db.countEligibleAccounts(jobId);
-      if (this.activeAttempts.size === 0) {
-        if (refreshed.successCount >= refreshed.need) {
-          const completed = this.db.completeJob(jobId, true);
-          this.autoExtractStates.delete(jobId);
-          this.emit("job.updated", { job: completed });
-          this.emit("toast", { level: "success", message: `job #${job.id} completed` });
-          return;
+      const hasAutoExtractState = this.autoExtractStates.has(jobId);
+      if (eligible === 0 && refreshed.successCount < refreshed.need && refreshed.launchedCount < refreshed.maxAttempts) {
+        const extraction = await this.maybeAutoExtract(refreshed);
+        if (extraction.status === "ready" || extraction.status === "waiting") {
+          await delay(100);
+          continue;
         }
-        if (eligible === 0 && refreshed.launchedCount < refreshed.maxAttempts) {
-          const extraction = await this.maybeAutoExtract(refreshed);
-          if (extraction.status === "ready" || extraction.status === "waiting") {
-            await delay(300);
-            continue;
-          }
+        if (this.activeAttempts.size === 0) {
           const failed = this.db.completeJob(jobId, false, extraction.reason);
-          this.autoExtractStates.delete(jobId);
+          this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
           this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
           return;
         }
-        if (eligible === 0 || refreshed.launchedCount >= refreshed.maxAttempts) {
+      }
+      if (this.activeAttempts.size === 0) {
+        if (refreshed.successCount >= refreshed.need) {
+          const completed = this.db.completeJob(jobId, true);
+          this.deleteAutoExtractStateIfIdle(jobId);
+          this.emit("job.updated", { job: completed });
+          this.emit("toast", { level: "success", message: `job #${job.id} completed` });
+          return;
+        }
+        if ((eligible === 0 && !hasAutoExtractState) || refreshed.launchedCount >= refreshed.maxAttempts) {
           const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
-          this.autoExtractStates.delete(jobId);
+          this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
           this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
           return;
         }
       }
 
-      await delay(300);
+      await delay(100);
     }
   }
 
@@ -710,8 +737,9 @@ export class JobScheduler {
       attemptBudget: 0,
       acceptedCount: 0,
       rawAttemptCount: 0,
+      inFlightCount: 0,
       nextProviderIndex: 0,
-      nextAttemptAtMs: 0,
+      providerNextAttemptAtMs: createProviderAttemptClock(),
       phase: "idle",
       startedAt: null,
       lastProvider: null,
@@ -722,12 +750,19 @@ export class JobScheduler {
   }
 
   private syncAutoExtractState(job: JobRecord): void {
+    const current = this.autoExtractStates.get(job.id);
     if (job.autoExtractSources.length === 0) {
-      this.autoExtractStates.delete(job.id);
+      if (current?.inFlightCount) {
+        current.enabledSources = [];
+        current.phase = current.inFlightCount > 0 ? "waiting" : "idle";
+        current.lastMessage = "auto extract disabled, waiting for in-flight requests to finish";
+        current.updatedAt = nowIso();
+      } else {
+        this.autoExtractStates.delete(job.id);
+      }
       return;
     }
     const nextMaxWaitMs = Math.max(0, job.autoExtractMaxWaitSec * 1000);
-    const current = this.autoExtractStates.get(job.id);
     if (!current) {
       this.autoExtractStates.set(job.id, this.createAutoExtractState(job));
       return;
@@ -744,8 +779,10 @@ export class JobScheduler {
       current.attemptBudget = 0;
       current.acceptedCount = 0;
       current.rawAttemptCount = 0;
+      current.inFlightCount = 0;
       current.startedAt = null;
       current.lastBudgetTickMs = null;
+      current.providerNextAttemptAtMs = createProviderAttemptClock();
     }
   }
 
@@ -769,8 +806,9 @@ export class JobScheduler {
     state.attemptBudget = 0;
     state.acceptedCount = 0;
     state.rawAttemptCount = 0;
+    state.inFlightCount = 0;
     state.startedAt = null;
-    state.nextAttemptAtMs = 0;
+    state.providerNextAttemptAtMs = createProviderAttemptClock();
     state.lastBudgetTickMs = null;
     state.lastMessage = message;
     state.updatedAt = nowIso();
@@ -785,11 +823,12 @@ export class JobScheduler {
     }
     state.phase = "waiting";
     state.currentRoundTarget = currentRoundTarget;
-    state.attemptBudget = currentRoundTarget + 3;
+    state.attemptBudget = currentRoundTarget + AUTO_EXTRACT_OVERFETCH_ALLOWANCE;
     state.acceptedCount = 0;
     state.rawAttemptCount = 0;
+    state.inFlightCount = 0;
     state.startedAt = nowIso();
-    state.nextAttemptAtMs = 0;
+    state.providerNextAttemptAtMs = createProviderAttemptClock();
     state.lastProvider = null;
     state.lastMessage = `waiting to extract ${currentRoundTarget} usable account(s)`;
     state.lastBudgetTickMs = Date.now();
@@ -810,11 +849,296 @@ export class JobScheduler {
     return this.db.isAccountSchedulableForJob(jobId, account.id) ? "unknown" : "already_attempted";
   }
 
-  private async maybeAutoExtract(job: JobRecord): Promise<AutoExtractDecision> {
+  private deleteAutoExtractStateIfIdle(jobId: number): void {
+    const state = this.autoExtractStates.get(jobId);
+    if (!state || state.inFlightCount === 0) {
+      this.autoExtractStates.delete(jobId);
+    }
+  }
+
+  private finalizeAutoExtractRound(
+    state: AutoExtractState,
+    outcome: { status: "ready" | "unavailable"; reason: string },
+  ): AutoExtractDecision {
+    this.resetAutoExtractRound(state, outcome.reason);
+    this.emit("job.updated", { job: this.db.getJob(state.jobId), autoExtractState: this.getAutoExtractSnapshot(state.jobId) });
+    return outcome;
+  }
+
+  private evaluateAutoExtractState(job: JobRecord, state: AutoExtractState): AutoExtractDecision | null {
+    const targetReached = state.currentRoundTarget > 0 && state.acceptedCount >= state.currentRoundTarget;
+    const waitExhausted = state.remainingWaitMs <= 0;
+    const rawBudgetExhausted = state.rawAttemptCount >= state.attemptBudget && state.attemptBudget > 0;
+    if (state.inFlightCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
+      state.phase = "waiting";
+      state.lastMessage = targetReached
+        ? `target reached, waiting for ${state.inFlightCount} in-flight request(s)`
+        : waitExhausted
+          ? `wait budget exhausted, waiting for ${state.inFlightCount} in-flight request(s)`
+          : `raw request budget exhausted, waiting for ${state.inFlightCount} in-flight request(s)`;
+      state.updatedAt = nowIso();
+      return { status: "waiting" };
+    }
+    if (targetReached) {
+      return this.finalizeAutoExtractRound(state, {
+        status: "ready",
+        reason: `accepted ${state.acceptedCount} usable account(s)`,
+      });
+    }
+    if (waitExhausted) {
+      return this.finalizeAutoExtractRound(state, {
+        status: state.acceptedCount > 0 ? "ready" : "unavailable",
+        reason: `auto extract timed out after ${Math.ceil(state.maxWaitMs / 1000)}s`,
+      });
+    }
+    if (rawBudgetExhausted) {
+      return this.finalizeAutoExtractRound(state, {
+        status: state.acceptedCount > 0 ? "ready" : "unavailable",
+        reason: `auto extract stopped after ${state.attemptBudget} raw request(s)`,
+      });
+    }
     if (job.autoExtractSources.length === 0) {
+      return this.finalizeAutoExtractRound(state, {
+        status: state.acceptedCount > 0 ? "ready" : "unavailable",
+        reason: "auto extract disabled",
+      });
+    }
+    return null;
+  }
+
+  private pickDueProvider(state: AutoExtractState, nowMs: number): AccountExtractorProvider | null {
+    if (state.enabledSources.length === 0) {
+      return null;
+    }
+    const total = state.enabledSources.length;
+    for (let offset = 0; offset < total; offset += 1) {
+      const index = (state.nextProviderIndex + offset) % total;
+      const provider = state.enabledSources[index];
+      if (!provider) {
+        continue;
+      }
+      if (state.providerNextAttemptAtMs[provider] <= nowMs) {
+        state.nextProviderIndex = (index + 1) % total;
+        return provider;
+      }
+    }
+    return null;
+  }
+
+  private launchAutoExtractRequest(context: AutoExtractRequestContext): void {
+    const settings = this.getSettings();
+    const runtimeConfig = {
+      zhanghaoyaKey: settings.extractorZhanghaoyaKey,
+      shanyouxiangKey: settings.extractorShanyouxiangKey,
+      timeoutMs: 15000,
+    };
+
+    const finish = (input: {
+      ok: boolean;
+      result?: Awaited<ReturnType<typeof fetchSingleExtractedAccount>>;
+      errorMessage?: string;
+      failureCode?: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | null;
+      rawResponse?: string | null;
+      maskedKey?: string | null;
+    }) => {
+      const state = this.autoExtractStates.get(context.jobId);
+      const startedAt = context.dispatchStartedAt;
+      const completedAt = nowIso();
+
+      let acceptedInBatch = 0;
+      const affectedIds = new Set<number>();
+      const rejectReasons = new Set<string>();
+
+      let batchStatus: "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error" =
+        input.ok && input.result ? "rejected" : mapFailureCodeToBatchStatus(input.failureCode ?? null);
+      let batchErrorMessage = input.errorMessage ?? null;
+      const batch = this.db.createAccountExtractBatch({
+        jobId: context.jobId,
+        provider: context.provider,
+        accountType: context.accountType,
+        requestedUsableCount: context.requestedUsableCount,
+        attemptBudget: context.attemptBudget,
+        acceptedCount: 0,
+        status: batchStatus,
+        errorMessage: batchErrorMessage,
+        rawResponse: input.rawResponse ?? null,
+        maskedKey: input.maskedKey ?? null,
+        startedAt,
+        completedAt: null,
+      });
+
+      if (input.ok && input.result) {
+        let acceptedRequestCandidate = false;
+        for (const candidate of input.result.candidates) {
+          if (candidate.parseStatus !== "parsed" || !candidate.email || !candidate.password) {
+            rejectReasons.add("parse_failed");
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: candidate.parseStatus,
+              acceptStatus: "rejected",
+              rejectReason: "parse_failed",
+            });
+            continue;
+          }
+
+          if (acceptedRequestCandidate) {
+            rejectReasons.add("request_returned_multiple_accounts");
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "rejected",
+              rejectReason: "request_returned_multiple_accounts",
+            });
+            continue;
+          }
+
+          const importResult = this.db.importAccounts(
+            [{ email: candidate.email, password: candidate.password }],
+            {
+              source: "extractor",
+              accountSource: context.provider,
+              rawPayloadByEmail: {
+                [candidate.email]: candidate.rawPayload,
+              },
+            },
+          );
+          for (const accountId of importResult.affectedIds) {
+            affectedIds.add(accountId);
+          }
+          const importedAccount = this.db.getAccountsByEmails([candidate.email])[0] || null;
+          const rejectReason = this.describeExtractRejectReason(context.jobId, importedAccount);
+          if (rejectReason !== "unknown") {
+            rejectReasons.add(rejectReason);
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "rejected",
+              rejectReason,
+              importedAccountId: importedAccount?.id ?? null,
+            });
+            continue;
+          }
+
+          acceptedRequestCandidate = true;
+          acceptedInBatch = 1;
+          if (importedAccount) {
+            affectedIds.add(importedAccount.id);
+          }
+          this.db.createAccountExtractItem({
+            batchId: batch.id,
+            provider: context.provider,
+            rawPayload: candidate.rawPayload,
+            email: candidate.email,
+            password: candidate.password,
+            parseStatus: "parsed",
+            acceptStatus: "accepted",
+            rejectReason: null,
+            importedAccountId: importedAccount?.id ?? null,
+          });
+        }
+
+        batchStatus =
+          acceptedInBatch > 0 ? "accepted" : input.result.ok ? "rejected" : mapFailureCodeToBatchStatus(input.result.failureCode);
+        batchErrorMessage = acceptedInBatch > 0 ? null : input.result.message || Array.from(rejectReasons).join(", ") || null;
+      }
+
+      this.db.updateAccountExtractBatch(batch.id, {
+        acceptedCount: acceptedInBatch,
+        status: batchStatus,
+        errorMessage: batchErrorMessage,
+        rawResponse: input.rawResponse ?? null,
+        maskedKey: input.maskedKey ?? null,
+        completedAt,
+      });
+
+      if (state && state.startedAt === context.roundStartedAt) {
+        state.inFlightCount = Math.max(0, state.inFlightCount - 1);
+        state.lastProvider = context.provider;
+        state.acceptedCount += acceptedInBatch;
+        state.phase = state.inFlightCount > 0 ? "waiting" : state.acceptedCount >= state.currentRoundTarget ? "waiting" : "extracting";
+        state.lastMessage =
+          acceptedInBatch > 0
+            ? `${providerLabel(context.provider)} accepted ${acceptedInBatch} usable account`
+            : batchErrorMessage || "no usable account accepted";
+        state.updatedAt = completedAt;
+      }
+
+      if (affectedIds.size > 0) {
+        this.emit("account.updated", { affectedIds: Array.from(affectedIds), action: "extractor_import" });
+      }
+      if (acceptedInBatch > 0) {
+        this.emit("toast", {
+          level: "success",
+          message: `job #${context.jobId} accepted ${acceptedInBatch} extracted account(s) from ${providerLabel(context.provider)}`,
+        });
+      }
+
+      const currentJob = this.db.getJob(context.jobId);
+      if (state && currentJob) {
+        const decision = this.evaluateAutoExtractState(currentJob, state);
+        if (decision == null) {
+          this.emit("job.updated", { job: currentJob, autoExtractState: this.getAutoExtractSnapshot(context.jobId) });
+        }
+      } else {
+        this.emit("job.updated", { job: currentJob, autoExtractState: this.getAutoExtractSnapshot(context.jobId) });
+      }
+    };
+
+    if (!keyConfiguredForProvider(context.provider, runtimeConfig)) {
+      finish({
+        ok: false,
+        errorMessage: `${providerLabel(context.provider)} key missing`,
+        failureCode: "invalid_key",
+        rawResponse: null,
+        maskedKey: null,
+      });
+      return;
+    }
+
+    void fetchSingleExtractedAccount({
+      provider: context.provider,
+      accountType: context.accountType,
+      config: runtimeConfig,
+    })
+      .then((result) => {
+        finish({
+          ok: true,
+          result,
+          errorMessage: result.message ?? undefined,
+          failureCode: result.failureCode,
+          rawResponse: result.rawResponse,
+          maskedKey: result.maskedKey,
+        });
+      })
+      .catch((error) => {
+        finish({
+          ok: false,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          failureCode: "upstream_error",
+          rawResponse: null,
+          maskedKey: maskLocalSecret(context.provider === "zhanghaoya" ? runtimeConfig.zhanghaoyaKey : runtimeConfig.shanyouxiangKey),
+        });
+      });
+  }
+
+  private async maybeAutoExtract(job: JobRecord): Promise<AutoExtractDecision> {
+    const existingState = this.autoExtractStates.get(job.id);
+    if (job.autoExtractSources.length === 0 && (!existingState || existingState.inFlightCount === 0)) {
       return { status: "unavailable", reason: "eligible accounts exhausted or max attempts reached" };
     }
-    let state = this.autoExtractStates.get(job.id);
+    let state = existingState;
     if (!state) {
       state = this.createAutoExtractState(job);
       this.autoExtractStates.set(job.id, state);
@@ -831,241 +1155,55 @@ export class JobScheduler {
     }
 
     this.updateAutoExtractBudget(state);
-    if (state.remainingWaitMs <= 0) {
-      this.resetAutoExtractRound(state, "auto extract wait budget exhausted");
-      this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-      return { status: "unavailable", reason: "auto extract wait budget exhausted" };
+    const preDispatchDecision = this.evaluateAutoExtractState(job, state);
+    if (preDispatchDecision) {
+      return preDispatchDecision;
     }
 
-    const nowMs = Date.now();
-    if (nowMs < state.nextAttemptAtMs) {
-      state.phase = "waiting";
-      state.lastMessage = `next extractor retry in ${Math.max(1, Math.ceil((state.nextAttemptAtMs - nowMs) / 1000))}s`;
-      state.updatedAt = nowIso();
-      this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-      return { status: "waiting" };
+    while (
+      state.enabledSources.length > 0
+      && state.remainingWaitMs > 0
+      && state.acceptedCount < state.currentRoundTarget
+      && state.rawAttemptCount < state.attemptBudget
+      && state.inFlightCount < AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS
+    ) {
+      const nowMs = Date.now();
+      const provider = this.pickDueProvider(state, nowMs);
+      if (!provider) {
+        break;
+      }
+      const dispatchStartedAt = nowIso();
+      state.phase = "extracting";
+      state.lastProvider = provider;
+      state.lastMessage = `${providerLabel(provider)} request dispatched`;
+      state.rawAttemptCount += 1;
+      state.inFlightCount += 1;
+      state.providerNextAttemptAtMs[provider] = nowMs + AUTO_EXTRACT_REQUEST_INTERVAL_MS;
+      state.updatedAt = dispatchStartedAt;
+      this.launchAutoExtractRequest({
+        jobId: job.id,
+        provider,
+        accountType: state.accountType,
+        requestedUsableCount: state.currentRoundTarget,
+        attemptBudget: state.attemptBudget,
+        dispatchStartedAt,
+        roundStartedAt: state.startedAt,
+      });
     }
 
-    const provider = state.enabledSources[state.nextProviderIndex % state.enabledSources.length] || state.enabledSources[0];
-    if (!provider) {
-      this.resetAutoExtractRound(state, "no extractor provider available");
-      return { status: "unavailable", reason: "no extractor provider available" };
+    if (state.acceptedCount < state.currentRoundTarget && state.inFlightCount === 0) {
+      const nextProviderReadyAt = state.enabledSources
+        .map((provider) => state.providerNextAttemptAtMs[provider])
+        .filter((readyAt) => readyAt > Date.now())
+        .sort((left, right) => left - right)[0];
+      if (nextProviderReadyAt) {
+        state.phase = "waiting";
+        state.lastMessage = `next extractor slot in ${Math.max(1, Math.ceil((nextProviderReadyAt - Date.now()) / 1000))}s`;
+        state.updatedAt = nowIso();
+      }
     }
-    state.nextProviderIndex = (state.nextProviderIndex + 1) % state.enabledSources.length;
-    state.phase = "extracting";
-    state.lastProvider = provider;
-    state.updatedAt = nowIso();
+
     this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-
-    const settings = this.getSettings();
-    const runtimeConfig = {
-      zhanghaoyaKey: settings.extractorZhanghaoyaKey,
-      shanyouxiangKey: settings.extractorShanyouxiangKey,
-      timeoutMs: 15000,
-    };
-
-    if (!keyConfiguredForProvider(provider, runtimeConfig)) {
-      const batch = this.db.createAccountExtractBatch({
-        jobId: job.id,
-        provider,
-        accountType: state.accountType,
-        requestedUsableCount: state.currentRoundTarget,
-        attemptBudget: state.attemptBudget,
-        acceptedCount: 0,
-        status: "invalid_key",
-        errorMessage: `${providerLabel(provider)} key missing`,
-        maskedKey: null,
-        rawResponse: null,
-        completedAt: nowIso(),
-      });
-      void batch;
-      state.rawAttemptCount += 1;
-      state.nextAttemptAtMs = Date.now() + 1000;
-      state.phase = "waiting";
-      state.lastMessage = `${providerLabel(provider)} key missing`;
-      state.updatedAt = nowIso();
-      this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-      if (state.rawAttemptCount >= state.attemptBudget) {
-        this.resetAutoExtractRound(state, "extractor attempt budget exhausted");
-        return { status: "unavailable", reason: "extractor attempt budget exhausted" };
-      }
-      return { status: "waiting" };
-    }
-
-    try {
-      const result = await fetchSingleExtractedAccount({
-        provider,
-        accountType: state.accountType,
-        config: runtimeConfig,
-      });
-      const batch = this.db.createAccountExtractBatch({
-        jobId: job.id,
-        provider,
-        accountType: state.accountType,
-        requestedUsableCount: state.currentRoundTarget,
-        attemptBudget: state.attemptBudget,
-        acceptedCount: 0,
-        status: result.ok ? "rejected" : mapFailureCodeToBatchStatus(result.failureCode),
-        errorMessage: result.message,
-        rawResponse: result.rawResponse,
-        maskedKey: result.maskedKey,
-        completedAt: null,
-      });
-
-      let acceptedInBatch = 0;
-      const affectedIds = new Set<number>();
-      const rejectReasons = new Set<string>();
-      for (const candidate of result.candidates) {
-        if (candidate.parseStatus !== "parsed" || !candidate.email || !candidate.password) {
-          rejectReasons.add("parse_failed");
-          this.db.createAccountExtractItem({
-            batchId: batch.id,
-            provider,
-            rawPayload: candidate.rawPayload,
-            email: candidate.email,
-            password: candidate.password,
-            parseStatus: candidate.parseStatus,
-            acceptStatus: "rejected",
-            rejectReason: "parse_failed",
-          });
-          continue;
-        }
-
-        if (state.acceptedCount + acceptedInBatch >= state.currentRoundTarget) {
-          rejectReasons.add("need_reached");
-          this.db.createAccountExtractItem({
-            batchId: batch.id,
-            provider,
-            rawPayload: candidate.rawPayload,
-            email: candidate.email,
-            password: candidate.password,
-            parseStatus: "parsed",
-            acceptStatus: "rejected",
-            rejectReason: "need_reached",
-          });
-          continue;
-        }
-
-        const importResult = this.db.importAccounts(
-          [{ email: candidate.email, password: candidate.password }],
-          {
-            source: "extractor",
-            accountSource: provider,
-            rawPayloadByEmail: {
-              [candidate.email]: candidate.rawPayload,
-            },
-          },
-        );
-        for (const accountId of importResult.affectedIds) {
-          affectedIds.add(accountId);
-        }
-        const importedAccount = this.db.getAccountsByEmails([candidate.email])[0] || null;
-        const rejectReason = this.describeExtractRejectReason(job.id, importedAccount);
-        if (rejectReason !== "unknown") {
-          rejectReasons.add(rejectReason);
-          this.db.createAccountExtractItem({
-            batchId: batch.id,
-            provider,
-            rawPayload: candidate.rawPayload,
-            email: candidate.email,
-            password: candidate.password,
-            parseStatus: "parsed",
-            acceptStatus: "rejected",
-            rejectReason,
-            importedAccountId: importedAccount?.id ?? null,
-          });
-          continue;
-        }
-
-        acceptedInBatch += 1;
-        if (importedAccount) {
-          affectedIds.add(importedAccount.id);
-        }
-        this.db.createAccountExtractItem({
-          batchId: batch.id,
-          provider,
-          rawPayload: candidate.rawPayload,
-          email: candidate.email,
-          password: candidate.password,
-          parseStatus: "parsed",
-          acceptStatus: "accepted",
-          rejectReason: null,
-          importedAccountId: importedAccount?.id ?? null,
-        });
-      }
-
-      state.acceptedCount += acceptedInBatch;
-      state.rawAttemptCount += 1;
-      state.nextAttemptAtMs = Date.now() + 1000;
-      state.phase = "waiting";
-      state.lastMessage =
-        acceptedInBatch > 0
-          ? `${providerLabel(provider)} accepted ${acceptedInBatch} usable account(s)`
-          : result.message || Array.from(rejectReasons).join(", ") || "no usable account accepted";
-      state.updatedAt = nowIso();
-
-      this.db.updateAccountExtractBatch(batch.id, {
-        acceptedCount: acceptedInBatch,
-        status: acceptedInBatch > 0 ? "accepted" : result.ok ? "rejected" : mapFailureCodeToBatchStatus(result.failureCode),
-        errorMessage: acceptedInBatch > 0 ? null : result.message || Array.from(rejectReasons).join(", ") || null,
-        rawResponse: result.rawResponse,
-        maskedKey: result.maskedKey,
-        completedAt: nowIso(),
-      });
-
-      if (affectedIds.size > 0) {
-        this.emit("account.updated", { affectedIds: Array.from(affectedIds), action: "extractor_import" });
-      }
-      if (acceptedInBatch > 0) {
-        this.emit("toast", {
-          level: "success",
-          message: `job #${job.id} accepted ${acceptedInBatch} extracted account(s) from ${providerLabel(provider)}`,
-        });
-      }
-
-      this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-
-      if (state.acceptedCount >= state.currentRoundTarget) {
-        this.resetAutoExtractRound(state, `accepted ${state.currentRoundTarget} usable account(s)`);
-        this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-        return { status: "ready" };
-      }
-      if (state.rawAttemptCount >= state.attemptBudget) {
-        const reason = `auto extract stopped after ${state.attemptBudget} raw attempt(s)`;
-        const acceptedAny = state.acceptedCount > 0;
-        this.resetAutoExtractRound(state, reason);
-        this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-        return acceptedAny ? { status: "ready" } : { status: "unavailable", reason };
-      }
-      return acceptedInBatch > 0 ? { status: "ready" } : { status: "waiting" };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const batch = this.db.createAccountExtractBatch({
-        jobId: job.id,
-        provider,
-        accountType: state.accountType,
-        requestedUsableCount: state.currentRoundTarget,
-        attemptBudget: state.attemptBudget,
-        acceptedCount: 0,
-        status: "error",
-        errorMessage: message,
-        rawResponse: null,
-        maskedKey: maskLocalSecret(provider === "zhanghaoya" ? runtimeConfig.zhanghaoyaKey : runtimeConfig.shanyouxiangKey),
-        completedAt: nowIso(),
-      });
-      void batch;
-      state.rawAttemptCount += 1;
-      state.nextAttemptAtMs = Date.now() + 1000;
-      state.phase = "waiting";
-      state.lastMessage = `${providerLabel(provider)} request failed: ${message}`;
-      state.updatedAt = nowIso();
-      this.emit("job.updated", { job: this.db.getJob(job.id), autoExtractState: this.getAutoExtractSnapshot(job.id) });
-      if (state.rawAttemptCount >= state.attemptBudget) {
-        const reason = `auto extract stopped after ${state.attemptBudget} raw attempt(s)`;
-        this.resetAutoExtractRound(state, reason);
-        return { status: "unavailable", reason };
-      }
-      return { status: "waiting" };
-    }
+    return this.evaluateAutoExtractState(job, state) || { status: "waiting" };
   }
 }

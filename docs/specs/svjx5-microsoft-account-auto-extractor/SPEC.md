@@ -150,7 +150,7 @@
 
 ## Visual Evidence
 
-![主流程自动提取控制](./assets/dashboard-auto-extract.png)
+![主流程自动提取控制](./assets/dashboard-auto-extract-concurrency.png)
 
 - source_type: storybook_canvas
 - target_program: mock-only

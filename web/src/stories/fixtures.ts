@@ -83,6 +83,7 @@ export const sampleJob: JobSnapshot = {
     acceptedCount: 1,
     rawAttemptCount: 2,
     attemptBudget: 5,
+    inFlightCount: 1,
     remainingWaitSec: 31,
     maxWaitSec: 45,
     startedAt: "2026-03-18T07:24:00.000Z",

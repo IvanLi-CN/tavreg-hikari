@@ -21,6 +21,16 @@ function Field(props: { label: string; children: React.ReactNode }) {
   );
 }
 
+function extractorProviderLabel(provider: AccountExtractorProvider): string {
+  return provider === "zhanghaoya" ? "账号鸭" : "闪邮箱";
+}
+
+function autoExtractPhaseLabel(phase: JobSnapshot["autoExtractState"] extends infer T ? T extends { phase: infer P } ? P : never : never) {
+  if (phase === "extracting") return "提取中";
+  if (phase === "waiting") return "等待中";
+  return "空闲";
+}
+
 export function DashboardView({
   job,
   events,
@@ -47,9 +57,9 @@ export function DashboardView({
   };
 
   const autoExtractHint = job.autoExtractState
-    ? `${job.autoExtractState.phase} · accepted ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · raw ${job.autoExtractState.rawAttemptCount}/${job.autoExtractState.attemptBudget} · wait ${job.autoExtractState.remainingWaitSec}s`
+    ? `${autoExtractPhaseLabel(job.autoExtractState.phase)} · 可用补号 ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · 原始请求 ${job.autoExtractState.rawAttemptCount}/${job.autoExtractState.attemptBudget} · 并发 ${job.autoExtractState.inFlightCount}/4 · 剩余 ${job.autoExtractState.remainingWaitSec}s`
     : jobDraft.autoExtractSources.length > 0
-      ? `idle · wait ${jobDraft.autoExtractMaxWaitSec}s · usable ${jobDraft.autoExtractQuantity}`
+      ? `已启用 · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 500ms/次 · 最多 4 并发`
       : "未启用自动提取";
 
   return (
@@ -99,7 +109,7 @@ export function DashboardView({
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-white">自动提取微软账号</div>
                   <div className="mt-1 text-sm text-slate-400">
-                    缺号时按 1 秒 1 个请求轮询号源，单轮最多比目标多尝试 3 次，但可用补号数不会超过当前任务剩余需求。
+                    缺号时每个号源按 500ms 派发 1 个请求，每次只提取 1 个账号，最多 4 个请求同时进行；超时或补够即停，极端情况下最多多提取 3 个。
                   </div>
                 </div>
                 <Badge
@@ -161,7 +171,7 @@ export function DashboardView({
               </div>
               {job.autoExtractState?.lastMessage ? (
                 <div className="mt-3 text-sm text-slate-400">
-                  最近提取状态：{job.autoExtractState.lastProvider ? `${job.autoExtractState.lastProvider} · ` : ""}
+                  最近提取状态：{job.autoExtractState.lastProvider ? `${extractorProviderLabel(job.autoExtractState.lastProvider)} · ` : ""}
                   {job.autoExtractState.lastMessage}
                 </div>
               ) : null}

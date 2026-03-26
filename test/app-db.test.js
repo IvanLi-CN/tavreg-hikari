@@ -11,6 +11,7 @@ import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
 const originalFetch = globalThis.fetch;
+const originalDateNow = Date.now;
 
 function createSchedulerSettings(overrides = {}) {
   return {
@@ -48,6 +49,7 @@ async function createTempDb() {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  Date.now = originalDateNow;
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -671,7 +673,9 @@ describe("scheduler helpers", () => {
     scheduler["syncAutoExtractState"](job);
 
     const decision = await scheduler["maybeAutoExtract"](job);
-    expect(decision).toEqual({ status: "ready" });
+    expect(decision).toEqual({ status: "waiting" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(appDb.countEligibleAccounts(job.id)).toBe(1);
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
@@ -686,8 +690,83 @@ describe("scheduler helpers", () => {
     expect(history.rows[0]?.items[1]).toMatchObject({
       email: "cap-b@outlook.com",
       acceptStatus: "rejected",
-      rejectReason: "need_reached",
+      rejectReason: "request_returned_multiple_accounts",
     });
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("dispatches auto extract requests every 500ms per provider with up to 4 concurrent in flight", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    let fakeNow = 0;
+    Date.now = () => fakeNow;
+
+    const pending = [];
+    globalThis.fetch = () =>
+      new Promise((resolve) => {
+        pending.push(resolve);
+      });
+
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () =>
+        createSchedulerSettings({
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "shan-demo-key-001",
+        }),
+      () => undefined,
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 6,
+      parallel: 1,
+      maxAttempts: 12,
+      autoExtractSources: ["zhanghaoya", "shanyouxiang"],
+      autoExtractQuantity: 6,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    let decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 2,
+      inFlightCount: 2,
+      attemptBudget: 9,
+    });
+
+    decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 2,
+      inFlightCount: 2,
+    });
+
+    fakeNow = 499;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 2,
+      inFlightCount: 2,
+    });
+
+    fakeNow = 500;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 4,
+      inFlightCount: 4,
+    });
+
+    fakeNow = 1000;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 4,
+      inFlightCount: 4,
+    });
+    expect(pending).toHaveLength(4);
 
     await scheduler.shutdown();
     appDb.close();
