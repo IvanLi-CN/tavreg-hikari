@@ -3,7 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { DashboardView } from "@/components/dashboard-view";
 import type { JobDraft } from "@/lib/app-types";
-import { sampleEvents, sampleJob } from "@/stories/fixtures";
+import { sampleEvents, sampleExtractorSettings, sampleJob } from "@/stories/fixtures";
 
 const meta = {
   title: "Views/DashboardView",
@@ -25,17 +25,37 @@ export const Running: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    jobDraft: {
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
   render: () => {
-    const [draft, setDraft] = useState<JobDraft>({ runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 });
+    const [draft, setDraft] = useState<JobDraft>({
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    });
     return (
       <DashboardView
         job={sampleJob}
         events={sampleEvents}
         jobDraft={draft}
+        extractorAvailability={sampleExtractorSettings.availability}
         onJobDraftChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
         onJobAction={() => undefined}
       />
@@ -45,9 +65,19 @@ export const Running: Story = {
 
 export const Empty: Story = {
   args: {
-    job: { job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0 },
+    job: { job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, autoExtractState: null },
     events: [],
-    jobDraft: { runMode: "headless", need: 1, parallel: 1, maxAttempts: 3 },
+    jobDraft: {
+      runMode: "headless",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 3,
+      autoExtractSources: [],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: { zhanghaoya: false, shanyouxiang: true },
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -87,7 +117,17 @@ export const OverflowGuard: Story = {
       },
       ...sampleEvents,
     ],
-    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    jobDraft: {
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya", "shanyouxiang"],
+      autoExtractQuantity: 2,
+      autoExtractMaxWaitSec: 45,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -104,7 +144,17 @@ export const ControlPlay: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: { runMode: "headed", need: 5, parallel: 2, maxAttempts: 9 },
+    jobDraft: {
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },

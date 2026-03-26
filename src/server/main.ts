@@ -9,7 +9,13 @@ import {
 } from "../moemail-openapi.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
-import { AppDatabase, type AppSettings, type JobAttemptRecord, type MicrosoftAccountRecord } from "../storage/app-db.js";
+import {
+  AppDatabase,
+  type AccountExtractorProvider,
+  type AppSettings,
+  type JobAttemptRecord,
+  type MicrosoftAccountRecord,
+} from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
@@ -196,22 +202,89 @@ function normalizeLoopbackHost(host: string | undefined): string {
   return "127.0.0.1";
 }
 
-function getDefaultSettings(): AppSettings {
+function normalizeExtractorSources(value: unknown): AccountExtractorProvider[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(value.filter((item): item is AccountExtractorProvider => item === "zhanghaoya" || item === "shanyouxiang")),
+  );
+}
+
+function toOptionalPositiveInt(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(1, Math.trunc(value));
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value.trim(), 10);
+    if (Number.isFinite(parsed)) return Math.max(1, parsed);
+  }
+  return undefined;
+}
+
+function serializeExtractorSettings(settings: AppSettings) {
   return {
+    extractorZhanghaoyaKey: settings.extractorZhanghaoyaKey,
+    extractorShanyouxiangKey: settings.extractorShanyouxiangKey,
+    defaultAutoExtractSources: settings.defaultAutoExtractSources,
+    defaultAutoExtractQuantity: settings.defaultAutoExtractQuantity,
+    defaultAutoExtractMaxWaitSec: settings.defaultAutoExtractMaxWaitSec,
+    defaultAutoExtractAccountType: settings.defaultAutoExtractAccountType,
+    availability: {
+      zhanghaoya: Boolean(settings.extractorZhanghaoyaKey.trim()),
+      shanyouxiang: Boolean(settings.extractorShanyouxiangKey.trim()),
+    },
+  };
+}
+
+function buildSettingsCodeDefaults(): AppSettings {
+  return {
+    subscriptionUrl: "",
+    groupName: "CODEX_AUTO",
+    routeGroupName: "CODEX_ROUTE",
+    checkUrl: "https://www.cloudflare.com/cdn-cgi/trace",
+    timeoutMs: 8000,
+    maxLatencyMs: 3000,
+    apiPort: 39090,
+    mixedPort: 49090,
+    serverHost: "127.0.0.1",
+    serverPort: 3717,
+    defaultRunMode: "headed",
+    defaultNeed: 1,
+    defaultParallel: 1,
+    defaultMaxAttempts: 5,
+    extractorZhanghaoyaKey: "",
+    extractorShanyouxiangKey: "",
+    defaultAutoExtractSources: [],
+    defaultAutoExtractQuantity: 1,
+    defaultAutoExtractMaxWaitSec: 60,
+    defaultAutoExtractAccountType: "outlook",
+  };
+}
+
+function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
+  return {
+    ...baseDefaults,
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
-    groupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
-    routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
-    checkUrl: (process.env.PROXY_CHECK_URL || "https://www.cloudflare.com/cdn-cgi/trace").trim(),
-    timeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, 8000),
-    maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, 3000),
-    apiPort: toInt(process.env.MIHOMO_API_PORT, 39090),
-    mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, 49090),
-    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || "127.0.0.1"),
-    serverPort: toInt(process.env.WEB_PORT, 3717),
-    defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : "headed",
-    defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, 1),
-    defaultParallel: toInt(process.env.WEB_DEFAULT_PARALLEL, 1),
-    defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, 5),
+    groupName: (process.env.MIHOMO_GROUP_NAME || baseDefaults.groupName).trim() || baseDefaults.groupName,
+    routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || baseDefaults.routeGroupName).trim() || baseDefaults.routeGroupName,
+    checkUrl: (process.env.PROXY_CHECK_URL || baseDefaults.checkUrl).trim(),
+    timeoutMs: toInt(process.env.PROXY_CHECK_TIMEOUT_MS, baseDefaults.timeoutMs),
+    maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, baseDefaults.maxLatencyMs),
+    apiPort: toInt(process.env.MIHOMO_API_PORT, baseDefaults.apiPort),
+    mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, baseDefaults.mixedPort),
+    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || baseDefaults.serverHost),
+    serverPort: toInt(process.env.WEB_PORT, baseDefaults.serverPort),
+    defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : baseDefaults.defaultRunMode,
+    defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, baseDefaults.defaultNeed),
+    defaultParallel: toInt(process.env.WEB_DEFAULT_PARALLEL, baseDefaults.defaultParallel),
+    defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, baseDefaults.defaultMaxAttempts),
+    extractorZhanghaoyaKey: (process.env.EXTRACTOR_ZHANGHAOYA_KEY || "").trim(),
+    extractorShanyouxiangKey: (process.env.EXTRACTOR_SHANYOUXIANG_KEY || "").trim(),
+    defaultAutoExtractSources: normalizeExtractorSources(
+      (process.env.WEB_DEFAULT_AUTO_EXTRACT_SOURCES || "")
+        .split(",")
+        .map((item: string) => item.trim())
+        .filter(Boolean),
+    ),
+    defaultAutoExtractQuantity: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_QUANTITY, baseDefaults.defaultAutoExtractQuantity),
+    defaultAutoExtractMaxWaitSec: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_MAX_WAIT_SEC, baseDefaults.defaultAutoExtractMaxWaitSec),
   };
 }
 
@@ -228,6 +301,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
+    passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     proofMailboxProvider: row.proofMailboxProvider,
     proofMailboxAddress: row.proofMailboxAddress,
@@ -237,6 +311,8 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     importedAt: row.importedAt,
     updatedAt: row.updatedAt,
     importSource: row.importSource,
+    accountSource: row.accountSource,
+    sourceRawPayload: row.sourceRawPayload,
     lastUsedAt: row.lastUsedAt,
     lastResultStatus: row.lastResultStatus,
     lastResultAt: row.lastResultAt,
@@ -265,6 +341,7 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       activeAttempts: [],
       recentAttempts: [],
       eligibleCount: 0,
+      autoExtractState: null,
     };
   }
   return {
@@ -275,6 +352,7 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
       .slice(0, 20)
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: db.countEligibleAccounts(job.id),
+    autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
   };
 }
 
@@ -340,11 +418,14 @@ async function serveStatic(req: Request): Promise<Response> {
 
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
-  const defaults = db.ensureSettings(getDefaultSettings());
+  const settingsDefaults = buildSettingsCodeDefaults();
+  const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
+  const defaults = db.ensureSettings(bootstrapSettings);
+  const readSettings = () => db.getSettings(settingsDefaults);
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
   const runExclusiveProxyOp = createExclusiveRunner();
-  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, () => db.getSettings(getDefaultSettings()), (event) => {
+  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, (event) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
       ws.send(message);
@@ -652,18 +733,80 @@ async function main(): Promise<void> {
         return json(serializeJobSnapshot(db, scheduler));
       }
 
+      if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
+        const settings = readSettings();
+        return json({
+          ok: true,
+          settings: serializeExtractorSettings(settings),
+        });
+      }
+
+      if (pathname === "/api/account-extractors/settings" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
+        const current = readSettings();
+        const next = buildNextSettings(current, {
+          extractorZhanghaoyaKey: typeof body?.extractorZhanghaoyaKey === "string" ? body.extractorZhanghaoyaKey : undefined,
+          extractorShanyouxiangKey:
+            typeof body?.extractorShanyouxiangKey === "string" ? body.extractorShanyouxiangKey : undefined,
+          defaultAutoExtractSources:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractSources")
+              ? normalizeExtractorSources(body.defaultAutoExtractSources)
+              : undefined,
+          defaultAutoExtractQuantity:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractQuantity")
+              ? toOptionalPositiveInt(body.defaultAutoExtractQuantity)
+              : undefined,
+          defaultAutoExtractMaxWaitSec:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractMaxWaitSec")
+              ? toOptionalPositiveInt(body.defaultAutoExtractMaxWaitSec)
+              : undefined,
+          defaultAutoExtractAccountType:
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractAccountType") && body.defaultAutoExtractAccountType === "outlook"
+              ? "outlook"
+              : undefined,
+        });
+        db.setSettings(next);
+        return json({
+          ok: true,
+          settings: serializeExtractorSettings(next),
+        });
+      }
+
+        if (pathname === "/api/account-extractors/history" && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const providerParam = url.searchParams.get("provider");
+        const provider =
+          providerParam === "zhanghaoya" || providerParam === "shanyouxiang" ? providerParam : undefined;
+        return json(
+          db.listAccountExtractHistory({
+            provider,
+            status: url.searchParams.get("status") || undefined,
+            q: url.searchParams.get("q") || undefined,
+            page,
+            pageSize,
+          }),
+        );
+      }
+
         if (pathname === "/api/jobs/current/control" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
         const action = String(body?.action || "");
         try {
           if (action === "start") {
-            const settings = db.getSettings(getDefaultSettings());
+            const settings = readSettings();
             const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
             const job = await scheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
               parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
               maxAttempts: Math.max(1, Number(body?.maxAttempts || settings.defaultMaxAttempts)),
+              autoExtractSources: normalizeExtractorSources(body?.autoExtractSources ?? settings.defaultAutoExtractSources),
+              autoExtractQuantity:
+                toOptionalPositiveInt(body?.autoExtractQuantity) ?? settings.defaultAutoExtractQuantity,
+              autoExtractMaxWaitSec:
+                toOptionalPositiveInt(body?.autoExtractMaxWaitSec) ?? settings.defaultAutoExtractMaxWaitSec,
+              autoExtractAccountType: "outlook",
             });
             return json({ ok: true, job });
           }
@@ -678,6 +821,22 @@ async function main(): Promise<void> {
               parallel: body?.parallel == null ? undefined : Number(body.parallel),
               need: body?.need == null ? undefined : Number(body.need),
               maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
+              autoExtractSources:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractSources")
+                  ? normalizeExtractorSources(body.autoExtractSources)
+                  : undefined,
+              autoExtractQuantity:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractQuantity")
+                  ? toOptionalPositiveInt(body.autoExtractQuantity)
+                  : undefined,
+              autoExtractMaxWaitSec:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractMaxWaitSec")
+                  ? toOptionalPositiveInt(body.autoExtractMaxWaitSec)
+                  : undefined,
+              autoExtractAccountType:
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractAccountType") && body.autoExtractAccountType === "outlook"
+                  ? "outlook"
+                  : undefined,
             });
             return json({ ok: true, job });
           }
@@ -687,8 +846,8 @@ async function main(): Promise<void> {
         }
       }
 
-        if (pathname === "/api/proxies" && req.method === "GET") {
-        const settings = db.getSettings(getDefaultSettings());
+      if (pathname === "/api/proxies" && req.method === "GET") {
+        const settings = readSettings();
         if (!settings.subscriptionUrl.trim()) {
           return json({
             settings,
@@ -717,9 +876,9 @@ async function main(): Promise<void> {
         }
       }
 
-        if (pathname === "/api/proxies/settings" && req.method === "POST") {
+      if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
-        const current = db.getSettings(getDefaultSettings());
+        const current = readSettings();
         const optimisticNext = buildNextSettings(current, body);
         if (!optimisticNext.subscriptionUrl.trim()) {
           db.setSettings(optimisticNext);
@@ -745,14 +904,14 @@ async function main(): Promise<void> {
         return json({ ok: true, settings: next, selectedName: inventory.selected, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
       }
 
-        if (pathname === "/api/proxies/select" && req.method === "POST") {
+      if (pathname === "/api/proxies/select" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { nodeName?: string } | null;
         const nodeName = String(body?.nodeName || "").trim();
         if (!nodeName) {
           db.setPinnedProxyName(null);
           return json({ ok: true, selectedName: db.getSelectedProxyName(), pinnedName: null, nodes: db.listProxyNodes() });
         }
-        const settings = db.getSettings(getDefaultSettings());
+        const settings = readSettings();
         return await runExclusiveProxyOp(async () => {
           const controller = await createProxyController(settings);
           try {
@@ -767,9 +926,9 @@ async function main(): Promise<void> {
         });
       }
 
-        if (pathname === "/api/proxies/check" && req.method === "POST") {
+      if (pathname === "/api/proxies/check" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
-        const settings = db.getSettings(getDefaultSettings());
+        const settings = readSettings();
         const { response, event } = await runExclusiveProxyOp(async () => {
           const controller = await createProxyController(settings);
           let response: Response | null = null;
