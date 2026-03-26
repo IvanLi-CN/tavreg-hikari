@@ -87,6 +87,7 @@ type AutoExtractDecision =
 const AUTO_EXTRACT_REQUEST_INTERVAL_MS = 500;
 const AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS = 4;
 const AUTO_EXTRACT_OVERFETCH_ALLOWANCE = AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS - 1;
+const AUTO_EXTRACT_REQUEST_TIMEOUT_MS = 5000;
 
 const STRIPPED_ATTEMPT_ENV_KEYS = [
   "EXISTING_EMAIL",
@@ -930,7 +931,7 @@ export class JobScheduler {
     const runtimeConfig = {
       zhanghaoyaKey: settings.extractorZhanghaoyaKey,
       shanyouxiangKey: settings.extractorShanyouxiangKey,
-      timeoutMs: 15000,
+      timeoutMs: AUTO_EXTRACT_REQUEST_TIMEOUT_MS,
     };
 
     const finish = (input: {

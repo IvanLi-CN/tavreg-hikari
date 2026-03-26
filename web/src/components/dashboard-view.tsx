@@ -109,7 +109,7 @@ export function DashboardView({
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-white">自动提取微软账号</div>
                   <div className="mt-1 text-sm text-slate-400">
-                    缺号时每个号源按 500ms 派发 1 个请求，每次只提取 1 个账号，最多 4 个请求同时进行；超时或补够即停，极端情况下最多多提取 3 个。
+                    缺号时每个号源按 500ms 派发 1 个请求，每次只提取 1 个账号；单请求 5 秒超时，最多 4 个请求同时进行，补够或超时就停，极端情况下最多多提取 3 个。
                   </div>
                 </div>
                 <Badge

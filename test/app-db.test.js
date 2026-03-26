@@ -12,6 +12,7 @@ import { TaskLedger } from "../src/storage/task-ledger.ts";
 const tempDirs = [];
 const originalFetch = globalThis.fetch;
 const originalDateNow = Date.now;
+const originalSetTimeout = globalThis.setTimeout;
 
 function createSchedulerSettings(overrides = {}) {
   return {
@@ -50,6 +51,7 @@ async function createTempDb() {
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   Date.now = originalDateNow;
+  globalThis.setTimeout = originalSetTimeout;
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -767,6 +769,51 @@ describe("scheduler helpers", () => {
       inFlightCount: 4,
     });
     expect(pending).toHaveLength(4);
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("auto extract requests use a 5 second timeout budget", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const observedTimeouts = [];
+    globalThis.setTimeout = ((handler, timeout, ...args) => {
+      observedTimeouts.push(Number(timeout));
+      return originalSetTimeout(() => {
+        if (typeof handler === "function") {
+          handler(...args);
+        }
+      }, 0);
+    });
+    globalThis.fetch = (_url, init) =>
+      new Promise((_resolve, reject) => {
+        init.signal.addEventListener("abort", () => reject(new Error("aborted by timeout")));
+      });
+
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+      () => undefined,
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    await scheduler["maybeAutoExtract"](job);
+    await new Promise((resolve) => originalSetTimeout(resolve, 0));
+    await new Promise((resolve) => originalSetTimeout(resolve, 0));
+
+    expect(observedTimeouts).toContain(5000);
 
     await scheduler.shutdown();
     appDb.close();
