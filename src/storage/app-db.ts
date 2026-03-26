@@ -396,6 +396,15 @@ export function computeLaunchCapacity(
   return Math.max(0, Math.min(availableSlots, needLeft, attemptBudget));
 }
 
+export function normalizeJobMaxAttempts(need: number, maxAttempts: number): number {
+  const normalizedNeed = Math.max(1, Number.isFinite(need) ? Math.trunc(need) : 1);
+  const normalizedMaxAttempts = Math.max(1, Number.isFinite(maxAttempts) ? Math.trunc(maxAttempts) : 1);
+  if (normalizedMaxAttempts >= normalizedNeed) {
+    return normalizedMaxAttempts;
+  }
+  return Math.max(normalizedNeed, Math.ceil(normalizedNeed * 1.5));
+}
+
 export function shouldEnterCompleting(job: Pick<JobRecord, "need" | "successCount" | "maxAttempts" | "launchedCount">): boolean {
   return job.successCount >= job.need || job.launchedCount >= job.maxAttempts;
 }
@@ -1178,6 +1187,9 @@ export class AppDatabase {
       throw new Error(`active job exists: ${active.id}`);
     }
     const now = nowIso();
+    const need = Math.max(1, Math.trunc(input.need));
+    const parallel = Math.max(1, Math.trunc(input.parallel));
+    const maxAttempts = normalizeJobMaxAttempts(need, input.maxAttempts);
     const result = this.db
       .query(`
         INSERT INTO jobs (
@@ -1189,9 +1201,9 @@ export class AppDatabase {
       `)
       .get(
         input.runMode,
-        input.need,
-        input.parallel,
-        input.maxAttempts,
+        need,
+        parallel,
+        maxAttempts,
         JSON.stringify(input.autoExtractSources || []),
         Math.max(0, Number(input.autoExtractQuantity || 0)),
         Math.max(0, Number(input.autoExtractMaxWaitSec || 0)),
@@ -1244,6 +1256,9 @@ export class AppDatabase {
       ...patch,
       updatedAt: nowIso(),
     };
+    next.parallel = Math.max(1, Math.trunc(next.parallel));
+    next.need = Math.max(1, Math.trunc(next.need));
+    next.maxAttempts = normalizeJobMaxAttempts(next.need, next.maxAttempts);
     this.db
       .query(`
         UPDATE jobs

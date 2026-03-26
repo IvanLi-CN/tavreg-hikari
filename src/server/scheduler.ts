@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import {
   AppDatabase,
   computeLaunchCapacity,
+  normalizeJobMaxAttempts,
   type AccountExtractorAccountType,
   type AccountExtractorProvider,
   type AppSettings,
@@ -306,13 +307,23 @@ export class JobScheduler {
       throw new Error("configure a Mihomo subscription before starting a job");
     }
     const autoExtract = this.normalizeAutoExtractConfig(params, settings);
+    const requestedNeed = Math.max(1, Number.isFinite(params.need) ? Math.trunc(params.need) : 1);
+    const normalizedMaxAttempts = normalizeJobMaxAttempts(requestedNeed, params.maxAttempts);
     const job = this.db.createJob({
       ...params,
+      maxAttempts: normalizedMaxAttempts,
       ...autoExtract,
     });
     this.syncAutoExtractState(job);
     this.emit("job.updated", { job });
     this.emit("toast", { level: "info", message: `job #${job.id} started` });
+    const requestedMaxAttempts = Math.max(1, Number.isFinite(params.maxAttempts) ? Math.trunc(params.maxAttempts) : 1);
+    if (normalizedMaxAttempts !== requestedMaxAttempts) {
+      this.emit("toast", {
+        level: "info",
+        message: `job #${job.id} max attempts auto-adjusted to ${normalizedMaxAttempts} for need ${requestedNeed}`,
+      });
+    }
     this.ensureLoop(job.id);
     return job;
   }
@@ -352,9 +363,20 @@ export class JobScheduler {
     const job = this.requireCurrentJob();
     const settings = this.getSettings();
     const patch: Partial<JobRecord> = {};
-    if (typeof input.parallel === "number") patch.parallel = Math.max(1, input.parallel);
-    if (typeof input.need === "number") patch.need = Math.max(1, input.need);
-    if (typeof input.maxAttempts === "number") patch.maxAttempts = Math.max(1, input.maxAttempts);
+    const requestedParallel =
+      typeof input.parallel === "number" ? Math.max(1, Number.isFinite(input.parallel) ? Math.trunc(input.parallel) : 1) : job.parallel;
+    const requestedNeed =
+      typeof input.need === "number" ? Math.max(1, Number.isFinite(input.need) ? Math.trunc(input.need) : 1) : job.need;
+    const requestedMaxAttempts =
+      typeof input.maxAttempts === "number"
+        ? Math.max(1, Number.isFinite(input.maxAttempts) ? Math.trunc(input.maxAttempts) : 1)
+        : job.maxAttempts;
+    const normalizedMaxAttempts = normalizeJobMaxAttempts(requestedNeed, requestedMaxAttempts);
+    if (typeof input.parallel === "number") patch.parallel = requestedParallel;
+    if (typeof input.need === "number") patch.need = requestedNeed;
+    if (input.maxAttempts !== undefined || input.need !== undefined) {
+      patch.maxAttempts = normalizedMaxAttempts;
+    }
     if (
       input.autoExtractSources !== undefined
       || input.autoExtractQuantity !== undefined
@@ -383,6 +405,12 @@ export class JobScheduler {
     }
     this.emit("job.updated", { job: this.db.getJob(job.id) });
     this.emit("toast", { level: "info", message: `job #${job.id} limits updated` });
+    if (normalizedMaxAttempts !== requestedMaxAttempts) {
+      this.emit("toast", {
+        level: "info",
+        message: `job #${job.id} max attempts auto-adjusted to ${normalizedMaxAttempts} for need ${requestedNeed}`,
+      });
+    }
     this.ensureLoop(job.id);
     return this.db.getJob(job.id)!;
   }

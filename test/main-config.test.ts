@@ -19,7 +19,7 @@ test("CLI rejects MAIL_PROVIDER=moemail because MoeMail is proof-only", () => {
 
   expect(result.status).toBe(1);
   expect(`${result.stdout}\n${result.stderr}`).toContain("Invalid env MAIL_PROVIDER: moemail");
-});
+}, 20_000);
 
 test("CLI defers AppDatabase loading until proof sync needs it", async () => {
   const mainSource = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");

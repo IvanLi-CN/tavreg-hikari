@@ -27,6 +27,7 @@ import type {
   ProxyPayload,
   ProxySettings,
 } from "@/lib/app-types";
+import { jobToDraft, normalizeJobDraft } from "@/lib/job-draft";
 import { getPageFromPathname, normalizeAppPath } from "@/lib/routes";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
@@ -227,7 +228,7 @@ export function App() {
 
   useEffect(() => {
     if (job.job || !proxies || !extractorSettings || jobDraftTouched) return;
-    setJobDraft({
+    setJobDraft(normalizeJobDraft({
       runMode: proxies.settings.defaultRunMode,
       need: proxies.settings.defaultNeed,
       parallel: proxies.settings.defaultParallel,
@@ -236,21 +237,12 @@ export function App() {
       autoExtractQuantity: extractorSettings.defaultAutoExtractQuantity,
       autoExtractMaxWaitSec: extractorSettings.defaultAutoExtractMaxWaitSec,
       autoExtractAccountType: extractorSettings.defaultAutoExtractAccountType,
-    });
+    }));
   }, [extractorSettings, job.job, jobDraftTouched, proxies]);
 
   useEffect(() => {
     if (!job.job || jobDraftTouched) return;
-    setJobDraft({
-      runMode: job.job.runMode,
-      need: job.job.need,
-      parallel: job.job.parallel,
-      maxAttempts: job.job.maxAttempts,
-      autoExtractSources: job.job.autoExtractSources,
-      autoExtractQuantity: job.job.autoExtractQuantity,
-      autoExtractMaxWaitSec: job.job.autoExtractMaxWaitSec,
-      autoExtractAccountType: job.job.autoExtractAccountType,
-    });
+    setJobDraft(jobToDraft(job.job));
   }, [job.job, jobDraftTouched]);
 
   useEffect(() => {
@@ -361,19 +353,23 @@ export function App() {
 
   const updateJobDraft = (patch: Partial<JobDraft>) => {
     setJobDraftTouched(true);
-    setJobDraft((current) => ({ ...current, ...patch }));
+    setJobDraft((current) => normalizeJobDraft({ ...current, ...patch }));
   };
 
   const handleJobAction = async (action: "start" | "pause" | "resume" | "update_limits") => {
     try {
       setError(null);
-      await api("/api/jobs/current/control", {
+      const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify({
           action,
           ...jobDraft,
         }),
       });
+      if (payload.job) {
+        setJobDraft(jobToDraft(payload.job));
+        setJobDraftTouched(false);
+      }
       await refreshJob();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
