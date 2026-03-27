@@ -32,7 +32,7 @@ bootstrap_dependencies() {
     install_cmd="bun install --frozen-lockfile"
   fi
 
-  if [ -d "$current_root/node_modules" ] && [ "$FORCE_SYNC" != "1" ]; then
+  if [ -d "$current_root/node_modules" ]; then
     log "keep dependency install: node_modules exists"
     return 0
   fi
@@ -55,6 +55,46 @@ bootstrap_dependencies() {
     esac
   )
   log "installed dependencies"
+}
+
+snapshot_sqlite_with_bun() {
+  src_path=$1
+  tmp_path=$2
+
+  if ! command -v bun >/dev/null 2>&1; then
+    return 1
+  fi
+
+  bun --eval '
+    import { Database } from "bun:sqlite";
+
+    const sourcePath = process.argv[1];
+    const destPath = process.argv[2];
+    const db = new Database(sourcePath);
+    db.exec("PRAGMA busy_timeout = 5000;");
+    const escapedDestPath = destPath.replaceAll("'"'"'", "'"'"''"'"'");
+    db.exec(`VACUUM INTO '"'"'${escapedDestPath}'"'"'`);
+    db.close(false);
+  ' "$src_path" "$tmp_path"
+}
+
+snapshot_sqlite() {
+  src_path=$1
+  tmp_path=$2
+  tmp_sql=$(sqlite_quote "$tmp_path")
+
+  rm -f "$tmp_path"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$src_path" \
+      ".timeout 5000" \
+      "VACUUM INTO '$tmp_sql';"
+    then
+      return 0
+    fi
+    rm -f "$tmp_path"
+  fi
+
+  snapshot_sqlite_with_bun "$src_path" "$tmp_path"
 }
 
 canonical_dir() {
@@ -146,32 +186,9 @@ copy_resource() {
   mkdir -p "$(dirname -- "$dst_path")"
   if [ "${rel_path##*.}" = "sqlite" ]; then
     tmp_path="${dst_path}.tmp.$$"
-    tmp_sql=$(sqlite_quote "$tmp_path")
-    rm -f "$tmp_path"
-    if command -v sqlite3 >/dev/null 2>&1; then
-      if ! sqlite3 "$src_path" \
-        ".timeout 5000" \
-        "VACUUM INTO '$tmp_sql';"
-      then
-        rm -f "$tmp_path"
-        return 1
-      fi
-    else
-      if ! bun --eval '
-        import { Database } from "bun:sqlite";
-
-        const sourcePath = process.argv[1];
-        const destPath = process.argv[2];
-        const db = new Database(sourcePath);
-        db.exec("PRAGMA busy_timeout = 5000;");
-        const escapedDestPath = destPath.replaceAll("'"'"'", "'"'"''"'"'");
-        db.exec(`VACUUM INTO '"'"'${escapedDestPath}'"'"'`);
-        db.close(false);
-      ' "$src_path" "$tmp_path"
-      then
-        rm -f "$tmp_path"
-        return 1
-      fi
+    if ! snapshot_sqlite "$src_path" "$tmp_path"; then
+      rm -f "$tmp_path"
+      return 1
     fi
     mv "$tmp_path" "$dst_path"
     log "snapshotted sqlite: $rel_path"

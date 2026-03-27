@@ -105,6 +105,7 @@ bun run test:worktree-bootstrap
 
 - 同步范围固定来自 `scripts/worktree-sync.paths`
 - `.sqlite` 路径通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不复制 `-wal/-shm`
-- 依赖安装会在 linked worktree 缺少 `node_modules` 时自动执行；存在 `bun.lock` 时使用 `bun install --frozen-lockfile`
+- `.sqlite` 路径优先使用本机 `sqlite3` 执行 `VACUUM INTO`，若本机版本不支持则回退到 Bun 内置 SQLite
+- 依赖安装会在 linked worktree 缺少 `node_modules` 时自动执行；存在 `bun.lock` 时使用 `bun install --frozen-lockfile`；`WORKTREE_SYNC_FORCE=1` 不会重装已存在的 `node_modules`
 - 目标文件已存在时绝不覆盖
 - 当前 revision 缺少脚本或 manifest 时，shared hook 必须降级为 no-op

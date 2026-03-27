@@ -232,6 +232,26 @@ if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sql
   exit 1
 fi
 
+fallback_bin="$tmp_root/fallback-bin"
+mkdir -p "$fallback_bin"
+cat > "$fallback_bin/sqlite3" <<'EOF'
+#!/bin/sh
+echo "Error: near \"INTO\": syntax error" >&2
+exit 1
+EOF
+chmod +x "$fallback_bin/sqlite3"
+rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+fallback_sync_output="$(cd "$worktree_missing" && PATH="$fallback_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$fallback_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+  echo "expected SQLite snapshot to fall back when sqlite3 lacks VACUUM INTO" >&2
+  exit 1
+fi
+
+deps_output="$(cd "$worktree_default" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$deps_output" "keep dependency install: node_modules exists"
+assert_output_not_contains "$deps_output" "installing dependencies:"
+
 checkout_output="$(git -C "$fixture_repo" checkout "$base_sha" 2>&1)"
 assert_output_not_contains "$checkout_output" "No such file or directory"
 assert_output_not_contains "$checkout_output" "exit status 127"
