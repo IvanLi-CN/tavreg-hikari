@@ -1193,6 +1193,25 @@ export class JobScheduler {
             continue;
           }
 
+          const roundTargetReached =
+            state != null
+            && state.startedAt === context.roundStartedAt
+            && state.acceptedCount + acceptedInBatch >= state.currentRoundTarget;
+          if (roundTargetReached) {
+            rejectReasons.add("round_target_reached");
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "rejected",
+              rejectReason: "round_target_reached",
+            });
+            continue;
+          }
+
           const importResult = this.db.importAccounts(
             [{ email: candidate.email, password: candidate.password }],
             {

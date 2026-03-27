@@ -935,6 +935,103 @@ describe("scheduler helpers", () => {
     appDb.close();
   });
 
+  test("rejects later in-flight extractor successes after the round target is already met", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const buildResponseForUrl = (href) => {
+      if (href.includes("zhanghaoya")) {
+        return new Response(
+          JSON.stringify({
+            Code: 200,
+            Message: "Success",
+            Data: "target-zh@outlook.com:pass-zh",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (href.includes("shanyouxiang")) {
+        return new Response("target-sy@outlook.com----pass-sy", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      if (href.includes("shankeyun")) {
+        return new Response("target-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            mails: ["target-hm@outlook.com:pass-hm"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const pending = [];
+    globalThis.fetch = (url) =>
+      new Promise((resolve) => {
+        pending.push({ href: String(url), resolve });
+      });
+
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () =>
+        createSchedulerSettings({
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "shan-demo-key-001",
+          extractorShankeyunKey: "shanke-demo-key-001",
+          extractorHotmail666Key: "hotmail666-demo-key-001",
+        }),
+      () => undefined,
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 8,
+      autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    const decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(pending).toHaveLength(4);
+
+    pending[0].resolve(buildResponseForUrl(pending[0].href));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    pending[1].resolve(buildResponseForUrl(pending[1].href));
+    pending[2].resolve(buildResponseForUrl(pending[2].href));
+    pending[3].resolve(buildResponseForUrl(pending[3].href));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+    expect(appDb.listAccounts({ page: 1, pageSize: 10 }).rows.map((account) => account.microsoftEmail)).toEqual([
+      "target-zh@outlook.com",
+    ]);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.total).toBe(4);
+    expect(history.rows.filter((row) => row.status === "accepted")).toHaveLength(1);
+    expect(
+      history.rows.flatMap((row) => row.items).filter((item) => item.rejectReason === "round_target_reached"),
+    ).toHaveLength(3);
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
   test("auto extract requests use a 5 second timeout budget", async () => {
     const { appDb, dbPath } = await createTempDb();
     const observedTimeouts = [];
