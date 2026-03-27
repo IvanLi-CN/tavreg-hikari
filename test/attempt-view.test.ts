@@ -60,3 +60,57 @@ test("serializeAttemptForApi reflects the latest signup task details for active 
     db.close();
   }
 });
+
+test("serializeAttemptForApi ignores stale signup task rows for a fresh retry attempt", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tavreg-attempt-view-stale-"));
+  const dbPath = path.join(root, "ledger.sqlite");
+  const db = await AppDatabase.open(dbPath);
+  const ledger = await TaskLedger.open({
+    enabled: true,
+    dbPath,
+    busyTimeoutMs: 1000,
+    ipRateLimitCooldownMs: 60_000,
+    ipRateLimitMax: 3,
+    captchaMissingCooldownMs: 60_000,
+    captchaMissingMax: 3,
+    captchaMissingThreshold: 1,
+    invalidCaptchaCooldownMs: 60_000,
+    invalidCaptchaMax: 3,
+    invalidCaptchaThreshold: 1,
+    allowRateLimitedIpFallback: false,
+  });
+
+  try {
+    const imported = db.importAccounts([{ email: "retry@outlook.com", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0]!;
+    const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 2 });
+
+    ledger!.upsertTask({
+      runId: "run-old",
+      jobId: job.id,
+      accountId,
+      batchId: "batch-old",
+      mode: "headed",
+      attemptIndex: 1,
+      modeRetryMax: 2,
+      status: "failed",
+      startedAt: "2026-03-27T00:00:00.000Z",
+      completedAt: "2026-03-27T00:00:08.000Z",
+      failureStage: "browser_launch",
+      errorCode: "oauth_timeout",
+      errorMessage: "old retry failed",
+    });
+
+    const retryAttempt = db.createAttempt(job.id, accountId, path.join(root, "attempt-output"));
+    const serialized = serializeAttemptForApi(db, retryAttempt);
+
+    expect(serialized.runId).toBeNull();
+    expect(serialized.status).toBe("running");
+    expect(serialized.stage).toBe("spawned");
+    expect(serialized.errorCode).toBeNull();
+    expect(serialized.errorMessage).toBeNull();
+  } finally {
+    ledger?.close();
+    db.close();
+  }
+});

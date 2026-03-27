@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
-import { JobScheduler, buildAttemptRuntimeSpec, resolveAttemptProxyNode } from "../src/server/scheduler.ts";
+import { JobScheduler, buildAttemptRuntimeSpec, pickWorkerRuntime, resolveAttemptProxyNode, resolveWorkerRuntime } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -878,6 +878,261 @@ describe("scheduler helpers", () => {
     await scheduler.shutdown();
     appDb.close();
   });
+
+  test("prefers node workers over bun for fingerprint chromium CDP runs", () => {
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "/custom/node",
+        explicitNodeTsxAvailable: true,
+        runningUnderBun: true,
+        processExecPath: "/custom/bun",
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: true,
+      }),
+    ).toEqual({
+      command: "/custom/node",
+      bootstrapArgs: ["--import", "tsx", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "/custom/node",
+        explicitNodeTsxAvailable: false,
+        runningUnderBun: true,
+        processExecPath: "/custom/bun",
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: false,
+      }),
+    ).toEqual({
+      command: "/custom/bun",
+      bootstrapArgs: ["run", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "",
+        runningUnderBun: true,
+        processExecPath: "/custom/bun",
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: true,
+      }),
+    ).toEqual({
+      command: "node",
+      bootstrapArgs: ["--import", "tsx", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "",
+        runningUnderBun: true,
+        processExecPath: "/custom/bun",
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: false,
+      }),
+    ).toEqual({
+      command: "/custom/bun",
+      bootstrapArgs: ["run", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "",
+        runningUnderBun: false,
+        processExecPath: "/custom/node",
+        nodeCommandAvailable: false,
+        nodeTsxAvailable: false,
+      }),
+    ).toEqual({
+      command: "/custom/node",
+      bootstrapArgs: ["--import", "tsx", "src/main.ts"],
+    });
+  });
+
+  test("syncs active attempt rows from signup task ledger into the job attempts table", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings(),
+      () => undefined,
+    );
+    const imported = appDb.importAccounts([{ email: "alpha@outlook.com", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0];
+    const account = appDb.getAccount(accountId);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-attempt"));
+    const ledger = await TaskLedger.open({
+      enabled: true,
+      dbPath,
+      busyTimeoutMs: 1000,
+      ipRateLimitCooldownMs: 60_000,
+      ipRateLimitMax: 3,
+      captchaMissingCooldownMs: 60_000,
+      captchaMissingMax: 3,
+      captchaMissingThreshold: 1,
+      invalidCaptchaCooldownMs: 60_000,
+      invalidCaptchaMax: 3,
+      invalidCaptchaThreshold: 1,
+      allowRateLimitedIpFallback: false,
+    });
+
+    try {
+      ledger.upsertTask({
+        runId: "run-123",
+        jobId: job.id,
+        accountId,
+        batchId: "batch-1",
+        mode: "headed",
+        attemptIndex: 1,
+        modeRetryMax: 3,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        failureStage: "browser_launch",
+        proxyNode: "Tokyo-1",
+        proxyIp: "1.2.3.4",
+        errorCode: "oauth_timeout",
+        errorMessage: "waiting for callback",
+      });
+
+      scheduler.activeAttempts.set(attempt.id, {
+        child: {},
+        attempt,
+        account,
+        outputDir: path.join(process.cwd(), "tmp-attempt"),
+        reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+        tail: [],
+      });
+
+      const rows = scheduler.activeAttemptRows();
+      expect(rows[0]).toMatchObject({
+        runId: "run-123",
+        stage: "browser_launch",
+        proxyNode: "Tokyo-1",
+        proxyIp: "1.2.3.4",
+        errorCode: "oauth_timeout",
+        errorMessage: "waiting for callback",
+      });
+      expect(appDb.getAttempt(attempt.id)).toMatchObject({
+        runId: "run-123",
+        stage: "browser_launch",
+        proxyNode: "Tokyo-1",
+        proxyIp: "1.2.3.4",
+        errorCode: "oauth_timeout",
+        errorMessage: "waiting for callback",
+      });
+    } finally {
+      scheduler.activeAttempts.clear();
+      ledger?.close();
+      await scheduler.shutdown();
+      appDb.close();
+    }
+  });
+
+  test("ignores stale signup task rows before a retried attempt writes its own run id", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings(),
+      () => undefined,
+    );
+    const imported = appDb.importAccounts([{ email: "retry-sync@outlook.com", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0];
+    const account = appDb.getAccount(accountId);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 2 });
+    const ledger = await TaskLedger.open({
+      enabled: true,
+      dbPath,
+      busyTimeoutMs: 1000,
+      ipRateLimitCooldownMs: 60_000,
+      ipRateLimitMax: 3,
+      captchaMissingCooldownMs: 60_000,
+      captchaMissingMax: 3,
+      captchaMissingThreshold: 1,
+      invalidCaptchaCooldownMs: 60_000,
+      invalidCaptchaMax: 3,
+      invalidCaptchaThreshold: 1,
+      allowRateLimitedIpFallback: false,
+    });
+
+    try {
+      ledger.upsertTask({
+        runId: "run-old",
+        jobId: job.id,
+        accountId,
+        batchId: "batch-old",
+        mode: "headed",
+        attemptIndex: 1,
+        modeRetryMax: 3,
+        status: "failed",
+        startedAt: "2026-03-27T00:00:00.000Z",
+        completedAt: "2026-03-27T00:00:10.000Z",
+        failureStage: "browser_launch",
+        errorCode: "oauth_timeout",
+        errorMessage: "old retry failed",
+      });
+
+      const retryAttempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-attempt-retry"));
+      scheduler.activeAttempts.set(retryAttempt.id, {
+        child: {},
+        attempt: retryAttempt,
+        account,
+        outputDir: path.join(process.cwd(), "tmp-attempt-retry"),
+        reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+        tail: [],
+      });
+
+      let rows = scheduler.activeAttemptRows();
+      expect(rows[0]).toMatchObject({
+        runId: null,
+        stage: "spawned",
+        errorCode: null,
+        errorMessage: null,
+      });
+      expect(appDb.getAttempt(retryAttempt.id)).toMatchObject({
+        runId: null,
+        stage: "spawned",
+        errorCode: null,
+        errorMessage: null,
+      });
+
+      ledger.upsertTask({
+        runId: "run-current",
+        jobId: job.id,
+        accountId,
+        batchId: "batch-current",
+        mode: "headed",
+        attemptIndex: 2,
+        modeRetryMax: 3,
+        status: "running",
+        startedAt: new Date(Date.parse(retryAttempt.startedAt) + 1000).toISOString(),
+        failureStage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+
+      rows = scheduler.activeAttemptRows();
+      expect(rows[0]).toMatchObject({
+        runId: "run-current",
+        stage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+      expect(appDb.getAttempt(retryAttempt.id)).toMatchObject({
+        runId: "run-current",
+        stage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+    } finally {
+      scheduler.activeAttempts.clear();
+      ledger?.close();
+      await scheduler.shutdown();
+      appDb.close();
+    }
+  });
 });
 
 describe("proxy aggregation", () => {
@@ -1210,8 +1465,8 @@ describe("scheduler runtime spec", () => {
       },
     });
 
-    const explicitNodeBinary = process.env.NODE_BINARY?.trim();
-    expect(runtime.command).toBe(process.versions.bun && !explicitNodeBinary ? process.execPath : explicitNodeBinary || process.execPath);
+    const expectedRuntime = resolveWorkerRuntime();
+    expect(runtime.command).toBe(expectedRuntime.command);
     expect(runtime.args.slice(-8)).toEqual([
       "--mode",
       "headed",
@@ -1222,7 +1477,8 @@ describe("scheduler runtime spec", () => {
       "--proxy-node",
       "Tokyo-01",
     ]);
-    expect(runtime.args.slice(0, 3)).toEqual(process.versions.bun && !explicitNodeBinary ? ["run", "src/main.ts", "--mode"] : ["--import", "tsx", "src/main.ts"]);
+    expect(runtime.args.slice(0, expectedRuntime.bootstrapArgs.length)).toEqual(expectedRuntime.bootstrapArgs);
+    expect(runtime.args[expectedRuntime.bootstrapArgs.length]).toBe("--mode");
     expect(runtime.env).toMatchObject({
       MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
       MIHOMO_GROUP_NAME: "WEB_AUTO",

@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import {
@@ -109,20 +109,96 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
   return next;
 }
 
-function resolveWorkerRuntime(): { command: string; bootstrapArgs: string[] } {
-  const explicitNodeBinary = process.env.NODE_BINARY?.trim();
-  if (process.versions.bun && !explicitNodeBinary) {
+let cachedNodeCommandAvailability: boolean | null = null;
+let cachedNodeTsxAvailability: boolean | null = null;
+
+function isNodeCommandAvailable(): boolean {
+  if (cachedNodeCommandAvailability != null) {
+    return cachedNodeCommandAvailability;
+  }
+  try {
+    const result = spawnSync("node", ["-v"], {
+      stdio: "ignore",
+      env: process.env,
+    });
+    cachedNodeCommandAvailability = !result.error && result.status === 0;
+  } catch {
+    cachedNodeCommandAvailability = false;
+  }
+  return cachedNodeCommandAvailability;
+}
+
+function isNodeTsxAvailable(nodeBinary = "node"): boolean {
+  if (nodeBinary === "node" && cachedNodeTsxAvailability != null) {
+    return cachedNodeTsxAvailability;
+  }
+  try {
+    const result = spawnSync(nodeBinary, ["--import", "tsx", "--eval", ""], {
+      stdio: "ignore",
+      env: process.env,
+    });
+    const available = !result.error && result.status === 0;
+    if (nodeBinary === "node") {
+      cachedNodeTsxAvailability = available;
+    }
+    return available;
+  } catch {
+    if (nodeBinary === "node") {
+      cachedNodeTsxAvailability = false;
+    }
+    return false;
+  }
+}
+
+export function pickWorkerRuntime(input: {
+  explicitNodeBinary?: string | null;
+  explicitNodeTsxAvailable?: boolean;
+  runningUnderBun: boolean;
+  processExecPath?: string | null;
+  nodeCommandAvailable: boolean;
+  nodeTsxAvailable: boolean;
+}): { command: string; bootstrapArgs: string[] } {
+  const nodeArgs = ["--import", "tsx", "src/main.ts"];
+  const explicitNodeBinary = input.explicitNodeBinary?.trim();
+  const explicitNodeRuntimeAvailable = explicitNodeBinary
+    ? (input.explicitNodeTsxAvailable ?? isNodeTsxAvailable(explicitNodeBinary))
+    : false;
+  if (explicitNodeBinary && explicitNodeRuntimeAvailable) {
     return {
-      command: process.execPath,
-      bootstrapArgs: ["run", "src/main.ts"],
+      command: explicitNodeBinary,
+      bootstrapArgs: nodeArgs,
+    };
+  }
+  if (!input.runningUnderBun) {
+    return {
+      command: input.processExecPath || "node",
+      bootstrapArgs: nodeArgs,
+    };
+  }
+  if (input.nodeCommandAvailable && input.nodeTsxAvailable) {
+    // Bun-hosted playwright-core can hang on connectOverCDP against
+    // fingerprint-chromium. Keep the worker on CDP, but run it under Node.
+    return {
+      command: "node",
+      bootstrapArgs: nodeArgs,
     };
   }
   return {
-    // Prefer Node.js when it is explicitly configured, but keep the Bun-hosted
-    // scheduler deployable on environments that only ship Bun.
-    command: explicitNodeBinary || process.execPath || "node",
-    bootstrapArgs: ["--import", "tsx", "src/main.ts"],
+    command: input.processExecPath || "bun",
+    bootstrapArgs: ["run", "src/main.ts"],
   };
+}
+
+export function resolveWorkerRuntime(baseEnv: NodeJS.ProcessEnv | undefined = process.env): { command: string; bootstrapArgs: string[] } {
+  const explicitNodeBinary = baseEnv?.NODE_BINARY;
+  return pickWorkerRuntime({
+    explicitNodeBinary,
+    explicitNodeTsxAvailable: explicitNodeBinary?.trim() ? isNodeTsxAvailable(explicitNodeBinary.trim()) : undefined,
+    runningUnderBun: Boolean(process.versions.bun),
+    processExecPath: process.execPath,
+    nodeCommandAvailable: isNodeCommandAvailable(),
+    nodeTsxAvailable: isNodeTsxAvailable(),
+  });
 }
 
 function isTerminalJobStatus(status: JobRecord["status"]): boolean {
@@ -231,6 +307,36 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseMillis(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldIgnoreSignupTaskForAttempt(
+  attempt: Pick<JobAttemptRecord, "runId" | "startedAt">,
+  latest: Record<string, unknown>,
+): boolean {
+  const latestRunId = latest.run_id == null ? null : String(latest.run_id);
+  if (attempt.runId) {
+    return latestRunId == null || latestRunId !== attempt.runId;
+  }
+
+  const attemptStartedAtMs = parseMillis(attempt.startedAt);
+  const latestStartedAtMs = parseMillis(latest.started_at);
+  const latestCompletedAtMs = parseMillis(latest.completed_at);
+  if (attemptStartedAtMs == null) {
+    return false;
+  }
+  if (latestStartedAtMs != null && latestStartedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  if (latestCompletedAtMs != null && latestCompletedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  return false;
+}
+
 function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
@@ -266,7 +372,7 @@ export class JobScheduler {
 
   activeAttemptRows(): JobAttemptRecord[] {
     return Array.from(this.activeAttempts.values())
-      .map((item) => this.db.getAttempt(item.attempt.id) || item.attempt)
+      .map((item) => this.syncActiveAttemptFromLedger(item))
       .filter(Boolean);
   }
 
@@ -446,6 +552,9 @@ export class JobScheduler {
 
   private async runLoop(jobId: number): Promise<void> {
     while (true) {
+      for (const active of this.activeAttempts.values()) {
+        this.syncActiveAttemptFromLedger(active);
+      }
       const job = this.db.getJob(jobId);
       if (!job) return;
 
@@ -630,6 +739,45 @@ export class JobScheduler {
       }
       throw error;
     }
+  }
+
+  private syncActiveAttemptFromLedger(active: ActiveAttempt): JobAttemptRecord {
+    const latest = this.db.getLatestSignupTask(active.attempt.jobId, active.account.id);
+    if (!latest || shouldIgnoreSignupTaskForAttempt(active.attempt, latest)) {
+      const current = this.db.getAttempt(active.attempt.id) || active.attempt;
+      active.attempt = current;
+      return current;
+    }
+
+    const patch: Partial<
+      Pick<JobAttemptRecord, "runId" | "stage" | "proxyNode" | "proxyIp" | "errorCode" | "errorMessage" | "status">
+    > = {};
+    const nextRunId = latest.run_id == null ? active.attempt.runId : String(latest.run_id);
+    const nextStage = latest.failure_stage == null ? active.attempt.stage : String(latest.failure_stage);
+    const nextProxyNode = latest.proxy_node == null ? active.attempt.proxyNode : String(latest.proxy_node);
+    const nextProxyIp = latest.proxy_ip == null ? active.attempt.proxyIp : String(latest.proxy_ip);
+    const nextErrorCode = latest.error_code == null ? active.attempt.errorCode : String(latest.error_code);
+    const nextErrorMessage = latest.error_message == null ? active.attempt.errorMessage : String(latest.error_message);
+    const nextStatus = latest.status === "running" ? "running" : active.attempt.status;
+
+    if (nextRunId !== active.attempt.runId) patch.runId = nextRunId;
+    if (nextStage !== active.attempt.stage) patch.stage = nextStage;
+    if (nextProxyNode !== active.attempt.proxyNode) patch.proxyNode = nextProxyNode;
+    if (nextProxyIp !== active.attempt.proxyIp) patch.proxyIp = nextProxyIp;
+    if (nextErrorCode !== active.attempt.errorCode) patch.errorCode = nextErrorCode;
+    if (nextErrorMessage !== active.attempt.errorMessage) patch.errorMessage = nextErrorMessage;
+    if (nextStatus !== active.attempt.status) patch.status = nextStatus;
+
+    if (Object.keys(patch).length === 0) {
+      const current = this.db.getAttempt(active.attempt.id) || active.attempt;
+      active.attempt = current;
+      return current;
+    }
+
+    const updated = this.db.updateAttempt(active.attempt.id, patch);
+    active.attempt = updated;
+    this.emit("attempt.updated", { attempt: updated });
+    return updated;
   }
 
   private async handleAttemptExit(

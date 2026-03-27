@@ -94,9 +94,27 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
 });
 
-test("macOS headed chrome skips native CDP automation", async () => {
+test("chrome native CDP automation stays enabled on macOS when configured", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain('if (process.platform === "darwin" && mode === "headed") return false;');
+  const start = source.indexOf("function shouldUseNativeChromeAutomation");
+  const end = source.indexOf("async function launchNativeChromeInspect");
+  const segment = source.slice(start, end);
+  expect(segment).toContain('if (browserEngine !== "chrome" || !enabled) return false;');
+  expect(segment).not.toContain('process.platform === "darwin"');
+});
+
+test("task timeout aborts native CDP launch instead of waiting for the full CDP attach timeout", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const browserLaunchAbortController = new AbortController();");
+  expect(source).toContain("browserLaunchAbortController.abort(new Error(`task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`));");
+  expect(source).toContain("await raceWithAbort(delay(1800), signal, \"native chrome launch aborted during startup\");");
+  expect(source).toContain("const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir, 40_000, signal, child.pid);");
+});
+
+test("running task ledger snapshots carry the live stage for active attempts", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("if (ledgerRecord.status === \"running\") {");
+  expect(source).toContain("ledgerRecord.failureStage = failureStage;");
 });
 
 test("microsoft provider login bypasses identifier challenge gating", async () => {
@@ -142,7 +160,20 @@ test("microsoft provider flow keeps the login surface and only waits on signup c
   expect(source).toContain("if (!hasConcreteChallengeSurface(latest)) {");
   expect(source).toContain('log(`${formKind} provider submit: waiting for passive managed challenge readiness`)');
   expect(source).toContain("if (isManagedChallengeStableForSubmit(latest)) {");
+  expect(source).toContain("function canFallbackPassiveMicrosoftProviderSubmit(");
+  expect(source).toContain('if (canFallbackPassiveMicrosoftProviderSubmit(latest, formKind)) {');
+  expect(source).toContain('log(`${formKind} provider submit: passive challenge timeout degraded to direct provider click`)');
+  expect(source).toContain("if (snapshot.hasChallengeCheckbox || snapshot.hasTurnstileApi) return false;");
+  expect(source).toContain("return snapshot.hasChallengeFrame && !snapshot.challengeHint;");
   expect(source).not.toContain('log("login flow: switched to Tavily signup surface before Microsoft provider submit");');
+});
+
+test("native chrome rebuild keeps auth submit patching installed", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const AUTH_REQUEST_ROUTE_BOUND_CONTEXTS = new WeakSet<object>();");
+  expect(source).toContain("if (AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.has(targetContext)) return;");
+  expect(source).toContain("AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.add(targetContext);");
+  expect(source).toContain("if (useNativeChrome) {\n        context = nativeChromeContext;\n        if (!context) {\n          throw new Error(\"native chrome context missing\");\n        }\n        await installAuthRequestRoute(context);");
 });
 
 test("microsoft account picker only acts on real picker surfaces and ignores recovery or proof shells", async () => {
@@ -189,12 +220,25 @@ test("safeGoto accepts timeout recoveries only after the target document is alre
 test("login entry only treats /home as resolved when authenticated signals are present", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("async function hasAuthenticatedHomeSignal(page: any): Promise<boolean> {");
+  expect(source).toContain('await probeJsonText("/api/auth/me", /@|email|name|picture|user|sub|sid/i)');
+  expect(source).toContain('await probeJsonText("/api/account", /@|email|name|uid|current_plan|plan_display_name/i)');
+  expect(source).toContain('await probeJsonText("/api/keys", /tvly-[A-Za-z0-9_-]{8,}|\\"name\\"\\\\s*:\\\\s*\\"default\\"/i)');
   const start = source.indexOf("async function openAuthFlowEntry");
   const end = source.indexOf("async function waitHomeStable");
   const segment = source.slice(start, end);
   expect(segment).toContain(': /\\/u\\/login\\/identifier|\\/u\\/login\\/password/i;');
   expect(segment).not.toContain('/\\/u\\/login\\/identifier|\\/u\\/login\\/password|app\\.tavily\\.com\\/home/i;');
   expect(segment).toContain("(await hasAuthenticatedHomeSignal(page))");
+});
+
+test("home stabilization gives Tavily auth APIs extra time after Microsoft returns to /home", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("async function waitHomeStable");
+  const end = source.indexOf("async function hasPostSignupConsentPrompt");
+  const segment = source.slice(start, end);
+  expect(segment).toContain("const authGraceDeadline = Date.now() + Math.max(stableMs, 15_000);");
+  expect(segment).toContain("while (Date.now() < authGraceDeadline)");
+  expect(segment).toContain("if (Date.now() >= stableDeadline) {");
 });
 
 test("microsoft login returns Tavily social-signup continuations instead of re-submitting the provider", async () => {
