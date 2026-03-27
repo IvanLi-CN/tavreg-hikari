@@ -3772,11 +3772,28 @@ async function hasAuthenticatedHomeSignal(page: any): Promise<boolean> {
   }
   return await page
     .evaluate(`async () => {
+      const probeJsonText = async (url, matcher) => {
+        try {
+          const response = await fetch(url, { credentials: "include", cache: "no-store" });
+          if (!response.ok) return false;
+          const text = await response.text();
+          return matcher.test(text);
+        } catch {
+          return false;
+        }
+      };
+
       try {
-        const response = await fetch("/api/auth/me", { credentials: "include", cache: "no-store" });
-        if (!response.ok) return false;
-        const text = await response.text();
-        return /@|email|name|picture|user/i.test(text);
+        if (await probeJsonText("/api/auth/me", /@|email|name|picture|user|sub|sid/i)) {
+          return true;
+        }
+        if (await probeJsonText("/api/account", /@|email|name|uid|current_plan|plan_display_name/i)) {
+          return true;
+        }
+        if (await probeJsonText("/api/keys", /tvly-[A-Za-z0-9_-]{8,}|\"name\"\\s*:\\s*\"default\"/i)) {
+          return true;
+        }
+        return false;
       } catch {
         return false;
       }
@@ -3965,15 +3982,19 @@ async function openAuthFlowEntry(
 
 async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
   const step = 800;
-  const rounds = Math.max(1, Math.floor(stableMs / step));
+  const stableDeadline = Date.now() + Math.max(step, stableMs);
+  const authGraceDeadline = Date.now() + Math.max(stableMs, 15_000);
   let sawAuthenticatedSignal = false;
-  for (let i = 0; i < rounds; i += 1) {
+  while (Date.now() < authGraceDeadline) {
     const url = page.url();
     if (!/app\.tavily\.com\/home/i.test(url) || /auth\.tavily\.com/i.test(url)) {
       return false;
     }
     if (await hasAuthenticatedHomeSignal(page)) {
       sawAuthenticatedSignal = true;
+      if (Date.now() >= stableDeadline) {
+        return true;
+      }
     }
     await page.waitForTimeout(step);
   }
@@ -4524,6 +4545,10 @@ async function waitForPassiveMicrosoftProviderReadiness(
         latest.turnstileValueLength || 0
       }, frame=${latest.hasChallengeFrame ? 1 : 0}, checkbox=${latest.hasChallengeCheckbox ? 1 : 0})`,
     );
+    if (canFallbackPassiveMicrosoftProviderSubmit(latest, formKind)) {
+      log(`${formKind} provider submit: passive challenge timeout degraded to direct provider click`);
+      return "ready";
+    }
   }
   return "wait";
 }
@@ -6794,6 +6819,17 @@ function canSubmitManagedChallengeWithoutVisibleToken(snapshot: AuthChallengeSna
     return snapshot.challengeCheckboxChecked === true;
   }
   return false;
+}
+
+function canFallbackPassiveMicrosoftProviderSubmit(
+  snapshot: AuthChallengeSnapshot | null | undefined,
+  formKind: "signup" | "login",
+): boolean {
+  if (!snapshot || formKind !== "login") return false;
+  if (snapshot.hasCaptchaInput || snapshot.hasCaptchaImage || snapshot.hasCaptchaContainer) return false;
+  if (getChallengeTokenLength(snapshot) > 0 || snapshot.challengeSuccessVisible) return false;
+  if ((snapshot.visibleErrors?.length || 0) > 0 || (snapshot.visibleErrorCodes?.length || 0) > 0) return false;
+  return snapshot.hasChallengeFrame || snapshot.hasChallengeCheckbox;
 }
 
 function isManagedChallengeStableForSubmit(snapshot: AuthChallengeSnapshot | null | undefined): boolean {

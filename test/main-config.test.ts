@@ -160,6 +160,9 @@ test("microsoft provider flow keeps the login surface and only waits on signup c
   expect(source).toContain("if (!hasConcreteChallengeSurface(latest)) {");
   expect(source).toContain('log(`${formKind} provider submit: waiting for passive managed challenge readiness`)');
   expect(source).toContain("if (isManagedChallengeStableForSubmit(latest)) {");
+  expect(source).toContain("function canFallbackPassiveMicrosoftProviderSubmit(");
+  expect(source).toContain('if (canFallbackPassiveMicrosoftProviderSubmit(latest, formKind)) {');
+  expect(source).toContain('log(`${formKind} provider submit: passive challenge timeout degraded to direct provider click`)');
   expect(source).not.toContain('log("login flow: switched to Tavily signup surface before Microsoft provider submit");');
 });
 
@@ -207,12 +210,25 @@ test("safeGoto accepts timeout recoveries only after the target document is alre
 test("login entry only treats /home as resolved when authenticated signals are present", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("async function hasAuthenticatedHomeSignal(page: any): Promise<boolean> {");
+  expect(source).toContain('await probeJsonText("/api/auth/me", /@|email|name|picture|user|sub|sid/i)');
+  expect(source).toContain('await probeJsonText("/api/account", /@|email|name|uid|current_plan|plan_display_name/i)');
+  expect(source).toContain('await probeJsonText("/api/keys", /tvly-[A-Za-z0-9_-]{8,}|\\"name\\"\\\\s*:\\\\s*\\"default\\"/i)');
   const start = source.indexOf("async function openAuthFlowEntry");
   const end = source.indexOf("async function waitHomeStable");
   const segment = source.slice(start, end);
   expect(segment).toContain(': /\\/u\\/login\\/identifier|\\/u\\/login\\/password/i;');
   expect(segment).not.toContain('/\\/u\\/login\\/identifier|\\/u\\/login\\/password|app\\.tavily\\.com\\/home/i;');
   expect(segment).toContain("(await hasAuthenticatedHomeSignal(page))");
+});
+
+test("home stabilization gives Tavily auth APIs extra time after Microsoft returns to /home", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("async function waitHomeStable");
+  const end = source.indexOf("async function hasPostSignupConsentPrompt");
+  const segment = source.slice(start, end);
+  expect(segment).toContain("const authGraceDeadline = Date.now() + Math.max(stableMs, 15_000);");
+  expect(segment).toContain("while (Date.now() < authGraceDeadline)");
+  expect(segment).toContain("if (Date.now() >= stableDeadline) {");
 });
 
 test("microsoft login returns Tavily social-signup continuations instead of re-submitting the provider", async () => {
