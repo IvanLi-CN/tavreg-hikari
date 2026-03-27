@@ -242,7 +242,7 @@ function maskLocalSecret(secret: string): string | null {
 }
 
 export function resolveAttemptProxyNode(
-  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "hasProxyNode">,
+  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "getProxyNodeLastStatus" | "hasProxyNode">,
 ): string | null {
   const pinnedProxyNode = db.getPinnedProxyName();
   if (pinnedProxyNode) {
@@ -250,6 +250,10 @@ export function resolveAttemptProxyNode(
   }
   const selectedProxyNode = db.getSelectedProxyName();
   if (!selectedProxyNode) {
+    return null;
+  }
+  const selectedProxyStatus = db.getProxyNodeLastStatus(selectedProxyNode)?.trim().toLowerCase();
+  if (selectedProxyStatus && selectedProxyStatus !== "ok" && selectedProxyStatus !== "succeeded") {
     return null;
   }
   return db.hasProxyNode(selectedProxyNode) ? selectedProxyNode : null;

@@ -139,7 +139,10 @@ function extractJsonMessage(rawResponse: string): string | null {
 
 function mapFailure(provider: AccountExtractorProvider, message: string): AccountExtractorFailureCode {
   const normalized = message.trim().toLowerCase();
-  if (/库存不足|insufficient|out of stock|notfound|剩余次数不足/.test(normalized) || (provider === "zhanghaoya" && normalized.includes("notfound"))) {
+  if (
+    /库存不足|余额不足|无此类型卡号|insufficient|out of stock|notfound|剩余次数不足/.test(normalized)
+    || (provider === "zhanghaoya" && normalized.includes("notfound"))
+  ) {
     return "insufficient_stock";
   }
   if (/卡密不存在|卡密无效|已过期|invalid key|minimum length|maxim|expired/.test(normalized)) {
@@ -246,7 +249,7 @@ const EXTRACTOR_DESCRIPTORS: Record<AccountExtractorProvider, ExtractorDescripto
     label: PROVIDER_LABELS.shankeyun,
     getKey: (config) => config.shankeyunKey,
     buildRequest: (key, accountType) => {
-      const url = new URL("http://api.shankeyun.com/api/buy");
+      const url = new URL("https://fk.shankeyun.com/api/win/buy");
       url.searchParams.set("card", key);
       url.searchParams.set("type", accountType);
       url.searchParams.set("num", "1");
@@ -272,7 +275,7 @@ const EXTRACTOR_DESCRIPTORS: Record<AccountExtractorProvider, ExtractorDescripto
     label: PROVIDER_LABELS.hotmail666,
     getKey: (config) => config.hotmail666Key,
     buildRequest: (key, accountType) => ({
-      url: "http://api.hotmail666.com/api/extract-mail",
+      url: "https://api.hotmail666.com/api/extract-mail",
       init: {
         method: "POST",
         headers: {

@@ -531,6 +531,8 @@ describe("AppDatabase account import", () => {
 describe("scheduler helpers", () => {
   test("normalizes extractor upstream responses", async () => {
     const hotmailBodies = [];
+    const hotmailUrls = [];
+    const shankeyunUrls = [];
     globalThis.fetch = async (url, init) => {
       const href = String(url);
       if (href.includes("zhanghaoya")) {
@@ -549,12 +551,14 @@ describe("scheduler helpers", () => {
           headers: { "content-type": "application/json" },
         });
       }
-      if (href.includes("shankeyun")) {
+      if (href.includes("/api/win/buy")) {
+        shankeyunUrls.push(href);
         return new Response("mail-sk@outlook.com----pass-sk--------refresh-token----client-id", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
       }
+      hotmailUrls.push(href);
       hotmailBodies.push(JSON.parse(String(init?.body || "{}")));
       return new Response(
         JSON.stringify({
@@ -604,6 +608,9 @@ describe("scheduler helpers", () => {
       password: "pass-sk",
       parseStatus: "parsed",
     });
+    expect(shankeyunUrls).toEqual([
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=outlook&num=1",
+    ]);
 
     const hotmail666 = await fetchSingleExtractedAccount({
       provider: "hotmail666",
@@ -622,6 +629,9 @@ describe("scheduler helpers", () => {
         mailType: "outlook",
         quantity: 1,
       },
+    ]);
+    expect(hotmailUrls).toEqual([
+      "https://api.hotmail666.com/api/extract-mail",
     ]);
   });
 
@@ -658,7 +668,7 @@ describe("scheduler helpers", () => {
   test("maps new provider failure envelopes to canonical codes", async () => {
     globalThis.fetch = async (url) => {
       const href = String(url);
-      if (href.includes("shankeyun")) {
+      if (href.includes("/api/win/buy")) {
         return new Response(JSON.stringify({ status: 0, msg: "卡密已过期" }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -690,6 +700,28 @@ describe("scheduler helpers", () => {
     });
     expect(hotmail666.ok).toBe(false);
     expect(hotmail666.failureCode).toBe("insufficient_stock");
+  });
+
+  test("preserves shankeyun upstream message for ambiguous stock failures", async () => {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ status: 0, msg: "余额不足或无此类型卡号" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    const result = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config: {
+        zhanghaoyaKey: "",
+        shanyouxiangKey: "",
+        shankeyunKey: "shanke-demo-key-001",
+        hotmail666Key: "",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failureCode).toBe("insufficient_stock");
+    expect(result.message).toBe("余额不足或无此类型卡号");
   });
 
   test("computes launch capacity and completing state", () => {
@@ -1822,6 +1854,37 @@ describe("scheduler runtime spec", () => {
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
 
     expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
+
+    appDb.close();
+  });
+
+  test("stops forcing a selected proxy node after it is marked failed", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
+
+    appDb.recordProxyCheck({
+      nodeName: "Tokyo-02",
+      status: "failed",
+      error: "net::ERR_CONNECTION_CLOSED",
+    });
+
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+
+    appDb.close();
+  });
+
+  test("does not force a selected proxy node while it is still in a non-healthy running state", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    appDb.recordProxyCheck({
+      nodeName: "Tokyo-02",
+      status: "running",
+    });
+
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
 
     appDb.close();
   });

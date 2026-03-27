@@ -457,6 +457,7 @@ async function main(): Promise<void> {
   const server = Bun.serve({
     hostname: runtimeBinding.host,
     port: runtimeBinding.port,
+    idleTimeout: 60,
     websocket: {
       open(ws: any) {
         clients.add(ws);

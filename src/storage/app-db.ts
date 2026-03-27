@@ -2001,6 +2001,15 @@ export class AppDatabase {
     return row?.node_name || null;
   }
 
+  getProxyNodeLastStatus(nodeName: string): string | null {
+    const normalized = nodeName.trim();
+    if (!normalized) return null;
+    const row = this.db
+      .query("SELECT last_status FROM proxy_nodes WHERE node_name = ? LIMIT 1")
+      .get(normalized) as { last_status?: string | null } | null;
+    return row?.last_status == null ? null : String(row.last_status);
+  }
+
   hasProxyNode(nodeName: string): boolean {
     const normalized = nodeName.trim();
     if (!normalized) return false;
