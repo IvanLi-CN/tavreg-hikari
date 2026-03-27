@@ -110,6 +110,7 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
 }
 
 let cachedNodeCommandAvailability: boolean | null = null;
+let cachedNodeTsxAvailability: boolean | null = null;
 
 function isNodeCommandAvailable(): boolean {
   if (cachedNodeCommandAvailability != null) {
@@ -127,15 +128,42 @@ function isNodeCommandAvailable(): boolean {
   return cachedNodeCommandAvailability;
 }
 
+function isNodeTsxAvailable(nodeBinary = "node"): boolean {
+  if (nodeBinary === "node" && cachedNodeTsxAvailability != null) {
+    return cachedNodeTsxAvailability;
+  }
+  try {
+    const result = spawnSync(nodeBinary, ["--import", "tsx", "--eval", ""], {
+      stdio: "ignore",
+      env: process.env,
+    });
+    const available = !result.error && result.status === 0;
+    if (nodeBinary === "node") {
+      cachedNodeTsxAvailability = available;
+    }
+    return available;
+  } catch {
+    if (nodeBinary === "node") {
+      cachedNodeTsxAvailability = false;
+    }
+    return false;
+  }
+}
+
 export function pickWorkerRuntime(input: {
   explicitNodeBinary?: string | null;
+  explicitNodeTsxAvailable?: boolean;
   runningUnderBun: boolean;
   processExecPath?: string | null;
   nodeCommandAvailable: boolean;
+  nodeTsxAvailable: boolean;
 }): { command: string; bootstrapArgs: string[] } {
   const nodeArgs = ["--import", "tsx", "src/main.ts"];
   const explicitNodeBinary = input.explicitNodeBinary?.trim();
-  if (explicitNodeBinary) {
+  const explicitNodeRuntimeAvailable = explicitNodeBinary
+    ? (input.explicitNodeTsxAvailable ?? isNodeTsxAvailable(explicitNodeBinary))
+    : false;
+  if (explicitNodeBinary && explicitNodeRuntimeAvailable) {
     return {
       command: explicitNodeBinary,
       bootstrapArgs: nodeArgs,
@@ -147,7 +175,7 @@ export function pickWorkerRuntime(input: {
       bootstrapArgs: nodeArgs,
     };
   }
-  if (input.nodeCommandAvailable) {
+  if (input.nodeCommandAvailable && input.nodeTsxAvailable) {
     // Bun-hosted playwright-core can hang on connectOverCDP against
     // fingerprint-chromium. Keep the worker on CDP, but run it under Node.
     return {
@@ -162,11 +190,14 @@ export function pickWorkerRuntime(input: {
 }
 
 export function resolveWorkerRuntime(baseEnv: NodeJS.ProcessEnv | undefined = process.env): { command: string; bootstrapArgs: string[] } {
+  const explicitNodeBinary = baseEnv?.NODE_BINARY;
   return pickWorkerRuntime({
-    explicitNodeBinary: baseEnv?.NODE_BINARY,
+    explicitNodeBinary,
+    explicitNodeTsxAvailable: explicitNodeBinary?.trim() ? isNodeTsxAvailable(explicitNodeBinary.trim()) : undefined,
     runningUnderBun: Boolean(process.versions.bun),
     processExecPath: process.execPath,
     nodeCommandAvailable: isNodeCommandAvailable(),
+    nodeTsxAvailable: isNodeTsxAvailable(),
   });
 }
 

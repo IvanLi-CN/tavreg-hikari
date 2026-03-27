@@ -883,9 +883,11 @@ describe("scheduler helpers", () => {
     expect(
       pickWorkerRuntime({
         explicitNodeBinary: "/custom/node",
+        explicitNodeTsxAvailable: true,
         runningUnderBun: true,
         processExecPath: "/custom/bun",
         nodeCommandAvailable: true,
+        nodeTsxAvailable: true,
       }),
     ).toEqual({
       command: "/custom/node",
@@ -894,10 +896,25 @@ describe("scheduler helpers", () => {
 
     expect(
       pickWorkerRuntime({
+        explicitNodeBinary: "/custom/node",
+        explicitNodeTsxAvailable: false,
+        runningUnderBun: true,
+        processExecPath: "/custom/bun",
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: false,
+      }),
+    ).toEqual({
+      command: "/custom/bun",
+      bootstrapArgs: ["run", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
         explicitNodeBinary: "",
         runningUnderBun: true,
         processExecPath: "/custom/bun",
         nodeCommandAvailable: true,
+        nodeTsxAvailable: true,
       }),
     ).toEqual({
       command: "node",
@@ -909,11 +926,25 @@ describe("scheduler helpers", () => {
         explicitNodeBinary: "",
         runningUnderBun: true,
         processExecPath: "/custom/bun",
-        nodeCommandAvailable: false,
+        nodeCommandAvailable: true,
+        nodeTsxAvailable: false,
       }),
     ).toEqual({
       command: "/custom/bun",
       bootstrapArgs: ["run", "src/main.ts"],
+    });
+
+    expect(
+      pickWorkerRuntime({
+        explicitNodeBinary: "",
+        runningUnderBun: false,
+        processExecPath: "/custom/node",
+        nodeCommandAvailable: false,
+        nodeTsxAvailable: false,
+      }),
+    ).toEqual({
+      command: "/custom/node",
+      bootstrapArgs: ["--import", "tsx", "src/main.ts"],
     });
   });
 

@@ -36,7 +36,7 @@
 ## 行为规格
 
 - 当浏览器引擎是 `chrome` 且开启 `CHROME_NATIVE_AUTOMATION` 时，macOS 仍必须保留 native Chrome CDP 路径。
-- 当 Web 管理台本身运行在 Bun 下时，worker 仍应优先切到 Node 运行 `src/main.ts`，因为 `fingerprint-chromium + playwright-core.connectOverCDP` 在 Bun 下会稳定超时，但在 Node 下可正常附着；这一调整不改变 CDP 协议与浏览器选择。
+- 当 Web 管理台本身运行在 Bun 下时，worker 仅在 `node` 与 `tsx` 都可用时才优先切到 Node 运行 `src/main.ts`；若当前部署缺少 `tsx`，必须回退到 Bun worker，避免在生产环境因为 devDependencies 缺失而直接起不来。这一调整不改变 CDP 协议与浏览器选择。
 - native CDP 启动链必须能响应外层 task timeout，在 timeout 触发后尽快终止 debugger endpoint 轮询与 CDP attach。
 - 运行中的 task ledger 快照必须带上当前 `failureStage`，并回写到 `job_attempts`，这样活动 attempt 在 API 与 SQLite 中都能显示 `browser_launch`、`login_home` 等实时阶段，而不是长期停在 `spawned`。
 - Tavily `/home` 的已登录判定不能只依赖首屏文案；当 `/api/auth/me`、`/api/account` 或 `/api/keys` 已经确认会话有效时，即使页面还在落地阶段，也必须把它视为已登录 home。
@@ -46,7 +46,8 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 任务运行在 macOS，When 浏览器引擎是 `chrome` 且开启 `CHROME_NATIVE_AUTOMATION`，Then 运行时仍会选择 native Chrome CDP。
-- Given Web 管理台运行在 Bun，When 调度器为微软账号任务拉起 worker，Then worker 仍会优先使用 Node 执行 `src/main.ts`，同时浏览器仍保持为 `fingerprint-chromium` 并通过 CDP 连接。
+- Given Web 管理台运行在 Bun 且 `node + tsx` 都可用，When 调度器为微软账号任务拉起 worker，Then worker 会优先使用 Node 执行 `src/main.ts`，同时浏览器仍保持为 `fingerprint-chromium` 并通过 CDP 连接。
+- Given Web 管理台运行在 Bun 但当前部署缺少 `tsx`，When 调度器为微软账号任务拉起 worker，Then worker 会回退到 Bun 运行时，而不是生成一个启动即失败的 Node worker。
 - Given native CDP 启动链还在等待 debugger endpoint 或 CDP attach，When task timeout 触发，Then worker 会中断当前启动链并尽快以 timeout 失败退出。
 - Given 活动 attempt 正在运行，When Web 管理台读取 attempt 详情或直接查看 `job_attempts`，Then 都能看到当前阶段而不是一直停在 `spawned`。
 - Given Microsoft 登录在 passkey 中断后已经回到 Tavily `/home`，When Tavily 的鉴权接口已经返回有效会话，Then 登录流程会把当前页识别为成功 home，而不是再次发起微软登录。
