@@ -1028,6 +1028,111 @@ describe("scheduler helpers", () => {
       appDb.close();
     }
   });
+
+  test("ignores stale signup task rows before a retried attempt writes its own run id", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings(),
+      () => undefined,
+    );
+    const imported = appDb.importAccounts([{ email: "retry-sync@outlook.com", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0];
+    const account = appDb.getAccount(accountId);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 2 });
+    const ledger = await TaskLedger.open({
+      enabled: true,
+      dbPath,
+      busyTimeoutMs: 1000,
+      ipRateLimitCooldownMs: 60_000,
+      ipRateLimitMax: 3,
+      captchaMissingCooldownMs: 60_000,
+      captchaMissingMax: 3,
+      captchaMissingThreshold: 1,
+      invalidCaptchaCooldownMs: 60_000,
+      invalidCaptchaMax: 3,
+      invalidCaptchaThreshold: 1,
+      allowRateLimitedIpFallback: false,
+    });
+
+    try {
+      ledger.upsertTask({
+        runId: "run-old",
+        jobId: job.id,
+        accountId,
+        batchId: "batch-old",
+        mode: "headed",
+        attemptIndex: 1,
+        modeRetryMax: 3,
+        status: "failed",
+        startedAt: "2026-03-27T00:00:00.000Z",
+        completedAt: "2026-03-27T00:00:10.000Z",
+        failureStage: "browser_launch",
+        errorCode: "oauth_timeout",
+        errorMessage: "old retry failed",
+      });
+
+      const retryAttempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-attempt-retry"));
+      scheduler.activeAttempts.set(retryAttempt.id, {
+        child: {},
+        attempt: retryAttempt,
+        account,
+        outputDir: path.join(process.cwd(), "tmp-attempt-retry"),
+        reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+        tail: [],
+      });
+
+      let rows = scheduler.activeAttemptRows();
+      expect(rows[0]).toMatchObject({
+        runId: null,
+        stage: "spawned",
+        errorCode: null,
+        errorMessage: null,
+      });
+      expect(appDb.getAttempt(retryAttempt.id)).toMatchObject({
+        runId: null,
+        stage: "spawned",
+        errorCode: null,
+        errorMessage: null,
+      });
+
+      ledger.upsertTask({
+        runId: "run-current",
+        jobId: job.id,
+        accountId,
+        batchId: "batch-current",
+        mode: "headed",
+        attemptIndex: 2,
+        modeRetryMax: 3,
+        status: "running",
+        startedAt: new Date(Date.parse(retryAttempt.startedAt) + 1000).toISOString(),
+        failureStage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+
+      rows = scheduler.activeAttemptRows();
+      expect(rows[0]).toMatchObject({
+        runId: "run-current",
+        stage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+      expect(appDb.getAttempt(retryAttempt.id)).toMatchObject({
+        runId: "run-current",
+        stage: "login_home",
+        errorCode: "login_waiting",
+        errorMessage: "current retry active",
+      });
+    } finally {
+      scheduler.activeAttempts.clear();
+      ledger?.close();
+      await scheduler.shutdown();
+      appDb.close();
+    }
+  });
 });
 
 describe("proxy aggregation", () => {

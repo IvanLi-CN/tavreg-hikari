@@ -307,6 +307,36 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseMillis(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldIgnoreSignupTaskForAttempt(
+  attempt: Pick<JobAttemptRecord, "runId" | "startedAt">,
+  latest: Record<string, unknown>,
+): boolean {
+  const latestRunId = latest.run_id == null ? null : String(latest.run_id);
+  if (attempt.runId) {
+    return latestRunId == null || latestRunId !== attempt.runId;
+  }
+
+  const attemptStartedAtMs = parseMillis(attempt.startedAt);
+  const latestStartedAtMs = parseMillis(latest.started_at);
+  const latestCompletedAtMs = parseMillis(latest.completed_at);
+  if (attemptStartedAtMs == null) {
+    return false;
+  }
+  if (latestStartedAtMs != null && latestStartedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  if (latestCompletedAtMs != null && latestCompletedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  return false;
+}
+
 function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
@@ -713,7 +743,7 @@ export class JobScheduler {
 
   private syncActiveAttemptFromLedger(active: ActiveAttempt): JobAttemptRecord {
     const latest = this.db.getLatestSignupTask(active.attempt.jobId, active.account.id);
-    if (!latest) {
+    if (!latest || shouldIgnoreSignupTaskForAttempt(active.attempt, latest)) {
       const current = this.db.getAttempt(active.attempt.id) || active.attempt;
       active.attempt = current;
       return current;
