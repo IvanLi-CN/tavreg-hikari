@@ -12,6 +12,110 @@ log() {
   printf 'worktree-sync: %s\n' "$*"
 }
 
+sqlite_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+bootstrap_dependencies() {
+  deps_stamp_dir="$git_dir/codex-worktree-sync"
+  deps_stamp_path="$deps_stamp_dir/deps.stamp"
+
+  if [ ! -f "$current_root/package.json" ]; then
+    log "skip dependency install: package.json missing"
+    return 0
+  fi
+
+  if ! command -v bun >/dev/null 2>&1; then
+    log "skip dependency install: bun unavailable"
+    return 0
+  fi
+
+  install_cmd="bun install"
+  if [ -f "$current_root/bun.lock" ]; then
+    install_cmd="bun install --frozen-lockfile"
+  else
+    install_cmd="bun install --no-save"
+  fi
+
+  mkdir -p "$deps_stamp_dir"
+  deps_signature="install=$install_cmd package=$(cksum < "$current_root/package.json" | awk '{print $1 ":" $2}')"
+  if [ -f "$current_root/bun.lock" ]; then
+    deps_signature="$deps_signature lock=$(cksum < "$current_root/bun.lock" | awk '{print $1 ":" $2}')"
+  fi
+
+  if [ -d "$current_root/node_modules" ] && [ -f "$deps_stamp_path" ] && [ "$(cat "$deps_stamp_path")" = "$deps_signature" ]; then
+    log "keep dependency install: node_modules exists"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    log "would install dependencies: $install_cmd"
+    return 0
+  fi
+
+  log "installing dependencies: $install_cmd"
+  if ! (
+    cd "$current_root"
+    case "$install_cmd" in
+      "bun install --frozen-lockfile")
+        bun install --frozen-lockfile
+        ;;
+      "bun install --no-save")
+        bun install --no-save
+        ;;
+      *)
+        bun install
+        ;;
+    esac
+  ); then
+    rm -f "$deps_stamp_path"
+    log "skip dependency install failed: $install_cmd"
+    return 0
+  fi
+  printf '%s\n' "$deps_signature" > "$deps_stamp_path"
+  log "installed dependencies"
+}
+
+snapshot_sqlite_with_bun() {
+  src_path=$1
+  tmp_path=$2
+
+  if ! command -v bun >/dev/null 2>&1; then
+    return 1
+  fi
+
+  bun --eval '
+    import { Database } from "bun:sqlite";
+
+    const sourcePath = process.argv[1];
+    const destPath = process.argv[2];
+    const db = new Database(sourcePath);
+    db.exec("PRAGMA busy_timeout = 5000;");
+    const escapedDestPath = destPath.replaceAll("'"'"'", "'"'"''"'"'");
+    db.exec(`VACUUM INTO '"'"'${escapedDestPath}'"'"'`);
+    db.close(false);
+  ' "$src_path" "$tmp_path"
+}
+
+snapshot_sqlite() {
+  src_path=$1
+  tmp_path=$2
+  tmp_sql=$(sqlite_quote "$tmp_path")
+
+  rm -f "$tmp_path"
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$src_path" \
+      ".timeout 5000" \
+      "VACUUM INTO '$tmp_sql';"
+    then
+      return 0
+    fi
+    rm -f "$tmp_path"
+  fi
+
+  snapshot_sqlite_with_bun "$src_path" "$tmp_path"
+}
+
 canonical_dir() {
   CDPATH= cd -- "$1" && pwd -P
 }
@@ -100,16 +204,12 @@ copy_resource() {
 
   mkdir -p "$(dirname -- "$dst_path")"
   if [ "${rel_path##*.}" = "sqlite" ]; then
-    bun --eval '
-      import { Database } from "bun:sqlite";
-
-      const sourcePath = process.argv[1];
-      const destPath = process.argv[2];
-      const db = new Database(sourcePath, { readonly: true });
-      const snapshot = db.serialize();
-      db.close(false);
-      await Bun.write(destPath, snapshot);
-    ' "$src_path" "$dst_path"
+    tmp_path="${dst_path}.tmp.$$"
+    if ! snapshot_sqlite "$src_path" "$tmp_path"; then
+      rm -f "$tmp_path"
+      return 1
+    fi
+    mv "$tmp_path" "$dst_path"
     log "snapshotted sqlite: $rel_path"
   else
     cp -R "$src_path" "$dst_path"
@@ -156,6 +256,8 @@ while IFS= read -r entry || [ -n "$entry" ]; do
   esac
   copy_resource "$entry"
 done < "$MANIFEST_PATH"
+
+bootstrap_dependencies
 
 if [ "$DRY_RUN" = "1" ]; then
   log "dry-run complete"

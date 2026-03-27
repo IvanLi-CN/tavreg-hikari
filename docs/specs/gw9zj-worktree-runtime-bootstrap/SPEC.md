@@ -17,6 +17,7 @@
 ### Goals
 
 - 为仓库补一套 repo-local worktree bootstrap：主工作区执行一次 `bun install` 后，新 linked worktree 在首次 checkout 时自动补齐缺失的本地运行态。
+- worktree bootstrap 需要把基本开发环境一并准备好，包括在新 linked worktree 缺少依赖时自动执行包安装。
 - 把同步范围锁定为白名单 manifest，仅覆盖 `.env.local` 与 SQLite ledger 主文件。
 - 保证同步策略固定为“源存在才复制，目标已存在绝不覆盖”。
 - 用真实 `git worktree add` smoke test 兜住首次 bootstrap、main worktree no-op、missing source 跳过与历史 revision 安全降级。
@@ -50,9 +51,16 @@
 - 自动同步仅在 linked worktree 首次 checkout 时触发；main worktree 必须稳定 no-op。
 - manifest 只允许 `.env.local` 与 `output/registry/signup-tasks.sqlite`。
 - 目标文件已存在时必须保留现状并输出 `keep target exists`。
+- linked worktree 缺少 `node_modules` 时必须自动执行依赖安装；存在 `bun.lock` 时必须使用 `bun install --frozen-lockfile`。
+- linked worktree 若不存在 `bun.lock`，自动依赖安装必须使用 `bun install --no-save`，避免 checkout 自动写出新锁文件。
+- `WORKTREE_SYNC_FORCE=1` 只能重新补齐缺失依赖，不能对已存在的 `node_modules` 触发重装。
+- 依赖安装必须是 best-effort：若 `bun install` 失败，只能记录日志并继续 checkout，不能让 worktree 创建失败。
+- 是否跳过依赖 bootstrap 必须基于“本 revision 的成功安装标记”，不能仅凭 `node_modules/` 目录存在与否判断。
 - 源文件缺失时必须输出 `skip source missing` 并以 `0` 退出，不能阻断 checkout。
 - 历史 commit 缺少同步脚本时，共享 hook 必须安全降级为 no-op。
 - SQLite ledger 必须通过 SQLite 一致性快照生成，不得直接逐文件复制活跃数据库的 `-wal/-shm` 伴生文件。
+- SQLite ledger 快照实现不得把整库一次性读进 JS 堆内存；应使用 SQLite 原生 `VACUUM INTO` 或等价原生命令生成目标文件。
+- 若本机 `sqlite3` 不支持 `VACUUM INTO`，脚本必须自动回退到 Bun 内置 SQLite 实现，而不是中断 bootstrap。
 
 ### SHOULD
 
@@ -69,7 +77,7 @@
 
 - 主工作区执行 `bun install` 时，`prepare` 调用 `scripts/install-hooks.sh`，在共享 hooks 目录安装 managed `post-checkout` wrapper。
 - 用户执行 `git worktree add` 创建新 linked worktree 时，`post-checkout` 调用 `scripts/sync-worktree-resources.sh`。
-- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 做普通复制、对 ledger 主文件做 SQLite 一致性快照。
+- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 做普通复制、对 ledger 主文件做基于 SQLite 原生 `VACUUM INTO` 的一致性快照，并在缺少 `node_modules` 时自动安装依赖。
 - 用户在 worktree 内执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh` 时，脚本重新遍历 manifest，但仍只补缺、不覆盖。
 
 ### Edge cases / errors
@@ -97,10 +105,17 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/signup-tasks.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到 `.env.local` 与一致性 ledger 快照。
+- Given 新 linked worktree 初次 bootstrap 时尚无 `node_modules`，When `post-checkout` hook 触发脚本，Then worktree 会自动完成依赖安装，且带 `bun.lock` 的 revision 使用 `bun install --frozen-lockfile`。
+- Given worktree 已有 `node_modules`，When 执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，Then 脚本只会输出 `keep dependency install: node_modules exists`，不会再次执行依赖安装。
+- Given linked worktree 缺少 `node_modules` 但当前环境下 `bun install` 失败，When hook 或 forced sync 触发依赖 bootstrap，Then 脚本会输出 `skip dependency install failed` 并继续完成非依赖资源同步，不会让 checkout 失败。
+- Given linked worktree 来源 revision 不带 `bun.lock`，When hook 自动执行依赖安装，Then 脚本使用 `bun install --no-save`，不会把 worktree 自动写脏为新增 `bun.lock`。
+- Given 上一次依赖 bootstrap 失败后 worktree 里残留了 `node_modules/`，When 再次执行 forced sync，Then 脚本仍会重试安装，而不是仅因目录存在就跳过。
 - Given 新 worktree 中任一目标文件已存在，When 自动 hook 或 `WORKTREE_SYNC_FORCE=1` 重跑同步，Then 现有文件保留不变，且日志包含 `keep target exists`。
 - Given 在主工作区运行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，When 脚本执行，Then 输出 `skip main worktree` 且不发生自覆盖。
 - Given 主工作区缺少某个 manifest 资源，When 新 worktree 首次 checkout 或手工重跑同步，Then 脚本输出 `skip source missing` 且以 `0` 退出。
 - Given 共享 hook 已安装，When checkout 到缺少同步脚本的历史 revision，Then Git 不会报 `No such file or directory` 或 `exit status 127`。
+- Given 主工作区 ledger 仍处于打开的 WAL 连接中，When linked worktree 手工 forced sync 或首次 bootstrap 生成快照，Then 已提交的数据会出现在目标 ledger 中，且脚本不会因为 JS 堆内存快照而失败。
+- Given 本机存在较老的 `sqlite3` 且不支持 `VACUUM INTO`，When bootstrap 需要生成 ledger 快照，Then 脚本会自动回退到 Bun 内置 SQLite 实现并继续完成同步。
 - Given 本次实现完成，When 执行 `bun run test:worktree-bootstrap` 与 `bun test`，Then 相关验证通过且无新增回归。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -120,7 +135,8 @@
 
 - `bun install --frozen-lockfile` 能成功执行并安装 shared hook
 - README 与 `scripts/worktree-sync.paths` 的同步范围说明一致
-- SQLite ledger 通过 `bun:sqlite` 一致性快照复制，不直接搬运 `-wal/-shm`
+- SQLite ledger 通过 SQLite 原生 `VACUUM INTO` 一致性快照复制，不直接搬运 `-wal/-shm`
+- smoke test 能证明 linked worktree 首次 bootstrap 后已具备 `node_modules`
 
 ## 文档更新（Docs to Update）
 
@@ -153,6 +169,12 @@
 - 2026-03-27: 完成共享 `post-checkout` hook、manifest 白名单同步脚本与 smoke test。
 - 2026-03-27: 验证通过：`bun install --frozen-lockfile`、`bun run test:worktree-bootstrap`、`bun test`。
 - 2026-03-27: 根据 review 反馈改为对 ledger 主文件做 SQLite 一致性快照，不再复制活跃数据库的 `-wal/-shm` 文件。
+- 2026-03-27: 将 ledger 快照实现收敛为 SQLite 原生 `VACUUM INTO`，避免大库在 bootstrap 时因 JS 堆内存快照而失败。
+- 2026-03-27: bootstrap 范围扩展为“资源补齐 + 依赖安装”，linked worktree 首次 checkout 会自动准备 `node_modules`。
+- 2026-03-27: 根据 PR review 修正 forced rerun 与旧版 `sqlite3` 兼容性，确保依赖只补缺且 `VACUUM INTO` 失败时自动回退到 Bun。
+- 2026-03-27: 将依赖安装收敛为 best-effort，避免网络/凭证类 `bun install` 失败阻断 worktree checkout。
+- 2026-03-27: 将无锁文件 revision 的依赖 bootstrap 切到 `bun install --no-save`，并用成功标记避免半失败 `node_modules` 阻断后续重试。
+- 2026-03-27: 最终实现对齐规格：无锁文件 revision 真实执行 `bun install --no-save`，并修正 smoke test 中的 Bun 包装脚本以避免递归调用。
 
 ## 参考（References）
 

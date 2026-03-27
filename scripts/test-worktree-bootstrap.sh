@@ -8,6 +8,7 @@ if ! command -v bun >/dev/null 2>&1; then
   echo "bun is required for worktree bootstrap smoke tests" >&2
   exit 1
 fi
+bun_bin="$(command -v bun)"
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/tavreg-hikari-worktree-test.XXXXXX")"
 tmp_root="$(cd "$tmp_root" && pwd -P)"
@@ -102,6 +103,28 @@ sqlite_latest_value() {
   ' "$db_path"
 }
 
+sqlite_hold_writer() {
+  local db_path="$1"
+  local value="$2"
+  local hold_ms="${3:-4000}"
+
+  mkdir -p "$(dirname "$db_path")"
+  bun --eval '
+    import { Database } from "bun:sqlite";
+
+    const dbPath = process.argv[1];
+    const value = process.argv[2];
+    const holdMs = Number(process.argv[3] ?? "4000");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode=WAL;");
+    db.exec("CREATE TABLE IF NOT EXISTS smoke (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);");
+    db.query("INSERT INTO smoke (value) VALUES (?)").run(value);
+    await Bun.sleep(holdMs);
+    db.close(false);
+  ' "$db_path" "$value" "$hold_ms" >/dev/null &
+  SQLITE_WRITER_PID=$!
+}
+
 mkdir -p "$fixture_repo"
 cat > "$fixture_repo/package.json" <<'JSON'
 {
@@ -157,6 +180,11 @@ assert_exists "$fixture_repo/output/registry/signup-tasks.sqlite-wal"
 git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=main-root"
+assert_exists "$worktree_default/node_modules"
+if [[ -e "$worktree_default/bun.lock" ]]; then
+  echo "expected bootstrap install without source bun.lock to avoid creating a lockfile" >&2
+  exit 1
+fi
 assert_exists "$worktree_default/output/registry/signup-tasks.sqlite"
 if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-shm" ]]; then
   echo "expected bootstrapped worktree SQLite snapshot to omit shm companion file" >&2
@@ -195,6 +223,60 @@ if [[ -e "$worktree_missing/output/registry/signup-tasks.sqlite" ]]; then
   echo "expected missing source SQLite file to stay absent in target worktree" >&2
   exit 1
 fi
+
+sqlite_insert_value "$fixture_repo/output/registry/signup-tasks.sqlite" "restored-ledger"
+rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+sqlite_hold_writer "$fixture_repo/output/registry/signup-tasks.sqlite" "live-ledger"
+writer_pid="$SQLITE_WRITER_PID"
+sleep 1
+live_sync_output="$(cd "$worktree_missing" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+wait "$writer_pid"
+assert_output_contains "$live_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+  echo "expected forced sync to snapshot a live SQLite source without losing committed rows" >&2
+  exit 1
+fi
+
+fallback_bin="$tmp_root/fallback-bin"
+mkdir -p "$fallback_bin"
+cat > "$fallback_bin/sqlite3" <<'EOF'
+#!/bin/sh
+echo "Error: near \"INTO\": syntax error" >&2
+exit 1
+EOF
+chmod +x "$fallback_bin/sqlite3"
+rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+fallback_sync_output="$(cd "$worktree_missing" && PATH="$fallback_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$fallback_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+  echo "expected SQLite snapshot to fall back when sqlite3 lacks VACUUM INTO" >&2
+  exit 1
+fi
+
+deps_output="$(cd "$worktree_default" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$deps_output" "keep dependency install: node_modules exists"
+assert_output_not_contains "$deps_output" "installing dependencies:"
+
+failure_bin="$tmp_root/failure-bin"
+mkdir -p "$failure_bin"
+cat > "$failure_bin/bun" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "install" ]; then
+  mkdir -p node_modules
+  echo "simulated bun install failure" >&2
+  exit 7
+fi
+exec "__REAL_BUN__" "$@"
+EOF
+perl -0pi -e "s|__REAL_BUN__|$bun_bin|g" "$failure_bin/bun"
+chmod +x "$failure_bin/bun"
+rm -rf "$worktree_missing/node_modules"
+install_failure_output="$(cd "$worktree_missing" && PATH="$failure_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$install_failure_output" "skip dependency install failed:"
+assert_exists "$worktree_missing/node_modules"
+retry_install_output="$(cd "$worktree_missing" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$retry_install_output" "installing dependencies: bun install --no-save"
+assert_output_contains "$retry_install_output" "installed dependencies"
 
 checkout_output="$(git -C "$fixture_repo" checkout "$base_sha" 2>&1)"
 assert_output_not_contains "$checkout_output" "No such file or directory"

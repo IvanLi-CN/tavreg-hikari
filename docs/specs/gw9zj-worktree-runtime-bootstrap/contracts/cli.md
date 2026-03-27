@@ -86,9 +86,14 @@ bun run test:worktree-bootstrap
   - `skip non-initial checkout`
   - `skip source missing: <path>`
   - `keep target exists: <path>`
+  - `keep dependency install: node_modules exists`
   - `would snapshot: <path>`
+  - `would install dependencies: bun install ...`
   - `copied: <path>`
   - `snapshotted sqlite: <path>`
+  - `installing dependencies: bun install ...`
+  - `installed dependencies`
+  - `skip dependency install failed: bun install ...`
   - `dry-run complete`
   - `sync complete`
 
@@ -100,6 +105,10 @@ bun run test:worktree-bootstrap
 ### 兼容性与迁移（Compatibility / migration）
 
 - 同步范围固定来自 `scripts/worktree-sync.paths`
-- `.sqlite` 路径通过 `bun:sqlite` `serialize()` 生成一致性快照，不复制 `-wal/-shm`
+- `.sqlite` 路径通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不复制 `-wal/-shm`
+- `.sqlite` 路径优先使用本机 `sqlite3` 执行 `VACUUM INTO`，若本机版本不支持则回退到 Bun 内置 SQLite
+- 依赖安装会在 linked worktree 缺少 `node_modules` 时自动执行；存在 `bun.lock` 时使用 `bun install --frozen-lockfile`，否则使用 `bun install --no-save`
+- 只有“当前 revision 已成功完成过依赖 bootstrap”的 worktree 才会输出 `keep dependency install: node_modules exists`；半失败残留的 `node_modules` 不会阻止后续重试
+- 依赖安装属于 best-effort；安装失败时脚本仅记录日志，不会让 checkout / worktree 创建失败
 - 目标文件已存在时绝不覆盖
 - 当前 revision 缺少脚本或 manifest 时，shared hook 必须降级为 no-op
