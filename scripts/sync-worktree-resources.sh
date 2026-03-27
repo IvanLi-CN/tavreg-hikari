@@ -17,6 +17,9 @@ sqlite_quote() {
 }
 
 bootstrap_dependencies() {
+  deps_stamp_dir="$git_dir/codex-worktree-sync"
+  deps_stamp_path="$deps_stamp_dir/deps.stamp"
+
   if [ ! -f "$current_root/package.json" ]; then
     log "skip dependency install: package.json missing"
     return 0
@@ -30,9 +33,17 @@ bootstrap_dependencies() {
   install_cmd="bun install"
   if [ -f "$current_root/bun.lock" ]; then
     install_cmd="bun install --frozen-lockfile"
+  else
+    install_cmd="bun install --no-save"
   fi
 
-  if [ -d "$current_root/node_modules" ]; then
+  mkdir -p "$deps_stamp_dir"
+  deps_signature="install=$install_cmd package=$(cksum < "$current_root/package.json" | awk '{print $1 ":" $2}')"
+  if [ -f "$current_root/bun.lock" ]; then
+    deps_signature="$deps_signature lock=$(cksum < "$current_root/bun.lock" | awk '{print $1 ":" $2}')"
+  fi
+
+  if [ -d "$current_root/node_modules" ] && [ -f "$deps_stamp_path" ] && [ "$(cat "$deps_stamp_path")" = "$deps_signature" ]; then
     log "keep dependency install: node_modules exists"
     return 0
   fi
@@ -54,9 +65,11 @@ bootstrap_dependencies() {
         ;;
     esac
   ); then
+    rm -f "$deps_stamp_path"
     log "skip dependency install failed: $install_cmd"
     return 0
   fi
+  printf '%s\n' "$deps_signature" > "$deps_stamp_path"
   log "installed dependencies"
 }
 

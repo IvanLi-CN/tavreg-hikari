@@ -180,6 +180,10 @@ git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=main-root"
 assert_exists "$worktree_default/node_modules"
+if [[ -e "$worktree_default/bun.lock" ]]; then
+  echo "expected bootstrap install without source bun.lock to avoid creating a lockfile" >&2
+  exit 1
+fi
 assert_exists "$worktree_default/output/registry/signup-tasks.sqlite"
 if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-shm" ]]; then
   echo "expected bootstrapped worktree SQLite snapshot to omit shm companion file" >&2
@@ -257,6 +261,7 @@ mkdir -p "$failure_bin"
 cat > "$failure_bin/bun" <<'EOF'
 #!/bin/sh
 if [ "${1:-}" = "install" ]; then
+  mkdir -p node_modules
   echo "simulated bun install failure" >&2
   exit 7
 fi
@@ -266,10 +271,10 @@ chmod +x "$failure_bin/bun"
 rm -rf "$worktree_missing/node_modules"
 install_failure_output="$(cd "$worktree_missing" && PATH="$failure_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
 assert_output_contains "$install_failure_output" "skip dependency install failed:"
-if [[ -d "$worktree_missing/node_modules" ]]; then
-  echo "expected failed dependency bootstrap to leave node_modules absent" >&2
-  exit 1
-fi
+assert_exists "$worktree_missing/node_modules"
+retry_install_output="$(cd "$worktree_missing" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$retry_install_output" "installing dependencies: bun install --no-save"
+assert_output_contains "$retry_install_output" "installed dependencies"
 
 checkout_output="$(git -C "$fixture_repo" checkout "$base_sha" 2>&1)"
 assert_output_not_contains "$checkout_output" "No such file or directory"
