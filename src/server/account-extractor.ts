@@ -76,9 +76,13 @@ function maskKey(raw: string | null | undefined): string | null {
   return `${value.slice(0, 4)}${"*".repeat(Math.max(4, value.length - 8))}${value.slice(-4)}`;
 }
 
+function splitDashedFields(line: string): string[] {
+  return line.split("----").map((segment) => segment.trim());
+}
+
 function parseAccountCandidate(provider: AccountExtractorProvider, line: string): AccountExtractorCandidate {
   const parts = line.includes("----")
-    ? line.split(/-{4,}/).map((segment) => segment.trim()).filter(Boolean)
+    ? splitDashedFields(line)
     : line.split(":").map((segment) => segment.trim());
   const email = parts[0] || null;
   const password = parts[1] || null;

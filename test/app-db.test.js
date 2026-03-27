@@ -625,6 +625,36 @@ describe("scheduler helpers", () => {
     ]);
   });
 
+  test("rejects dashed extractor rows when the password field is empty", async () => {
+    globalThis.fetch = async () =>
+      new Response("mail-sk@outlook.com--------refresh-token----client-id", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+
+    const result = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config: {
+        zhanghaoyaKey: "",
+        shanyouxiangKey: "",
+        shankeyunKey: "shanke-demo-key-001",
+        hotmail666Key: "",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failureCode).toBe("parse_failed");
+    expect(result.candidates).toEqual([
+      {
+        provider: "shankeyun",
+        rawPayload: "mail-sk@outlook.com--------refresh-token----client-id",
+        email: null,
+        password: null,
+        parseStatus: "invalid",
+      },
+    ]);
+  });
+
   test("maps new provider failure envelopes to canonical codes", async () => {
     globalThis.fetch = async (url) => {
       const href = String(url);
