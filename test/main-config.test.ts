@@ -94,9 +94,9 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
 });
 
-test("macOS headed chrome skips native CDP automation", async () => {
+test("macOS chrome skips native CDP automation", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain('if (process.platform === "darwin" && mode === "headed") return false;');
+  expect(source).toContain('if (process.platform === "darwin") return false;');
 });
 
 test("microsoft provider login bypasses identifier challenge gating", async () => {

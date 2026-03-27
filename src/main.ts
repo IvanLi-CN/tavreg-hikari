@@ -10212,7 +10212,9 @@ function shouldUseNativeChromeAutomation(
   enabled: boolean,
 ): boolean {
   if (browserEngine !== "chrome" || !enabled) return false;
-  if (process.platform === "darwin" && mode === "headed") return false;
+  // Native Chrome CDP attach is unstable on macOS in both headed and headless flows.
+  // Prefer direct Playwright Chrome launch there so worker attempts fail/advance promptly.
+  if (process.platform === "darwin") return false;
   return true;
 }
 
