@@ -21,6 +21,38 @@ test("CLI rejects MAIL_PROVIDER=moemail because MoeMail is proof-only", () => {
   expect(`${result.stdout}\n${result.stderr}`).toContain("Invalid env MAIL_PROVIDER: moemail");
 }, 20_000);
 
+test("CLI rejects BROWSER_ENGINE=camoufox instead of silently falling back to chrome", () => {
+  const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
+  const result = spawnSync(nodeBinary, ["--import", "tsx", "src/main.ts"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      BROWSER_ENGINE: "camoufox",
+    },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  expect(result.status).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("Invalid env BROWSER_ENGINE: camoufox");
+}, 20_000);
+
+test("CLI rejects system Google Chrome as the automation executable", () => {
+  const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
+  const result = spawnSync(nodeBinary, ["--import", "tsx", "src/main.ts"], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      CHROME_EXECUTABLE_PATH: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+
+  expect(result.status).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("Unsupported CHROME_EXECUTABLE_PATH");
+}, 20_000);
+
 test("CLI defers AppDatabase loading until proof sync needs it", async () => {
   const mainSource = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   const appDbSource = await readFile(path.join(repoRoot, "src/storage/app-db.ts"), "utf8");
@@ -101,6 +133,20 @@ test("chrome native CDP automation stays enabled on macOS when configured", asyn
   const segment = source.slice(start, end);
   expect(segment).toContain('if (browserEngine !== "chrome" || !enabled) return false;');
   expect(segment).not.toContain('process.platform === "darwin"');
+});
+
+test("browser config never falls back to system Google Chrome", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain('if (value === "chrome") return "chrome";');
+  expect(source).not.toContain('if (value === "chrome" || value === "camoufox") return "chrome";');
+  expect(source).toContain('path.resolve(cwd, ".tools/Chromium.app/Contents/MacOS/Chromium")');
+  expect(source).not.toContain('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
+  expect(source).toContain('Only fingerprint Chromium is allowed.');
+});
+
+test("worktree bootstrap syncs fingerprint Chromium into linked worktrees", async () => {
+  const source = await readFile(path.join(repoRoot, "scripts/worktree-sync.paths"), "utf8");
+  expect(source).toContain(".tools/Chromium.app");
 });
 
 test("task timeout aborts native CDP launch instead of waiting for the full CDP attach timeout", async () => {
