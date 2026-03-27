@@ -440,6 +440,55 @@ async function connectOverCdpWithTimeout(endpoint: string, timeoutMs: number): P
   return (await Promise.race([chromium.connectOverCDP(endpoint, { timeout: timeoutMs }), timeoutPromise])) as Browser;
 }
 
+function toAbortError(signal: AbortSignal | undefined, fallbackMessage: string): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) return reason;
+  if (typeof reason === "string" && reason.trim()) return new Error(reason.trim());
+  return new Error(fallbackMessage);
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, fallbackMessage: string): void {
+  if (!signal?.aborted) return;
+  throw toAbortError(signal, fallbackMessage);
+}
+
+async function raceWithAbort<T>(
+  task: Promise<T>,
+  signal: AbortSignal | undefined,
+  fallbackMessage: string,
+): Promise<T> {
+  if (!signal) {
+    return await task;
+  }
+  if (signal.aborted) {
+    throw toAbortError(signal, fallbackMessage);
+  }
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      reject(toAbortError(signal, fallbackMessage));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    task.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 function mustEnv(name: string): string {
   const value = (process.env[name] || "").trim();
   if (!value) {
@@ -9918,12 +9967,26 @@ async function readChromeDevToolsActivePort(profileDir: string): Promise<{ port:
   }
 }
 
-async function waitForChromeWsEndpoint(port: number, profileDir: string, timeoutMs = 40_000): Promise<string> {
+async function waitForChromeWsEndpoint(
+  port: number,
+  profileDir: string,
+  timeoutMs = 40_000,
+  signal?: AbortSignal,
+  childPid?: number,
+): Promise<string> {
   const endpoint = `http://127.0.0.1:${port}/json/version`;
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    throwIfAborted(signal, `native chrome debugger wait aborted on port ${port}`);
+    if (childPid && !isPidAlive(childPid)) {
+      throw new Error(`native chrome exited before debugger became ready on port ${port} (profile=${profileDir})`);
+    }
     try {
-      const resp = await fetchWithTimeout(endpoint, 2500);
+      const resp = await raceWithAbort(
+        fetchWithTimeout(endpoint, 2500),
+        signal,
+        `native chrome debugger wait aborted on port ${port}`,
+      );
       if (resp.ok) {
         const payload = (await resp.json()) as JsonRecord;
         const ws = typeof payload.webSocketDebuggerUrl === "string" ? payload.webSocketDebuggerUrl.trim() : "";
@@ -9942,7 +10005,11 @@ async function waitForChromeWsEndpoint(port: number, profileDir: string, timeout
       }
       if (activePort.port !== port) {
         try {
-          const fallbackResp = await fetchWithTimeout(`http://127.0.0.1:${activePort.port}/json/version`, 2500);
+          const fallbackResp = await raceWithAbort(
+            fetchWithTimeout(`http://127.0.0.1:${activePort.port}/json/version`, 2500),
+            signal,
+            `native chrome debugger wait aborted on port ${port}`,
+          );
           if (fallbackResp.ok) {
             const payload = (await fallbackResp.json()) as JsonRecord;
             const ws = typeof payload.webSocketDebuggerUrl === "string" ? payload.webSocketDebuggerUrl.trim() : "";
@@ -9953,7 +10020,7 @@ async function waitForChromeWsEndpoint(port: number, profileDir: string, timeout
         }
       }
     }
-    await delay(250);
+    await raceWithAbort(delay(250), signal, `native chrome debugger wait aborted on port ${port}`);
   }
   throw new Error(`native chrome debugger endpoint timeout on port ${port} (profile=${profileDir})`);
 }
@@ -9975,6 +10042,7 @@ async function launchNativeChromeCdp(
   locale: string,
   acceptLanguage: string,
   timezoneId?: string,
+  signal?: AbortSignal,
 ): Promise<{
   browser: Browser;
   context: any;
@@ -9989,6 +10057,7 @@ async function launchNativeChromeCdp(
   let lastError: Error | null = null;
 
   for (let i = 0; i < profileCandidates.length; i += 1) {
+    throwIfAborted(signal, "native chrome launch aborted");
     const profileDir = profileCandidates[i]!;
     const usingBaseProfile = i > 0;
     await mkdir(profileDir, { recursive: true });
@@ -10023,42 +10092,55 @@ async function launchNativeChromeCdp(
     const child = spawn(cfg.chromeExecutablePath, args, { stdio: ["ignore", chromeLogFd, chromeLogFd], detached: true });
     child.unref();
     const stop = createChildProcessStopper(child, profileDir);
-    await delay(1800);
-    if (child.exitCode != null) {
-      lastError = new Error(
-        `native chrome exited early: ${child.exitCode}${usingBaseProfile ? " (base profile fallback)" : ""}`,
-      );
-      continue;
-    }
-    if (!isPidAlive(child.pid)) {
-      const chromeLog = existsSync(chromeLogPath) ? (await readFile(chromeLogPath, "utf8").catch(() => "")) : "";
-      const compactLog = chromeLog.split(/\r?\n/).filter(Boolean).slice(-20).join(" | ");
-      lastError = new Error(
-        `native chrome exited before debugger became ready${usingBaseProfile ? " (base profile fallback)" : ""}${
-          compactLog ? `: ${compactLog}` : ""
-        }`,
-      );
-      await stop().catch(() => {});
-      continue;
-    }
-
+    const abortNativeChrome = () => {
+      void stop().catch(() => {});
+    };
+    signal?.addEventListener("abort", abortNativeChrome, { once: true });
     try {
-      if (mode === "headed" && cfg.chromeActivateOnLaunch) {
-        await activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath));
+      await raceWithAbort(delay(1800), signal, "native chrome launch aborted during startup");
+      if (child.exitCode != null) {
+        lastError = new Error(
+          `native chrome exited early: ${child.exitCode}${usingBaseProfile ? " (base profile fallback)" : ""}`,
+        );
+        continue;
       }
-      const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir);
+      if (!isPidAlive(child.pid)) {
+        const chromeLog = existsSync(chromeLogPath) ? (await readFile(chromeLogPath, "utf8").catch(() => "")) : "";
+        const compactLog = chromeLog.split(/\r?\n/).filter(Boolean).slice(-20).join(" | ");
+        lastError = new Error(
+          `native chrome exited before debugger became ready${usingBaseProfile ? " (base profile fallback)" : ""}${
+            compactLog ? `: ${compactLog}` : ""
+          }`,
+        );
+        await stop().catch(() => {});
+        continue;
+      }
+
+      if (mode === "headed" && cfg.chromeActivateOnLaunch) {
+        await raceWithAbort(
+          activateMacApp(resolveChromeAppName(cfg.chromeExecutablePath)),
+          signal,
+          "native chrome launch aborted before activation",
+        );
+      }
+      const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir, 40_000, signal, child.pid);
       // Prefer HTTP endpoint first; it is less sensitive to websocket handshake quirks on some hosts.
       const cdpEndpoints = [`http://127.0.0.1:${debugPort}`, wsEndpoint];
       let browser: Browser | null = null;
       const connectErrors: string[] = [];
       for (const endpoint of cdpEndpoints) {
+        throwIfAborted(signal, "native chrome launch aborted before CDP connect");
         try {
-          browser = await connectOverCdpWithTimeout(endpoint, 60_000);
+          browser = await raceWithAbort(
+            connectOverCdpWithTimeout(endpoint, 60_000),
+            signal,
+            `native chrome launch aborted while connecting to ${endpoint.startsWith("ws://") ? "ws" : "http"} endpoint`,
+          );
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           connectErrors.push(`${endpoint.startsWith("ws://") ? "ws" : "http"}: ${message.split("\n")[0]}`);
-          await delay(500);
+          await raceWithAbort(delay(500), signal, "native chrome launch aborted between CDP retries");
         }
       }
       if (!browser) {
@@ -10086,6 +10168,8 @@ async function launchNativeChromeCdp(
       const baseError = error instanceof Error ? error : new Error(String(error));
       lastError = compactLog ? new Error(`${baseError.message}; chrome_log=${compactLog}`) : baseError;
       await stop().catch(() => {});
+    } finally {
+      signal?.removeEventListener("abort", abortNativeChrome);
     }
   }
 
@@ -10212,9 +10296,7 @@ function shouldUseNativeChromeAutomation(
   enabled: boolean,
 ): boolean {
   if (browserEngine !== "chrome" || !enabled) return false;
-  // Native Chrome CDP attach is unstable on macOS in both headed and headless flows.
-  // Prefer direct Playwright Chrome launch there so worker attempts fail/advance promptly.
-  if (process.platform === "darwin") return false;
+  void mode;
   return true;
 }
 
@@ -10818,6 +10900,7 @@ async function runSingleMode(
   let localErrorCode = "";
   let localErrorMessage = "";
   const taskScopedAttempt = Boolean(preparedTask);
+  const browserLaunchAbortController = new AbortController();
   const signupAttemptPolicy: SignupAttemptPolicy = {
     signupChallengeRounds: taskScopedAttempt ? 1 : cfg.maxCaptchaRounds,
     passwordStepRounds: taskScopedAttempt ? 1 : Math.min(cfg.maxCaptchaRounds, 8),
@@ -10848,6 +10931,9 @@ async function runSingleMode(
   const persistLedgerRecord = (reason: string): void => {
     if (!ledger) return;
     try {
+      if (ledgerRecord.status === "running") {
+        ledgerRecord.failureStage = failureStage;
+      }
       ledger.upsertTask(ledgerRecord);
     } catch (error) {
       log(`task ledger write skipped (${reason}): ${error instanceof Error ? error.message : String(error)}`);
@@ -11322,6 +11408,7 @@ async function runSingleMode(
             locale,
             acceptLanguage,
             selectedGeo?.timezone,
+            browserLaunchAbortController.signal,
           );
           nativeChromeMode = "cdp";
           nativeChromeStop = launched.stop;
@@ -11333,6 +11420,9 @@ async function runSingleMode(
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const compact = message.split("\n")[0] || "unknown";
+          if (/^task_attempt_timeout:/i.test(compact) || browserLaunchAbortController.signal.aborted) {
+            throw (error instanceof Error ? error : new Error(compact));
+          }
           notes.push(`native chrome cdp unavailable: ${compact}`);
           throw new Error(`native_cdp_unavailable: ${compact}`);
         }
@@ -11382,6 +11472,7 @@ async function runSingleMode(
       taskTimeout = setTimeout(() => {
         taskTimedOut = true;
         log(`[${mode}] task attempt timeout after ${cfg.taskAttemptTimeoutMs}ms at stage=${failureStage}`);
+        browserLaunchAbortController.abort(new Error(`task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`));
         void closeBrowserSession();
         if (!existingMihomoController) {
           void mihomoController.stop().catch(() => {});
@@ -11526,6 +11617,9 @@ async function runSingleMode(
         launchErr = error instanceof Error ? error : new Error(message);
         log(`[${mode}] browser launch/context attempt ${launchAttempt} failed: ${message}`);
         await closeBrowserSession();
+        if (taskTimedOut || browserLaunchAbortController.signal.aborted) {
+          break;
+        }
         if (launchAttempt >= cfg.browserLaunchRetryMax) {
           break;
         }

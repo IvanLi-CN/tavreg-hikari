@@ -94,9 +94,27 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
 });
 
-test("macOS chrome skips native CDP automation", async () => {
+test("chrome native CDP automation stays enabled on macOS when configured", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain('if (process.platform === "darwin") return false;');
+  const start = source.indexOf("function shouldUseNativeChromeAutomation");
+  const end = source.indexOf("async function launchNativeChromeInspect");
+  const segment = source.slice(start, end);
+  expect(segment).toContain('if (browserEngine !== "chrome" || !enabled) return false;');
+  expect(segment).not.toContain('process.platform === "darwin"');
+});
+
+test("task timeout aborts native CDP launch instead of waiting for the full CDP attach timeout", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const browserLaunchAbortController = new AbortController();");
+  expect(source).toContain("browserLaunchAbortController.abort(new Error(`task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`));");
+  expect(source).toContain("await raceWithAbort(delay(1800), signal, \"native chrome launch aborted during startup\");");
+  expect(source).toContain("const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir, 40_000, signal, child.pid);");
+});
+
+test("running task ledger snapshots carry the live stage for active attempts", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("if (ledgerRecord.status === \"running\") {");
+  expect(source).toContain("ledgerRecord.failureStage = failureStage;");
 });
 
 test("microsoft provider login bypasses identifier challenge gating", async () => {
