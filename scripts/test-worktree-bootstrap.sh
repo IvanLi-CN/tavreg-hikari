@@ -158,8 +158,14 @@ git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=main-root"
 assert_exists "$worktree_default/output/registry/signup-tasks.sqlite"
-assert_exists "$worktree_default/output/registry/signup-tasks.sqlite-shm"
-assert_exists "$worktree_default/output/registry/signup-tasks.sqlite-wal"
+if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-shm" ]]; then
+  echo "expected bootstrapped worktree SQLite snapshot to omit shm companion file" >&2
+  exit 1
+fi
+if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-wal" ]]; then
+  echo "expected bootstrapped worktree SQLite snapshot to omit wal companion file" >&2
+  exit 1
+fi
 if [[ "$(sqlite_latest_value "$worktree_default/output/registry/signup-tasks.sqlite")" != "main-ledger" ]]; then
   echo "expected copied SQLite ledger to contain source fixture data" >&2
   exit 1
@@ -181,14 +187,12 @@ fi
 main_output="$(cd "$fixture_repo" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
 assert_output_contains "$main_output" "skip main worktree"
 
-rm -f "$fixture_repo/output/registry/signup-tasks.sqlite-wal"
+rm -f "$fixture_repo/output/registry/signup-tasks.sqlite"
 missing_output="$(git -C "$fixture_repo" worktree add --detach "$worktree_missing" HEAD 2>&1)"
-assert_output_contains "$missing_output" "skip source missing: output/registry/signup-tasks.sqlite-wal"
+assert_output_contains "$missing_output" "skip source missing: output/registry/signup-tasks.sqlite"
 assert_file_content "$worktree_missing/.env.local" "SOURCE_ENV=main-root"
-assert_exists "$worktree_missing/output/registry/signup-tasks.sqlite"
-assert_exists "$worktree_missing/output/registry/signup-tasks.sqlite-shm"
-if [[ -e "$worktree_missing/output/registry/signup-tasks.sqlite-wal" ]]; then
-  echo "expected missing source WAL file to stay absent in target worktree" >&2
+if [[ -e "$worktree_missing/output/registry/signup-tasks.sqlite" ]]; then
+  echo "expected missing source SQLite file to stay absent in target worktree" >&2
   exit 1
 fi
 

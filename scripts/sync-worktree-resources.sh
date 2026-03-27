@@ -90,13 +90,31 @@ copy_resource() {
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
-    log "would copy: $rel_path"
+    if [ "${rel_path##*.}" = "sqlite" ]; then
+      log "would snapshot: $rel_path"
+    else
+      log "would copy: $rel_path"
+    fi
     return 0
   fi
 
   mkdir -p "$(dirname -- "$dst_path")"
-  cp -R "$src_path" "$dst_path"
-  log "copied: $rel_path"
+  if [ "${rel_path##*.}" = "sqlite" ]; then
+    bun --eval '
+      import { Database } from "bun:sqlite";
+
+      const sourcePath = process.argv[1];
+      const destPath = process.argv[2];
+      const db = new Database(sourcePath, { readonly: true });
+      const snapshot = db.serialize();
+      db.close(false);
+      await Bun.write(destPath, snapshot);
+    ' "$src_path" "$dst_path"
+    log "snapshotted sqlite: $rel_path"
+  else
+    cp -R "$src_path" "$dst_path"
+    log "copied: $rel_path"
+  fi
 }
 
 current_root=$(canonical_dir "$(git rev-parse --show-toplevel)")

@@ -27,8 +27,9 @@
 
 ## Linked Worktree Bootstrap
 
-- 当主工作区已经准备好 `.env.local` 与 `output/registry/signup-tasks.sqlite{,-shm,-wal}` 后，新建 linked worktree 会在首次 checkout 时自动补齐这些缺失文件。
-- 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 文件组，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图。
+- 当主工作区已经准备好 `.env.local` 与 `output/registry/signup-tasks.sqlite` 后，新建 linked worktree 会在首次 checkout 时自动补齐缺失项。
+- 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 主文件，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图。
+- SQLite ledger 会通过 `bun:sqlite` 的 `serialize()` 生成一致性快照，不直接复制活跃数据库的 `-wal/-shm` 文件。
 - 自动与手工重跑都遵循“只补缺，不覆盖”：目标文件已存在时会保留现状，不会覆盖 worktree 内的本地修改。
 - 手工预演可用 `WORKTREE_SYNC_FORCE=1 WORKTREE_SYNC_DRY_RUN=1 ./scripts/sync-worktree-resources.sh`。
 - 手工补齐缺失项可用 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`。
