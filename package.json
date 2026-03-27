@@ -3,6 +3,8 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "hooks:install": "sh ./scripts/install-hooks.sh",
+    "prepare": "sh ./scripts/install-hooks.sh",
     "start": "node --import tsx src/main.ts",
     "web:start": "bun run src/server/main.ts",
     "web:build": "vite build --config vite.config.ts",
@@ -12,6 +14,7 @@
     "build-storybook": "storybook build --config-dir .storybook --output-dir storybook-static --disable-telemetry",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
+    "test:worktree-bootstrap": "bash ./scripts/test-worktree-bootstrap.sh",
     "ledger:query": "bun run src/ledger-cli.ts query",
     "proxy:check-all": "bun run src/proxy-cli.ts check-all",
     "proxy:check": "bun run src/proxy-cli.ts check",
