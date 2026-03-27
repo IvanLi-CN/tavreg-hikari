@@ -43,7 +43,7 @@ bootstrap_dependencies() {
   fi
 
   log "installing dependencies: $install_cmd"
-  (
+  if ! (
     cd "$current_root"
     case "$install_cmd" in
       "bun install --frozen-lockfile")
@@ -53,7 +53,10 @@ bootstrap_dependencies() {
         bun install
         ;;
     esac
-  )
+  ); then
+    log "skip dependency install failed: $install_cmd"
+    return 0
+  fi
   log "installed dependencies"
 }
 

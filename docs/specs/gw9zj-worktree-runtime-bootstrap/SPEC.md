@@ -53,6 +53,7 @@
 - 目标文件已存在时必须保留现状并输出 `keep target exists`。
 - linked worktree 缺少 `node_modules` 时必须自动执行依赖安装；存在 `bun.lock` 时必须使用 `bun install --frozen-lockfile`。
 - `WORKTREE_SYNC_FORCE=1` 只能重新补齐缺失依赖，不能对已存在的 `node_modules` 触发重装。
+- 依赖安装必须是 best-effort：若 `bun install` 失败，只能记录日志并继续 checkout，不能让 worktree 创建失败。
 - 源文件缺失时必须输出 `skip source missing` 并以 `0` 退出，不能阻断 checkout。
 - 历史 commit 缺少同步脚本时，共享 hook 必须安全降级为 no-op。
 - SQLite ledger 必须通过 SQLite 一致性快照生成，不得直接逐文件复制活跃数据库的 `-wal/-shm` 伴生文件。
@@ -104,6 +105,7 @@
 - Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/signup-tasks.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到 `.env.local` 与一致性 ledger 快照。
 - Given 新 linked worktree 初次 bootstrap 时尚无 `node_modules`，When `post-checkout` hook 触发脚本，Then worktree 会自动完成依赖安装，且带 `bun.lock` 的 revision 使用 `bun install --frozen-lockfile`。
 - Given worktree 已有 `node_modules`，When 执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，Then 脚本只会输出 `keep dependency install: node_modules exists`，不会再次执行依赖安装。
+- Given linked worktree 缺少 `node_modules` 但当前环境下 `bun install` 失败，When hook 或 forced sync 触发依赖 bootstrap，Then 脚本会输出 `skip dependency install failed` 并继续完成非依赖资源同步，不会让 checkout 失败。
 - Given 新 worktree 中任一目标文件已存在，When 自动 hook 或 `WORKTREE_SYNC_FORCE=1` 重跑同步，Then 现有文件保留不变，且日志包含 `keep target exists`。
 - Given 在主工作区运行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，When 脚本执行，Then 输出 `skip main worktree` 且不发生自覆盖。
 - Given 主工作区缺少某个 manifest 资源，When 新 worktree 首次 checkout 或手工重跑同步，Then 脚本输出 `skip source missing` 且以 `0` 退出。
@@ -166,6 +168,7 @@
 - 2026-03-27: 将 ledger 快照实现收敛为 SQLite 原生 `VACUUM INTO`，避免大库在 bootstrap 时因 JS 堆内存快照而失败。
 - 2026-03-27: bootstrap 范围扩展为“资源补齐 + 依赖安装”，linked worktree 首次 checkout 会自动准备 `node_modules`。
 - 2026-03-27: 根据 PR review 修正 forced rerun 与旧版 `sqlite3` 兼容性，确保依赖只补缺且 `VACUUM INTO` 失败时自动回退到 Bun。
+- 2026-03-27: 将依赖安装收敛为 best-effort，避免网络/凭证类 `bun install` 失败阻断 worktree checkout。
 
 ## 参考（References）
 

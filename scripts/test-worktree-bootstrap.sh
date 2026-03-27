@@ -252,6 +252,25 @@ deps_output="$(cd "$worktree_default" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/sc
 assert_output_contains "$deps_output" "keep dependency install: node_modules exists"
 assert_output_not_contains "$deps_output" "installing dependencies:"
 
+failure_bin="$tmp_root/failure-bin"
+mkdir -p "$failure_bin"
+cat > "$failure_bin/bun" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "install" ]; then
+  echo "simulated bun install failure" >&2
+  exit 7
+fi
+exec /usr/bin/env bun "$@"
+EOF
+chmod +x "$failure_bin/bun"
+rm -rf "$worktree_missing/node_modules"
+install_failure_output="$(cd "$worktree_missing" && PATH="$failure_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+assert_output_contains "$install_failure_output" "skip dependency install failed:"
+if [[ -d "$worktree_missing/node_modules" ]]; then
+  echo "expected failed dependency bootstrap to leave node_modules absent" >&2
+  exit 1
+fi
+
 checkout_output="$(git -C "$fixture_repo" checkout "$base_sha" 2>&1)"
 assert_output_not_contains "$checkout_output" "No such file or directory"
 assert_output_not_contains "$checkout_output" "exit status 127"
