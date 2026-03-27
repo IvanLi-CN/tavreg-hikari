@@ -179,6 +179,7 @@ assert_exists "$fixture_repo/output/registry/signup-tasks.sqlite-wal"
 git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=main-root"
+assert_exists "$worktree_default/node_modules"
 assert_exists "$worktree_default/output/registry/signup-tasks.sqlite"
 if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-shm" ]]; then
   echo "expected bootstrapped worktree SQLite snapshot to omit shm companion file" >&2

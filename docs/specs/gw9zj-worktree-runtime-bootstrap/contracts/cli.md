@@ -86,9 +86,13 @@ bun run test:worktree-bootstrap
   - `skip non-initial checkout`
   - `skip source missing: <path>`
   - `keep target exists: <path>`
+  - `keep dependency install: node_modules exists`
   - `would snapshot: <path>`
+  - `would install dependencies: bun install ...`
   - `copied: <path>`
   - `snapshotted sqlite: <path>`
+  - `installing dependencies: bun install ...`
+  - `installed dependencies`
   - `dry-run complete`
   - `sync complete`
 
@@ -101,5 +105,6 @@ bun run test:worktree-bootstrap
 
 - 同步范围固定来自 `scripts/worktree-sync.paths`
 - `.sqlite` 路径通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不复制 `-wal/-shm`
+- 依赖安装会在 linked worktree 缺少 `node_modules` 时自动执行；存在 `bun.lock` 时使用 `bun install --frozen-lockfile`
 - 目标文件已存在时绝不覆盖
 - 当前 revision 缺少脚本或 manifest 时，shared hook 必须降级为 no-op

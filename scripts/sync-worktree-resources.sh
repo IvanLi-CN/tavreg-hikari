@@ -16,6 +16,47 @@ sqlite_quote() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
 
+bootstrap_dependencies() {
+  if [ ! -f "$current_root/package.json" ]; then
+    log "skip dependency install: package.json missing"
+    return 0
+  fi
+
+  if ! command -v bun >/dev/null 2>&1; then
+    log "skip dependency install: bun unavailable"
+    return 0
+  fi
+
+  install_cmd="bun install"
+  if [ -f "$current_root/bun.lock" ]; then
+    install_cmd="bun install --frozen-lockfile"
+  fi
+
+  if [ -d "$current_root/node_modules" ] && [ "$FORCE_SYNC" != "1" ]; then
+    log "keep dependency install: node_modules exists"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    log "would install dependencies: $install_cmd"
+    return 0
+  fi
+
+  log "installing dependencies: $install_cmd"
+  (
+    cd "$current_root"
+    case "$install_cmd" in
+      "bun install --frozen-lockfile")
+        bun install --frozen-lockfile
+        ;;
+      *)
+        bun install
+        ;;
+    esac
+  )
+  log "installed dependencies"
+}
+
 canonical_dir() {
   CDPATH= cd -- "$1" && pwd -P
 }
@@ -179,6 +220,8 @@ while IFS= read -r entry || [ -n "$entry" ]; do
   esac
   copy_resource "$entry"
 done < "$MANIFEST_PATH"
+
+bootstrap_dependencies
 
 if [ "$DRY_RUN" = "1" ]; then
   log "dry-run complete"
