@@ -18,16 +18,27 @@
 
 ## 运行前准备
 
+- 主工作区首次初始化先执行 `bun install`，它会安装共享 `post-checkout` hook，供后续 linked worktree 自动补齐缺失的本地运行态。
 - 复制 `.env.example` 为 `.env.local` 并填写必要配置。
 - 至少需要：
   - OCR/OpenAI 兼容接口配置
   - `MIHOMO_SUBSCRIPTION_URL`
   - 浏览器与邮箱相关配置（按当前运行模式选择）
 
+## Linked Worktree Bootstrap
+
+- 当主工作区已经准备好 `.env.local` 与 `output/registry/signup-tasks.sqlite{,-shm,-wal}` 后，新建 linked worktree 会在首次 checkout 时自动补齐这些缺失文件。
+- 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 文件组，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图。
+- 自动与手工重跑都遵循“只补缺，不覆盖”：目标文件已存在时会保留现状，不会覆盖 worktree 内的本地修改。
+- 手工预演可用 `WORKTREE_SYNC_FORCE=1 WORKTREE_SYNC_DRY_RUN=1 ./scripts/sync-worktree-resources.sh`。
+- 手工补齐缺失项可用 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`。
+
 ## 常用脚本
 
 - `bun run typecheck`
 - `bun test`
+- `bun run hooks:install`
+- `bun run test:worktree-bootstrap`
 - `bun run web:build`
 - `bun run web:start`
 - `bun run ledger:query`

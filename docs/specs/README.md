@@ -15,3 +15,4 @@
 | 5nkhw | Tavreg Hikari Web 管理台 | 已完成 | `5nkhw-tavreg-hikari-web-control/SPEC.md` | 2026-03-19 | Web 控制台、调度器、预解析导入与账号分组已落地 |
 | 2dkks | API Keys 批量选择与导出（`key | ip`） | 已完成 | `2dkks-api-key-batch-export/SPEC.md` | 2026-03-20 | PR #6 |
 | svjx5 | 微软账号自动提取与本地历史接入 | 待实现 | `svjx5-microsoft-account-auto-extractor/SPEC.md` | 2026-03-25 | 号源适配、自动补号、本地历史 |
+| gw9zj | 主工作区运行态同步到新 Worktree 的自动 Bootstrap | 已完成 | `gw9zj-worktree-runtime-bootstrap/SPEC.md` | 2026-03-27 | `.env.local` 与 SQLite ledger 自动补齐 |

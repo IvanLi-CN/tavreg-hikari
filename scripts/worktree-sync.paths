@@ -1,0 +1,6 @@
+# Repo-relative runtime resources that should be copied into new linked worktrees.
+# Copy happens only when the source exists and the destination is missing.
+.env.local
+output/registry/signup-tasks.sqlite
+output/registry/signup-tasks.sqlite-shm
+output/registry/signup-tasks.sqlite-wal
