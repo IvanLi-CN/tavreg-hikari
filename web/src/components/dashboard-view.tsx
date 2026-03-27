@@ -128,56 +128,91 @@ export function DashboardView({
                   {autoExtractHint}
                 </Badge>
               </div>
-              <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,0.6fr)]">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => {
-                    const available = extractorAvailability[provider];
-                    const checked = jobDraft.autoExtractSources.includes(provider);
-                    return (
-                      <label
-                        key={provider}
-                        className={`flex items-start gap-3 rounded-2xl border px-4 py-3 ${
-                          checked ? "border-cyan-300/30 bg-cyan-300/8" : "border-white/8 bg-white/[0.03]"
-                        } ${!available && !checked ? "opacity-60" : ""}`}
-                      >
-                        <Checkbox
-                          checked={checked}
-                          disabled={!available && !checked}
-                          onCheckedChange={(value) => toggleExtractorSource(provider, value === true)}
-                          aria-label={`toggle-${provider}`}
-                        />
-                        <div className="min-w-0">
-                          <div className="text-sm font-medium text-white">{label}</div>
-                          <div className="mt-1 text-xs text-slate-400">{available ? "KEY 已配置" : "缺少 KEY，请先去微软账号页配置"}</div>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
-                <Field label="Auto Quantity">
-                  <Input
-                    type="number"
-                    min={1}
-                    disabled={jobDraft.autoExtractSources.length === 0}
-                    value={jobDraft.autoExtractQuantity}
-                    onChange={(event) => onJobDraftChange({ autoExtractQuantity: Number(event.target.value) || 1 })}
-                  />
-                </Field>
-                <Field label="Max Wait Sec">
-                  <Input
-                    type="number"
-                    min={1}
-                    disabled={jobDraft.autoExtractSources.length === 0}
-                    value={jobDraft.autoExtractMaxWaitSec}
-                    onChange={(event) => onJobDraftChange({ autoExtractMaxWaitSec: Number(event.target.value) || 1 })}
-                  />
-                </Field>
-                <Field label="Account Type">
-                  <Input value={jobDraft.autoExtractAccountType} readOnly />
-                </Field>
+              <div className="mt-4 space-y-4">
+                <section className="rounded-[22px] border border-white/8 bg-[#0b1727]/72 p-4">
+                  <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Sources</div>
+                      <div className="mt-1 text-sm text-slate-300">选择参与轮转补号的渠道。</div>
+                    </div>
+                    <Badge variant={jobDraft.autoExtractSources.length > 0 ? "info" : "neutral"} className="normal-case tracking-[0.08em]">
+                      已启用 {jobDraft.autoExtractSources.length} / {EXTRACTOR_PROVIDER_OPTIONS.length}
+                    </Badge>
+                  </div>
+                  <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                    {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => {
+                      const available = extractorAvailability[provider];
+                      const checked = jobDraft.autoExtractSources.includes(provider);
+                      return (
+                        <label
+                          key={provider}
+                          className={`flex min-w-0 items-center gap-3 rounded-2xl border px-4 py-3 transition ${
+                            checked ? "border-cyan-300/30 bg-cyan-300/8" : "border-white/8 bg-white/[0.03]"
+                          } ${!available && !checked ? "opacity-60" : ""}`}
+                        >
+                          <Checkbox
+                            checked={checked}
+                            disabled={!available && !checked}
+                            onCheckedChange={(value) => toggleExtractorSource(provider, value === true)}
+                            aria-label={`toggle-${provider}`}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 flex-wrap items-center gap-2">
+                              <div className="truncate text-sm font-medium text-white">{label}</div>
+                              <Badge
+                                variant={checked ? "info" : available ? "neutral" : "warning"}
+                                className="shrink-0 normal-case tracking-[0.08em]"
+                              >
+                                {checked ? "已启用" : available ? "待启用" : "未配置"}
+                              </Badge>
+                            </div>
+                            <div className="mt-1 text-xs text-slate-400">
+                              {available
+                                ? checked
+                                  ? "当前任务会参与轮转补号"
+                                  : "KEY 已配置，可随时启用"
+                                : "缺少 KEY，请先去微软账号页配置"}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="rounded-[22px] border border-white/8 bg-[#0b1727]/72 p-4">
+                  <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Strategy</div>
+                  <div className="mt-1 text-sm text-slate-300">补号上限、等待时间与固定账号类型。</div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    <Field label="Auto Quantity">
+                      <Input
+                        type="number"
+                        min={1}
+                        disabled={jobDraft.autoExtractSources.length === 0}
+                        value={jobDraft.autoExtractQuantity}
+                        onChange={(event) => onJobDraftChange({ autoExtractQuantity: Number(event.target.value) || 1 })}
+                      />
+                    </Field>
+                    <Field label="Max Wait Sec">
+                      <Input
+                        type="number"
+                        min={1}
+                        disabled={jobDraft.autoExtractSources.length === 0}
+                        value={jobDraft.autoExtractMaxWaitSec}
+                        onChange={(event) => onJobDraftChange({ autoExtractMaxWaitSec: Number(event.target.value) || 1 })}
+                      />
+                    </Field>
+                    <Field label="Account Type">
+                      <Input value={jobDraft.autoExtractAccountType} readOnly />
+                    </Field>
+                  </div>
+                  <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                    自动提取关闭时不会发起任何补号请求；开启后仅把新增进入当前 job 可调度池的账号计为有效补货。
+                  </div>
+                </section>
               </div>
               {job.autoExtractState?.lastMessage ? (
-                <div className="mt-3 text-sm text-slate-400">
+                <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
                   最近提取状态：{job.autoExtractState.lastProvider ? `${extractorProviderLabel(job.autoExtractState.lastProvider)} · ` : ""}
                   {job.autoExtractState.lastMessage}
                 </div>
