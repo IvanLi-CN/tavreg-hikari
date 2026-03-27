@@ -60,6 +60,9 @@ bootstrap_dependencies() {
       "bun install --frozen-lockfile")
         bun install --frozen-lockfile
         ;;
+      "bun install --no-save")
+        bun install --no-save
+        ;;
       *)
         bun install
         ;;

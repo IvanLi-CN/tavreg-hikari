@@ -8,6 +8,7 @@ if ! command -v bun >/dev/null 2>&1; then
   echo "bun is required for worktree bootstrap smoke tests" >&2
   exit 1
 fi
+bun_bin="$(command -v bun)"
 
 tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/tavreg-hikari-worktree-test.XXXXXX")"
 tmp_root="$(cd "$tmp_root" && pwd -P)"
@@ -265,8 +266,9 @@ if [ "${1:-}" = "install" ]; then
   echo "simulated bun install failure" >&2
   exit 7
 fi
-exec /usr/bin/env bun "$@"
+exec "__REAL_BUN__" "$@"
 EOF
+perl -0pi -e "s|__REAL_BUN__|$bun_bin|g" "$failure_bin/bun"
 chmod +x "$failure_bin/bun"
 rm -rf "$worktree_missing/node_modules"
 install_failure_output="$(cd "$worktree_missing" && PATH="$failure_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
