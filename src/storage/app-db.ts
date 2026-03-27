@@ -66,9 +66,9 @@ export type JobStatus = "idle" | "running" | "paused" | "completing" | "complete
 export type AttemptStatus = "running" | "succeeded" | "failed";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "moemail";
-export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang";
+export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountImportSource = "manual" | "extractor";
-export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang";
+export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
 export type AccountExtractBatchStatus =
   | "accepted"
@@ -97,6 +97,8 @@ export interface AppSettings extends Record<string, unknown> {
   defaultMaxAttempts: number;
   extractorZhanghaoyaKey: string;
   extractorShanyouxiangKey: string;
+  extractorShankeyunKey: string;
+  extractorHotmail666Key: string;
   defaultAutoExtractSources: AccountExtractorProvider[];
   defaultAutoExtractQuantity: number;
   defaultAutoExtractMaxWaitSec: number;

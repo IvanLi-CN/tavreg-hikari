@@ -614,7 +614,14 @@ export function App() {
           job={job}
           events={events}
           jobDraft={jobDraft}
-          extractorAvailability={extractorSettings?.availability || { zhanghaoya: false, shanyouxiang: false }}
+          extractorAvailability={
+            extractorSettings?.availability || {
+              zhanghaoya: false,
+              shanyouxiang: false,
+              shankeyun: false,
+              hotmail666: false,
+            }
+          }
           onJobDraftChange={updateJobDraft}
           onJobAction={handleJobAction}
         />

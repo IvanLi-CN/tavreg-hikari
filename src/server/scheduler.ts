@@ -12,7 +12,12 @@ import {
   type JobRecord,
   type MicrosoftAccountRecord,
 } from "../storage/app-db.js";
-import { fetchSingleExtractedAccount, keyConfiguredForProvider } from "./account-extractor.js";
+import {
+  fetchSingleExtractedAccount,
+  getAccountExtractorProviderLabel,
+  getConfiguredExtractorKey,
+  keyConfiguredForProvider,
+} from "./account-extractor.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
@@ -207,12 +212,17 @@ function isTerminalJobStatus(status: JobRecord["status"]): boolean {
 
 function normalizeExtractorSources(sources: AccountExtractorProvider[] | undefined): AccountExtractorProvider[] {
   return Array.from(
-    new Set((sources || []).filter((item): item is AccountExtractorProvider => item === "zhanghaoya" || item === "shanyouxiang")),
+    new Set(
+      (sources || []).filter(
+        (item): item is AccountExtractorProvider =>
+          item === "zhanghaoya" || item === "shanyouxiang" || item === "shankeyun" || item === "hotmail666",
+      ),
+    ),
   );
 }
 
 function providerLabel(provider: AccountExtractorProvider): string {
-  return provider === "zhanghaoya" ? "账号鸭" : "闪邮箱";
+  return getAccountExtractorProviderLabel(provider);
 }
 
 function mapFailureCodeToBatchStatus(
@@ -341,6 +351,8 @@ function createProviderAttemptClock(): Record<AccountExtractorProvider, number> 
   return {
     zhanghaoya: 0,
     shanyouxiang: 0,
+    shankeyun: 0,
+    hotmail666: 0,
   };
 }
 
@@ -886,6 +898,8 @@ export class JobScheduler {
     const runtimeConfig = {
       zhanghaoyaKey: settings.extractorZhanghaoyaKey,
       shanyouxiangKey: settings.extractorShanyouxiangKey,
+      shankeyunKey: settings.extractorShankeyunKey,
+      hotmail666Key: settings.extractorHotmail666Key,
     };
     const missingProviders = autoExtractSources.filter((provider) => !keyConfiguredForProvider(provider, runtimeConfig));
     if (missingProviders.length > 0) {
@@ -1107,6 +1121,8 @@ export class JobScheduler {
     const runtimeConfig = {
       zhanghaoyaKey: settings.extractorZhanghaoyaKey,
       shanyouxiangKey: settings.extractorShanyouxiangKey,
+      shankeyunKey: settings.extractorShankeyunKey,
+      hotmail666Key: settings.extractorHotmail666Key,
       timeoutMs: AUTO_EXTRACT_REQUEST_TIMEOUT_MS,
     };
 
@@ -1305,7 +1321,7 @@ export class JobScheduler {
           errorMessage: error instanceof Error ? error.message : String(error),
           failureCode: "upstream_error",
           rawResponse: null,
-          maskedKey: maskLocalSecret(context.provider === "zhanghaoya" ? runtimeConfig.zhanghaoyaKey : runtimeConfig.shanyouxiangKey),
+          maskedKey: maskLocalSecret(getConfiguredExtractorKey(context.provider, runtimeConfig)),
         });
       });
   }

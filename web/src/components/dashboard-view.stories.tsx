@@ -12,7 +12,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "主流程页，包含指标卡、运行中 attempts、最近 attempts 与实时事件流。",
+        component: "主流程页，包含指标卡、四源自动补号控制、运行中 attempts、最近 attempts 与实时事件流。",
       },
     },
   },
@@ -30,7 +30,7 @@ export const Running: Story = {
       need: 5,
       parallel: 2,
       maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya"],
+      autoExtractSources: ["zhanghaoya", "hotmail666"],
       autoExtractQuantity: 1,
       autoExtractMaxWaitSec: 60,
       autoExtractAccountType: "outlook",
@@ -45,7 +45,7 @@ export const Running: Story = {
       need: 5,
       parallel: 2,
       maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya"],
+      autoExtractSources: ["zhanghaoya", "hotmail666"],
       autoExtractQuantity: 1,
       autoExtractMaxWaitSec: 60,
       autoExtractAccountType: "outlook",
@@ -77,7 +77,7 @@ export const Empty: Story = {
       autoExtractMaxWaitSec: 60,
       autoExtractAccountType: "outlook",
     },
-    extractorAvailability: { zhanghaoya: false, shanyouxiang: true },
+    extractorAvailability: { zhanghaoya: false, shanyouxiang: true, shankeyun: true, hotmail666: false },
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -122,7 +122,7 @@ export const OverflowGuard: Story = {
       need: 5,
       parallel: 2,
       maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya", "shanyouxiang"],
+      autoExtractSources: ["zhanghaoya", "shankeyun", "hotmail666"],
       autoExtractQuantity: 2,
       autoExtractMaxWaitSec: 45,
       autoExtractAccountType: "outlook",
@@ -140,6 +140,38 @@ export const OverflowGuard: Story = {
   ],
 };
 
+export const FourSourceCompact: Story = {
+  args: {
+    job: sampleJob,
+    events: sampleEvents,
+    jobDraft: {
+      runMode: "headed",
+      need: 6,
+      parallel: 2,
+      maxAttempts: 12,
+      autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
+      autoExtractQuantity: 2,
+      autoExtractMaxWaitSec: 45,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: {
+      zhanghaoya: true,
+      shanyouxiang: true,
+      shankeyun: true,
+      hotmail666: true,
+    },
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-full max-w-[980px] overflow-hidden">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
 export const ControlPlay: Story = {
   args: {
     job: sampleJob,
@@ -149,7 +181,7 @@ export const ControlPlay: Story = {
       need: 5,
       parallel: 2,
       maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya"],
+      autoExtractSources: ["zhanghaoya", "hotmail666"],
       autoExtractQuantity: 1,
       autoExtractMaxWaitSec: 60,
       autoExtractAccountType: "outlook",

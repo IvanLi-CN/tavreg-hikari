@@ -205,7 +205,12 @@ function normalizeLoopbackHost(host: string | undefined): string {
 function normalizeExtractorSources(value: unknown): AccountExtractorProvider[] {
   if (!Array.isArray(value)) return [];
   return Array.from(
-    new Set(value.filter((item): item is AccountExtractorProvider => item === "zhanghaoya" || item === "shanyouxiang")),
+    new Set(
+      value.filter(
+        (item): item is AccountExtractorProvider =>
+          item === "zhanghaoya" || item === "shanyouxiang" || item === "shankeyun" || item === "hotmail666",
+      ),
+    ),
   );
 }
 
@@ -222,6 +227,8 @@ function serializeExtractorSettings(settings: AppSettings) {
   return {
     extractorZhanghaoyaKey: settings.extractorZhanghaoyaKey,
     extractorShanyouxiangKey: settings.extractorShanyouxiangKey,
+    extractorShankeyunKey: settings.extractorShankeyunKey,
+    extractorHotmail666Key: settings.extractorHotmail666Key,
     defaultAutoExtractSources: settings.defaultAutoExtractSources,
     defaultAutoExtractQuantity: settings.defaultAutoExtractQuantity,
     defaultAutoExtractMaxWaitSec: settings.defaultAutoExtractMaxWaitSec,
@@ -229,6 +236,8 @@ function serializeExtractorSettings(settings: AppSettings) {
     availability: {
       zhanghaoya: Boolean(settings.extractorZhanghaoyaKey.trim()),
       shanyouxiang: Boolean(settings.extractorShanyouxiangKey.trim()),
+      shankeyun: Boolean(settings.extractorShankeyunKey.trim()),
+      hotmail666: Boolean(settings.extractorHotmail666Key.trim()),
     },
   };
 }
@@ -251,6 +260,8 @@ function buildSettingsCodeDefaults(): AppSettings {
     defaultMaxAttempts: 5,
     extractorZhanghaoyaKey: "",
     extractorShanyouxiangKey: "",
+    extractorShankeyunKey: "",
+    extractorHotmail666Key: "",
     defaultAutoExtractSources: [],
     defaultAutoExtractQuantity: 1,
     defaultAutoExtractMaxWaitSec: 60,
@@ -277,6 +288,8 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     defaultMaxAttempts: toInt(process.env.WEB_DEFAULT_MAX_ATTEMPTS, baseDefaults.defaultMaxAttempts),
     extractorZhanghaoyaKey: (process.env.EXTRACTOR_ZHANGHAOYA_KEY || "").trim(),
     extractorShanyouxiangKey: (process.env.EXTRACTOR_SHANYOUXIANG_KEY || "").trim(),
+    extractorShankeyunKey: (process.env.EXTRACTOR_SHANKEYUN_KEY || "").trim(),
+    extractorHotmail666Key: (process.env.EXTRACTOR_HOTMAIL666_KEY || "").trim(),
     defaultAutoExtractSources: normalizeExtractorSources(
       (process.env.WEB_DEFAULT_AUTO_EXTRACT_SOURCES || "")
         .split(",")
@@ -748,6 +761,8 @@ async function main(): Promise<void> {
           extractorZhanghaoyaKey: typeof body?.extractorZhanghaoyaKey === "string" ? body.extractorZhanghaoyaKey : undefined,
           extractorShanyouxiangKey:
             typeof body?.extractorShanyouxiangKey === "string" ? body.extractorShanyouxiangKey : undefined,
+          extractorShankeyunKey: typeof body?.extractorShankeyunKey === "string" ? body.extractorShankeyunKey : undefined,
+          extractorHotmail666Key: typeof body?.extractorHotmail666Key === "string" ? body.extractorHotmail666Key : undefined,
           defaultAutoExtractSources:
             body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractSources")
               ? normalizeExtractorSources(body.defaultAutoExtractSources)
@@ -777,7 +792,12 @@ async function main(): Promise<void> {
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const providerParam = url.searchParams.get("provider");
         const provider =
-          providerParam === "zhanghaoya" || providerParam === "shanyouxiang" ? providerParam : undefined;
+          providerParam === "zhanghaoya"
+          || providerParam === "shanyouxiang"
+          || providerParam === "shankeyun"
+          || providerParam === "hotmail666"
+            ? providerParam
+            : undefined;
         return json(
           db.listAccountExtractHistory({
             provider,

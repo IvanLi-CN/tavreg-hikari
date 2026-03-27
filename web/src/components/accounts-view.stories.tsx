@@ -183,7 +183,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、分组组合框、跨分页勾选、批量分组和批量删除的交互面。",
+          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组和批量删除的交互面。",
       },
     },
   },
@@ -244,6 +244,26 @@ export const ExtractorSettingsEntry: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
     await expect(within(document.body).getByRole("dialog", { name: "微软账号提取器设置" })).toBeInTheDocument();
+  },
+};
+
+export const ExtractorSettingsCompact: Story = {
+  args: baseArgs,
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-full max-w-[980px] overflow-hidden">
+        <Story />
+      </div>
+    ),
+  ],
+  render: () => <AccountsStorySurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "微软账号提取器设置" });
+    await expect(dialog).toBeInTheDocument();
+    await expect(within(dialog).getByText("闪客云 KEY")).toBeInTheDocument();
+    await expect(within(dialog).getByText("Hotmail666 KEY")).toBeInTheDocument();
   },
 };
 

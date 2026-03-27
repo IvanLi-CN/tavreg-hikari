@@ -12,6 +12,13 @@ import { StatusBadge } from "@/components/status-badge";
 import type { AccountExtractorProvider, EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
+const EXTRACTOR_PROVIDER_OPTIONS = [
+  { provider: "zhanghaoya", label: "账号鸭" },
+  { provider: "shanyouxiang", label: "闪邮箱" },
+  { provider: "shankeyun", label: "闪客云" },
+  { provider: "hotmail666", label: "Hotmail666" },
+] as const satisfies Array<{ provider: AccountExtractorProvider; label: string }>;
+
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-2">
@@ -22,7 +29,7 @@ function Field(props: { label: string; children: React.ReactNode }) {
 }
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
-  return provider === "zhanghaoya" ? "账号鸭" : "闪邮箱";
+  return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
 }
 
 function autoExtractPhaseLabel(phase: JobSnapshot["autoExtractState"] extends infer T ? T extends { phase: infer P } ? P : never : never) {
@@ -45,6 +52,8 @@ export function DashboardView({
   extractorAvailability: {
     zhanghaoya: boolean;
     shanyouxiang: boolean;
+    shankeyun: boolean;
+    hotmail666: boolean;
   };
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
@@ -121,10 +130,8 @@ export function DashboardView({
               </div>
               <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.7fr)_minmax(0,0.7fr)_minmax(0,0.6fr)]">
                 <div className="grid gap-3 sm:grid-cols-2">
-                  {([
-                    ["zhanghaoya", "账号鸭", extractorAvailability.zhanghaoya],
-                    ["shanyouxiang", "闪邮箱", extractorAvailability.shanyouxiang],
-                  ] as const).map(([provider, label, available]) => {
+                  {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => {
+                    const available = extractorAvailability[provider];
                     const checked = jobDraft.autoExtractSources.includes(provider);
                     return (
                       <label
