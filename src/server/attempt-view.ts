@@ -1,7 +1,40 @@
 import type { AppDatabase, JobAttemptRecord } from "../storage/app-db.js";
 
+function parseMillis(value: unknown): number | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function shouldIgnoreSignupTaskForAttempt(row: JobAttemptRecord, signupTask: Record<string, unknown> | null): boolean {
+  if (!signupTask) return true;
+  const signupRunId = signupTask.run_id == null ? null : String(signupTask.run_id);
+  if (row.runId) {
+    return signupRunId == null || signupRunId !== row.runId;
+  }
+  const attemptStartedAtMs = parseMillis(row.startedAt);
+  const signupStartedAtMs = parseMillis(signupTask.started_at);
+  const signupCompletedAtMs = parseMillis(signupTask.completed_at);
+  if (attemptStartedAtMs == null) {
+    return false;
+  }
+  if (signupStartedAtMs != null && signupStartedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  if (signupCompletedAtMs != null && signupCompletedAtMs < attemptStartedAtMs) {
+    return true;
+  }
+  return false;
+}
+
 export function serializeAttemptForApi(db: AppDatabase, row: JobAttemptRecord): Record<string, unknown> {
   const signupTask = db.getLatestSignupTask(row.jobId, row.accountId);
+  if (shouldIgnoreSignupTaskForAttempt(row, signupTask)) {
+    return {
+      ...row,
+      accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
+    };
+  }
   return {
     ...row,
     runId: signupTask?.run_id ? String(signupTask.run_id) : row.runId,
