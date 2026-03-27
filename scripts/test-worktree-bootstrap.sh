@@ -102,6 +102,28 @@ sqlite_latest_value() {
   ' "$db_path"
 }
 
+sqlite_hold_writer() {
+  local db_path="$1"
+  local value="$2"
+  local hold_ms="${3:-4000}"
+
+  mkdir -p "$(dirname "$db_path")"
+  bun --eval '
+    import { Database } from "bun:sqlite";
+
+    const dbPath = process.argv[1];
+    const value = process.argv[2];
+    const holdMs = Number(process.argv[3] ?? "4000");
+    const db = new Database(dbPath);
+    db.exec("PRAGMA journal_mode=WAL;");
+    db.exec("CREATE TABLE IF NOT EXISTS smoke (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL);");
+    db.query("INSERT INTO smoke (value) VALUES (?)").run(value);
+    await Bun.sleep(holdMs);
+    db.close(false);
+  ' "$db_path" "$value" "$hold_ms" >/dev/null &
+  SQLITE_WRITER_PID=$!
+}
+
 mkdir -p "$fixture_repo"
 cat > "$fixture_repo/package.json" <<'JSON'
 {
@@ -193,6 +215,19 @@ assert_output_contains "$missing_output" "skip source missing: output/registry/s
 assert_file_content "$worktree_missing/.env.local" "SOURCE_ENV=main-root"
 if [[ -e "$worktree_missing/output/registry/signup-tasks.sqlite" ]]; then
   echo "expected missing source SQLite file to stay absent in target worktree" >&2
+  exit 1
+fi
+
+sqlite_insert_value "$fixture_repo/output/registry/signup-tasks.sqlite" "restored-ledger"
+rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+sqlite_hold_writer "$fixture_repo/output/registry/signup-tasks.sqlite" "live-ledger"
+writer_pid="$SQLITE_WRITER_PID"
+sleep 1
+live_sync_output="$(cd "$worktree_missing" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
+wait "$writer_pid"
+assert_output_contains "$live_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+  echo "expected forced sync to snapshot a live SQLite source without losing committed rows" >&2
   exit 1
 fi
 

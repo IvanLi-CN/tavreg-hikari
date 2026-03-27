@@ -12,6 +12,10 @@ log() {
   printf 'worktree-sync: %s\n' "$*"
 }
 
+sqlite_quote() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
 canonical_dir() {
   CDPATH= cd -- "$1" && pwd -P
 }
@@ -100,16 +104,35 @@ copy_resource() {
 
   mkdir -p "$(dirname -- "$dst_path")"
   if [ "${rel_path##*.}" = "sqlite" ]; then
-    bun --eval '
-      import { Database } from "bun:sqlite";
+    tmp_path="${dst_path}.tmp.$$"
+    tmp_sql=$(sqlite_quote "$tmp_path")
+    rm -f "$tmp_path"
+    if command -v sqlite3 >/dev/null 2>&1; then
+      if ! sqlite3 "$src_path" \
+        ".timeout 5000" \
+        "VACUUM INTO '$tmp_sql';"
+      then
+        rm -f "$tmp_path"
+        return 1
+      fi
+    else
+      if ! bun --eval '
+        import { Database } from "bun:sqlite";
 
-      const sourcePath = process.argv[1];
-      const destPath = process.argv[2];
-      const db = new Database(sourcePath, { readonly: true });
-      const snapshot = db.serialize();
-      db.close(false);
-      await Bun.write(destPath, snapshot);
-    ' "$src_path" "$dst_path"
+        const sourcePath = process.argv[1];
+        const destPath = process.argv[2];
+        const db = new Database(sourcePath);
+        db.exec("PRAGMA busy_timeout = 5000;");
+        const escapedDestPath = destPath.replaceAll("'"'"'", "'"'"''"'"'");
+        db.exec(`VACUUM INTO '"'"'${escapedDestPath}'"'"'`);
+        db.close(false);
+      ' "$src_path" "$tmp_path"
+      then
+        rm -f "$tmp_path"
+        return 1
+      fi
+    fi
+    mv "$tmp_path" "$dst_path"
     log "snapshotted sqlite: $rel_path"
   else
     cp -R "$src_path" "$dst_path"

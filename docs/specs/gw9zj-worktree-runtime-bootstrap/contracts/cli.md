@@ -100,6 +100,6 @@ bun run test:worktree-bootstrap
 ### 兼容性与迁移（Compatibility / migration）
 
 - 同步范围固定来自 `scripts/worktree-sync.paths`
-- `.sqlite` 路径通过 `bun:sqlite` `serialize()` 生成一致性快照，不复制 `-wal/-shm`
+- `.sqlite` 路径通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不复制 `-wal/-shm`
 - 目标文件已存在时绝不覆盖
 - 当前 revision 缺少脚本或 manifest 时，shared hook 必须降级为 no-op

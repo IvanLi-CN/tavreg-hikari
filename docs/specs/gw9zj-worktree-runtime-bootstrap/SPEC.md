@@ -53,6 +53,7 @@
 - 源文件缺失时必须输出 `skip source missing` 并以 `0` 退出，不能阻断 checkout。
 - 历史 commit 缺少同步脚本时，共享 hook 必须安全降级为 no-op。
 - SQLite ledger 必须通过 SQLite 一致性快照生成，不得直接逐文件复制活跃数据库的 `-wal/-shm` 伴生文件。
+- SQLite ledger 快照实现不得把整库一次性读进 JS 堆内存；应使用 SQLite 原生 `VACUUM INTO` 或等价原生命令生成目标文件。
 
 ### SHOULD
 
@@ -69,7 +70,7 @@
 
 - 主工作区执行 `bun install` 时，`prepare` 调用 `scripts/install-hooks.sh`，在共享 hooks 目录安装 managed `post-checkout` wrapper。
 - 用户执行 `git worktree add` 创建新 linked worktree 时，`post-checkout` 调用 `scripts/sync-worktree-resources.sh`。
-- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 做普通复制、对 ledger 主文件做 SQLite 一致性快照。
+- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 做普通复制、对 ledger 主文件做基于 SQLite 原生 `VACUUM INTO` 的一致性快照。
 - 用户在 worktree 内执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh` 时，脚本重新遍历 manifest，但仍只补缺、不覆盖。
 
 ### Edge cases / errors
@@ -101,6 +102,7 @@
 - Given 在主工作区运行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，When 脚本执行，Then 输出 `skip main worktree` 且不发生自覆盖。
 - Given 主工作区缺少某个 manifest 资源，When 新 worktree 首次 checkout 或手工重跑同步，Then 脚本输出 `skip source missing` 且以 `0` 退出。
 - Given 共享 hook 已安装，When checkout 到缺少同步脚本的历史 revision，Then Git 不会报 `No such file or directory` 或 `exit status 127`。
+- Given 主工作区 ledger 仍处于打开的 WAL 连接中，When linked worktree 手工 forced sync 或首次 bootstrap 生成快照，Then 已提交的数据会出现在目标 ledger 中，且脚本不会因为 JS 堆内存快照而失败。
 - Given 本次实现完成，When 执行 `bun run test:worktree-bootstrap` 与 `bun test`，Then 相关验证通过且无新增回归。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -120,7 +122,7 @@
 
 - `bun install --frozen-lockfile` 能成功执行并安装 shared hook
 - README 与 `scripts/worktree-sync.paths` 的同步范围说明一致
-- SQLite ledger 通过 `bun:sqlite` 一致性快照复制，不直接搬运 `-wal/-shm`
+- SQLite ledger 通过 SQLite 原生 `VACUUM INTO` 一致性快照复制，不直接搬运 `-wal/-shm`
 
 ## 文档更新（Docs to Update）
 
@@ -153,6 +155,7 @@
 - 2026-03-27: 完成共享 `post-checkout` hook、manifest 白名单同步脚本与 smoke test。
 - 2026-03-27: 验证通过：`bun install --frozen-lockfile`、`bun run test:worktree-bootstrap`、`bun test`。
 - 2026-03-27: 根据 review 反馈改为对 ledger 主文件做 SQLite 一致性快照，不再复制活跃数据库的 `-wal/-shm` 文件。
+- 2026-03-27: 将 ledger 快照实现收敛为 SQLite 原生 `VACUUM INTO`，避免大库在 bootstrap 时因 JS 堆内存快照而失败。
 
 ## 参考（References）
 
