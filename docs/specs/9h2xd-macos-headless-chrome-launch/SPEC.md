@@ -42,7 +42,9 @@
 - 当同一账号发生重试时，新 attempt 在拿到自己的 `run_id` 之前不得继承旧 retry 留下的 `signup_tasks` 行；只有当前 attempt 自己产生的台账记录才能回写到新的 `job_attempts`。
 - Tavily `/home` 的已登录判定不能只依赖首屏文案；当 `/api/auth/me`、`/api/account` 或 `/api/keys` 已经确认会话有效时，即使页面还在落地阶段，也必须把它视为已登录 home。
 - `waitHomeStable` 必须给 Microsoft 回跳后的 Tavily home 一个额外的鉴权落地窗口，避免刚回到 `/home` 就因为首轮 DOM 过薄而误判失败。
+- macOS headed native Chrome CDP 路径也必须继续安装 Tavily auth submit patch 路由，确保 captcha/state/password/code 字段补丁在 native 与非 native 分支上一致生效。
 - Microsoft passkey 恢复后若重新回到 Tavily 登录页，且 challenge 侧没有真实 captcha input、token、错误提示或明确成功信号，则 login 页允许在被动 challenge 超时后继续直接点击 Microsoft provider；signup 页不允许走这条降级。
+- 上述 login 降级只允许发生在“仅残留无交互能力的 challenge 外壳”上；若页面仍存在可点击 checkbox、Turnstile runtime 或其他真实 challenge 信号，则必须继续等待 challenge 完成，不能把它当作可安全绕过的被动壳。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -53,7 +55,9 @@
 - Given 活动 attempt 正在运行，When Web 管理台读取 attempt 详情或直接查看 `job_attempts`，Then 都能看到当前阶段而不是一直停在 `spawned`。
 - Given 同一账号正在重试且上一轮 attempt 已留下 `signup_tasks` 记录，When 新 attempt 还没写出自己的 `run_id`，Then 调度器不会把旧 attempt 的 `run_id`、`stage` 或错误信息回填到新的 `job_attempts`。
 - Given Microsoft 登录在 passkey 中断后已经回到 Tavily `/home`，When Tavily 的鉴权接口已经返回有效会话，Then 登录流程会把当前页识别为成功 home，而不是再次发起微软登录。
+- Given macOS headed native Chrome CDP 已启动，When Tavily auth submit 发出登录或注册 POST，Then native 分支仍会安装并执行 auth request patch 路由，而不会丢失 captcha/state/password/code 补丁。
 - Given Microsoft passkey 恢复后重新落到 Tavily login identifier，When 页面只残留无 token 的被动 challenge 外壳，Then login provider 提交流程会在超时后降级成直接 provider click，并继续后续登录。
+- Given Tavily login 页仍显示真实的 challenge checkbox、Turnstile runtime 或其他活跃 challenge 信号，When 被动 challenge 超时，Then provider 流程仍会继续等待 challenge，而不会把该页面误判为可直接重提 provider。
 - Given 一个可用的微软账号与代理节点，When 分别执行 headed 与 headless 直跑登录，Then 两个模式都能走完整条 `fingerprint-chromium + CDP` 链路并提取默认 Tavily API key。
 - Given 本次修复完成，When 执行 `bun test test/main-config.test.ts test/app-db.test.js`、`bun run typecheck`，并做一次真实 headed 与 headless 端到端复测，Then 全部通过。
 

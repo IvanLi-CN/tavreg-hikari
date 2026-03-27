@@ -6829,7 +6829,8 @@ function canFallbackPassiveMicrosoftProviderSubmit(
   if (snapshot.hasCaptchaInput || snapshot.hasCaptchaImage || snapshot.hasCaptchaContainer) return false;
   if (getChallengeTokenLength(snapshot) > 0 || snapshot.challengeSuccessVisible) return false;
   if ((snapshot.visibleErrors?.length || 0) > 0 || (snapshot.visibleErrorCodes?.length || 0) > 0) return false;
-  return snapshot.hasChallengeFrame || snapshot.hasChallengeCheckbox;
+  if (snapshot.hasChallengeCheckbox || snapshot.hasTurnstileApi) return false;
+  return snapshot.hasChallengeFrame && !snapshot.challengeHint;
 }
 
 function isManagedChallengeStableForSubmit(snapshot: AuthChallengeSnapshot | null | undefined): boolean {
@@ -9443,6 +9444,7 @@ function buildBrowserIdentityProfile(locale: string, browserVersion: string): Br
 
 const IDENTITY_BOUND_CONTEXTS = new WeakSet<object>();
 const PASSKEY_SUPPRESSION_BOUND_CONTEXTS = new WeakSet<object>();
+const AUTH_REQUEST_ROUTE_BOUND_CONTEXTS = new WeakSet<object>();
 const WORKER_PASSKEY_SUPPRESSION_SCRIPT = `(() => {
   if ((globalThis).__kohaWorkerPasskeySuppressed) {
     return true;
@@ -11197,6 +11199,7 @@ async function runSingleMode(
 
   const installAuthRequestRoute = async (targetContext: any): Promise<void> => {
     if (!targetContext || typeof targetContext.route !== "function") return;
+    if (AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.has(targetContext)) return;
     await targetContext.route(
       /https?:\/\/auth\.tavily\.com\/u\/((signup|login)\/(identifier|password)|email-identifier\/challenge)/i,
       async (route: any) => {
@@ -11319,6 +11322,7 @@ async function runSingleMode(
       }
     },
     );
+    AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.add(targetContext);
   };
 
   try {
@@ -11541,6 +11545,7 @@ async function runSingleMode(
         if (!context) {
           throw new Error("native chrome context missing");
         }
+        await installAuthRequestRoute(context);
         if (identity) {
           await applyBrowserIdentityToContext(context, identity, selectedGeo?.timezone, false);
         }

@@ -163,7 +163,17 @@ test("microsoft provider flow keeps the login surface and only waits on signup c
   expect(source).toContain("function canFallbackPassiveMicrosoftProviderSubmit(");
   expect(source).toContain('if (canFallbackPassiveMicrosoftProviderSubmit(latest, formKind)) {');
   expect(source).toContain('log(`${formKind} provider submit: passive challenge timeout degraded to direct provider click`)');
+  expect(source).toContain("if (snapshot.hasChallengeCheckbox || snapshot.hasTurnstileApi) return false;");
+  expect(source).toContain("return snapshot.hasChallengeFrame && !snapshot.challengeHint;");
   expect(source).not.toContain('log("login flow: switched to Tavily signup surface before Microsoft provider submit");');
+});
+
+test("native chrome rebuild keeps auth submit patching installed", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const AUTH_REQUEST_ROUTE_BOUND_CONTEXTS = new WeakSet<object>();");
+  expect(source).toContain("if (AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.has(targetContext)) return;");
+  expect(source).toContain("AUTH_REQUEST_ROUTE_BOUND_CONTEXTS.add(targetContext);");
+  expect(source).toContain("if (useNativeChrome) {\n        context = nativeChromeContext;\n        if (!context) {\n          throw new Error(\"native chrome context missing\");\n        }\n        await installAuthRequestRoute(context);");
 });
 
 test("microsoft account picker only acts on real picker surfaces and ignores recovery or proof shells", async () => {
