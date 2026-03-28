@@ -32,6 +32,8 @@ function createSchedulerSettings(overrides = {}) {
     defaultMaxAttempts: 1,
     extractorZhanghaoyaKey: "",
     extractorShanyouxiangKey: "",
+    extractorShankeyunKey: "",
+    extractorHotmail666Key: "",
     defaultAutoExtractSources: [],
     defaultAutoExtractQuantity: 1,
     defaultAutoExtractMaxWaitSec: 60,
@@ -491,13 +493,47 @@ describe("AppDatabase account import", () => {
       importedAccountId: account.id,
     });
 
+    const secondBatch = appDb.createAccountExtractBatch({
+      jobId: job.id,
+      provider: "shankeyun",
+      requestedUsableCount: 1,
+      attemptBudget: 4,
+      acceptedCount: 0,
+      status: "insufficient_stock",
+      errorMessage: "剩余次数不足",
+      rawResponse: "{\"status\":0,\"msg\":\"剩余次数不足\"}",
+      maskedKey: "shan********0002",
+      completedAt: new Date().toISOString(),
+    });
+    appDb.createAccountExtractItem({
+      batchId: secondBatch.id,
+      provider: "shankeyun",
+      rawPayload: "fresh-sk@outlook.com----pass-999--------refresh-token----client-id",
+      email: "fresh-sk@outlook.com",
+      password: "pass-999",
+      parseStatus: "parsed",
+      acceptStatus: "rejected",
+      rejectReason: "already_attempted",
+      importedAccountId: account.id,
+    });
+
+    const filtered = appDb.listAccountExtractHistory({ provider: "shankeyun", page: 1, pageSize: 10 });
+    expect(filtered.total).toBe(1);
+    expect(filtered.rows[0]).toMatchObject({
+      provider: "shankeyun",
+      status: "insufficient_stock",
+    });
+
     appDb.close();
   });
 });
 
 describe("scheduler helpers", () => {
   test("normalizes extractor upstream responses", async () => {
-    globalThis.fetch = async (url) => {
+    const hotmailBodies = [];
+    const hotmailUrls = [];
+    const shankeyunUrls = [];
+    globalThis.fetch = async (url, init) => {
       const href = String(url);
       if (href.includes("zhanghaoya")) {
         return new Response(
@@ -509,18 +545,42 @@ describe("scheduler helpers", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
-      return new Response(JSON.stringify({ status: -1, msg: "库存不足！" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      if (href.includes("shanyouxiang")) {
+        return new Response(JSON.stringify({ status: -1, msg: "库存不足！" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (href.includes("/api/win/buy")) {
+        shankeyunUrls.push(href);
+        return new Response("mail-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      hotmailUrls.push(href);
+      hotmailBodies.push(JSON.parse(String(init?.body || "{}")));
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            mails: ["mail-hm@outlook.com:pass-hm:refresh-token"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const config = {
+      zhanghaoyaKey: "zhya-demo-key-001",
+      shanyouxiangKey: "shan-demo-key-001",
+      shankeyunKey: "shanke-demo-key-001",
+      hotmail666Key: "hotmail666-demo-key-001",
     };
 
     const zhanghaoya = await fetchSingleExtractedAccount({
       provider: "zhanghaoya",
-      config: {
-        zhanghaoyaKey: "zhya-demo-key-001",
-        shanyouxiangKey: "",
-      },
+      config,
     });
     expect(zhanghaoya.ok).toBe(true);
     expect(zhanghaoya.candidates[0]).toMatchObject({
@@ -532,13 +592,136 @@ describe("scheduler helpers", () => {
 
     const shanyouxiang = await fetchSingleExtractedAccount({
       provider: "shanyouxiang",
-      config: {
-        zhanghaoyaKey: "",
-        shanyouxiangKey: "shan-demo-key-001",
-      },
+      config,
     });
     expect(shanyouxiang.ok).toBe(false);
     expect(shanyouxiang.failureCode).toBe("insufficient_stock");
+
+    const shankeyun = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+    });
+    expect(shankeyun.ok).toBe(true);
+    expect(shankeyun.candidates[0]).toMatchObject({
+      provider: "shankeyun",
+      email: "mail-sk@outlook.com",
+      password: "pass-sk",
+      parseStatus: "parsed",
+    });
+    expect(shankeyunUrls).toEqual([
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=outlook&num=1",
+    ]);
+
+    const hotmail666 = await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+    });
+    expect(hotmail666.ok).toBe(true);
+    expect(hotmail666.candidates[0]).toMatchObject({
+      provider: "hotmail666",
+      email: "mail-hm@outlook.com",
+      password: "pass-hm",
+      parseStatus: "parsed",
+    });
+    expect(hotmailBodies).toEqual([
+      {
+        cardKey: "hotmail666-demo-key-001",
+        mailType: "outlook",
+        quantity: 1,
+      },
+    ]);
+    expect(hotmailUrls).toEqual([
+      "https://api.hotmail666.com/api/extract-mail",
+    ]);
+  });
+
+  test("rejects dashed extractor rows when the password field is empty", async () => {
+    globalThis.fetch = async () =>
+      new Response("mail-sk@outlook.com--------refresh-token----client-id", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+
+    const result = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config: {
+        zhanghaoyaKey: "",
+        shanyouxiangKey: "",
+        shankeyunKey: "shanke-demo-key-001",
+        hotmail666Key: "",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failureCode).toBe("parse_failed");
+    expect(result.candidates).toEqual([
+      {
+        provider: "shankeyun",
+        rawPayload: "mail-sk@outlook.com--------refresh-token----client-id",
+        email: null,
+        password: null,
+        parseStatus: "invalid",
+      },
+    ]);
+  });
+
+  test("maps new provider failure envelopes to canonical codes", async () => {
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (href.includes("/api/win/buy")) {
+        return new Response(JSON.stringify({ status: 0, msg: "卡密已过期" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ success: false, message: "剩余次数不足，当前剩余: 0" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const config = {
+      zhanghaoyaKey: "",
+      shanyouxiangKey: "",
+      shankeyunKey: "shanke-demo-key-001",
+      hotmail666Key: "hotmail666-demo-key-001",
+    };
+
+    const shankeyun = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+    });
+    expect(shankeyun.ok).toBe(false);
+    expect(shankeyun.failureCode).toBe("invalid_key");
+
+    const hotmail666 = await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+    });
+    expect(hotmail666.ok).toBe(false);
+    expect(hotmail666.failureCode).toBe("insufficient_stock");
+  });
+
+  test("preserves shankeyun upstream message for ambiguous stock failures", async () => {
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ status: 0, msg: "余额不足或无此类型卡号" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    const result = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config: {
+        zhanghaoyaKey: "",
+        shanyouxiangKey: "",
+        shankeyunKey: "shanke-demo-key-001",
+        hotmail666Key: "",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failureCode).toBe("insufficient_stock");
+    expect(result.message).toBe("余额不足或无此类型卡号");
   });
 
   test("computes launch capacity and completing state", () => {
@@ -705,9 +888,42 @@ describe("scheduler helpers", () => {
     Date.now = () => fakeNow;
 
     const pending = [];
-    globalThis.fetch = () =>
+    const buildResponseForUrl = (href) => {
+      if (href.includes("zhanghaoya")) {
+        return new Response(
+          JSON.stringify({
+            Code: 200,
+            Message: "Success",
+            Data: "cadence-zh@outlook.com:pass-zh",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (href.includes("shanyouxiang")) {
+        return new Response("cadence-sy@outlook.com----pass-sy", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      if (href.includes("shankeyun")) {
+        return new Response("cadence-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            mails: ["cadence-hm@outlook.com:pass-hm"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+    globalThis.fetch = (url) =>
       new Promise((resolve) => {
-        pending.push(resolve);
+        pending.push({ href: String(url), resolve });
       });
 
     const scheduler = new JobScheduler(
@@ -718,6 +934,8 @@ describe("scheduler helpers", () => {
         createSchedulerSettings({
           extractorZhanghaoyaKey: "zhya-demo-key-001",
           extractorShanyouxiangKey: "shan-demo-key-001",
+          extractorShankeyunKey: "shanke-demo-key-001",
+          extractorHotmail666Key: "hotmail666-demo-key-001",
         }),
       () => undefined,
     );
@@ -726,7 +944,7 @@ describe("scheduler helpers", () => {
       need: 6,
       parallel: 1,
       maxAttempts: 12,
-      autoExtractSources: ["zhanghaoya", "shanyouxiang"],
+      autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
       autoExtractQuantity: 6,
       autoExtractMaxWaitSec: 30,
       autoExtractAccountType: "outlook",
@@ -736,23 +954,23 @@ describe("scheduler helpers", () => {
     let decision = await scheduler["maybeAutoExtract"](job);
     expect(decision).toEqual({ status: "waiting" });
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 2,
-      inFlightCount: 2,
+      rawAttemptCount: 4,
+      inFlightCount: 4,
       attemptBudget: 9,
     });
 
     decision = await scheduler["maybeAutoExtract"](job);
     expect(decision).toEqual({ status: "waiting" });
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 2,
-      inFlightCount: 2,
+      rawAttemptCount: 4,
+      inFlightCount: 4,
     });
 
     fakeNow = 499;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 2,
-      inFlightCount: 2,
+      rawAttemptCount: 4,
+      inFlightCount: 4,
     });
 
     fakeNow = 500;
@@ -761,14 +979,116 @@ describe("scheduler helpers", () => {
       rawAttemptCount: 4,
       inFlightCount: 4,
     });
+    expect(pending).toHaveLength(4);
 
-    fakeNow = 1000;
+    pending[0].resolve(buildResponseForUrl(pending[0].href));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    fakeNow = 600;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 4,
+      rawAttemptCount: 5,
       inFlightCount: 4,
     });
+    expect(pending).toHaveLength(5);
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("rejects later in-flight extractor successes after the round target is already met", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const buildResponseForUrl = (href) => {
+      if (href.includes("zhanghaoya")) {
+        return new Response(
+          JSON.stringify({
+            Code: 200,
+            Message: "Success",
+            Data: "target-zh@outlook.com:pass-zh",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (href.includes("shanyouxiang")) {
+        return new Response("target-sy@outlook.com----pass-sy", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      if (href.includes("shankeyun")) {
+        return new Response("target-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            mails: ["target-hm@outlook.com:pass-hm"],
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    };
+
+    const pending = [];
+    globalThis.fetch = (url) =>
+      new Promise((resolve) => {
+        pending.push({ href: String(url), resolve });
+      });
+
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () =>
+        createSchedulerSettings({
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "shan-demo-key-001",
+          extractorShankeyunKey: "shanke-demo-key-001",
+          extractorHotmail666Key: "hotmail666-demo-key-001",
+        }),
+      () => undefined,
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 8,
+      autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    const decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
     expect(pending).toHaveLength(4);
+
+    pending[0].resolve(buildResponseForUrl(pending[0].href));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    pending[1].resolve(buildResponseForUrl(pending[1].href));
+    pending[2].resolve(buildResponseForUrl(pending[2].href));
+    pending[3].resolve(buildResponseForUrl(pending[3].href));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+    expect(appDb.listAccounts({ page: 1, pageSize: 10 }).rows.map((account) => account.microsoftEmail)).toEqual([
+      "target-zh@outlook.com",
+    ]);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.total).toBe(4);
+    expect(history.rows.filter((row) => row.status === "accepted")).toHaveLength(1);
+    expect(
+      history.rows.flatMap((row) => row.items).filter((item) => item.rejectReason === "round_target_reached"),
+    ).toHaveLength(3);
 
     await scheduler.shutdown();
     appDb.close();
@@ -1265,11 +1585,17 @@ describe("settings updates", () => {
         subscriptionUrl: "  https://next.example/sub.yaml  ",
         groupName: "  WEB_AUTO  ",
         timeoutMs: 500,
+        extractorShankeyunKey: " shanke-demo-key-001 ",
+        extractorHotmail666Key: " hotmail666-demo-key-001 ",
+        defaultAutoExtractSources: ["zhanghaoya", "shankeyun", "hotmail666", "zhanghaoya"],
       }),
     ).toMatchObject({
       subscriptionUrl: "https://next.example/sub.yaml",
       groupName: "WEB_AUTO",
       timeoutMs: 1000,
+      extractorShankeyunKey: "shanke-demo-key-001",
+      extractorHotmail666Key: "hotmail666-demo-key-001",
+      defaultAutoExtractSources: ["zhanghaoya", "shankeyun", "hotmail666"],
     });
   });
 
@@ -1528,6 +1854,37 @@ describe("scheduler runtime spec", () => {
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
 
     expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
+
+    appDb.close();
+  });
+
+  test("stops forcing a selected proxy node after it is marked failed", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
+
+    appDb.recordProxyCheck({
+      nodeName: "Tokyo-02",
+      status: "failed",
+      error: "net::ERR_CONNECTION_CLOSED",
+    });
+
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+
+    appDb.close();
+  });
+
+  test("does not force a selected proxy node while it is still in a non-healthy running state", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+
+    appDb.recordProxyCheck({
+      nodeName: "Tokyo-02",
+      status: "running",
+    });
+
+    expect(resolveAttemptProxyNode(appDb)).toBeNull();
 
     appDb.close();
   });

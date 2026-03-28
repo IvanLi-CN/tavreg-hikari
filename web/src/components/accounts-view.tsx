@@ -21,6 +21,7 @@ import { StatusBadge } from "@/components/status-badge";
 import type {
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
+  AccountExtractorProvider,
   AccountExtractorSettings,
   AccountImportPreviewPayload,
   AccountQuery,
@@ -29,6 +30,17 @@ import type {
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+const EXTRACTOR_PROVIDER_OPTIONS = [
+  { provider: "zhanghaoya", label: "账号鸭" },
+  { provider: "shanyouxiang", label: "闪邮箱" },
+  { provider: "shankeyun", label: "闪客云" },
+  { provider: "hotmail666", label: "Hotmail666" },
+] as const satisfies Array<{ provider: AccountExtractorProvider; label: string }>;
+
+function extractorProviderLabel(provider: AccountExtractorProvider): string {
+  return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
+}
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -217,8 +229,12 @@ export function AccountsView({
   const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const [extractorDialogOpen, setExtractorDialogOpen] = useState(false);
-  const [zhanghaoyaKeyDraft, setZhanghaoyaKeyDraft] = useState("");
-  const [shanyouxiangKeyDraft, setShanyouxiangKeyDraft] = useState("");
+  const [extractorKeyDrafts, setExtractorKeyDrafts] = useState<Record<AccountExtractorProvider, string>>({
+    zhanghaoya: "",
+    shanyouxiang: "",
+    shankeyun: "",
+    hotmail666: "",
+  });
   const [extractorSaveError, setExtractorSaveError] = useState<string | null>(null);
   const [passwordCopyFeedback, setPasswordCopyFeedback] = useState<{
     accountId: number | null;
@@ -370,18 +386,28 @@ export function AccountsView({
   };
 
   const openExtractorDialog = () => {
-    setZhanghaoyaKeyDraft(extractorSettings?.extractorZhanghaoyaKey || "");
-    setShanyouxiangKeyDraft(extractorSettings?.extractorShanyouxiangKey || "");
+    setExtractorKeyDrafts({
+      zhanghaoya: extractorSettings?.extractorZhanghaoyaKey || "",
+      shanyouxiang: extractorSettings?.extractorShanyouxiangKey || "",
+      shankeyun: extractorSettings?.extractorShankeyunKey || "",
+      hotmail666: extractorSettings?.extractorHotmail666Key || "",
+    });
     setExtractorSaveError(null);
     setExtractorDialogOpen(true);
+  };
+
+  const updateExtractorKeyDraft = (provider: AccountExtractorProvider, value: string) => {
+    setExtractorKeyDrafts((current) => ({ ...current, [provider]: value }));
   };
 
   const handleSaveExtractorKeys = async () => {
     try {
       setExtractorSaveError(null);
       await onSaveExtractorSettings({
-        extractorZhanghaoyaKey: zhanghaoyaKeyDraft,
-        extractorShanyouxiangKey: shanyouxiangKeyDraft,
+        extractorZhanghaoyaKey: extractorKeyDrafts.zhanghaoya,
+        extractorShanyouxiangKey: extractorKeyDrafts.shanyouxiang,
+        extractorShankeyunKey: extractorKeyDrafts.shankeyun,
+        extractorHotmail666Key: extractorKeyDrafts.hotmail666,
       });
       setExtractorDialogOpen(false);
     } catch (error) {
@@ -430,23 +456,19 @@ export function AccountsView({
             <CardHeader>
               <CardTitle>提取器设置</CardTitle>
               <CardDescription>
-                配置账号鸭 / 闪邮箱 KEY，并查询本地提取历史。这里只读取 SQLite 本地记录，不直连远端历史接口。
+                配置四个号源的 KEY，并查询本地提取历史。这里只读取 SQLite 本地记录，不直连远端历史接口。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-sm font-medium text-white">账号鸭</div>
-                  <div className="mt-1 text-sm text-slate-400">
-                    {extractorSettings?.availability.zhanghaoya ? "KEY 已配置" : "KEY 未配置"}
+                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
+                  <div key={provider} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                    <div className="text-sm font-medium text-white">{label}</div>
+                    <div className="mt-1 text-sm text-slate-400">
+                      {extractorSettings?.availability[provider] ? "KEY 已配置" : "KEY 未配置"}
+                    </div>
                   </div>
-                </div>
-                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                  <div className="text-sm font-medium text-white">闪邮箱</div>
-                  <div className="mt-1 text-sm text-slate-400">
-                    {extractorSettings?.availability.shanyouxiang ? "KEY 已配置" : "KEY 未配置"}
-                  </div>
-                </div>
+                ))}
               </div>
               <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-400">
                 本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
@@ -823,7 +845,7 @@ export function AccountsView({
           <DialogHeader className="shrink-0">
             <DialogTitle>微软账号提取器设置</DialogTitle>
             <DialogDescription>
-              分别维护账号鸭与闪邮箱的 KEY，并查询本地提取历史。历史数据来自当前机器上的 SQLite，不依赖站点远端记录。
+              分别维护四个号源的 KEY，并查询本地提取历史。历史数据来自当前机器上的 SQLite，不依赖站点远端记录。
             </DialogDescription>
           </DialogHeader>
 
@@ -833,29 +855,22 @@ export function AccountsView({
                 <div className="text-sm font-medium text-white">站点 KEY</div>
                 <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY。</div>
               </div>
-              <label className="flex flex-col gap-2">
-                <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">账号鸭 KEY</span>
-                <Input
-                  value={zhanghaoyaKeyDraft}
-                  onChange={(event) => setZhanghaoyaKeyDraft(event.target.value)}
-                  placeholder="请输入 zhanghaoya key"
-                />
-              </label>
-              <label className="flex flex-col gap-2">
-                <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">闪邮箱 KEY</span>
-                <Input
-                  value={shanyouxiangKeyDraft}
-                  onChange={(event) => setShanyouxiangKeyDraft(event.target.value)}
-                  placeholder="请输入 shanyouxiang key"
-                />
-              </label>
+              {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
+                <label key={provider} className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{label} KEY</span>
+                  <Input
+                    value={extractorKeyDrafts[provider]}
+                    onChange={(event) => updateExtractorKeyDraft(provider, event.target.value)}
+                    placeholder={`请输入 ${label} KEY`}
+                  />
+                </label>
+              ))}
               <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/8 bg-[#08111d]/88 p-4 text-sm text-slate-400">
-                  账号鸭：{extractorSettings?.availability.zhanghaoya ? "已配置" : "未配置"}
-                </div>
-                <div className="rounded-2xl border border-white/8 bg-[#08111d]/88 p-4 text-sm text-slate-400">
-                  闪邮箱：{extractorSettings?.availability.shanyouxiang ? "已配置" : "未配置"}
-                </div>
+                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
+                  <div key={provider} className="rounded-2xl border border-white/8 bg-[#08111d]/88 p-4 text-sm text-slate-400">
+                    {label}：{extractorSettings?.availability[provider] ? "已配置" : "未配置"}
+                  </div>
+                ))}
               </div>
               {extractorSaveError ? (
                 <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">{extractorSaveError}</div>
@@ -880,8 +895,9 @@ export function AccountsView({
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__all__">全部来源</SelectItem>
-                      <SelectItem value="zhanghaoya">账号鸭</SelectItem>
-                      <SelectItem value="shanyouxiang">闪邮箱</SelectItem>
+                      {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
+                        <SelectItem key={provider} value={provider}>{label}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </FilterField>
@@ -966,7 +982,7 @@ export function AccountsView({
                         <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-medium text-white">
-                              #{batch.id} · {batch.provider} · {batch.accountType}
+                              #{batch.id} · {extractorProviderLabel(batch.provider)} · {batch.accountType}
                             </div>
                             <div className="mt-1 text-xs text-slate-400">
                               job {batch.jobId || "—"} · requested {batch.requestedUsableCount} · accepted {batch.acceptedCount} ·

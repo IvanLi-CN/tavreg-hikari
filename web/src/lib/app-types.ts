@@ -1,7 +1,7 @@
 export type PageKey = "dashboard" | "accounts" | "apiKeys" | "proxies";
 
 export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
-export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang";
+export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
 
 export type AccountRecord = {
@@ -16,7 +16,7 @@ export type AccountRecord = {
   importedAt: string;
   updatedAt: string;
   importSource: string;
-  accountSource: "manual" | "zhanghaoya" | "shanyouxiang";
+  accountSource: "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
   sourceRawPayload: string | null;
   lastUsedAt: string | null;
   lastResultStatus: string;
@@ -248,6 +248,8 @@ export type JobDraft = {
 export type AccountExtractorSettings = {
   extractorZhanghaoyaKey: string;
   extractorShanyouxiangKey: string;
+  extractorShankeyunKey: string;
+  extractorHotmail666Key: string;
   defaultAutoExtractSources: AccountExtractorProvider[];
   defaultAutoExtractQuantity: number;
   defaultAutoExtractMaxWaitSec: number;
@@ -255,6 +257,8 @@ export type AccountExtractorSettings = {
   availability: {
     zhanghaoya: boolean;
     shanyouxiang: boolean;
+    shankeyun: boolean;
+    hotmail666: boolean;
   };
 };
 

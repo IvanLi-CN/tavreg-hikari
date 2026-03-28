@@ -2,11 +2,13 @@ import type { AppSettings } from "../storage/app-db.js";
 
 export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSettings> {
   const next: Partial<AppSettings> = {};
+  const isExtractorProvider = (value: unknown): value is AppSettings["defaultAutoExtractSources"][number] =>
+    value === "zhanghaoya" || value === "shanyouxiang" || value === "shankeyun" || value === "hotmail666";
   const normalizeSources = (value: unknown): AppSettings["defaultAutoExtractSources"] => {
     if (!Array.isArray(value)) return [];
     return Array.from(
       new Set(
-        value.filter((item): item is "zhanghaoya" | "shanyouxiang" => item === "zhanghaoya" || item === "shanyouxiang"),
+        value.filter(isExtractorProvider),
       ),
     );
   };
@@ -26,6 +28,8 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   if (typeof input.defaultMaxAttempts === "number" && Number.isFinite(input.defaultMaxAttempts)) next.defaultMaxAttempts = Math.max(1, input.defaultMaxAttempts);
   if (typeof input.extractorZhanghaoyaKey === "string") next.extractorZhanghaoyaKey = input.extractorZhanghaoyaKey.trim();
   if (typeof input.extractorShanyouxiangKey === "string") next.extractorShanyouxiangKey = input.extractorShanyouxiangKey.trim();
+  if (typeof input.extractorShankeyunKey === "string") next.extractorShankeyunKey = input.extractorShankeyunKey.trim();
+  if (typeof input.extractorHotmail666Key === "string") next.extractorHotmail666Key = input.extractorHotmail666Key.trim();
   if (Array.isArray(input.defaultAutoExtractSources)) next.defaultAutoExtractSources = normalizeSources(input.defaultAutoExtractSources);
   if (typeof input.defaultAutoExtractQuantity === "number" && Number.isFinite(input.defaultAutoExtractQuantity)) {
     next.defaultAutoExtractQuantity = Math.max(1, input.defaultAutoExtractQuantity);

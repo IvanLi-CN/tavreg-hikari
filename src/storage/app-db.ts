@@ -66,9 +66,9 @@ export type JobStatus = "idle" | "running" | "paused" | "completing" | "complete
 export type AttemptStatus = "running" | "succeeded" | "failed";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "moemail";
-export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang";
+export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountImportSource = "manual" | "extractor";
-export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang";
+export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
 export type AccountExtractBatchStatus =
   | "accepted"
@@ -97,6 +97,8 @@ export interface AppSettings extends Record<string, unknown> {
   defaultMaxAttempts: number;
   extractorZhanghaoyaKey: string;
   extractorShanyouxiangKey: string;
+  extractorShankeyunKey: string;
+  extractorHotmail666Key: string;
   defaultAutoExtractSources: AccountExtractorProvider[];
   defaultAutoExtractQuantity: number;
   defaultAutoExtractMaxWaitSec: number;
@@ -1997,6 +1999,15 @@ export class AppDatabase {
       .query("SELECT node_name FROM proxy_nodes WHERE is_selected = 1 ORDER BY last_selected_at DESC LIMIT 1")
       .get() as { node_name?: string } | null;
     return row?.node_name || null;
+  }
+
+  getProxyNodeLastStatus(nodeName: string): string | null {
+    const normalized = nodeName.trim();
+    if (!normalized) return null;
+    const row = this.db
+      .query("SELECT last_status FROM proxy_nodes WHERE node_name = ? LIMIT 1")
+      .get(normalized) as { last_status?: string | null } | null;
+    return row?.last_status == null ? null : String(row.last_status);
   }
 
   hasProxyNode(nodeName: string): boolean {

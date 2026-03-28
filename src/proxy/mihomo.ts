@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import process from "node:process";
@@ -91,10 +91,13 @@ function resolvePlatform(): { os: string; archAliases: string[] } {
 }
 
 async function fetchRelease(url: string): Promise<{ tag: string; assets: ReleaseAsset[] }> {
+  const githubToken =
+    process.env.GITHUB_PERSONAL_ACCESS_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
   const resp = await fetch(url, {
     headers: {
       "Accept": "application/vnd.github+json",
       "User-Agent": "tavreg-hikari",
+      ...(githubToken ? { "Authorization": `Bearer ${githubToken}` } : {}),
     },
   });
   if (!resp.ok) {
@@ -187,8 +190,50 @@ function selectAsset(
   return matchByArch[0]!;
 }
 
-async function downloadMihomoBinary(cfg: MihomoConfig): Promise<string> {
-  const cacheKey = `${cfg.version || "latest"}:${process.platform}:${process.arch}`;
+function normalizeVersionLabel(version: string): string {
+  return version.trim().replace(/^v/i, "");
+}
+
+function compareVersionLabelsDesc(left: string, right: string): number {
+  const leftParts = normalizeVersionLabel(left).split(".").map((part) => Number.parseInt(part, 10));
+  const rightParts = normalizeVersionLabel(right).split(".").map((part) => Number.parseInt(part, 10));
+  const maxLen = Math.max(leftParts.length, rightParts.length);
+  for (let index = 0; index < maxLen; index += 1) {
+    const leftPart = Number.isFinite(leftParts[index] ?? NaN) ? (leftParts[index] as number) : 0;
+    const rightPart = Number.isFinite(rightParts[index] ?? NaN) ? (rightParts[index] as number) : 0;
+    if (leftPart !== rightPart) return rightPart - leftPart;
+  }
+  return right.localeCompare(left);
+}
+
+async function findDownloadedMihomoBinary(
+  downloadDir: string,
+  binName: string,
+  versionLabel: string,
+): Promise<string | null> {
+  const candidate = path.join(downloadDir, normalizeVersionLabel(versionLabel), binName);
+  return (await fileExists(candidate)) ? candidate : null;
+}
+
+async function findLatestDownloadedMihomoBinary(downloadDir: string, binName: string): Promise<string | null> {
+  let entries: string[];
+  try {
+    entries = await readdir(downloadDir);
+  } catch {
+    return null;
+  }
+  const versionDirs = entries
+    .filter((entry) => /^\d+(?:\.\d+)+$/.test(entry))
+    .sort(compareVersionLabelsDesc);
+  for (const versionLabel of versionDirs) {
+    const candidate = await findDownloadedMihomoBinary(downloadDir, binName, versionLabel);
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+export async function downloadMihomoBinary(cfg: MihomoConfig): Promise<string> {
+  const cacheKey = `${path.resolve(cfg.downloadDir)}:${cfg.version || "latest"}:${process.platform}:${process.arch}`;
   const cached = mihomoBinaryCache.get(cacheKey);
   if (cached) {
     return await cached;
@@ -197,7 +242,26 @@ async function downloadMihomoBinary(cfg: MihomoConfig): Promise<string> {
   const downloadPromise = (async (): Promise<string> => {
     const { os, archAliases } = resolvePlatform();
     const tagOverride = cfg.version ? (cfg.version.startsWith("v") ? cfg.version : `v${cfg.version}`) : null;
-    const release = await fetchRelease(tagOverride ? `${RELEASE_TAG_API}/${tagOverride}` : RELEASE_API);
+    const binName = os === "windows" ? "mihomo.exe" : "mihomo";
+    const cachedBinary = tagOverride
+      ? await findDownloadedMihomoBinary(cfg.downloadDir, binName, tagOverride)
+      : await findLatestDownloadedMihomoBinary(cfg.downloadDir, binName);
+    if (cachedBinary) {
+      return cachedBinary;
+    }
+
+    let release: { tag: string; assets: ReleaseAsset[] };
+    try {
+      release = await fetchRelease(tagOverride ? `${RELEASE_TAG_API}/${tagOverride}` : RELEASE_API);
+    } catch (error) {
+      const fallbackBinary = tagOverride
+        ? await findDownloadedMihomoBinary(cfg.downloadDir, binName, tagOverride)
+        : await findLatestDownloadedMihomoBinary(cfg.downloadDir, binName);
+      if (fallbackBinary) {
+        return fallbackBinary;
+      }
+      throw error;
+    }
     const tag = tagOverride || release.tag;
     const assets = release.assets;
     const asset = selectAsset(assets, os, archAliases, tag);
@@ -206,9 +270,8 @@ async function downloadMihomoBinary(cfg: MihomoConfig): Promise<string> {
       throw new Error("mihomo_asset_invalid");
     }
 
-    const versionLabel = tag.replace(/^v/, "");
+    const versionLabel = normalizeVersionLabel(tag);
     const dir = path.join(cfg.downloadDir, versionLabel);
-    const binName = os === "windows" ? "mihomo.exe" : "mihomo";
     const binPath = path.join(dir, binName);
 
     if (await fileExists(binPath)) {
