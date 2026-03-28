@@ -57,7 +57,7 @@ export const NavigationPlay: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("tab", { name: "API Keys" }));
-    await expect(args.onNavigate).toHaveBeenCalledWith("apiKeys");
+    await userEvent.click(canvas.getByRole("tab", { name: "微软邮箱" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("mailboxes");
   },
 };

@@ -2,10 +2,10 @@ import { Badge } from "@/components/ui/badge";
 
 function normalizeVariant(status: string | null | undefined): "neutral" | "success" | "warning" | "danger" | "info" {
   if (!status) return "neutral";
-  if (["completed", "succeeded", "active", "ready", "ok"].includes(status)) return "success";
-  if (["running", "completing", "unknown"].includes(status)) return "info";
+  if (["completed", "succeeded", "active", "ready", "ok", "available"].includes(status)) return "success";
+  if (["running", "completing", "unknown", "preparing"].includes(status)) return "info";
   if (["paused", "warning", "revoked"].includes(status)) return "warning";
-  if (["failed", "error", "disabled", "fail"].includes(status)) return "danger";
+  if (["failed", "error", "disabled", "fail", "invalidated"].includes(status)) return "danger";
   return "neutral";
 }
 
@@ -18,6 +18,9 @@ function formatLabel(status: string | null | undefined) {
     extract_api_key: "extract api key",
     ok: "ok",
     fail: "fail",
+    preparing: "preparing",
+    available: "available",
+    invalidated: "invalidated",
   };
 
   return labels[status] ?? status;

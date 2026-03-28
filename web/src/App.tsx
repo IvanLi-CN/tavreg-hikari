@@ -3,6 +3,7 @@ import { AccountsView } from "@/components/accounts-view";
 import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
 import { DashboardView } from "@/components/dashboard-view";
+import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
@@ -22,6 +23,16 @@ import type {
   EventRecord,
   JobDraft,
   JobSnapshot,
+  MailboxMessageDetail,
+  MailboxMessageDetailPayload,
+  MailboxMessageSummary,
+  MailboxMessagesPayload,
+  MailboxOauthStartPayload,
+  MailboxRecord,
+  MailboxesPayload,
+  MailboxSyncPayload,
+  MicrosoftGraphSettings,
+  MicrosoftGraphSettingsPayload,
   PageKey,
   ProxyCheckScope,
   ProxyPayload,
@@ -46,21 +57,31 @@ async function api<T>(input: string, init?: RequestInit): Promise<T> {
 }
 
 function usePathname() {
-  const [pathname, setPathname] = useState(() => normalizeAppPath(window.location.pathname));
+  const [locationState, setLocationState] = useState(() => ({
+    pathname: normalizeAppPath(window.location.pathname),
+    search: window.location.search || "",
+  }));
 
   useEffect(() => {
-    const handlePopstate = () => setPathname(normalizeAppPath(window.location.pathname));
+    const handlePopstate = () =>
+      setLocationState({
+        pathname: normalizeAppPath(window.location.pathname),
+        search: window.location.search || "",
+      });
     window.addEventListener("popstate", handlePopstate);
     return () => window.removeEventListener("popstate", handlePopstate);
   }, []);
 
   return {
-    pathname,
+    pathname: locationState.pathname,
+    search: locationState.search,
     navigate(next: string) {
-      const normalized = normalizeAppPath(next);
-      if (normalized === pathname) return;
-      window.history.pushState({}, "", normalized);
-      setPathname(normalized);
+      const url = new URL(next, window.location.origin);
+      const normalizedPath = normalizeAppPath(url.pathname);
+      const normalizedSearch = url.search || "";
+      if (normalizedPath === locationState.pathname && normalizedSearch === locationState.search) return;
+      window.history.pushState({}, "", `${normalizedPath}${normalizedSearch}`);
+      setLocationState({ pathname: normalizedPath, search: normalizedSearch });
     },
   };
 }
@@ -70,7 +91,7 @@ function mergeIds(current: number[], next: number[]): number[] {
 }
 
 export function App() {
-  const { pathname, navigate } = usePathname();
+  const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>({
     job: null,
     activeAttempts: [],
@@ -94,6 +115,48 @@ export function App() {
     summary: { active: 0, revoked: 0 },
     groups: [],
   });
+  const [microsoftGraphSettings, setMicrosoftGraphSettings] = useState<MicrosoftGraphSettings | null>(null);
+  const [microsoftGraphSettingsDraft, setMicrosoftGraphSettingsDraft] = useState({
+    microsoftGraphClientId: "",
+    microsoftGraphClientSecret: "",
+    microsoftGraphRedirectUri: "",
+    microsoftGraphAuthority: "common",
+  });
+  const [mailboxes, setMailboxes] = useState<MailboxRecord[]>([]);
+  const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
+  const [mailboxMessages, setMailboxMessages] = useState<MailboxMessagesPayload>({
+    ok: true,
+    mailbox: {
+      id: 0,
+      accountId: 0,
+      microsoftEmail: "",
+      groupName: null,
+      proofMailboxAddress: null,
+      status: "preparing",
+      syncEnabled: true,
+      graphUserId: null,
+      graphUserPrincipalName: null,
+      graphDisplayName: null,
+      authority: "common",
+      oauthStartedAt: null,
+      oauthConnectedAt: null,
+      deltaLink: null,
+      unreadCount: 0,
+      lastSyncedAt: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+      createdAt: "",
+      updatedAt: "",
+      isAuthorized: false,
+    },
+    rows: [],
+    total: 0,
+    offset: 0,
+    limit: 50,
+    hasMore: false,
+  });
+  const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
+  const [selectedMessageDetail, setSelectedMessageDetail] = useState<MailboxMessageDetail | null>(null);
   const [proxies, setProxies] = useState<ProxyPayload | null>(null);
   const [extractorSettings, setExtractorSettings] = useState<AccountExtractorSettings | null>(null);
   const [extractorHistory, setExtractorHistory] = useState<AccountExtractorHistoryPayload>({
@@ -141,12 +204,24 @@ export function App() {
   const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
   const [extractorSettingsBusy, setExtractorSettingsBusy] = useState(false);
   const [extractorHistoryBusy, setExtractorHistoryBusy] = useState(false);
+  const [graphSettingsBusy, setGraphSettingsBusy] = useState(false);
+  const [mailboxesBusy, setMailboxesBusy] = useState(false);
+  const [messagesBusy, setMessagesBusy] = useState(false);
+  const [messageBusy, setMessageBusy] = useState(false);
+  const [connectingMailboxId, setConnectingMailboxId] = useState<number | null>(null);
+  const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
+  const mailboxSelectionRef = useRef<number | null>(null);
+  const autoSyncedMailboxIdsRef = useRef<number[]>([]);
 
   const selectedProxy = useMemo(
     () => proxies?.nodes.find((node) => node.isSelected) || null,
     [proxies],
+  );
+  const selectedMailbox = useMemo(
+    () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
+    [mailboxes, selectedMailboxId],
   );
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
@@ -219,9 +294,65 @@ export function App() {
       setExtractorHistoryBusy(false);
     }
   };
+  const refreshMicrosoftGraphSettings = async () => {
+    const payload = await api<MicrosoftGraphSettingsPayload>("/api/microsoft-mail/settings");
+    setMicrosoftGraphSettings(payload.settings);
+    setMicrosoftGraphSettingsDraft({
+      microsoftGraphClientId: payload.settings.microsoftGraphClientId,
+      microsoftGraphClientSecret: "",
+      microsoftGraphRedirectUri: payload.settings.microsoftGraphRedirectUri,
+      microsoftGraphAuthority: payload.settings.microsoftGraphAuthority || "common",
+    });
+  };
+  const refreshMailboxes = async () => {
+    try {
+      setMailboxesBusy(true);
+      const payload = await api<MailboxesPayload>("/api/microsoft-mail/mailboxes");
+      setMailboxes(payload.rows);
+    } finally {
+      setMailboxesBusy(false);
+    }
+  };
+  const refreshMailboxMessages = async (mailboxId: number, options?: { offset?: number; append?: boolean }) => {
+    try {
+      setMessagesBusy(true);
+      const params = new URLSearchParams();
+      params.set("limit", "50");
+      params.set("offset", String(options?.offset || 0));
+      const payload = await api<MailboxMessagesPayload>(`/api/microsoft-mail/mailboxes/${mailboxId}/messages?${params.toString()}`);
+      setMailboxMessages((current) =>
+        options?.append
+          ? {
+              ...payload,
+              rows: [...current.rows, ...payload.rows.filter((row) => !current.rows.some((currentRow) => currentRow.id === row.id))],
+            }
+          : payload,
+      );
+    } finally {
+      setMessagesBusy(false);
+    }
+  };
+  const refreshMailboxMessageDetail = async (messageId: number) => {
+    try {
+      setMessageBusy(true);
+      const payload = await api<MailboxMessageDetailPayload>(`/api/microsoft-mail/messages/${messageId}`);
+      setSelectedMessageDetail(payload.message);
+    } finally {
+      setMessageBusy(false);
+    }
+  };
 
   useEffect(() => {
-    void Promise.all([refreshJob(), refreshAccounts(), refreshApiKeys(), refreshProxies(), refreshExtractorSettings(), refreshExtractorHistory()]).catch((err) => {
+    void Promise.all([
+      refreshJob(),
+      refreshAccounts(),
+      refreshApiKeys(),
+      refreshProxies(),
+      refreshExtractorSettings(),
+      refreshExtractorHistory(),
+      refreshMicrosoftGraphSettings(),
+      refreshMailboxes(),
+    ]).catch((err) => {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
@@ -262,6 +393,10 @@ export function App() {
   }, [activePage]);
 
   useEffect(() => {
+    mailboxSelectionRef.current = selectedMailboxId;
+  }, [selectedMailboxId]);
+
+  useEffect(() => {
     const socket = new WebSocket(`${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/api/events/ws`);
     socket.onmessage = (event) => {
       const next = JSON.parse(event.data) as EventRecord;
@@ -272,6 +407,13 @@ export function App() {
       if (next.type === "account.updated") {
         void refreshAccounts(accountQueryRef.current);
         void refreshApiKeys(apiKeyQueryRef.current);
+        void refreshMailboxes();
+      }
+      if (next.type === "mailbox.updated") {
+        void refreshMailboxes();
+        if (mailboxSelectionRef.current) {
+          void refreshMailboxMessages(mailboxSelectionRef.current);
+        }
       }
       if ((next.type === "job.updated" || next.type === "account.updated") && activePageRef.current === "accounts") {
         void refreshExtractorHistory(extractorHistoryQueryRef.current);
@@ -295,6 +437,54 @@ export function App() {
   useEffect(() => {
     void refreshExtractorHistory(extractorHistoryQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [extractorHistoryQuery]);
+
+  useEffect(() => {
+    if (activePage !== "mailboxes") return;
+    const params = new URLSearchParams(search);
+    const accountId = Number(params.get("accountId") || 0);
+    if (Number.isInteger(accountId) && accountId > 0) {
+      const matched = mailboxes.find((mailbox) => mailbox.accountId === accountId);
+      if (matched && matched.id !== selectedMailboxId) {
+        setSelectedMailboxId(matched.id);
+        setSelectedMessageId(null);
+        setSelectedMessageDetail(null);
+        return;
+      }
+    }
+    if (selectedMailboxId == null && mailboxes.length > 0) {
+      const firstMailbox = mailboxes[0];
+      if (!firstMailbox) return;
+      setSelectedMailboxId(firstMailbox.id);
+      setSelectedMessageId(null);
+      setSelectedMessageDetail(null);
+    }
+  }, [activePage, mailboxes, search, selectedMailboxId]);
+
+  useEffect(() => {
+    if (activePage !== "mailboxes" || !selectedMailboxId) return;
+    void refreshMailboxMessages(selectedMailboxId).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [activePage, selectedMailboxId]);
+
+  useEffect(() => {
+    if (!selectedMailbox || activePage !== "mailboxes") return;
+    if (selectedMailbox.status === "preparing" && !selectedMailbox.lastSyncedAt && selectedMailbox.isAuthorized) {
+      if (autoSyncedMailboxIdsRef.current.includes(selectedMailbox.id)) return;
+      autoSyncedMailboxIdsRef.current = mergeIds(autoSyncedMailboxIdsRef.current, [selectedMailbox.id]);
+      void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    }
+  }, [activePage, selectedMailbox]);
+
+  useEffect(() => {
+    if (activePage !== "mailboxes") return;
+    const outcome = new URLSearchParams(search).get("oauth");
+    if (outcome === "error") {
+      setError("Microsoft OAuth 授权失败，请检查 Graph 设置后重试。");
+      return;
+    }
+    if (outcome === "success") {
+      setError(null);
+    }
+  }, [activePage, search]);
 
   const handleOpenImportPreview = async () => {
     const parsed = parseImportContent(importContent);
@@ -608,8 +798,132 @@ export function App() {
       setBatchBusy(false);
     }
   };
+
+  const handleSaveMicrosoftGraphSettings = async () => {
+    try {
+      setGraphSettingsBusy(true);
+      setError(null);
+      const payload = await api<MicrosoftGraphSettingsPayload>("/api/microsoft-mail/settings", {
+        method: "POST",
+        body: JSON.stringify(microsoftGraphSettingsDraft),
+      });
+      setMicrosoftGraphSettings(payload.settings);
+      setMicrosoftGraphSettingsDraft((current) => ({
+        ...current,
+        microsoftGraphClientId: payload.settings.microsoftGraphClientId,
+        microsoftGraphClientSecret: "",
+        microsoftGraphRedirectUri: payload.settings.microsoftGraphRedirectUri,
+        microsoftGraphAuthority: payload.settings.microsoftGraphAuthority || "common",
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setGraphSettingsBusy(false);
+    }
+  };
+
+  const handleOpenMailbox = (accountId: number) => {
+    navigate(`/mailboxes?accountId=${accountId}`);
+  };
+
+  const handleSelectMailbox = (mailboxId: number) => {
+    const mailbox = mailboxes.find((item) => item.id === mailboxId) || null;
+    setSelectedMailboxId(mailboxId);
+    setSelectedMessageId(null);
+    setSelectedMessageDetail(null);
+    if (mailbox) {
+      navigate(`/mailboxes?accountId=${mailbox.accountId}`);
+    }
+  };
+
+  const handleConnectMailbox = async (mailboxId: number) => {
+    const mailbox = mailboxes.find((item) => item.id === mailboxId) || null;
+    if (!mailbox) return;
+    try {
+      setConnectingMailboxId(mailboxId);
+      setError(null);
+      const payload = await api<MailboxOauthStartPayload>(`/api/microsoft-mail/accounts/${mailbox.accountId}/oauth/start`, {
+        method: "POST",
+      });
+      window.location.href = payload.authUrl;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setConnectingMailboxId(null);
+    }
+  };
+
+  const handleSyncMailbox = async (mailboxId: number) => {
+    try {
+      setSyncingMailboxId(mailboxId);
+      setError(null);
+      await api<MailboxSyncPayload>(`/api/microsoft-mail/mailboxes/${mailboxId}/sync`, {
+        method: "POST",
+      });
+      await refreshMailboxes();
+      await refreshMailboxMessages(mailboxId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setSyncingMailboxId(null);
+    }
+  };
+
+  const handleLoadMoreMailboxMessages = async () => {
+    if (!selectedMailbox) return;
+    try {
+      setError(null);
+      await refreshMailboxMessages(selectedMailbox.id, {
+        offset: mailboxMessages.rows.length,
+        append: true,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  };
+
+  const handleSelectMailboxMessage = async (messageId: number) => {
+    try {
+      setSelectedMessageId(messageId);
+      setError(null);
+      await refreshMailboxMessageDetail(messageId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  };
+
+  useEffect(() => {
+    if (activePage !== "mailboxes") return;
+    if (!mailboxMessages.rows.length) {
+      setSelectedMessageId(null);
+      setSelectedMessageDetail(null);
+      return;
+    }
+    if (selectedMessageId && mailboxMessages.rows.some((row) => row.id === selectedMessageId)) {
+      return;
+    }
+    const firstMessageId = mailboxMessages.rows[0]?.id || null;
+    if (firstMessageId) {
+      setSelectedMessageId(firstMessageId);
+      void refreshMailboxMessageDetail(firstMessageId).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    }
+  }, [activePage, mailboxMessages.rows, selectedMessageId]);
+
   return (
-    <AppShell activePage={activePage} error={error} onNavigate={(page) => navigate(page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`)}>
+    <AppShell
+      activePage={activePage}
+      error={error}
+      onNavigate={(page) =>
+        navigate(
+          page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`,
+        )
+      }
+    >
       {activePage === "dashboard" ? (
         <DashboardView
           job={job}
@@ -669,6 +983,38 @@ export function App() {
           onSaveExtractorSettings={handleSaveExtractorSettings}
           onExtractorHistoryQueryChange={setExtractorHistoryQuery}
           onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
+          onOpenMailbox={handleOpenMailbox}
+        />
+      ) : null}
+
+      {activePage === "mailboxes" ? (
+        <MailboxesView
+          settings={microsoftGraphSettings}
+          settingsDraft={microsoftGraphSettingsDraft}
+          settingsBusy={graphSettingsBusy}
+          mailboxes={mailboxes}
+          selectedMailbox={selectedMailbox}
+          messages={mailboxMessages.rows}
+          messagesTotal={mailboxMessages.total}
+          messagesHasMore={mailboxMessages.hasMore}
+          messagesBusy={messagesBusy || mailboxesBusy}
+          selectedMessageId={selectedMessageId}
+          messageDetail={selectedMessageDetail}
+          messageBusy={messageBusy}
+          connectingMailboxId={connectingMailboxId}
+          syncingMailboxId={syncingMailboxId}
+          onSettingsDraftChange={(patch) =>
+            setMicrosoftGraphSettingsDraft((current) => ({
+              ...current,
+              ...patch,
+            }))
+          }
+          onSaveSettings={handleSaveMicrosoftGraphSettings}
+          onSelectMailbox={handleSelectMailbox}
+          onConnectMailbox={handleConnectMailbox}
+          onSyncMailbox={handleSyncMailbox}
+          onLoadMoreMessages={handleLoadMoreMailboxMessages}
+          onSelectMessage={handleSelectMailboxMessage}
         />
       ) : null}
 

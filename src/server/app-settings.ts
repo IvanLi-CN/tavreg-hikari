@@ -38,6 +38,13 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
     next.defaultAutoExtractMaxWaitSec = Math.max(1, input.defaultAutoExtractMaxWaitSec);
   }
   if (input.defaultAutoExtractAccountType === "outlook") next.defaultAutoExtractAccountType = input.defaultAutoExtractAccountType;
+  if (typeof input.microsoftGraphClientId === "string") next.microsoftGraphClientId = input.microsoftGraphClientId.trim();
+  if (typeof input.microsoftGraphClientSecret === "string") next.microsoftGraphClientSecret = input.microsoftGraphClientSecret.trim();
+  if (typeof input.microsoftGraphRedirectUri === "string") next.microsoftGraphRedirectUri = input.microsoftGraphRedirectUri.trim();
+  if (typeof input.microsoftGraphAuthority === "string") {
+    const normalizedAuthority = input.microsoftGraphAuthority.trim().replace(/^\/+|\/+$/g, "");
+    next.microsoftGraphAuthority = normalizedAuthority || "common";
+  }
   return next;
 }
 

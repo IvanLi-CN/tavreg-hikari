@@ -134,6 +134,7 @@ const baseArgs = {
   onSaveExtractorSettings: fn(async () => undefined),
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
+  onOpenMailbox: fn(),
 };
 
 type AccountsStorySurfaceProps = {
@@ -203,6 +204,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onSaveExtractorSettings={async () => undefined}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
+        onOpenMailbox={() => undefined}
       />
     </div>
   );
