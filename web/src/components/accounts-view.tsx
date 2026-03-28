@@ -451,7 +451,7 @@ export function AccountsView({
               <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-400">
                 本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
               </div>
-              <Button variant="outline" onClick={openExtractorDialog} className="w-full sm:w-auto">
+              <Button variant="outline" onClick={openExtractorDialog} className="w-full sm:w-auto" data-testid="open-extractor-settings">
                 打开提取器设置
               </Button>
             </CardContent>
@@ -816,16 +816,19 @@ export function AccountsView({
           if (!open) setExtractorSaveError(null);
         }}
       >
-        <DialogContent className="w-[min(96vw,84rem)] max-w-[96vw]">
-          <DialogHeader>
+        <DialogContent
+          className="flex w-[min(96vw,var(--extractor-dialog-preview-width,84rem))] max-h-[88vh] max-w-[96vw] flex-col"
+          data-testid="extractor-settings-dialog"
+        >
+          <DialogHeader className="shrink-0">
             <DialogTitle>微软账号提取器设置</DialogTitle>
             <DialogDescription>
               分别维护账号鸭与闪邮箱的 KEY，并查询本地提取历史。历史数据来自当前机器上的 SQLite，不依赖站点远端记录。
             </DialogDescription>
           </DialogHeader>
 
-          <div className="grid gap-4 px-6 py-2 xl:grid-cols-[minmax(20rem,0.72fr)_minmax(0,1.28fr)]">
-            <div className="space-y-4">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(20rem,0.72fr)_minmax(0,1.28fr)]">
+            <div className="order-2 shrink-0 space-y-4 xl:order-1 xl:min-h-0 xl:overflow-auto xl:pr-1">
               <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
                 <div className="text-sm font-medium text-white">站点 KEY</div>
                 <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY。</div>
@@ -859,8 +862,8 @@ export function AccountsView({
               ) : null}
             </div>
 
-            <div className="min-w-0 space-y-4">
-              <div className="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)_auto_auto]">
+            <div className="order-1 min-w-0 flex flex-col gap-4 xl:order-2 xl:min-h-0 xl:flex-1">
+              <div className="grid min-w-0 gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.35fr)_minmax(8.5rem,0.6fr)_auto]">
                 <FilterField label="Provider">
                   <Select
                     value={extractorHistoryQuery.provider || "__all__"}
@@ -948,8 +951,11 @@ export function AccountsView({
                 </div>
               </div>
 
-              <ScrollArea className="max-h-[56vh] min-w-0 rounded-[24px] border border-white/8 bg-[#08111d]/88">
-                <div className="min-w-0 space-y-4 p-4 pr-6">
+              <ScrollArea
+                className="h-[min(40vh,28rem)] min-w-0 rounded-[24px] border border-white/8 bg-[#08111d]/88 sm:h-[min(44vh,32rem)] xl:min-h-0 xl:h-auto xl:flex-1"
+                data-testid="extractor-history-scroll-area"
+              >
+                <div className="min-w-0 space-y-4 p-4 pr-6" data-testid="extractor-history-panel">
                   {extractorHistory.rows.length === 0 ? (
                     <div className="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-slate-500">
                       当前筛选下还没有本地提取记录。
@@ -967,20 +973,20 @@ export function AccountsView({
                               raw {batch.attemptBudget} · {formatDate(batch.startedAt)}
                             </div>
                           </div>
-                          <div className="flex min-w-0 flex-wrap gap-2 lg:max-w-[18rem] lg:justify-end">
+                          <div className="flex min-w-0 flex-wrap items-start gap-2 lg:max-w-[19rem] lg:justify-end">
                             <ExtractHistoryStatusBadge status={batch.status} />
-                            <Badge variant="neutral" className="max-w-full break-all text-left normal-case tracking-[0.08em]">
+                            <Badge variant="neutral" className="min-w-0 max-w-full whitespace-normal break-all text-left normal-case tracking-[0.08em]">
                               {batch.maskedKey || "no-key"}
                             </Badge>
                           </div>
                         </div>
                         {batch.errorMessage ? (
-                          <div className="mt-3 rounded-2xl border border-white/8 bg-[#0d1728]/70 px-4 py-3 text-sm text-slate-300">
+                          <div className="mt-3 min-w-0 break-all rounded-2xl border border-white/8 bg-[#0d1728]/70 px-4 py-3 text-sm text-slate-300">
                             {batch.errorMessage}
                           </div>
                         ) : null}
                         {batch.rawResponse ? (
-                          <pre className="mt-3 max-h-32 min-w-0 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
+                          <pre className="mt-3 max-h-36 min-w-0 overflow-auto whitespace-pre-wrap break-all rounded-2xl border border-white/8 bg-[#030712] p-3 text-xs leading-5 text-slate-400">
                             {batch.rawResponse}
                           </pre>
                         ) : null}
@@ -993,14 +999,19 @@ export function AccountsView({
                             batch.items.map((item) => (
                               <div
                                 key={item.id}
-                                className="grid min-w-0 gap-3 rounded-2xl border border-white/8 bg-[#0d1728]/55 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.72fr)_minmax(0,0.56fr)_minmax(0,0.62fr)_minmax(0,0.88fr)_minmax(0,1.12fr)]"
+                                className="grid min-w-0 gap-3 rounded-2xl border border-white/8 bg-[#0d1728]/55 p-4 sm:grid-cols-2 xl:grid-cols-3"
                               >
                                 <ExtractHistoryItemField label="邮箱" value={item.email || "—"} />
                                 <ExtractHistoryItemField label="密码" value={item.password || "—"} valueClassName="font-mono text-slate-300" />
                                 <ExtractHistoryItemField label="Parse" value={item.parseStatus} />
                                 <ExtractHistoryItemField label="Accept" value={item.acceptStatus} />
-                                <ExtractHistoryItemField label="Reject Reason" value={item.rejectReason || "—"} />
-                                <ExtractHistoryItemField label="Raw Payload" value={item.rawPayload} valueClassName="text-slate-400" />
+                                <ExtractHistoryItemField label="Reject Reason" value={item.rejectReason || "—"} className="sm:col-span-2 xl:col-span-3" />
+                                <ExtractHistoryItemField
+                                  label="Raw Payload"
+                                  value={item.rawPayload}
+                                  className="sm:col-span-2 xl:col-span-3"
+                                  valueClassName="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-xs leading-5 text-slate-400"
+                                />
                               </div>
                             ))
                           )}
@@ -1011,7 +1022,7 @@ export function AccountsView({
                 </div>
               </ScrollArea>
 
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
                 <div className="text-sm text-slate-400">
                   第 {extractorHistory.page} / {extractHistoryPageCount} 页，共 {extractorHistory.total} 条批次记录。
                 </div>
@@ -1045,7 +1056,7 @@ export function AccountsView({
             </div>
           </div>
 
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button variant="secondary" onClick={() => setExtractorDialogOpen(false)} disabled={extractorSettingsBusy}>
               关闭
             </Button>
