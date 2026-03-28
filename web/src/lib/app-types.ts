@@ -1,8 +1,9 @@
-export type PageKey = "dashboard" | "accounts" | "apiKeys" | "proxies";
+export type PageKey = "dashboard" | "accounts" | "mailboxes" | "apiKeys" | "proxies";
 
 export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
+export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated";
 
 export type AccountRecord = {
   id: number;
@@ -26,6 +27,104 @@ export type AccountRecord = {
   groupName: string | null;
   disabledAt: string | null;
   disabledReason: string | null;
+  mailboxStatus: MailboxStatus | null;
+  mailboxLastSyncedAt: string | null;
+  mailboxLastErrorCode: string | null;
+  mailboxUnreadCount: number;
+};
+
+export type MicrosoftGraphSettings = {
+  microsoftGraphClientId: string;
+  microsoftGraphClientSecretMasked: string;
+  microsoftGraphRedirectUri: string;
+  microsoftGraphAuthority: string;
+  configured: boolean;
+};
+
+export type MicrosoftGraphSettingsPayload = {
+  ok: true;
+  settings: MicrosoftGraphSettings;
+};
+
+export type MailboxRecord = {
+  id: number;
+  accountId: number;
+  microsoftEmail: string;
+  groupName: string | null;
+  proofMailboxAddress: string | null;
+  status: MailboxStatus;
+  syncEnabled: boolean;
+  unreadCount: number;
+  graphUserId: string | null;
+  graphUserPrincipalName: string | null;
+  graphDisplayName: string | null;
+  authority: string;
+  oauthStartedAt: string | null;
+  oauthConnectedAt: string | null;
+  deltaLink: string | null;
+  lastSyncedAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  isAuthorized: boolean;
+};
+
+export type MailboxesPayload = {
+  ok: true;
+  rows: MailboxRecord[];
+};
+
+export type MailboxMessageSummary = {
+  id: number;
+  mailboxId: number;
+  graphMessageId: string;
+  internetMessageId: string | null;
+  conversationId: string | null;
+  subject: string;
+  fromName: string | null;
+  fromAddress: string | null;
+  receivedAt: string | null;
+  isRead: boolean;
+  hasAttachments: boolean;
+  bodyContentType: "html" | "text";
+  bodyPreview: string;
+  webLink: string | null;
+  updatedAt: string;
+};
+
+export type MailboxMessagesPayload = {
+  ok: true;
+  mailbox: MailboxRecord;
+  rows: MailboxMessageSummary[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+};
+
+export type MailboxMessageDetail = MailboxMessageSummary & {
+  internetMessageId: string | null;
+  conversationId: string | null;
+  bodyContentType: "html" | "text";
+  bodyContent: string;
+  webLink: string | null;
+};
+
+export type MailboxMessageDetailPayload = {
+  ok: true;
+  message: MailboxMessageDetail;
+};
+
+export type MailboxOauthStartPayload = {
+  ok: true;
+  mailbox: MailboxRecord;
+  authUrl: string;
+};
+
+export type MailboxSyncPayload = {
+  ok: true;
+  mailbox: MailboxRecord;
 };
 
 export type AccountsPayload = {
