@@ -839,7 +839,7 @@ export function AccountsView({
         }}
       >
         <DialogContent
-          className="flex w-[min(96vw,var(--extractor-dialog-preview-width,84rem))] max-h-[88vh] max-w-[96vw] flex-col"
+          className="!flex w-[min(96vw,var(--extractor-dialog-preview-width,84rem))] max-h-[88vh] max-w-[96vw] !flex-col"
           data-testid="extractor-settings-dialog"
         >
           <DialogHeader className="shrink-0">
