@@ -70,6 +70,11 @@ export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyu
 export type AccountImportSource = "manual" | "extractor";
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
+export type AccountSkipReason =
+  | "has_api_key"
+  | "microsoft_password_incorrect"
+  | "microsoft_account_locked"
+  | "microsoft_unknown_recovery_email";
 export type AccountExtractBatchStatus =
   | "accepted"
   | "rejected"
@@ -123,7 +128,7 @@ export interface MicrosoftAccountRecord {
   lastResultStatus: AccountStatus;
   lastResultAt: string | null;
   lastErrorCode: string | null;
-  skipReason: string | null;
+  skipReason: AccountSkipReason | null;
   groupName: string | null;
   disabledAt: string | null;
   disabledReason: string | null;
@@ -241,6 +246,11 @@ interface SettingsRow {
 }
 
 const PINNED_PROXY_NODE_SETTING_KEY = "pinnedProxyNodeName";
+const HARD_ACCOUNT_SKIP_REASONS = new Set<AccountSkipReason>([
+  "microsoft_password_incorrect",
+  "microsoft_account_locked",
+  "microsoft_unknown_recovery_email",
+]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -264,6 +274,49 @@ function fileExists(filePath: string): Promise<boolean> {
     .catch(() => false);
 }
 
+function isHardAccountSkipReason(reason: string | null | undefined): reason is Exclude<AccountSkipReason, "has_api_key"> {
+  return HARD_ACCOUNT_SKIP_REASONS.has(String(reason || "").trim() as Exclude<AccountSkipReason, "has_api_key">);
+}
+
+function isBlockingAccountSkipReason(reason: string | null | undefined): boolean {
+  return String(reason || "").trim().length > 0;
+}
+
+function deriveAccountSkipReasonFromErrorCode(errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
+  const normalized = String(errorCode || "").trim();
+  if (!normalized) return null;
+  if (/^microsoft_password_incorrect/i.test(normalized)) return "microsoft_password_incorrect";
+  if (/^microsoft_account_locked/i.test(normalized)) return "microsoft_account_locked";
+  if (/^microsoft_unknown_recovery_email/i.test(normalized)) return "microsoft_unknown_recovery_email";
+  return null;
+}
+
+function resolveAccountStatus(input: {
+  disabledAt: string | null;
+  hasApiKey: boolean;
+  leaseJobId: number | null;
+  lastResultStatus: AccountStatus;
+  skipReason: string | null;
+}): AccountStatus {
+  if (input.disabledAt != null) return "disabled";
+  if (input.hasApiKey) return "skipped_has_key";
+  if (input.leaseJobId != null) {
+    return input.lastResultStatus === "running" ? "running" : "leased";
+  }
+  return isBlockingAccountSkipReason(input.skipReason) ? "failed" : "ready";
+}
+
+function resolveFailureSkipReason(input: {
+  hasApiKey: boolean;
+  currentSkipReason: string | null;
+  errorCode: string | null | undefined;
+}): AccountSkipReason | null {
+  if (input.hasApiKey) return "has_api_key";
+  const derived = deriveAccountSkipReasonFromErrorCode(input.errorCode);
+  if (derived) return derived;
+  return isHardAccountSkipReason(input.currentSkipReason) ? (input.currentSkipReason as AccountSkipReason) : null;
+}
+
 function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
   return {
     id: Number(row.id),
@@ -283,7 +336,7 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
     lastResultAt: row.last_result_at == null ? null : String(row.last_result_at),
     lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
-    skipReason: row.skip_reason == null ? null : String(row.skip_reason),
+    skipReason: row.skip_reason == null ? null : (String(row.skip_reason) as AccountSkipReason),
     groupName: row.group_name == null ? null : String(row.group_name),
     disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
     disabledReason: row.disabled_reason == null ? null : String(row.disabled_reason),
@@ -677,7 +730,9 @@ export class AppDatabase {
         .query("UPDATE job_attempts SET status = 'failed', stage = 'server_restart', completed_at = ?, duration_ms = 0 WHERE status = 'running'")
         .run(now);
       this.db
-        .query("UPDATE microsoft_accounts SET lease_job_id = NULL, lease_started_at = NULL, last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' WHEN has_api_key = 1 THEN 'skipped_has_key' ELSE 'ready' END WHERE lease_job_id IS NOT NULL")
+        .query(
+          "UPDATE microsoft_accounts SET lease_job_id = NULL, lease_started_at = NULL, last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' WHEN has_api_key = 1 THEN 'skipped_has_key' WHEN COALESCE(skip_reason, '') <> '' THEN 'failed' ELSE 'ready' END WHERE lease_job_id IS NOT NULL",
+        )
         .run();
       this.db.exec("COMMIT;");
     } catch (error) {
@@ -820,13 +875,9 @@ export class AppDatabase {
           account_source = ?,
           source_raw_payload = ?,
           group_name = COALESCE(?, group_name),
-          skip_reason = CASE WHEN has_api_key = 1 THEN 'has_api_key' ELSE NULL END,
-          last_result_status = CASE
-            WHEN disabled_at IS NOT NULL THEN 'disabled'
-            WHEN has_api_key = 1 THEN 'skipped_has_key'
-            WHEN lease_job_id IS NOT NULL THEN 'leased'
-            ELSE 'ready'
-          END
+          skip_reason = ?,
+          last_result_status = ?,
+          last_error_code = ?
       WHERE id = ?
     `);
 
@@ -844,7 +895,35 @@ export class AppDatabase {
           created += 1;
           continue;
         }
-        updateStmt.run(password, now, source, accountSource, rawPayload, normalizedGroupName, Number(existing.id));
+        const current = mapAccountRow(existing);
+        const shouldClearPasswordBlock =
+          current.skipReason === "microsoft_password_incorrect" && current.passwordPlaintext.trim() !== password;
+        const nextSkipReason: AccountSkipReason | null = current.hasApiKey
+          ? "has_api_key"
+          : shouldClearPasswordBlock
+            ? null
+            : current.skipReason;
+        const nextStatus = resolveAccountStatus({
+          disabledAt: current.disabledAt,
+          hasApiKey: current.hasApiKey,
+          leaseJobId: current.leaseJobId,
+          lastResultStatus: current.lastResultStatus,
+          skipReason: nextSkipReason,
+        });
+        const nextErrorCode =
+          shouldClearPasswordBlock && /^microsoft_password_incorrect/i.test(current.lastErrorCode || "") ? null : current.lastErrorCode;
+        updateStmt.run(
+          password,
+          now,
+          source,
+          accountSource,
+          rawPayload,
+          normalizedGroupName,
+          nextSkipReason,
+          nextStatus,
+          nextErrorCode,
+          Number(existing.id),
+        );
         affectedIds.push(Number(existing.id));
         updated += 1;
       }
@@ -978,16 +1057,35 @@ export class AppDatabase {
       }
     }
 
+    const shouldClearRecoveryBlock = Boolean(normalizedAddress) && current.skipReason === "microsoft_unknown_recovery_email";
+    const nextSkipReason: AccountSkipReason | null = current.hasApiKey
+      ? "has_api_key"
+      : shouldClearRecoveryBlock
+        ? null
+        : current.skipReason;
+    const nextStatus = resolveAccountStatus({
+      disabledAt: current.disabledAt,
+      hasApiKey: current.hasApiKey,
+      leaseJobId: current.leaseJobId,
+      lastResultStatus: current.lastResultStatus,
+      skipReason: nextSkipReason,
+    });
+    const nextErrorCode =
+      shouldClearRecoveryBlock && /^microsoft_unknown_recovery_email/i.test(current.lastErrorCode || "") ? null : current.lastErrorCode;
+
     this.db
       .query(`
         UPDATE microsoft_accounts
         SET proof_mailbox_provider = ?,
             proof_mailbox_address = ?,
             proof_mailbox_id = ?,
+            skip_reason = ?,
+            last_result_status = ?,
+            last_error_code = ?,
             updated_at = ?
         WHERE id = ?
       `)
-      .run(normalizedProvider, normalizedAddress, normalizedMailboxId, nowIso(), accountId);
+      .run(normalizedProvider, normalizedAddress, normalizedMailboxId, nextSkipReason, nextStatus, nextErrorCode, nowIso(), accountId);
 
     return this.getAccount(accountId)!;
   }
@@ -1027,25 +1125,38 @@ export class AppDatabase {
     const disabled = input.disabled === undefined ? current.disabledAt != null : Boolean(input.disabled);
     const normalizedReason = disabled ? input.reason?.trim() || current.disabledReason || null : null;
     const disabledAt = disabled ? current.disabledAt || now : null;
-    const nextStatus: AccountStatus = disabled
-      ? "disabled"
+    const nextSkipReason: AccountSkipReason | null = disabled
+      ? current.hasApiKey
+        ? "has_api_key"
+        : current.skipReason
       : current.hasApiKey
-        ? "skipped_has_key"
-        : current.leaseJobId != null
-          ? "leased"
-          : "ready";
+        ? "has_api_key"
+        : null;
+    const nextStatus = disabled
+      ? "disabled"
+      : resolveAccountStatus({
+          disabledAt: null,
+          hasApiKey: current.hasApiKey,
+          leaseJobId: current.leaseJobId,
+          lastResultStatus: current.lastResultStatus,
+          skipReason: nextSkipReason,
+        });
+    const nextErrorCode =
+      disabled || current.skipReason == null || current.skipReason === "has_api_key" ? current.lastErrorCode : null;
 
     this.db
       .query(`
         UPDATE microsoft_accounts
         SET disabled_at = ?,
             disabled_reason = ?,
+            skip_reason = ?,
             last_result_status = ?,
+            last_error_code = ?,
             last_result_at = ?,
             updated_at = ?
         WHERE id = ?
       `)
-      .run(disabledAt, normalizedReason, nextStatus, now, now, accountId);
+      .run(disabledAt, normalizedReason, nextSkipReason, nextStatus, nextErrorCode, now, now, accountId);
 
     return this.getAccount(accountId)!;
   }
@@ -1056,6 +1167,10 @@ export class AppDatabase {
     errorCode?: string | null,
     options?: { releaseLease?: boolean },
   ): void {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
     const now = nowIso();
     const releaseLease = options?.releaseLease !== false;
     this.db
@@ -1063,6 +1178,7 @@ export class AppDatabase {
         UPDATE microsoft_accounts
         SET disabled_at = COALESCE(disabled_at, ?),
             disabled_reason = ?,
+            skip_reason = ?,
             last_result_status = 'disabled',
             last_result_at = ?,
             last_error_code = COALESCE(?, last_error_code),
@@ -1075,7 +1191,7 @@ export class AppDatabase {
             }
         WHERE id = ?
       `)
-      .run(now, reason.trim(), now, errorCode ?? null, now, accountId);
+      .run(now, reason.trim(), current.skipReason, now, errorCode ?? null, now, accountId);
   }
 
   deleteAccounts(ids: number[]): { deleted: number; blockedIds: number[] } {
@@ -1301,7 +1417,7 @@ export class AppDatabase {
           FROM microsoft_accounts
           WHERE disabled_at IS NULL
             AND has_api_key = 0
-            AND COALESCE(skip_reason, '') <> 'has_api_key'
+            AND COALESCE(skip_reason, '') = ''
             AND lease_job_id IS NULL
             AND id NOT IN (SELECT account_id FROM job_attempts WHERE job_id = ?)
           ORDER BY
@@ -1338,7 +1454,7 @@ export class AppDatabase {
         FROM microsoft_accounts
         WHERE disabled_at IS NULL
           AND has_api_key = 0
-          AND COALESCE(skip_reason, '') <> 'has_api_key'
+          AND COALESCE(skip_reason, '') = ''
           AND lease_job_id IS NULL
           AND id NOT IN (SELECT account_id FROM job_attempts WHERE job_id = ?)
       `)
@@ -1356,7 +1472,7 @@ export class AppDatabase {
     if (!account) return false;
     if (account.disabledAt != null) return false;
     if (account.hasApiKey) return false;
-    if ((account.skipReason || "") === "has_api_key") return false;
+    if (isBlockingAccountSkipReason(account.skipReason)) return false;
     if (account.leaseJobId != null) return false;
     const attempted = this.db
       .query("SELECT 1 AS ok FROM job_attempts WHERE job_id = ? AND account_id = ? LIMIT 1")
@@ -1761,12 +1877,22 @@ export class AppDatabase {
   }
 
   markAccountDirectFailure(accountId: number, errorCode?: string | null, options?: { releaseLease?: boolean }): void {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
     const now = nowIso();
     const releaseLease = options?.releaseLease !== false;
+    const nextSkipReason = resolveFailureSkipReason({
+      hasApiKey: current.hasApiKey,
+      currentSkipReason: current.skipReason,
+      errorCode,
+    });
     this.db
       .query(`
         UPDATE microsoft_accounts
         SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
+            skip_reason = ?,
             last_result_at = ?,
             last_error_code = ?,
             updated_at = ?${
@@ -1778,7 +1904,7 @@ export class AppDatabase {
             }
         WHERE id = ?
       `)
-      .run(now, errorCode ?? null, now, accountId);
+      .run(nextSkipReason, now, errorCode ?? null, now, accountId);
   }
 
   completeAttemptFailure(
@@ -1791,6 +1917,7 @@ export class AppDatabase {
     const now = nowIso();
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const currentAccount = this.getAccount(accountId);
     const startedAt = this.getAttempt(attemptId)?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const errorCode = failure.errorCode || (signupTask?.error_code ? String(signupTask.error_code) : null);
@@ -1806,10 +1933,16 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
+    const nextSkipReason = resolveFailureSkipReason({
+      hasApiKey: currentAccount?.hasApiKey ?? false,
+      currentSkipReason: currentAccount?.skipReason ?? null,
+      errorCode,
+    });
     this.db
       .query(`
         UPDATE microsoft_accounts
         SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
+            skip_reason = ?,
             last_result_at = ?,
             last_error_code = ?,
             updated_at = ?,
@@ -1817,7 +1950,7 @@ export class AppDatabase {
             lease_started_at = NULL
         WHERE id = ?
       `)
-      .run(now, errorCode, now, accountId);
+      .run(nextSkipReason, now, errorCode, now, accountId);
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,
       status: shouldEnterCompleting(currentJob) ? "completing" : currentJob.status,

@@ -135,6 +135,7 @@ const baseArgs = {
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
 };
+const restoreAvailabilitySpy = fn(async () => undefined);
 
 type AccountsStorySurfaceProps = {
   accounts?: AccountsPayload;
@@ -148,6 +149,9 @@ type AccountsStorySurfaceProps = {
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
   frameClassName?: string;
+  initialSelectedIds?: number[];
+  onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
+  onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
 };
 
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
@@ -158,7 +162,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const [importGroupName, setImportGroupName] = useState("");
   const [batchGroupName, setBatchGroupName] = useState("");
   const [query, setQuery] = useState<AccountQuery>(createDefaultQuery());
-  const [selectedIds, setSelectedIds] = useState<number[]>([2]);
+  const [selectedIds, setSelectedIds] = useState<number[]>(props.initialSelectedIds ?? [2]);
   const [previewOpen, setPreviewOpen] = useState(Boolean(props.previewOpen));
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
@@ -198,8 +202,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onApplyBatchGroup={() => undefined}
         onDeleteSelected={() => undefined}
         onClearSelection={() => setSelectedIds([])}
-        onSaveProofMailbox={async () => undefined}
-        onSaveAvailability={async () => undefined}
+        onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
+        onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
@@ -207,6 +211,20 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
     </div>
   );
 }
+
+const failureReuseAccounts: AccountsPayload = {
+  total: 4,
+  page: 1,
+  pageSize: 20,
+  summary: {
+    ready: 0,
+    linked: 0,
+    failed: 3,
+    disabled: 1,
+  },
+  groups: ["failed-pool", "manual-hold", "retry-pool"],
+  rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),
+};
 
 async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<HTMLElement> {
   const canvas = within(canvasElement);
@@ -251,7 +269,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组和批量删除的交互面。提取器设置弹窗补充了高密度历史、失败矩阵、空态和紧凑视口四类可复现场景。",
+          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组和批量删除的交互面。账号池样例额外覆盖瞬时失败可复用、硬账号阻断和人工停用三类状态，便于核对失败复用策略。",
       },
     },
   },
@@ -438,5 +456,65 @@ export const PasswordCopyPlay: Story = {
     await userEvent.click(trigger);
     await expect(writeText).toHaveBeenCalledWith("pass-456");
     await expect(within(trigger).getByText("已复制")).toBeInTheDocument();
+  },
+};
+
+export const FailureReuseMatrix: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "状态矩阵场景，集中展示瞬时失败可复用、密码错误阻断、未知辅助邮箱阻断与人工停用四类差异。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Microsoft 密码错误")).toBeInTheDocument();
+    await expect(canvas.getByText("未知辅助邮箱：de*****@genq.top")).toBeInTheDocument();
+    await expect(canvas.getByText("人工复核中")).toBeInTheDocument();
+    await expect(canvas.getAllByRole("button", { name: "恢复可用" }).length).toBeGreaterThanOrEqual(3);
+  },
+};
+
+export const FailureReuseCompactCards: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={failureReuseAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "窄视口卡片态，只保留密码错误阻断、未知辅助邮箱阻断、瞬时失败可复用与人工停用四个目标账号，便于直接核对恢复入口和阻断文案。",
+      },
+    },
+  },
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Microsoft 密码错误")).toBeInTheDocument();
+    await expect(canvas.getByText("未知辅助邮箱：de*****@genq.top")).toBeInTheDocument();
+    await expect(canvas.getByText("人工复核中")).toBeInTheDocument();
+    await expect(canvas.getAllByRole("button", { name: "恢复可用" }).length).toBeGreaterThanOrEqual(3);
+  },
+};
+
+export const RestoreBlockedAccountPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface onSaveAvailability={restoreAvailabilitySpy} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证硬账号阻断与人工停用都会暴露恢复入口，并复用同一 PATCH 语义解除阻断。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const restoreButtons = canvas.getAllByRole("button", { name: "恢复可用" });
+    await expect(restoreButtons.length).toBeGreaterThan(0);
+    await userEvent.click(restoreButtons[0]!);
+    await expect(restoreAvailabilitySpy).toHaveBeenCalledWith(expect.any(Number), false, null);
   },
 };

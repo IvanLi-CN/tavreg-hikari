@@ -311,12 +311,13 @@ describe("AppDatabase account import", () => {
     const imported = appDb.importAccounts([{ email: "disabled@outlook.com", password: "disabled-pass" }]);
     const accountId = imported.affectedIds[0];
 
-    appDb.markAccountUnavailable(accountId, "未知辅助邮箱：di*****@genq.top", "microsoft_unknown_recovery_email");
+    appDb.markAccountUnavailable(accountId, "manual hold", "microsoft_unknown_recovery_email");
     let account = appDb.getAccount(accountId);
     expect(account).toMatchObject({
       lastResultStatus: "disabled",
       lastErrorCode: "microsoft_unknown_recovery_email",
-      disabledReason: "未知辅助邮箱：di*****@genq.top",
+      disabledReason: "manual hold",
+      skipReason: null,
     });
     expect(account?.disabledAt).toBeTruthy();
 
@@ -325,7 +326,8 @@ describe("AppDatabase account import", () => {
     expect(account).toMatchObject({
       lastResultStatus: "disabled",
       lastErrorCode: "network_connection_closed",
-      disabledReason: "未知辅助邮箱：di*****@genq.top",
+      disabledReason: "manual hold",
+      skipReason: null,
     });
 
     appDb.updateAccountAvailability(accountId, { disabled: false, reason: null });
@@ -334,6 +336,7 @@ describe("AppDatabase account import", () => {
       lastResultStatus: "ready",
       disabledAt: null,
       disabledReason: null,
+      skipReason: null,
     });
 
     appDb.close();
@@ -381,8 +384,124 @@ describe("AppDatabase account import", () => {
     expect(account).toMatchObject({
       lastResultStatus: "disabled",
       disabledReason: "未知辅助邮箱",
+      skipReason: null,
       leaseJobId: job.id,
     });
+
+    appDb.close();
+  });
+
+  test("marks hard microsoft failures as reusable blockers instead of disabled accounts", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "blocked@outlook.com", password: "blocked-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.markAccountDirectFailure(accountId, "microsoft_account_locked");
+    const account = appDb.getAccount(accountId);
+
+    expect(account).toMatchObject({
+      lastResultStatus: "failed",
+      lastErrorCode: "microsoft_account_locked",
+      skipReason: "microsoft_account_locked",
+      disabledAt: null,
+      disabledReason: null,
+    });
+
+    appDb.close();
+  });
+
+  test("clears the unknown recovery block after a proof mailbox is saved", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.markAccountDirectFailure(accountId, "microsoft_unknown_recovery_email:pr*****@mail.test");
+    let account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "failed",
+      skipReason: "microsoft_unknown_recovery_email",
+      lastErrorCode: "microsoft_unknown_recovery_email:pr*****@mail.test",
+    });
+
+    account = appDb.updateAccountProofMailbox(accountId, {
+      provider: "moemail",
+      address: "proof@mail.test",
+      mailboxId: "proof-box-001",
+    });
+    expect(account).toMatchObject({
+      proofMailboxAddress: "proof@mail.test",
+      proofMailboxId: "proof-box-001",
+      lastResultStatus: "ready",
+      skipReason: null,
+      lastErrorCode: null,
+    });
+
+    appDb.close();
+  });
+
+  test("clears the password block only when a new password is imported", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "old-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.markAccountDirectFailure(accountId, "microsoft_password_incorrect");
+    appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "old-pass" }]);
+    let account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      lastResultStatus: "failed",
+      skipReason: "microsoft_password_incorrect",
+      lastErrorCode: "microsoft_password_incorrect",
+    });
+
+    appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "new-pass" }]);
+    account = appDb.getAccount(accountId);
+    expect(account).toMatchObject({
+      passwordPlaintext: "new-pass",
+      lastResultStatus: "ready",
+      skipReason: null,
+      lastErrorCode: null,
+    });
+
+    appDb.close();
+  });
+
+  test("reuses transient failed accounts in a new job but not in the same job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "retryable@outlook.com", password: "retry-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(firstJob.id);
+    const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "retryable-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(firstJob.id, attempt.id, accountId, { errorCode: "network_connection_closed" });
+    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(0);
+    appDb.completeJob(firstJob.id, false, "transient failure exhausted the first job");
+
+    const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
+    expect(appDb.leaseNextAccount(secondJob.id)?.id).toBe(accountId);
+
+    appDb.close();
+  });
+
+  test("keeps hard-blocked failed accounts out of future jobs until restored", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "hard-blocked@outlook.com", password: "hard-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(firstJob.id);
+    const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "hard-blocked-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(firstJob.id, attempt.id, accountId, { errorCode: "microsoft_account_locked" });
+    appDb.completeJob(firstJob.id, false, "locked account exhausted the first job");
+
+    const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.countEligibleAccounts(secondJob.id)).toBe(0);
+
+    appDb.updateAccountAvailability(accountId, { disabled: false, reason: null });
+    expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
 
     appDb.close();
   });
