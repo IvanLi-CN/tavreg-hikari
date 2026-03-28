@@ -14,6 +14,7 @@ import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountExtractorProvider, EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+import { normalizeJobDraft } from "@/lib/job-draft";
 
 const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "zhanghaoya", label: "账号鸭" },
@@ -59,7 +60,7 @@ export function DashboardView({
     hotmail666: boolean;
   };
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
-  onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
+  onJobAction: (action: "start" | "pause" | "resume" | "update_limits", draft?: JobDraft) => void;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
@@ -74,19 +75,24 @@ export function DashboardView({
     onJobDraftChange({ autoExtractSources: Array.from(current) });
   };
 
-  const commitDraftInputs = () => {
-    needRef.current?.commit();
-    parallelRef.current?.commit();
-    maxAttemptsRef.current?.commit();
-    autoExtractQuantityRef.current?.commit();
-    autoExtractMaxWaitSecRef.current?.commit();
-  };
+  const commitDraftInputs = (): JobDraft =>
+    normalizeJobDraft({
+      ...jobDraft,
+      need: needRef.current?.commit() ?? jobDraft.need,
+      parallel: parallelRef.current?.commit() ?? jobDraft.parallel,
+      maxAttempts: maxAttemptsRef.current?.commit() ?? jobDraft.maxAttempts,
+      autoExtractQuantity: autoExtractQuantityRef.current?.commit() ?? jobDraft.autoExtractQuantity,
+      autoExtractMaxWaitSec: autoExtractMaxWaitSecRef.current?.commit() ?? jobDraft.autoExtractMaxWaitSec,
+    });
 
   const handleJobActionClick = (action: "start" | "pause" | "resume" | "update_limits") => {
     if (action === "start" || action === "update_limits") {
+      let committedDraft = jobDraft;
       flushSync(() => {
-        commitDraftInputs();
+        committedDraft = commitDraftInputs();
       });
+      onJobAction(action, committedDraft);
+      return;
     }
     onJobAction(action);
   };

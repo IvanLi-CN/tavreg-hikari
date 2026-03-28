@@ -356,14 +356,15 @@ export function App() {
     setJobDraft((current) => normalizeJobDraft({ ...current, ...patch }));
   };
 
-  const handleJobAction = async (action: "start" | "pause" | "resume" | "update_limits") => {
+  const handleJobAction = async (action: "start" | "pause" | "resume" | "update_limits", draftOverride?: JobDraft) => {
     try {
       setError(null);
+      const draft = draftOverride || jobDraft;
       const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify({
           action,
-          ...jobDraft,
+          ...draft,
         }),
       });
       if (payload.job) {
@@ -393,13 +394,13 @@ export function App() {
     }
   };
 
-  const handleSaveProxySettings = async () => {
-    if (!proxies) return;
+  const handleSaveProxySettings = async (settingsOverride?: ProxySettings) => {
+    if (!proxies && !settingsOverride) return;
     try {
       setError(null);
       await api("/api/proxies/settings", {
         method: "POST",
-        body: JSON.stringify(proxies.settings),
+        body: JSON.stringify(settingsOverride || proxies?.settings),
       });
       await refreshProxies();
     } catch (err) {

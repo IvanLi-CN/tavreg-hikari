@@ -36,7 +36,7 @@ export function ProxiesView({
   proxyCheckScope: ProxyCheckScope;
   onProxyCheckScopeChange: (scope: ProxyCheckScope) => void;
   onProxySettingsChange: <K extends keyof ProxySettings>(key: K, value: ProxySettings[K]) => void;
-  onSaveProxySettings: () => void;
+  onSaveProxySettings: (settings?: ProxySettings) => void;
   onCheckScope: () => void;
   onSelectNode: (nodeName: string) => void;
   onCheckNode: (nodeName: string) => void;
@@ -46,18 +46,20 @@ export function ProxiesView({
   const apiPortRef = useRef<BufferedNumberInputHandle>(null);
   const mixedPortRef = useRef<BufferedNumberInputHandle>(null);
 
-  const commitSettingsInputs = () => {
-    timeoutRef.current?.commit();
-    maxLatencyRef.current?.commit();
-    apiPortRef.current?.commit();
-    mixedPortRef.current?.commit();
-  };
+  const commitSettingsInputs = (): ProxySettings => ({
+    ...proxies.settings,
+    timeoutMs: timeoutRef.current?.commit() ?? proxies.settings.timeoutMs,
+    maxLatencyMs: maxLatencyRef.current?.commit() ?? proxies.settings.maxLatencyMs,
+    apiPort: apiPortRef.current?.commit() ?? proxies.settings.apiPort,
+    mixedPort: mixedPortRef.current?.commit() ?? proxies.settings.mixedPort,
+  });
 
   const handleSaveClick = () => {
+    let committedSettings = proxies.settings;
     flushSync(() => {
-      commitSettingsInputs();
+      committedSettings = commitSettingsInputs();
     });
-    onSaveProxySettings();
+    onSaveProxySettings(committedSettings);
   };
 
   return (
