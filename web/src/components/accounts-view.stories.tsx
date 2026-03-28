@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
@@ -147,7 +147,6 @@ type AccountsStorySurfaceProps = {
   extractorHistory?: AccountExtractorHistoryPayload;
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
-  extractorDialogPreviewWidth?: string;
   frameClassName?: string;
 };
 
@@ -164,22 +163,6 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
-
-  useEffect(() => {
-    if (!props.extractorDialogPreviewWidth) {
-      return undefined;
-    }
-    const root = document.documentElement;
-    const previousWidth = root.style.getPropertyValue("--extractor-dialog-preview-width");
-    root.style.setProperty("--extractor-dialog-preview-width", props.extractorDialogPreviewWidth);
-    return () => {
-      if (previousWidth) {
-        root.style.setProperty("--extractor-dialog-preview-width", previousWidth);
-        return;
-      }
-      root.style.removeProperty("--extractor-dialog-preview-width");
-    };
-  }, [props.extractorDialogPreviewWidth]);
 
   return (
     <div className={props.frameClassName}>
@@ -378,19 +361,16 @@ export const ExtractorSettingsFailureMatrix: Story = {
 
 export const ExtractorSettingsCompactViewport: Story = {
   args: baseArgs,
-  render: () => (
-    <AccountsStorySurface
-      extractorHistory={sampleExtractorHistoryDense}
-      extractorHistoryQuery={createDefaultExtractorHistoryQuery()}
-      extractorDialogPreviewWidth="23.5rem"
-    />
-  ),
+  render: () => <AccountsStorySurface extractorHistory={sampleExtractorHistoryDense} extractorHistoryQuery={createDefaultExtractorHistoryQuery()} />,
   parameters: {
     docs: {
       description: {
         story: "375px 窄视口场景，用于验证弹窗在移动宽度下仍然内部滚动、分页可见且没有横向炸开。",
       },
     },
+  },
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
   },
   play: async ({ canvasElement }) => {
     const dialog = await openExtractorSettingsDialog(canvasElement);
