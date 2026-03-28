@@ -203,6 +203,7 @@ export function AccountsView({
   onSaveExtractorSettings,
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
+  onOpenMailbox,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -240,6 +241,7 @@ export function AccountsView({
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
+  onOpenMailbox: (accountId: number) => void;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -650,6 +652,9 @@ export function AccountsView({
                                       标记不可用
                                     </Button>
                                   )}
+                                  <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
+                                    收件箱
+                                  </Button>
                                 </div>
                               </div>
                             </div>
@@ -665,6 +670,13 @@ export function AccountsView({
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
                               <dd><StatusBadge status={getAccountDisplayStatus(row)} /></dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">收信状态</dt>
+                              <dd className="flex items-center gap-2">
+                                <StatusBadge status={row.mailboxStatus} />
+                                {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
+                              </dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">导入时间</dt>
@@ -706,6 +718,7 @@ export function AccountsView({
                         <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
                         <TableHead>最近状态</TableHead>
+                        <TableHead>收信状态</TableHead>
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
                         <TableHead>账号阻断</TableHead>
@@ -735,7 +748,13 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
-                          <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
+                          <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
+                          <TableCell className="whitespace-nowrap">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={row.mailboxStatus} />
+                              {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
+                            </div>
+                          </TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{formatAccountBlockReason(row)}</TableCell>
@@ -754,6 +773,9 @@ export function AccountsView({
                                   标记不可用
                                 </Button>
                               )}
+                              <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
+                                收件箱
+                              </Button>
                             </div>
                           </TableCell>
                         </TableRow>

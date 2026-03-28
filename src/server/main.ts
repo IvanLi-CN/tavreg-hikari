@@ -15,6 +15,8 @@ import {
   type AppSettings,
   type JobAttemptRecord,
   type MicrosoftAccountRecord,
+  type MicrosoftMailboxRecord,
+  type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
@@ -23,6 +25,22 @@ import { createExclusiveRunner } from "./exclusive-runner.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
+import {
+  assertMicrosoftGraphSettings,
+  buildMicrosoftAuthorizeUrl,
+  createMicrosoftOauthState,
+  createMicrosoftPkcePair,
+  exchangeMicrosoftAuthCode,
+  fetchMicrosoftMessageDetail,
+  fetchMicrosoftProfile,
+  getMailboxErrorCode,
+  getMailboxErrorMessage,
+  isMicrosoftTokenExpired,
+  refreshMicrosoftAccessToken,
+  syncMicrosoftInbox,
+  toMailboxFailureStatus,
+  type MicrosoftGraphSettingsInput,
+} from "./microsoft-mail.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -242,6 +260,20 @@ function serializeExtractorSettings(settings: AppSettings) {
   };
 }
 
+function serializeMicrosoftGraphSettings(settings: AppSettings) {
+  return {
+    microsoftGraphClientId: settings.microsoftGraphClientId,
+    microsoftGraphClientSecretMasked: settings.microsoftGraphClientSecret ? maskSecret(settings.microsoftGraphClientSecret) : "",
+    microsoftGraphRedirectUri: settings.microsoftGraphRedirectUri,
+    microsoftGraphAuthority: settings.microsoftGraphAuthority || "common",
+    configured: Boolean(
+      settings.microsoftGraphClientId.trim() &&
+        settings.microsoftGraphClientSecret.trim() &&
+        settings.microsoftGraphRedirectUri.trim(),
+    ),
+  };
+}
+
 function buildSettingsCodeDefaults(): AppSettings {
   return {
     subscriptionUrl: "",
@@ -266,6 +298,10 @@ function buildSettingsCodeDefaults(): AppSettings {
     defaultAutoExtractQuantity: 1,
     defaultAutoExtractMaxWaitSec: 60,
     defaultAutoExtractAccountType: "outlook",
+    microsoftGraphClientId: "",
+    microsoftGraphClientSecret: "",
+    microsoftGraphRedirectUri: "",
+    microsoftGraphAuthority: "common",
   };
 }
 
@@ -298,6 +334,10 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     ),
     defaultAutoExtractQuantity: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_QUANTITY, baseDefaults.defaultAutoExtractQuantity),
     defaultAutoExtractMaxWaitSec: toInt(process.env.WEB_DEFAULT_AUTO_EXTRACT_MAX_WAIT_SEC, baseDefaults.defaultAutoExtractMaxWaitSec),
+    microsoftGraphClientId: (process.env.MICROSOFT_GRAPH_CLIENT_ID || "").trim(),
+    microsoftGraphClientSecret: (process.env.MICROSOFT_GRAPH_CLIENT_SECRET || "").trim(),
+    microsoftGraphRedirectUri: (process.env.MICROSOFT_GRAPH_REDIRECT_URI || "").trim(),
+    microsoftGraphAuthority: (process.env.MICROSOFT_GRAPH_AUTHORITY || baseDefaults.microsoftGraphAuthority).trim() || "common",
   };
 }
 
@@ -334,6 +374,10 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     groupName: row.groupName,
     disabledAt: row.disabledAt,
     disabledReason: row.disabledReason,
+    mailboxStatus: row.mailboxStatus,
+    mailboxLastSyncedAt: row.mailboxLastSyncedAt,
+    mailboxLastErrorCode: row.mailboxLastErrorCode,
+    mailboxUnreadCount: row.mailboxUnreadCount,
   };
 }
 
@@ -343,7 +387,80 @@ function serializeImportedAccount(row: MicrosoftAccountRecord): Record<string, u
     microsoftEmail: row.microsoftEmail,
     passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
+    mailboxStatus: row.mailboxStatus,
   };
+}
+
+function serializeMailbox(row: MicrosoftMailboxRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    microsoftEmail: row.microsoftEmail,
+    groupName: row.groupName,
+    proofMailboxAddress: row.proofMailboxAddress,
+    status: row.status,
+    syncEnabled: row.syncEnabled,
+    graphUserId: row.graphUserId,
+    graphUserPrincipalName: row.graphUserPrincipalName,
+    graphDisplayName: row.graphDisplayName,
+    authority: row.authority,
+    oauthStartedAt: row.oauthStartedAt,
+    oauthConnectedAt: row.oauthConnectedAt,
+    deltaLink: row.deltaLink,
+    unreadCount: row.unreadCount,
+    lastSyncedAt: row.lastSyncedAt,
+    lastErrorCode: row.lastErrorCode,
+    lastErrorMessage: row.lastErrorMessage,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    isAuthorized: Boolean(row.refreshToken),
+  };
+}
+
+function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    mailboxId: row.mailboxId,
+    graphMessageId: row.graphMessageId,
+    internetMessageId: row.internetMessageId,
+    conversationId: row.conversationId,
+    subject: row.subject,
+    fromName: row.fromName,
+    fromAddress: row.fromAddress,
+    receivedAt: row.receivedAt,
+    isRead: row.isRead,
+    hasAttachments: row.hasAttachments,
+    bodyContentType: row.bodyContentType,
+    bodyPreview: row.bodyPreview,
+    webLink: row.webLink,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  return {
+    ...serializeMailboxMessageSummary(row),
+    bodyContent: row.bodyContent,
+    createdAt: row.createdAt,
+  };
+}
+
+function readMicrosoftGraphSettings(settings: AppSettings): MicrosoftGraphSettingsInput {
+  return {
+    clientId: settings.microsoftGraphClientId,
+    clientSecret: settings.microsoftGraphClientSecret,
+    redirectUri: settings.microsoftGraphRedirectUri,
+    authority: settings.microsoftGraphAuthority || "common",
+  };
+}
+
+function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "success" | "error"): Response {
+  const target = new URL("/mailboxes", req.url);
+  if (accountId) {
+    target.searchParams.set("accountId", String(accountId));
+  }
+  target.searchParams.set("oauth", outcome);
+  return Response.redirect(target.toString(), 302);
 }
 
 function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
@@ -429,6 +546,67 @@ async function serveStatic(req: Request): Promise<Response> {
   return new Response("Frontend build not found. Run `bun run web:build` first.", { status: 503 });
 }
 
+async function ensureMailboxAccessToken(db: AppDatabase, mailbox: MicrosoftMailboxRecord, settings: AppSettings): Promise<{
+  mailbox: MicrosoftMailboxRecord;
+  accessToken: string;
+}> {
+  const graphSettings = readMicrosoftGraphSettings(settings);
+  assertMicrosoftGraphSettings(graphSettings);
+  if (mailbox.accessToken && !isMicrosoftTokenExpired(mailbox.accessTokenExpiresAt)) {
+    return {
+      mailbox,
+      accessToken: mailbox.accessToken,
+    };
+  }
+  if (!mailbox.refreshToken) {
+    throw new Error("mailbox_not_authorized");
+  }
+  const token = await refreshMicrosoftAccessToken({
+    clientId: graphSettings.clientId,
+    clientSecret: graphSettings.clientSecret,
+    redirectUri: graphSettings.redirectUri,
+    authority: mailbox.authority || graphSettings.authority,
+    refreshToken: mailbox.refreshToken,
+  });
+  const nextMailbox = db.updateMailboxTokens(mailbox.id, {
+    refreshToken: token.refreshToken || mailbox.refreshToken,
+    accessToken: token.accessToken,
+    accessTokenExpiresAt: token.expiresAt,
+    authority: mailbox.authority || graphSettings.authority,
+  });
+  if (!token.accessToken) {
+    throw new Error("mailbox_access_token_missing");
+  }
+  return {
+    mailbox: nextMailbox,
+    accessToken: token.accessToken,
+  };
+}
+
+async function syncMailboxInbox(db: AppDatabase, mailbox: MicrosoftMailboxRecord, settings: AppSettings): Promise<MicrosoftMailboxRecord> {
+  const { mailbox: refreshedMailbox, accessToken } = await ensureMailboxAccessToken(db, mailbox, settings);
+  const syncResult = await syncMicrosoftInbox({
+    accessToken,
+    deltaLink: refreshedMailbox.deltaLink,
+  });
+  db.upsertMailboxMessages(refreshedMailbox.id, syncResult.messages, {
+    removedGraphMessageIds: syncResult.removedGraphMessageIds,
+    keepLatest: 500,
+  });
+  const unreadCount = db.countMailboxUnread(refreshedMailbox.id);
+  return db.markMailboxStatus(refreshedMailbox.id, {
+    status: "available",
+    accessToken,
+    accessTokenExpiresAt: refreshedMailbox.accessTokenExpiresAt,
+    refreshToken: refreshedMailbox.refreshToken,
+    deltaLink: syncResult.deltaLink ?? refreshedMailbox.deltaLink,
+    unreadCount,
+    lastSyncedAt: nowIso(),
+    lastErrorCode: null,
+    lastErrorMessage: null,
+  });
+}
+
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
   const settingsDefaults = buildSettingsCodeDefaults();
@@ -478,6 +656,10 @@ async function main(): Promise<void> {
       const url = new URL(req.url);
       const pathname = url.pathname;
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
+      const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
+      const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
+      const mailboxMessagesMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/messages$/);
+      const mailboxMessageDetailMatch = pathname.match(/^\/api\/microsoft-mail\/messages\/(\d+)$/);
 
       try {
         if (pathname === "/api/events/ws") {
@@ -785,6 +967,291 @@ async function main(): Promise<void> {
         return json({
           ok: true,
           settings: serializeExtractorSettings(next),
+        });
+      }
+
+      if (pathname === "/api/microsoft-mail/settings" && req.method === "GET") {
+        return json({
+          ok: true,
+          settings: serializeMicrosoftGraphSettings(readSettings()),
+        });
+      }
+
+      if (pathname === "/api/microsoft-mail/settings" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
+        const current = readSettings();
+        const next = buildNextSettings(current, {
+          microsoftGraphClientId:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftGraphClientId")
+              ? typeof body.microsoftGraphClientId === "string"
+                ? body.microsoftGraphClientId
+                : ""
+              : undefined,
+          microsoftGraphClientSecret:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftGraphClientSecret")
+              ? typeof body.microsoftGraphClientSecret === "string"
+                ? body.microsoftGraphClientSecret.trim()
+                  ? body.microsoftGraphClientSecret
+                  : current.microsoftGraphClientSecret
+                : ""
+              : undefined,
+          microsoftGraphRedirectUri:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftGraphRedirectUri")
+              ? typeof body.microsoftGraphRedirectUri === "string"
+                ? body.microsoftGraphRedirectUri
+                : ""
+              : undefined,
+          microsoftGraphAuthority:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftGraphAuthority")
+              ? typeof body.microsoftGraphAuthority === "string"
+                ? body.microsoftGraphAuthority
+                : "common"
+              : undefined,
+        });
+        db.setSettings(next);
+        return json({
+          ok: true,
+          settings: serializeMicrosoftGraphSettings(next),
+        });
+      }
+
+      if (pathname === "/api/microsoft-mail/mailboxes" && req.method === "GET") {
+        return json({
+          ok: true,
+          rows: db.listMailboxes().map((row) => serializeMailbox(row)),
+        });
+      }
+
+      if (mailboxOauthStartMatch && req.method === "POST") {
+        const accountId = Number.parseInt(mailboxOauthStartMatch[1] || "", 10);
+        if (!Number.isInteger(accountId) || accountId < 1) {
+          return badRequest("invalid account id");
+        }
+        const account = db.getAccount(accountId);
+        if (!account) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
+        const graphSettings = readMicrosoftGraphSettings(readSettings());
+        assertMicrosoftGraphSettings(graphSettings);
+        const mailbox = db.ensureMailboxForAccount(accountId);
+        const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
+        const oauthState = createMicrosoftOauthState();
+        const nextMailbox = db.saveMailboxOauthStart(mailbox.id, {
+          oauthState,
+          oauthCodeVerifier: codeVerifier,
+          authority: graphSettings.authority,
+        });
+        const authUrl = buildMicrosoftAuthorizeUrl({
+          clientId: graphSettings.clientId,
+          redirectUri: graphSettings.redirectUri,
+          authority: graphSettings.authority,
+          state: oauthState,
+          codeChallenge,
+          loginHint: account.microsoftEmail,
+        });
+        broadcast({
+          type: "mailbox.updated",
+          payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
+          timestamp: nowIso(),
+        });
+        broadcast({
+          type: "account.updated",
+          payload: { affectedIds: [accountId], action: "mailbox_status" },
+          timestamp: nowIso(),
+        });
+        return json({
+          ok: true,
+          authUrl,
+          mailbox: serializeMailbox(nextMailbox),
+        });
+      }
+
+      if (pathname === "/api/microsoft-mail/oauth/callback" && req.method === "GET") {
+        const state = String(url.searchParams.get("state") || "").trim();
+        const oauthError = String(url.searchParams.get("error") || "").trim();
+        const oauthErrorDescription = String(url.searchParams.get("error_description") || "").trim();
+        const code = String(url.searchParams.get("code") || "").trim();
+        const mailbox = state ? db.getMailboxByOauthState(state) : null;
+        if (!mailbox) {
+          return buildMailboxRedirect(req, null, "error");
+        }
+        try {
+          if (oauthError) {
+            const status = oauthError === "interaction_required" || oauthError === "consent_required" ? "invalidated" : "failed";
+            const failedMailbox = db.markMailboxStatus(mailbox.id, {
+              status,
+              lastErrorCode: oauthError,
+              lastErrorMessage: oauthErrorDescription || oauthError,
+            });
+            broadcast({
+              type: "mailbox.updated",
+              payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
+              timestamp: nowIso(),
+            });
+            broadcast({
+              type: "account.updated",
+              payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
+              timestamp: nowIso(),
+            });
+            return buildMailboxRedirect(req, mailbox.accountId, "error");
+          }
+          if (!code) {
+            throw new Error("oauth_code_missing");
+          }
+          if (!mailbox.oauthCodeVerifier) {
+            throw new Error("oauth_code_verifier_missing");
+          }
+          const graphSettings = readMicrosoftGraphSettings(readSettings());
+          assertMicrosoftGraphSettings(graphSettings);
+          const token = await exchangeMicrosoftAuthCode({
+            clientId: graphSettings.clientId,
+            clientSecret: graphSettings.clientSecret,
+            redirectUri: graphSettings.redirectUri,
+            authority: mailbox.authority || graphSettings.authority,
+            code,
+            codeVerifier: mailbox.oauthCodeVerifier,
+          });
+          if (!token.refreshToken) {
+            throw new Error("refresh_token_missing");
+          }
+          const profile = token.accessToken ? await fetchMicrosoftProfile(token.accessToken) : null;
+          const nextMailbox = db.completeMailboxOAuth(mailbox.id, {
+            refreshToken: token.refreshToken,
+            accessToken: token.accessToken,
+            accessTokenExpiresAt: token.expiresAt,
+            authority: mailbox.authority || graphSettings.authority,
+            graphUserId: profile?.id ?? null,
+            graphUserPrincipalName: profile?.userPrincipalName ?? profile?.mail ?? null,
+            graphDisplayName: profile?.displayName ?? null,
+          });
+          broadcast({
+            type: "mailbox.updated",
+            payload: { mailboxIds: [nextMailbox.id], action: "oauth_success" },
+            timestamp: nowIso(),
+          });
+          broadcast({
+            type: "account.updated",
+            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
+            timestamp: nowIso(),
+          });
+          return buildMailboxRedirect(req, mailbox.accountId, "success");
+        } catch (error) {
+          const failedMailbox = db.markMailboxStatus(mailbox.id, {
+            status: toMailboxFailureStatus(error),
+            lastErrorCode: getMailboxErrorCode(error),
+            lastErrorMessage: getMailboxErrorMessage(error),
+          });
+          broadcast({
+            type: "mailbox.updated",
+            payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
+            timestamp: nowIso(),
+          });
+          broadcast({
+            type: "account.updated",
+            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
+            timestamp: nowIso(),
+          });
+          return buildMailboxRedirect(req, mailbox.accountId, "error");
+        }
+      }
+
+      if (mailboxSyncMatch && req.method === "POST") {
+        const mailboxId = Number.parseInt(mailboxSyncMatch[1] || "", 10);
+        if (!Number.isInteger(mailboxId) || mailboxId < 1) {
+          return badRequest("invalid mailbox id");
+        }
+        const mailbox = db.getMailbox(mailboxId);
+        if (!mailbox) {
+          return badRequest(`mailbox not found: ${mailboxId}`, 404);
+        }
+        if (!mailbox.refreshToken && !mailbox.accessToken) {
+          return badRequest("mailbox not authorized", 409);
+        }
+        try {
+          const nextMailbox = await syncMailboxInbox(db, mailbox, readSettings());
+          broadcast({
+            type: "mailbox.updated",
+            payload: { mailboxIds: [nextMailbox.id], action: "sync" },
+            timestamp: nowIso(),
+          });
+          broadcast({
+            type: "account.updated",
+            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
+            timestamp: nowIso(),
+          });
+          return json({
+            ok: true,
+            mailbox: serializeMailbox(nextMailbox),
+          });
+        } catch (error) {
+          const failedMailbox = db.markMailboxStatus(mailbox.id, {
+            status: toMailboxFailureStatus(error),
+            lastErrorCode: getMailboxErrorCode(error),
+            lastErrorMessage: getMailboxErrorMessage(error),
+          });
+          broadcast({
+            type: "mailbox.updated",
+            payload: { mailboxIds: [failedMailbox.id], action: "sync_failed" },
+            timestamp: nowIso(),
+          });
+          broadcast({
+            type: "account.updated",
+            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
+            timestamp: nowIso(),
+          });
+          return badRequest(getMailboxErrorMessage(error), failedMailbox.status === "invalidated" ? 409 : 502);
+        }
+      }
+
+      if (mailboxMessagesMatch && req.method === "GET") {
+        const mailboxId = Number.parseInt(mailboxMessagesMatch[1] || "", 10);
+        if (!Number.isInteger(mailboxId) || mailboxId < 1) {
+          return badRequest("invalid mailbox id");
+        }
+        const mailbox = db.getMailbox(mailboxId);
+        if (!mailbox) {
+          return badRequest(`mailbox not found: ${mailboxId}`, 404);
+        }
+        const limit = toInt(url.searchParams.get("limit") || undefined, 50);
+        const offset = toInt(url.searchParams.get("offset") || undefined, 0);
+        const payload = db.listMailboxMessages(mailboxId, { limit, offset });
+        return json({
+          ok: true,
+          mailbox: serializeMailbox(mailbox),
+          rows: payload.rows.map((row) => serializeMailboxMessageSummary(row)),
+          total: payload.total,
+          limit,
+          offset,
+          hasMore: offset + payload.rows.length < payload.total,
+        });
+      }
+
+      if (mailboxMessageDetailMatch && req.method === "GET") {
+        const messageId = Number.parseInt(mailboxMessageDetailMatch[1] || "", 10);
+        if (!Number.isInteger(messageId) || messageId < 1) {
+          return badRequest("invalid message id");
+        }
+        let message = db.getMailboxMessage(messageId);
+        if (!message) {
+          return badRequest(`message not found: ${messageId}`, 404);
+        }
+        if (!message.bodyContent.trim()) {
+          const mailbox = db.getMailbox(message.mailboxId);
+          if (mailbox?.refreshToken || mailbox?.accessToken) {
+            try {
+              const { accessToken } = await ensureMailboxAccessToken(db, mailbox, readSettings());
+              const detail = await fetchMicrosoftMessageDetail({
+                accessToken,
+                graphMessageId: message.graphMessageId,
+              });
+              db.upsertMailboxMessages(mailbox.id, [detail], { keepLatest: 500 });
+              message = db.getMailboxMessageByGraphId(mailbox.id, message.graphMessageId) || message;
+            } catch {}
+          }
+        }
+        return json({
+          ok: true,
+          message: serializeMailboxMessageDetail(message),
         });
       }
 
