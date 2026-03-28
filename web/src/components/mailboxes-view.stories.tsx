@@ -49,7 +49,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "微软邮箱工作台，保留左侧 mailbox 列表、中间 Inbox 列表、右侧邮件正文，并将 Graph 设置拆到独立页面。",
+        component: "微软邮箱工具页，使用紧凑的顶部工具栏和三栏工作区承载 mailbox 列表、Inbox 列表与邮件正文，Graph 设置独立到单独页面。",
       },
     },
   },
@@ -73,7 +73,7 @@ export const OpenSettingsPlay: Story = {
   render: () => <MailboxesStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("微软邮箱工作台")).toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("button", { name: "打开 Graph 设置" }));
+    await expect(canvas.getByText("微软邮箱")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("button", { name: "Graph 设置" }));
   },
 };

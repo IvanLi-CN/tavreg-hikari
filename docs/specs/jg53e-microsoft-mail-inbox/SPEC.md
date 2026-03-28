@@ -143,8 +143,8 @@
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/MailboxesView/Default
-- state: workspace hero + mailbox list + inbox + message detail
-- evidence_note: 验证收件箱工作台已移除设置表单，并保留三栏邮箱布局、账号状态标签、未读邮件列表和净化后的正文展示。
+- state: compact toolbar + mailbox list + inbox + message detail
+- evidence_note: 验证收件箱页采用紧凑工具栏与三栏工作区，移除展示型大卡片，并保留账号状态标签、未读邮件列表和净化后的正文展示。
 
 ![微软邮箱独立设置页](./assets/mailbox-settings-view.png)
 
@@ -154,8 +154,8 @@
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/MailboxSettingsView/Configured
-- state: dedicated graph settings page
-- evidence_note: 验证 Graph 凭据、callback 提示、状态摘要与返回收件箱入口已经独立到单独页面。
+- state: form-first settings layout
+- evidence_note: 验证设置页改为工具型表单布局，Graph 凭据、状态摘要、接入要求和返回邮箱入口已经独立到单独页面。
 
 ![微软账号页收信状态列](./assets/accounts-mailbox-status.png)
 

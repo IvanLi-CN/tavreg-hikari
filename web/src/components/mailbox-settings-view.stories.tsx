@@ -10,7 +10,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "微软邮箱的独立 Graph 设置页，用于维护 Client ID、Client Secret、Redirect URI 和 authority。",
+        component: "微软邮箱的独立设置页，采用工具型表单布局维护 Client ID、Client Secret、Redirect URI 和 authority。",
       },
     },
   },
@@ -71,7 +71,7 @@ export const SavePlay: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("独立设置页")).toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("button", { name: "保存 Graph 设置" }));
+    await expect(canvas.getByText("Microsoft Graph 设置")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("button", { name: "保存设置" }));
   },
 };
