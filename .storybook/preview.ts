@@ -1,5 +1,6 @@
 import type { Preview } from "@storybook/react-vite";
 import { create } from "storybook/theming";
+import { MINIMAL_VIEWPORTS } from "storybook/viewport";
 import "../web/src/styles.css";
 
 const docsTheme = create({
@@ -27,6 +28,16 @@ const docsTheme = create({
   fontCode: "\"Fira Code\", \"SF Mono\", \"JetBrains Mono\", monospace",
 });
 
+const customViewports = {
+  extractorCompact375: {
+    name: "Extractor Compact 375",
+    styles: {
+      width: "375px",
+      height: "812px",
+    },
+  },
+};
+
 const preview: Preview = {
   tags: ["autodocs"],
   parameters: {
@@ -46,6 +57,12 @@ const preview: Preview = {
     },
     docs: {
       theme: docsTheme,
+    },
+    viewport: {
+      options: {
+        ...MINIMAL_VIEWPORTS,
+        ...customViewports,
+      },
     },
     options: {
       storySort: {

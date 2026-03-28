@@ -177,9 +177,20 @@
 - capture_scope: element
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
-- story_id_or_title: Views/AccountsView/ExtractorSettingsCompact
-- state: extractor settings dialog
-- evidence_note: 验证微软账号页新增提取器设置入口、四个站点 KEY 配置与本地提取历史查询结果。
+- story_id_or_title: Views/AccountsView/Extractor Settings Dense History
+- state: dense history desktop viewport
+- evidence_note: 验证提取器设置弹窗在桌面宽度下保持头部、历史滚动区、分页与底部操作区同时可见，长状态文案与原始响应不会挤爆布局。
+
+![微软账号提取器设置弹窗（紧凑视口）](./assets/accounts-extractor-dialog-compact.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: element
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/Extractor Settings Compact Viewport
+- state: compact viewport internal scroll
+- evidence_note: 验证紧凑视口下历史区仍有明确高度并可内部滚动，筛选区、历史卡片与底部保存操作不会因为长内容或列布局而塌缩。
 
 ![微软账号列表密码点击复制](./assets/accounts-password-copy.png)
 

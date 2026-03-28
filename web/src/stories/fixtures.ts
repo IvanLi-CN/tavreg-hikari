@@ -1,5 +1,7 @@
 import type {
+  AccountExtractHistoryBatch,
   AccountExtractorHistoryPayload,
+  AccountExtractorProvider,
   AccountExtractorSettings,
   AccountRecord,
   AccountsPayload,
@@ -412,4 +414,161 @@ export const sampleExtractorHistory: AccountExtractorHistoryPayload = {
       items: [],
     },
   ],
+};
+
+const extractorStatusCycle = [
+  "insufficient_stock",
+  "rejected",
+  "accepted",
+  "invalid_key",
+  "parse_failed",
+  "error",
+] as const satisfies readonly AccountExtractHistoryBatch["status"][];
+
+function repeatSegment(prefix: string, seed: number, count: number): string {
+  return Array.from({ length: count }, (_, index) => `${prefix}-${seed}-${index}-${"X".repeat((index % 5) + 8)}`).join(" | ");
+}
+
+function buildExtractorMaskedKey(provider: AccountExtractorProvider, batchId: number): string {
+  const prefix = provider === "zhanghaoya" ? "zhya" : "shan";
+  return `${prefix}${String(batchId).padStart(4, "0")}${"*".repeat(30)}${String(batchId).padStart(4, "0")}`;
+}
+
+function buildExtractorErrorMessage(status: AccountExtractHistoryBatch["status"], batchId: number): string | null {
+  if (status === "accepted") return null;
+  if (status === "insufficient_stock") {
+    return `库存不足，当前批次无法满足 requested 数量。${repeatSegment("stock", batchId, 8)}`;
+  }
+  if (status === "rejected") {
+    return `存在重复、已尝试或不符合当前 job 约束的账号。${repeatSegment("reject", batchId, 7)}`;
+  }
+  if (status === "invalid_key") {
+    return `站点 KEY 校验失败，请重新保存后再尝试。${repeatSegment("key", batchId, 6)}`;
+  }
+  if (status === "parse_failed") {
+    return `上游返回存在不可解析原始行，已保留原始负载用于排查。${repeatSegment("parse", batchId, 7)}`;
+  }
+  return `站点返回了非预期错误，请稍后重试。${repeatSegment("provider", batchId, 8)}`;
+}
+
+function buildExtractorRawResponse(status: AccountExtractHistoryBatch["status"], batchId: number): string | null {
+  if (status === "invalid_key") {
+    return JSON.stringify({
+      status: -1,
+      msg: "invalid_key",
+      detail: repeatSegment("invalid-key", batchId, 12),
+    });
+  }
+  if (status === "accepted") {
+    return JSON.stringify({
+      status: 0,
+      msg: "ok",
+      data: {
+        mails: Array.from({ length: 3 }, (_, index) => ({
+          email: `batch${batchId}-usable-${index}@outlook.com`,
+          password: `A${batchId}-${index}-${"P".repeat(5)}`,
+        })),
+      },
+      trace: repeatSegment("accepted-trace", batchId, 14),
+    });
+  }
+  return JSON.stringify({
+    status: -1,
+    msg: status,
+    detail: repeatSegment(`detail-${status}`, batchId, 16),
+    trace: repeatSegment(`trace-${status}`, batchId + 1, 16),
+  });
+}
+
+export function createSampleExtractorHistory(options?: {
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  rowCount?: number;
+  statuses?: Array<AccountExtractHistoryBatch["status"]>;
+}): AccountExtractorHistoryPayload {
+  const page = options?.page ?? 1;
+  const pageSize = options?.pageSize ?? 10;
+  const rowCount = Math.max(0, Math.min(options?.rowCount ?? pageSize, pageSize));
+  const total = options?.total ?? 6862;
+  const statuses: readonly AccountExtractHistoryBatch["status"][] = options?.statuses?.length ? options.statuses : extractorStatusCycle;
+
+  return {
+    total,
+    page,
+    pageSize,
+    rows: Array.from({ length: rowCount }, (_, index) => {
+      const batchId = 6861 - (page - 1) * pageSize - index;
+      const provider: AccountExtractorProvider = index % 2 === 0 ? "shanyouxiang" : "zhanghaoya";
+      const status = statuses[index % statuses.length] as AccountExtractHistoryBatch["status"];
+      const requestedUsableCount = (index % 4) + 1;
+      const itemCount = status === "invalid_key" || status === "insufficient_stock" ? 0 : (index % 7) || 6;
+      const acceptedCount = status === "accepted" ? Math.max(1, Math.min(requestedUsableCount, Math.max(1, itemCount - 1))) : 0;
+
+      return {
+        id: batchId,
+        jobId: 123,
+        provider,
+        accountType: "outlook",
+        requestedUsableCount,
+        attemptBudget: requestedUsableCount + 3 + (index % 3),
+        acceptedCount,
+        status,
+        errorMessage: buildExtractorErrorMessage(status, batchId),
+        rawResponse: buildExtractorRawResponse(status, batchId),
+        maskedKey: buildExtractorMaskedKey(provider, batchId),
+        startedAt: `2026-03-27T19:${String(10 + index).padStart(2, "0")}:54.000Z`,
+        completedAt: `2026-03-27T19:${String(11 + index).padStart(2, "0")}:12.000Z`,
+        items: Array.from({ length: itemCount }, (_, itemIndex) => {
+          const parseStatus = status === "parse_failed" && itemIndex >= Math.max(1, itemCount - 2) ? "invalid" : "parsed";
+          const acceptStatus = parseStatus === "parsed" && itemIndex < acceptedCount ? "accepted" : "rejected";
+          const email = parseStatus === "invalid" ? null : `batch${batchId}-candidate-${itemIndex}@${itemIndex % 2 === 0 ? "outlook.com" : "hotmail.com"}`;
+          const password = parseStatus === "invalid" ? null : `P${batchId}-${itemIndex}-${"K".repeat(6)}`;
+
+          return {
+            id: batchId * 10 + itemIndex,
+            batchId,
+            provider,
+            rawPayload:
+              parseStatus === "invalid"
+                ? `RAW-LINE-${batchId}-${itemIndex} :: ${repeatSegment("raw-invalid", batchId + itemIndex, 12)}`
+                : `${email}:${password} :: ${repeatSegment("raw", batchId + itemIndex, 10)}`,
+            email,
+            password,
+            parseStatus,
+            acceptStatus,
+            rejectReason:
+              acceptStatus === "accepted"
+                ? null
+                : status === "rejected"
+                  ? `already_attempted :: ${repeatSegment("reject-reason", batchId + itemIndex, 8)}`
+                  : status === "parse_failed"
+                    ? `parse_failed :: ${repeatSegment("parse-reason", batchId + itemIndex, 7)}`
+                    : status === "error"
+                      ? `provider_error :: ${repeatSegment("provider-reason", batchId + itemIndex, 8)}`
+                      : status === "invalid_key"
+                        ? "invalid_key"
+                        : "insufficient_stock",
+            importedAccountId: acceptStatus === "accepted" ? batchId + itemIndex : null,
+            createdAt: `2026-03-27T19:${String(12 + index).padStart(2, "0")}:${String(10 + itemIndex).padStart(2, "0")}.000Z`,
+          };
+        }),
+      };
+    }),
+  };
+}
+
+export const sampleExtractorHistoryDense = createSampleExtractorHistory();
+
+export const sampleExtractorHistoryFailureMatrix = createSampleExtractorHistory({
+  total: 126,
+  rowCount: 6,
+  statuses: ["insufficient_stock", "rejected", "invalid_key", "parse_failed", "error"],
+});
+
+export const sampleExtractorHistoryEmpty: AccountExtractorHistoryPayload = {
+  total: 0,
+  page: 1,
+  pageSize: 10,
+  rows: [],
 };
