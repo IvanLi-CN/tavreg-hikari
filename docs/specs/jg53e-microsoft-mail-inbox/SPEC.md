@@ -17,9 +17,10 @@
 ### Goals
 
 - 新增独立 `/mailboxes` 页面，使用左侧账号列表 / 中间邮件列表 / 右侧正文的三栏布局。
+- 新增独立 `/mailboxes/settings` 页面，用于维护 Microsoft Graph `client id / client secret / redirect uri / authority`。
 - 每次导入或更新微软账号时自动确保存在对应 `microsoft_mailboxes` 记录，默认状态为 `preparing`。
 - 用 Microsoft Graph OAuth 授权码流 + web callback 接入 Inbox 只读同步，固定回调路径为 `/api/microsoft-mail/oauth/callback`。
-- 在本地 `app_settings` 中保存 Graph 设置，在账号页显示收信状态，在邮箱页支持连接、重连和手动刷新。
+- 在本地 `app_settings` 中保存 Graph 设置，在账号页显示收信状态；邮箱页只保留连接、重连和手动刷新，配置维护移到独立设置页。
 - 本地缓存 Inbox 邮件，并保留 HTML 正文净化渲染能力。
 
 ### Non-goals
@@ -99,6 +100,7 @@
 ### OAuth / Graph 设置
 
 - Graph 设置默认 authority 为 `common`，以兼容任意 Entra ID 租户与个人 Microsoft 账号。
+- `/mailboxes/settings` 是 Graph 凭据的唯一维护入口；收件箱工作台不再内嵌配置表单。
 - OAuth start 为每个 mailbox 生成独立 `state + PKCE`，并返回跳转用 `authUrl`。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
 
@@ -118,8 +120,8 @@
 
 ### 界面
 
-- 顶部设置卡片维护 Graph `client id / client secret / redirect uri / authority`。
 - 账号页在桌面表格与移动卡片中都显示“收信状态”，并增加“收件箱”入口按钮。
+- `/mailboxes/settings` 负责维护 Graph `client id / client secret / redirect uri / authority`，并提供 callback 与权限范围提示。
 - 邮箱页左栏显示 mailbox 状态、未读数、连接/重连与刷新按钮；中栏显示 Inbox 列表；右栏显示正文与邮件头信息。
 
 ## 验收标准
@@ -141,8 +143,19 @@
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/MailboxesView/Default
-- state: graph settings + mailbox list + inbox + message detail
-- evidence_note: 验证 Microsoft Graph 设置面板、三栏邮箱布局、账号状态标签、未读邮件列表和净化后的正文展示。
+- state: workspace hero + mailbox list + inbox + message detail
+- evidence_note: 验证收件箱工作台已移除设置表单，并保留三栏邮箱布局、账号状态标签、未读邮件列表和净化后的正文展示。
+
+![微软邮箱独立设置页](./assets/mailbox-settings-view.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/MailboxSettingsView/Configured
+- state: dedicated graph settings page
+- evidence_note: 验证 Graph 凭据、callback 提示、状态摘要与返回收件箱入口已经独立到单独页面。
 
 ![微软账号页收信状态列](./assets/accounts-mailbox-status.png)
 
@@ -167,4 +180,3 @@
 
 - `docs/specs/README.md`
 - `README.md`
-

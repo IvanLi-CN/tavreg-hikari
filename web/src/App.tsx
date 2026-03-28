@@ -3,6 +3,7 @@ import { AccountsView } from "@/components/accounts-view";
 import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
 import { DashboardView } from "@/components/dashboard-view";
+import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
@@ -41,7 +42,7 @@ import type {
   ProxySettings,
 } from "@/lib/app-types";
 import { jobToDraft, normalizeJobDraft } from "@/lib/job-draft";
-import { getPageFromPathname, normalizeAppPath } from "@/lib/routes";
+import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -214,6 +215,8 @@ export function App() {
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
+  const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname), [pathname]);
+  const isMailboxWorkspacePage = activePage === "mailboxes" && !isMailboxSettingsPage;
   const mailboxSelectionRef = useRef<number | null>(null);
   const autoSyncedMailboxIdsRef = useRef<number[]>([]);
 
@@ -441,7 +444,7 @@ export function App() {
   }, [extractorHistoryQuery]);
 
   useEffect(() => {
-    if (activePage !== "mailboxes") return;
+    if (!isMailboxWorkspacePage) return;
     const params = new URLSearchParams(search);
     const accountId = Number(params.get("accountId") || 0);
     if (Number.isInteger(accountId) && accountId > 0) {
@@ -460,24 +463,24 @@ export function App() {
       setSelectedMessageId(null);
       setSelectedMessageDetail(null);
     }
-  }, [activePage, mailboxes, search, selectedMailboxId]);
+  }, [isMailboxWorkspacePage, mailboxes, search, selectedMailboxId]);
 
   useEffect(() => {
-    if (activePage !== "mailboxes" || !selectedMailboxId) return;
+    if (!isMailboxWorkspacePage || !selectedMailboxId) return;
     void refreshMailboxMessages(selectedMailboxId).catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [activePage, selectedMailboxId]);
+  }, [isMailboxWorkspacePage, selectedMailboxId]);
 
   useEffect(() => {
-    if (!selectedMailbox || activePage !== "mailboxes") return;
+    if (!selectedMailbox || !isMailboxWorkspacePage) return;
     if (selectedMailbox.status === "preparing" && !selectedMailbox.lastSyncedAt && selectedMailbox.isAuthorized) {
       if (autoSyncedMailboxIdsRef.current.includes(selectedMailbox.id)) return;
       autoSyncedMailboxIdsRef.current = mergeIds(autoSyncedMailboxIdsRef.current, [selectedMailbox.id]);
       void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }
-  }, [activePage, selectedMailbox]);
+  }, [isMailboxWorkspacePage, selectedMailbox]);
 
   useEffect(() => {
-    if (activePage !== "mailboxes") return;
+    if (!isMailboxWorkspacePage) return;
     const outcome = new URLSearchParams(search).get("oauth");
     if (outcome === "error") {
       setError("Microsoft OAuth 授权失败，请检查 Graph 设置后重试。");
@@ -486,7 +489,7 @@ export function App() {
     if (outcome === "success") {
       setError(null);
     }
-  }, [activePage, search]);
+  }, [isMailboxWorkspacePage, search]);
 
   const handleOpenImportPreview = async () => {
     const parsed = parseImportContent(importContent);
@@ -830,6 +833,18 @@ export function App() {
     navigate(`/mailboxes?accountId=${accountId}`);
   };
 
+  const handleOpenMailboxSettings = () => {
+    navigate("/mailboxes/settings");
+  };
+
+  const handleBackToMailboxes = () => {
+    if (selectedMailbox) {
+      navigate(`/mailboxes?accountId=${selectedMailbox.accountId}`);
+      return;
+    }
+    navigate("/mailboxes");
+  };
+
   const handleSelectMailbox = (mailboxId: number) => {
     const mailbox = mailboxes.find((item) => item.id === mailboxId) || null;
     setSelectedMailboxId(mailboxId);
@@ -901,7 +916,7 @@ export function App() {
   };
 
   useEffect(() => {
-    if (activePage !== "mailboxes") return;
+    if (!isMailboxWorkspacePage) return;
     if (!mailboxMessages.rows.length) {
       setSelectedMessageId(null);
       setSelectedMessageDetail(null);
@@ -915,7 +930,7 @@ export function App() {
       setSelectedMessageId(firstMessageId);
       void refreshMailboxMessageDetail(firstMessageId).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }
-  }, [activePage, mailboxMessages.rows, selectedMessageId]);
+  }, [isMailboxWorkspacePage, mailboxMessages.rows, selectedMessageId]);
 
   return (
     <AppShell
@@ -991,34 +1006,42 @@ export function App() {
       ) : null}
 
       {activePage === "mailboxes" ? (
-        <MailboxesView
-          settings={microsoftGraphSettings}
-          settingsDraft={microsoftGraphSettingsDraft}
-          settingsBusy={graphSettingsBusy}
-          mailboxes={mailboxes}
-          selectedMailbox={selectedMailbox}
-          messages={mailboxMessages.rows}
-          messagesTotal={mailboxMessages.total}
-          messagesHasMore={mailboxMessages.hasMore}
-          messagesBusy={messagesBusy || mailboxesBusy}
-          selectedMessageId={selectedMessageId}
-          messageDetail={selectedMessageDetail}
-          messageBusy={messageBusy}
-          connectingMailboxId={connectingMailboxId}
-          syncingMailboxId={syncingMailboxId}
-          onSettingsDraftChange={(patch) =>
-            setMicrosoftGraphSettingsDraft((current) => ({
-              ...current,
-              ...patch,
-            }))
-          }
-          onSaveSettings={handleSaveMicrosoftGraphSettings}
-          onSelectMailbox={handleSelectMailbox}
-          onConnectMailbox={handleConnectMailbox}
-          onSyncMailbox={handleSyncMailbox}
-          onLoadMoreMessages={handleLoadMoreMailboxMessages}
-          onSelectMessage={handleSelectMailboxMessage}
-        />
+        isMailboxSettingsPage ? (
+          <MailboxSettingsView
+            settings={microsoftGraphSettings}
+            settingsDraft={microsoftGraphSettingsDraft}
+            settingsBusy={graphSettingsBusy}
+            onSettingsDraftChange={(patch) =>
+              setMicrosoftGraphSettingsDraft((current) => ({
+                ...current,
+                ...patch,
+              }))
+            }
+            onSaveSettings={handleSaveMicrosoftGraphSettings}
+            onBack={handleBackToMailboxes}
+          />
+        ) : (
+          <MailboxesView
+            settingsConfigured={microsoftGraphSettings?.configured ?? false}
+            mailboxes={mailboxes}
+            selectedMailbox={selectedMailbox}
+            messages={mailboxMessages.rows}
+            messagesTotal={mailboxMessages.total}
+            messagesHasMore={mailboxMessages.hasMore}
+            messagesBusy={messagesBusy || mailboxesBusy}
+            selectedMessageId={selectedMessageId}
+            messageDetail={selectedMessageDetail}
+            messageBusy={messageBusy}
+            connectingMailboxId={connectingMailboxId}
+            syncingMailboxId={syncingMailboxId}
+            onOpenSettings={handleOpenMailboxSettings}
+            onSelectMailbox={handleSelectMailbox}
+            onConnectMailbox={handleConnectMailbox}
+            onSyncMailbox={handleSyncMailbox}
+            onLoadMoreMessages={handleLoadMoreMailboxMessages}
+            onSelectMessage={handleSelectMailboxMessage}
+          />
+        )
       ) : null}
 
       {activePage === "apiKeys" ? (

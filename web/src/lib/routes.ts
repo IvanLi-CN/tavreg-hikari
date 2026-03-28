@@ -9,8 +9,12 @@ export function normalizeAppPath(pathname: string): string {
 export function getPageFromPathname(pathname: string): PageKey {
   const normalized = normalizeAppPath(pathname);
   if (normalized === "/accounts") return "accounts";
-  if (normalized === "/mailboxes") return "mailboxes";
+  if (normalized === "/mailboxes" || normalized.startsWith("/mailboxes/")) return "mailboxes";
   if (normalized === "/api-keys") return "apiKeys";
   if (normalized === "/proxies") return "proxies";
   return "dashboard";
+}
+
+export function isMailboxSettingsPath(pathname: string): boolean {
+  return normalizeAppPath(pathname) === "/mailboxes/settings";
 }

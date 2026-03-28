@@ -3,18 +3,14 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { MailboxesView } from "@/components/mailboxes-view";
 import type { MailboxMessageDetail, MailboxRecord } from "@/lib/app-types";
-import {
-  sampleMailboxMessageDetail,
-  sampleMailboxMessages,
-  sampleMailboxes,
-  sampleMicrosoftGraphSettings,
-} from "@/stories/fixtures";
+import { sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
 
 function MailboxesStorySurface(props?: {
   selectedMailboxId?: number;
   selectedMessageId?: number;
   messageDetail?: MailboxMessageDetail | null;
   mailboxes?: MailboxRecord[];
+  settingsConfigured?: boolean;
 }) {
   const [selectedMailboxId, setSelectedMailboxId] = useState(props?.selectedMailboxId || sampleMailboxes[1]!.id);
   const [selectedMessageId, setSelectedMessageId] = useState<number | null>(props?.selectedMessageId || sampleMailboxMessages[0]!.id);
@@ -22,14 +18,7 @@ function MailboxesStorySurface(props?: {
 
   return (
     <MailboxesView
-      settings={sampleMicrosoftGraphSettings}
-      settingsDraft={{
-        microsoftGraphClientId: sampleMicrosoftGraphSettings.microsoftGraphClientId,
-        microsoftGraphClientSecret: "",
-        microsoftGraphRedirectUri: sampleMicrosoftGraphSettings.microsoftGraphRedirectUri,
-        microsoftGraphAuthority: sampleMicrosoftGraphSettings.microsoftGraphAuthority,
-      }}
-      settingsBusy={false}
+      settingsConfigured={props?.settingsConfigured ?? true}
       mailboxes={props?.mailboxes || sampleMailboxes}
       selectedMailbox={activeMailbox}
       messages={sampleMailboxMessages}
@@ -41,8 +30,7 @@ function MailboxesStorySurface(props?: {
       messageBusy={false}
       connectingMailboxId={null}
       syncingMailboxId={null}
-      onSettingsDraftChange={fn()}
-      onSaveSettings={fn(async () => undefined)}
+      onOpenSettings={fn()}
       onSelectMailbox={(mailboxId) => setSelectedMailboxId(mailboxId)}
       onConnectMailbox={fn(async () => undefined)}
       onSyncMailbox={fn(async () => undefined)}
@@ -61,7 +49,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "微软邮箱收件箱页，包含 Graph 设置、左侧 mailbox 列表、中间 Inbox 列表以及右侧净化后的邮件正文。",
+        component: "微软邮箱工作台，保留左侧 mailbox 列表、中间 Inbox 列表、右侧邮件正文，并将 Graph 设置拆到独立页面。",
       },
     },
   },
@@ -75,17 +63,17 @@ export const Default: Story = {
   render: () => <MailboxesStorySurface />,
 };
 
-export const PreparingAndInvalidated: Story = {
+export const NeedsSetup: Story = {
   args: {} as Story["args"],
-  render: () => <MailboxesStorySurface selectedMailboxId={sampleMailboxes[0]!.id} messageDetail={null} />,
+  render: () => <MailboxesStorySurface settingsConfigured={false} selectedMailboxId={sampleMailboxes[0]!.id} messageDetail={null} />,
 };
 
-export const ConnectActionPlay: Story = {
+export const OpenSettingsPlay: Story = {
   args: {} as Story["args"],
   render: () => <MailboxesStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("Microsoft Graph 配置")).toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("button", { name: "重新授权" }));
+    await expect(canvas.getByText("微软邮箱工作台")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("button", { name: "打开 Graph 设置" }));
   },
 };
