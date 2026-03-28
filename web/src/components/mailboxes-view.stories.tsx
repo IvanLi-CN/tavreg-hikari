@@ -71,14 +71,17 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
+  args: {} as Story["args"],
   render: () => <MailboxesStorySurface />,
 };
 
 export const PreparingAndInvalidated: Story = {
+  args: {} as Story["args"],
   render: () => <MailboxesStorySurface selectedMailboxId={sampleMailboxes[0]!.id} messageDetail={null} />,
 };
 
 export const ConnectActionPlay: Story = {
+  args: {} as Story["args"],
   render: () => <MailboxesStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
