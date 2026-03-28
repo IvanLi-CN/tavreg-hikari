@@ -850,7 +850,7 @@ export function AccountsView({
           </DialogHeader>
 
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(20rem,0.72fr)_minmax(0,1.28fr)]">
-            <div className="order-2 shrink-0 space-y-4 xl:order-1 xl:min-h-0 xl:overflow-auto xl:pr-1">
+            <div className="shrink-0 space-y-4 xl:min-h-0 xl:overflow-auto xl:pr-1">
               <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
                 <div className="text-sm font-medium text-white">站点 KEY</div>
                 <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY。</div>
@@ -877,7 +877,7 @@ export function AccountsView({
               ) : null}
             </div>
 
-            <div className="order-1 min-w-0 flex flex-col gap-4 xl:order-2 xl:min-h-0 xl:flex-1">
+            <div className="min-w-0 flex flex-col gap-4 xl:min-h-0 xl:flex-1">
               <div className="grid min-w-0 gap-3 sm:grid-cols-2 2xl:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.35fr)_minmax(8.5rem,0.6fr)_auto]">
                 <FilterField label="Provider">
                   <Select
