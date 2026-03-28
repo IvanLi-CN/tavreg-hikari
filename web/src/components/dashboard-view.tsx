@@ -1,7 +1,10 @@
+import { useRef } from "react";
+import { flushSync } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -58,11 +61,34 @@ export function DashboardView({
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: "start" | "pause" | "resume" | "update_limits") => void;
 }) {
+  const needRef = useRef<BufferedNumberInputHandle>(null);
+  const parallelRef = useRef<BufferedNumberInputHandle>(null);
+  const maxAttemptsRef = useRef<BufferedNumberInputHandle>(null);
+  const autoExtractQuantityRef = useRef<BufferedNumberInputHandle>(null);
+  const autoExtractMaxWaitSecRef = useRef<BufferedNumberInputHandle>(null);
+
   const toggleExtractorSource = (provider: AccountExtractorProvider, checked: boolean) => {
     const current = new Set(jobDraft.autoExtractSources);
     if (checked) current.add(provider);
     else current.delete(provider);
     onJobDraftChange({ autoExtractSources: Array.from(current) });
+  };
+
+  const commitDraftInputs = () => {
+    needRef.current?.commit();
+    parallelRef.current?.commit();
+    maxAttemptsRef.current?.commit();
+    autoExtractQuantityRef.current?.commit();
+    autoExtractMaxWaitSecRef.current?.commit();
+  };
+
+  const handleJobActionClick = (action: "start" | "pause" | "resume" | "update_limits") => {
+    if (action === "start" || action === "update_limits") {
+      flushSync(() => {
+        commitDraftInputs();
+      });
+    }
+    onJobAction(action);
   };
 
   const autoExtractHint = job.autoExtractState
@@ -104,13 +130,23 @@ export function DashboardView({
                 </Select>
               </Field>
               <Field label="Need">
-                <Input type="number" min={1} value={jobDraft.need} onChange={(event) => onJobDraftChange({ need: Number(event.target.value) || 1 })} />
+                <BufferedNumberInput ref={needRef} min={1} value={jobDraft.need} onCommit={(value) => onJobDraftChange({ need: value })} />
               </Field>
               <Field label="Parallel">
-                <Input type="number" min={1} value={jobDraft.parallel} onChange={(event) => onJobDraftChange({ parallel: Number(event.target.value) || 1 })} />
+                <BufferedNumberInput
+                  ref={parallelRef}
+                  min={1}
+                  value={jobDraft.parallel}
+                  onCommit={(value) => onJobDraftChange({ parallel: value })}
+                />
               </Field>
               <Field label="Max Attempts">
-                <Input type="number" min={1} value={jobDraft.maxAttempts} onChange={(event) => onJobDraftChange({ maxAttempts: Number(event.target.value) || 1 })} />
+                <BufferedNumberInput
+                  ref={maxAttemptsRef}
+                  min={1}
+                  value={jobDraft.maxAttempts}
+                  onCommit={(value) => onJobDraftChange({ maxAttempts: value })}
+                />
               </Field>
             </div>
             <div className="rounded-[24px] border border-cyan-400/18 bg-cyan-400/[0.04] p-4">
@@ -185,21 +221,21 @@ export function DashboardView({
                   <div className="mt-1 text-sm text-slate-300">补号上限、等待时间与固定账号类型。</div>
                   <div className="mt-4 grid gap-3 md:grid-cols-3">
                     <Field label="Auto Quantity">
-                      <Input
-                        type="number"
+                      <BufferedNumberInput
+                        ref={autoExtractQuantityRef}
                         min={1}
                         disabled={jobDraft.autoExtractSources.length === 0}
                         value={jobDraft.autoExtractQuantity}
-                        onChange={(event) => onJobDraftChange({ autoExtractQuantity: Number(event.target.value) || 1 })}
+                        onCommit={(value) => onJobDraftChange({ autoExtractQuantity: value })}
                       />
                     </Field>
                     <Field label="Max Wait Sec">
-                      <Input
-                        type="number"
+                      <BufferedNumberInput
+                        ref={autoExtractMaxWaitSecRef}
                         min={1}
                         disabled={jobDraft.autoExtractSources.length === 0}
                         value={jobDraft.autoExtractMaxWaitSec}
-                        onChange={(event) => onJobDraftChange({ autoExtractMaxWaitSec: Number(event.target.value) || 1 })}
+                        onCommit={(value) => onJobDraftChange({ autoExtractMaxWaitSec: value })}
                       />
                     </Field>
                     <Field label="Account Type">
@@ -219,10 +255,10 @@ export function DashboardView({
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={() => onJobAction("start")}>启动</Button>
-              <Button variant="secondary" onClick={() => onJobAction("pause")}>暂停</Button>
-              <Button variant="secondary" onClick={() => onJobAction("resume")}>恢复</Button>
-              <Button variant="outline" onClick={() => onJobAction("update_limits")}>应用调参</Button>
+              <Button onClick={() => handleJobActionClick("start")}>启动</Button>
+              <Button variant="secondary" onClick={() => handleJobActionClick("pause")}>暂停</Button>
+              <Button variant="secondary" onClick={() => handleJobActionClick("resume")}>恢复</Button>
+              <Button variant="outline" onClick={() => handleJobActionClick("update_limits")}>应用调参</Button>
             </div>
           </CardContent>
         </Card>

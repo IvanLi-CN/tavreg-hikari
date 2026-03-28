@@ -1,5 +1,8 @@
+import { useRef } from "react";
+import { flushSync } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -38,6 +41,25 @@ export function ProxiesView({
   onSelectNode: (nodeName: string) => void;
   onCheckNode: (nodeName: string) => void;
 }) {
+  const timeoutRef = useRef<BufferedNumberInputHandle>(null);
+  const maxLatencyRef = useRef<BufferedNumberInputHandle>(null);
+  const apiPortRef = useRef<BufferedNumberInputHandle>(null);
+  const mixedPortRef = useRef<BufferedNumberInputHandle>(null);
+
+  const commitSettingsInputs = () => {
+    timeoutRef.current?.commit();
+    maxLatencyRef.current?.commit();
+    apiPortRef.current?.commit();
+    mixedPortRef.current?.commit();
+  };
+
+  const handleSaveClick = () => {
+    flushSync(() => {
+      commitSettingsInputs();
+    });
+    onSaveProxySettings();
+  };
+
   return (
     <section className="grid gap-4 xl:grid-cols-[0.88fr_1.12fr]">
       <div className="space-y-4">
@@ -66,20 +88,35 @@ export function ProxiesView({
                 <Input value={proxies.settings.checkUrl} onChange={(event) => onProxySettingsChange("checkUrl", event.target.value)} />
               </Field>
               <Field label="Timeout (ms)">
-                <Input type="number" value={proxies.settings.timeoutMs} onChange={(event) => onProxySettingsChange("timeoutMs", Number(event.target.value) || 1000)} />
+                <BufferedNumberInput
+                  ref={timeoutRef}
+                  min={1000}
+                  value={proxies.settings.timeoutMs}
+                  onCommit={(value) => onProxySettingsChange("timeoutMs", value)}
+                />
               </Field>
               <Field label="Max Latency (ms)">
-                <Input type="number" value={proxies.settings.maxLatencyMs} onChange={(event) => onProxySettingsChange("maxLatencyMs", Number(event.target.value) || 100)} />
+                <BufferedNumberInput
+                  ref={maxLatencyRef}
+                  min={100}
+                  value={proxies.settings.maxLatencyMs}
+                  onCommit={(value) => onProxySettingsChange("maxLatencyMs", value)}
+                />
               </Field>
               <Field label="API Port">
-                <Input type="number" value={proxies.settings.apiPort} onChange={(event) => onProxySettingsChange("apiPort", Number(event.target.value) || 1)} />
+                <BufferedNumberInput ref={apiPortRef} min={1} value={proxies.settings.apiPort} onCommit={(value) => onProxySettingsChange("apiPort", value)} />
               </Field>
               <Field label="Mixed Port">
-                <Input type="number" value={proxies.settings.mixedPort} onChange={(event) => onProxySettingsChange("mixedPort", Number(event.target.value) || 1)} />
+                <BufferedNumberInput
+                  ref={mixedPortRef}
+                  min={1}
+                  value={proxies.settings.mixedPort}
+                  onCommit={(value) => onProxySettingsChange("mixedPort", value)}
+                />
               </Field>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={onSaveProxySettings}>保存并同步</Button>
+              <Button onClick={handleSaveClick}>保存并同步</Button>
               <Select value={proxyCheckScope} onValueChange={(value) => onProxyCheckScopeChange(value as ProxyCheckScope)}>
                 <SelectTrigger className="w-[11rem]">
                   <SelectValue />
