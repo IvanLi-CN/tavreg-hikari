@@ -563,7 +563,7 @@ export const sampleExtractorHistoryDense = createSampleExtractorHistory();
 export const sampleExtractorHistoryFailureMatrix = createSampleExtractorHistory({
   total: 126,
   rowCount: 6,
-  statuses: ["insufficient_stock", "rejected", "invalid_key", "parse_failed", "error", "accepted"],
+  statuses: ["insufficient_stock", "rejected", "invalid_key", "parse_failed", "error"],
 });
 
 export const sampleExtractorHistoryEmpty: AccountExtractorHistoryPayload = {
