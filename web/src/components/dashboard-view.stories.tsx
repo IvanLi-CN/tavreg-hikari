@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { DashboardView } from "@/components/dashboard-view";
 import type { JobDraft } from "@/lib/app-types";
+import { normalizeJobDraft } from "@/lib/job-draft";
 import { sampleEvents, sampleExtractorSettings, sampleJob } from "@/stories/fixtures";
 
 const meta = {
@@ -51,14 +52,19 @@ export const Running: Story = {
       autoExtractAccountType: "outlook",
     });
     return (
-      <DashboardView
-        job={sampleJob}
-        events={sampleEvents}
-        jobDraft={draft}
-        extractorAvailability={sampleExtractorSettings.availability}
-        onJobDraftChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
-        onJobAction={() => undefined}
-      />
+      <>
+        <DashboardView
+          job={sampleJob}
+          events={sampleEvents}
+          jobDraft={draft}
+          extractorAvailability={sampleExtractorSettings.availability}
+          onJobDraftChange={(patch) => setDraft((current) => normalizeJobDraft({ ...current, ...patch }))}
+          onJobAction={() => undefined}
+        />
+        <pre data-testid="job-draft-debug" className="sr-only">
+          {JSON.stringify(draft)}
+        </pre>
+      </>
     );
   },
 };
@@ -196,5 +202,78 @@ export const ControlPlay: Story = {
     await expect(args.onJobAction).toHaveBeenCalledWith("start");
     await userEvent.click(canvas.getByRole("button", { name: "应用调参" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("update_limits");
+  },
+};
+
+export const BufferedNumberFlowPlay: Story = {
+  args: {
+    job: sampleJob,
+    events: sampleEvents,
+    jobDraft: {
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya", "hotmail666"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: sampleExtractorSettings.availability,
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  render: (args) => {
+    const [draft, setDraft] = useState<JobDraft>(args.jobDraft);
+    const [lastAction, setLastAction] = useState<string>("");
+    return (
+      <>
+        <DashboardView
+          job={sampleJob}
+          events={sampleEvents}
+          jobDraft={draft}
+          extractorAvailability={sampleExtractorSettings.availability}
+          onJobDraftChange={(patch) => {
+            setDraft((current) => normalizeJobDraft({ ...current, ...patch }));
+            args.onJobDraftChange(patch);
+          }}
+          onJobAction={(action) => {
+            setLastAction(action);
+            args.onJobAction(action);
+          }}
+        />
+        <pre data-testid="job-draft-debug" className="sr-only">
+          {JSON.stringify({ draft, lastAction })}
+        </pre>
+      </>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const draftDebug = canvas.getByTestId("job-draft-debug");
+    const maxAttemptsInput = canvas.getByLabelText("Max Attempts");
+    const needInput = canvas.getByLabelText("Need");
+    const autoQuantityInput = canvas.getByLabelText("Auto Quantity");
+
+    await userEvent.clear(maxAttemptsInput);
+    await userEvent.type(maxAttemptsInput, "10");
+    await expect(maxAttemptsInput).toHaveValue("10");
+
+    await userEvent.clear(needInput);
+    await userEvent.type(needInput, "12");
+    await userEvent.click(canvas.getByRole("button", { name: "应用调参" }));
+    await expect(needInput).toHaveValue("12");
+    await expect(draftDebug.textContent).toContain("\"need\":12");
+    await expect(draftDebug.textContent).toContain("\"lastAction\":\"update_limits\"");
+
+    await userEvent.clear(autoQuantityInput);
+    await userEvent.type(autoQuantityInput, "0");
+    await userEvent.tab();
+    await expect(autoQuantityInput).toHaveValue("1");
+
+    await userEvent.clear(maxAttemptsInput);
+    await userEvent.type(maxAttemptsInput, "1");
+    await userEvent.tab();
+    await expect(maxAttemptsInput).toHaveValue("18");
   },
 };
