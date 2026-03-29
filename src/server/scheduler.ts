@@ -233,11 +233,12 @@ function providerLabel(provider: AccountExtractorProvider): string {
 }
 
 function mapFailureCodeToBatchStatus(
-  code: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | null,
-): "invalid_key" | "insufficient_stock" | "parse_failed" | "error" {
+  code: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | "job_force_stopping" | null,
+): "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error" {
   if (code === "invalid_key") return "invalid_key";
   if (code === "insufficient_stock") return "insufficient_stock";
   if (code === "parse_failed") return "parse_failed";
+  if (code === "job_force_stopping") return "rejected";
   return "error";
 }
 
@@ -1337,7 +1338,7 @@ export class JobScheduler {
       ok: boolean;
       result?: Awaited<ReturnType<typeof fetchSingleExtractedAccount>>;
       errorMessage?: string;
-      failureCode?: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | null;
+      failureCode?: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | "job_force_stopping" | null;
       rawResponse?: string | null;
       maskedKey?: string | null;
     }) => {
@@ -1570,10 +1571,14 @@ export class JobScheduler {
         });
       })
       .catch((error) => {
+        const requestAborted = controller.signal.aborted || isAbortError(error);
+        const abortedByManualStop =
+          requestAborted
+          && isStopInProgressStatus(this.db.getJob(context.jobId)?.status ?? "idle");
         finish({
           ok: false,
-          errorMessage: isAbortError(error) ? "request aborted" : error instanceof Error ? error.message : String(error),
-          failureCode: "upstream_error",
+          errorMessage: abortedByManualStop ? "stopped by user" : requestAborted ? "request aborted" : error instanceof Error ? error.message : String(error),
+          failureCode: abortedByManualStop ? "job_force_stopping" : "upstream_error",
           rawResponse: null,
           maskedKey: maskLocalSecret(getConfiguredExtractorKey(context.provider, runtimeConfig)),
         });

@@ -157,6 +157,73 @@ test("force stop aborts tracked auto extract requests and terminates active atte
   appDb.close();
 });
 
+test("force stop records aborted auto extract requests as manual stops", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(
+    appDb,
+    process.cwd(),
+    dbPath,
+    () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+    () => undefined,
+  );
+
+  globalThis.fetch = (async (_input, init) =>
+    await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener(
+        "abort",
+        () => {
+          reject(init.signal?.reason ?? new Error("aborted"));
+        },
+        { once: true },
+      );
+    })) as typeof fetch;
+
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "outlook",
+  });
+  const state = scheduler["createAutoExtractState"](job);
+  const roundStartedAt = new Date().toISOString();
+  state.phase = "extracting";
+  state.startedAt = roundStartedAt;
+  state.currentRoundTarget = 1;
+  state.inFlightCount = 1;
+  scheduler["autoExtractStates"].set(job.id, state);
+
+  scheduler["launchAutoExtractRequest"]({
+    jobId: job.id,
+    provider: "zhanghaoya",
+    accountType: "outlook",
+    requestedUsableCount: 1,
+    attemptBudget: 1,
+    dispatchStartedAt: roundStartedAt,
+    roundStartedAt,
+    requestId: "req-force-stop-batch",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  scheduler.forceStopCurrentJob(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+  expect(history.rows[0]).toMatchObject({
+    provider: "zhanghaoya",
+    status: "rejected",
+    errorMessage: "stopped by user",
+  });
+  expect(appDb.getJob(job.id)?.status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("shutdown preserves stopped semantics while a manual stop is still draining", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
