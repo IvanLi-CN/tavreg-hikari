@@ -493,6 +493,9 @@ export class JobScheduler {
 
   pauseCurrentJob(): JobRecord {
     const job = this.requireCurrentJob();
+    if (job.status === "paused") {
+      return job;
+    }
     if (job.status !== "running") {
       throw new Error(`current job cannot be paused from ${job.status}`);
     }
@@ -504,6 +507,9 @@ export class JobScheduler {
 
   resumeCurrentJob(): JobRecord {
     const job = this.requireCurrentJob();
+    if (job.status === "running") {
+      return job;
+    }
     if (job.status !== "paused") {
       throw new Error(`current job cannot be resumed from ${job.status}`);
     }
@@ -516,7 +522,11 @@ export class JobScheduler {
   }
 
   stopCurrentJob(): JobRecord {
-    const job = this.requireCurrentJob();
+    const job = this.db.getCurrentJob();
+    if (!job) throw new Error("no current job");
+    if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
     if (!["running", "paused"].includes(job.status)) {
       throw new Error(`current job cannot be stopped from ${job.status}`);
     }
@@ -544,7 +554,11 @@ export class JobScheduler {
     if (!confirmForceStop) {
       throw new Error("force stop requires confirmForceStop=true");
     }
-    const job = this.requireCurrentJob();
+    const job = this.db.getCurrentJob();
+    if (!job) throw new Error("no current job");
+    if (job.status === "stopped" || job.status === "force_stopping") {
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
     if (!["running", "paused", "stopping"].includes(job.status)) {
       throw new Error(`current job cannot be force stopped from ${job.status}`);
     }
@@ -773,17 +787,21 @@ export class JobScheduler {
 
       const capacity = computeLaunchCapacity(job, activeCount);
       for (let i = 0; i < capacity; i += 1) {
+        const dispatchJob = this.db.getJob(jobId);
+        if (!dispatchJob || dispatchJob.status !== "running") {
+          break;
+        }
         const account = this.db.leaseNextAccount(jobId);
         if (!account) break;
-        const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${job.id}`, `attempt-${Date.now()}-${account.id}`);
-        const attempt = this.db.createAttempt(job.id, account.id, attemptOutputDir);
+        const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${dispatchJob.id}`, `attempt-${Date.now()}-${account.id}`);
+        const attempt = this.db.createAttempt(dispatchJob.id, account.id, attemptOutputDir);
         try {
-          await this.spawnAttempt(job, account, attempt, attemptOutputDir);
+          await this.spawnAttempt(dispatchJob, account, attempt, attemptOutputDir);
           this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
           this.emit("account.updated", { account: this.db.getAccount(account.id) });
-          this.emit("job.updated", { job: this.db.getJob(job.id) });
+          this.emit("job.updated", { job: this.db.getJob(dispatchJob.id) });
         } catch (error) {
-          this.failAttempt(job.id, attempt.id, account.id, {
+          this.failAttempt(dispatchJob.id, attempt.id, account.id, {
             errorCode: "launch_setup_failed",
             errorMessage: error instanceof Error ? error.message : String(error),
           });
@@ -792,6 +810,26 @@ export class JobScheduler {
 
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
+      if (refreshed.status === "paused") {
+        await delay(100);
+        continue;
+      }
+      if (isStopInProgressStatus(refreshed.status)) {
+        const stopped = this.maybeFinalizeStoppedJob(jobId);
+        if (stopped) {
+          this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(jobId) });
+          this.emit("toast", {
+            level: "info",
+            message: refreshed.status === "force_stopping" ? `job #${refreshed.id} force stopped` : `job #${refreshed.id} stopped`,
+          });
+          return;
+        }
+        await delay(100);
+        continue;
+      }
+      if (isTerminalJobStatus(refreshed.status)) {
+        return;
+      }
       const eligible = this.db.countEligibleAccounts(jobId);
       const hasAutoExtractState = this.autoExtractStates.has(jobId);
       if (eligible === 0 && refreshed.successCount < refreshed.need && refreshed.launchedCount < refreshed.maxAttempts) {

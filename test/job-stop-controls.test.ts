@@ -224,6 +224,63 @@ test("force stop records aborted auto extract requests as manual stops", async (
   appDb.close();
 });
 
+test("control actions stay idempotent under duplicate UI submissions", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+
+  expect(scheduler.pauseCurrentJob().status).toBe("paused");
+  expect(scheduler.pauseCurrentJob().status).toBe("paused");
+  expect(scheduler.resumeCurrentJob().status).toBe("running");
+  expect(scheduler.resumeCurrentJob().status).toBe("running");
+  expect(scheduler.stopCurrentJob().status).toBe("stopped");
+  expect(scheduler.stopCurrentJob().status).toBe("stopped");
+  expect(scheduler.forceStopCurrentJob(true).status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("runLoop rechecks stop state before launching more attempts", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  appDb.importAccounts([
+    { email: "loop-stop-1@outlook.com", password: "pw123456" },
+    { email: "loop-stop-2@outlook.com", password: "pw123456" },
+  ]);
+
+  let spawnCalls = 0;
+  scheduler["spawnAttempt"] = async () => {
+    spawnCalls += 1;
+    if (spawnCalls === 1) {
+      scheduler.stopCurrentJob();
+    }
+  };
+
+  const job = await scheduler.startJob({
+    runMode: "headed",
+    need: 2,
+    parallel: 2,
+    maxAttempts: 2,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  expect(spawnCalls).toBe(1);
+  expect(appDb.getJob(job.id)?.status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("shutdown preserves stopped semantics while a manual stop is still draining", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
