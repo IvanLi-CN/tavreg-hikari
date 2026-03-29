@@ -744,7 +744,15 @@ export class AppDatabase {
     this.db.exec("BEGIN IMMEDIATE;");
     try {
       this.db
-        .query("UPDATE jobs SET status = 'failed', completed_at = ?, updated_at = ?, last_error = COALESCE(last_error, 'server_restart') WHERE status IN ('running', 'completing', 'paused', 'stopping', 'force_stopping')")
+        .query(
+          "UPDATE job_attempts SET status = 'stopped', stage = 'stopped', completed_at = ?, duration_ms = 0, error_code = COALESCE(error_code, 'force_stopped'), error_message = COALESCE(error_message, 'stopped by user') WHERE status = 'running' AND job_id IN (SELECT id FROM jobs WHERE status IN ('stopping', 'force_stopping'))",
+        )
+        .run(now);
+      this.db
+        .query("UPDATE jobs SET status = 'stopped', paused_at = NULL, completed_at = ?, updated_at = ?, last_error = NULL WHERE status IN ('stopping', 'force_stopping')")
+        .run(now, now);
+      this.db
+        .query("UPDATE jobs SET status = 'failed', completed_at = ?, updated_at = ?, last_error = COALESCE(last_error, 'server_restart') WHERE status IN ('running', 'completing', 'paused')")
         .run(now, now);
       this.db
         .query("UPDATE job_attempts SET status = 'failed', stage = 'server_restart', completed_at = ?, duration_ms = 0 WHERE status = 'running'")

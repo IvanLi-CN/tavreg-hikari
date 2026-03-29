@@ -682,11 +682,16 @@ export class JobScheduler {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    for (const job of [this.db.getCurrentJob()].filter(Boolean) as JobRecord[]) {
+    const currentJob = this.db.getCurrentJob();
+    for (const job of [currentJob].filter(Boolean) as JobRecord[]) {
       this.abortAutoExtractRequests(job.id, "server shutdown");
     }
+    const preserveManualStopSemantics = currentJob ? isStopInProgressStatus(currentJob.status) : false;
     const waits: Promise<void>[] = [];
     for (const active of this.activeAttempts.values()) {
+      if (preserveManualStopSemantics) {
+        active.stopRequested = "force_stop";
+      }
       signalChildProcess(active.child, "SIGTERM");
       waits.push(
         new Promise((resolve) => {

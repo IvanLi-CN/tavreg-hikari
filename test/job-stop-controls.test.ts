@@ -157,6 +157,51 @@ test("force stop aborts tracked auto extract requests and terminates active atte
   appDb.close();
 });
 
+test("shutdown preserves stopped semantics while a manual stop is still draining", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  const imported = appDb.importAccounts([{ email: "stop-shutdown@outlook.com", password: "pw123456" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-stop-shutdown-attempt"));
+  const signals: string[] = [];
+  const listeners = new Map<string, () => void>();
+  const activeAttempt = {
+    child: {
+      pid: 0,
+      kill: (signal: string) => {
+        signals.push(signal);
+        queueMicrotask(() => listeners.get("close")?.());
+        return true;
+      },
+      once: (event: string, handler: () => void) => {
+        listeners.set(event, handler);
+      },
+    },
+    attempt,
+    account,
+    outputDir: path.join(process.cwd(), "tmp-stop-shutdown-attempt"),
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    tail: [],
+    stopRequested: null,
+  } as any;
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt);
+
+  await scheduler.shutdown();
+
+  expect(signals).toContain("SIGTERM");
+  expect(activeAttempt.stopRequested).toBe("force_stop");
+  appDb.close();
+});
+
 test("external abort signal cancels account extractor requests", async () => {
   globalThis.fetch = (async (_input, init) =>
     await new Promise<Response>((_resolve, reject) => {

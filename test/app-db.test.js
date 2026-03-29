@@ -606,6 +606,30 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
+  test("preserves manual-stop jobs and attempts across stale-state recovery", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "recover-stop@outlook.com", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-recover-stop-attempt");
+    appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    expect(reopened.getJob(job.id)).toMatchObject({
+      status: "stopped",
+      lastError: null,
+    });
+    expect(reopened.getAttempt(attempt.id)).toMatchObject({
+      status: "stopped",
+      stage: "stopped",
+      errorCode: "force_stopped",
+      errorMessage: "stopped by user",
+    });
+
+    reopened.close();
+  });
+
   test("clears stale pinned proxy names when inventory drops them", async () => {
     const { appDb } = await createTempDb();
     appDb.upsertProxyInventory(["JP1", "US1"], "JP1");
