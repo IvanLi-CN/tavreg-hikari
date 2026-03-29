@@ -34,6 +34,10 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
     defaultAutoExtractQuantity: 1,
     defaultAutoExtractMaxWaitSec: 60,
     defaultAutoExtractAccountType: "outlook",
+    microsoftGraphClientId: "",
+    microsoftGraphClientSecret: "",
+    microsoftGraphRedirectUri: "",
+    microsoftGraphAuthority: "common",
     ...overrides,
   };
 }

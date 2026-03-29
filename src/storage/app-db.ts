@@ -331,6 +331,82 @@ function fileExists(filePath: string): Promise<boolean> {
     .catch(() => false);
 }
 
+function isHardAccountSkipReason(reason: string | null | undefined): reason is Exclude<AccountSkipReason, "has_api_key"> {
+  return HARD_ACCOUNT_SKIP_REASONS.has(String(reason || "").trim() as Exclude<AccountSkipReason, "has_api_key">);
+}
+
+function isBlockingAccountSkipReason(reason: string | null | undefined): boolean {
+  return String(reason || "").trim().length > 0;
+}
+
+function deriveAccountSkipReasonFromErrorCode(errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
+  const normalized = String(errorCode || "").trim();
+  if (!normalized) return null;
+  if (/^microsoft_password_incorrect/i.test(normalized)) return "microsoft_password_incorrect";
+  if (/^microsoft_account_locked/i.test(normalized)) return "microsoft_account_locked";
+  if (/^microsoft_unknown_recovery_email/i.test(normalized)) return "microsoft_unknown_recovery_email";
+  return null;
+}
+
+function resolveAccountStatus(input: {
+  disabledAt: string | null;
+  hasApiKey: boolean;
+  leaseJobId: number | null;
+  lastResultStatus: AccountStatus;
+  skipReason: string | null;
+}): AccountStatus {
+  if (input.disabledAt != null) return "disabled";
+  if (input.hasApiKey) return "skipped_has_key";
+  if (isHardAccountSkipReason(input.skipReason)) return "disabled";
+  if (input.leaseJobId != null) {
+    return input.lastResultStatus === "running" ? "running" : "leased";
+  }
+  return isBlockingAccountSkipReason(input.skipReason) ? "failed" : "ready";
+}
+
+function resolveFailureResultStatus(input: { disabledAt: string | null; skipReason: string | null }): AccountStatus {
+  return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
+}
+
+function resolveReleasedLeaseAccountStatus(input: {
+  disabledAt: string | null;
+  hasApiKey: boolean;
+  skipReason: string | null;
+}): AccountStatus {
+  return resolveAccountStatus({
+    disabledAt: input.disabledAt,
+    hasApiKey: input.hasApiKey,
+    leaseJobId: null,
+    lastResultStatus: "ready",
+    skipReason: input.skipReason,
+  });
+}
+
+function deriveLegacyHardBlockReason(
+  reason: string | null | undefined,
+  errorCode: string | null | undefined,
+): Exclude<AccountSkipReason, "has_api_key"> | null {
+  const fromErrorCode = deriveAccountSkipReasonFromErrorCode(errorCode);
+  if (fromErrorCode) return fromErrorCode;
+  const normalizedReason = String(reason || "").trim().toLowerCase();
+  if (!normalizedReason) return null;
+  if (normalizedReason.includes("锁定") || normalizedReason.includes("locked")) return "microsoft_account_locked";
+  if (normalizedReason.includes("辅助邮箱") || normalizedReason.includes("recovery")) return "microsoft_unknown_recovery_email";
+  if (normalizedReason.includes("密码错误") || normalizedReason.includes("incorrect password")) return "microsoft_password_incorrect";
+  return null;
+}
+
+function resolveFailureSkipReason(input: {
+  hasApiKey: boolean;
+  currentSkipReason: string | null;
+  errorCode: string | null | undefined;
+}): AccountSkipReason | null {
+  if (input.hasApiKey) return "has_api_key";
+  const derived = deriveAccountSkipReasonFromErrorCode(input.errorCode);
+  if (derived) return derived;
+  return isHardAccountSkipReason(input.currentSkipReason) ? (input.currentSkipReason as AccountSkipReason) : null;
+}
+
 function accountSelectSql(whereClause = "", orderClause = ""): string {
   return `
     SELECT
@@ -2097,6 +2173,20 @@ export class AppDatabase {
       .query("SELECT * FROM microsoft_mail_messages WHERE mailbox_id = ? AND graph_message_id = ?")
       .get(mailboxId, normalizedGraphMessageId) as Record<string, unknown> | null;
     return row ? mapMailboxMessageRow(row) : null;
+  }
+
+  private hasNonRetryableAttemptForJob(jobId: number, accountId: number): boolean {
+    const attempted = this.db
+      .query(`
+        SELECT 1 AS blocked
+        FROM job_attempts
+        WHERE job_id = ?
+          AND account_id = ?
+          AND status IN ('running', 'succeeded')
+        LIMIT 1
+      `)
+      .get(jobId, accountId) as { blocked?: number } | null;
+    return Boolean(attempted?.blocked);
   }
 
   isAccountSchedulableForJob(jobId: number, accountId: number): boolean {
