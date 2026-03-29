@@ -9,6 +9,7 @@ import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import type {
+  AccountRecord,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
   AccountExtractorSettings,
@@ -91,6 +92,17 @@ function usePathname() {
 
 function mergeIds(current: number[], next: number[]): number[] {
   return Array.from(new Set([...current, ...next]));
+}
+
+function isLockedBatchConnectAccount(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): boolean {
+  return (
+    String(account.skipReason || "").trim() === "microsoft_account_locked"
+    || /^microsoft_account_locked/i.test(String(account.lastErrorCode || "").trim())
+  );
+}
+
+function isBatchConnectBlockedAccount(account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode">): boolean {
+  return Boolean(account.disabledAt) || isLockedBatchConnectAccount(account);
 }
 
 export function App() {
@@ -211,7 +223,9 @@ export function App() {
   const [mailboxesBusy, setMailboxesBusy] = useState(false);
   const [messagesBusy, setMessagesBusy] = useState(false);
   const [messageBusy, setMessageBusy] = useState(false);
-  const [connectingMailboxId, setConnectingMailboxId] = useState<number | null>(null);
+  const [accountConnectBusy, setAccountConnectBusy] = useState(false);
+  const [accountConnectProgress, setAccountConnectProgress] = useState<{ current: number; total: number } | null>(null);
+  const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
@@ -345,6 +359,10 @@ export function App() {
     } finally {
       setMessageBusy(false);
     }
+  };
+
+  const refreshMailboxAccountState = async () => {
+    await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
   };
 
   useEffect(() => {
@@ -833,6 +851,76 @@ export function App() {
     navigate(`/mailboxes?accountId=${accountId}`);
   };
 
+  const startMailboxConnectionForAccount = async (accountId: number) => {
+    const payload = await api<MailboxOauthStartPayload>(`/api/microsoft-mail/accounts/${accountId}/oauth/start`, {
+      method: "POST",
+    });
+    await refreshMailboxAccountState();
+    return payload;
+  };
+
+  const handleConnectAccount = async (accountId: number) => {
+    try {
+      setAccountConnectBusy(true);
+      setAccountConnectProgress({ current: 1, total: 1 });
+      setConnectingAccountIds([accountId]);
+      setError(null);
+      await startMailboxConnectionForAccount(accountId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setConnectingAccountIds([]);
+      setAccountConnectProgress(null);
+      setAccountConnectBusy(false);
+    }
+  };
+
+  const handleConnectSelectedAccounts = async () => {
+    if (selectedAccountIds.length === 0) return;
+    const uniqueSelectedIds = Array.from(new Set(selectedAccountIds));
+    const queue = uniqueSelectedIds.filter((accountId) => {
+      const account = accounts.rows.find((row) => row.id === accountId);
+      return !account || !isBatchConnectBlockedAccount(account);
+    });
+    const skippedAccounts = uniqueSelectedIds.length - queue.length;
+    if (queue.length === 0) {
+      setError(skippedAccounts > 0 ? "所选账号都已锁定或禁用，无法发起连接" : null);
+      return;
+    }
+    const failedAccounts: string[] = [];
+    try {
+      setAccountConnectBusy(true);
+      setError(null);
+      for (let index = 0; index < queue.length; index += 1) {
+        const accountId = queue[index]!;
+        const accountLabel = accounts.rows.find((row) => row.id === accountId)?.microsoftEmail || `#${accountId}`;
+        setAccountConnectProgress({ current: index + 1, total: queue.length });
+        setConnectingAccountIds([accountId]);
+        try {
+          await startMailboxConnectionForAccount(accountId);
+        } catch {
+          failedAccounts.push(accountLabel);
+        }
+      }
+      if (failedAccounts.length > 0 || skippedAccounts > 0) {
+        const parts: string[] = [];
+        if (failedAccounts.length > 0) {
+          parts.push(`部分账号连接失败：${failedAccounts.slice(0, 4).join("、")}${failedAccounts.length > 4 ? " 等" : ""}`);
+        }
+        if (skippedAccounts > 0) {
+          parts.push(`已跳过 ${skippedAccounts} 个锁定或禁用账号`);
+        }
+        setError(parts.join("；"));
+      }
+    } finally {
+      setConnectingAccountIds([]);
+      setAccountConnectProgress(null);
+      setAccountConnectBusy(false);
+      await refreshMailboxAccountState().catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    }
+  };
+
   const handleOpenMailboxSettings = () => {
     navigate("/mailboxes/settings");
   };
@@ -852,25 +940,6 @@ export function App() {
     setSelectedMessageDetail(null);
     if (mailbox) {
       navigate(`/mailboxes?accountId=${mailbox.accountId}`);
-    }
-  };
-
-  const handleConnectMailbox = async (mailboxId: number) => {
-    const mailbox = mailboxes.find((item) => item.id === mailboxId) || null;
-    if (!mailbox) return;
-    try {
-      setConnectingMailboxId(mailboxId);
-      setError(null);
-      const payload = await api<MailboxOauthStartPayload>(`/api/microsoft-mail/accounts/${mailbox.accountId}/oauth/start`, {
-        method: "POST",
-      });
-      await refreshMailboxes();
-      navigate(`/mailboxes?accountId=${payload.mailbox.accountId}`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      throw err;
-    } finally {
-      setConnectingMailboxId(null);
     }
   };
 
@@ -976,12 +1045,16 @@ export function App() {
           importBusy={importBusy}
           previewBusy={previewBusy}
           batchBusy={batchBusy}
+          connectBusy={accountConnectBusy}
+          connectProgress={accountConnectProgress}
           extractorSettings={extractorSettings}
           extractorSettingsBusy={extractorSettingsBusy}
           extractorHistory={extractorHistory}
           extractorHistoryQuery={extractorHistoryQuery}
           extractorHistoryBusy={extractorHistoryBusy}
           allCurrentPageSelected={allCurrentPageSelected}
+          graphSettingsConfigured={microsoftGraphSettings?.configured ?? false}
+          connectingAccountIds={connectingAccountIds}
           onImportContentChange={setImportContent}
           onImportGroupChange={setImportGroupName}
           onBatchGroupNameChange={setBatchGroupName}
@@ -997,6 +1070,8 @@ export function App() {
           onApplyBatchGroup={handleApplyBatchGroup}
           onDeleteSelected={handleDeleteSelected}
           onClearSelection={() => setSelectedAccountIds([])}
+          onConnectAccount={handleConnectAccount}
+          onConnectSelectedAccounts={handleConnectSelectedAccounts}
           onSaveProofMailbox={handleSaveProofMailbox}
           onSaveAvailability={handleSaveAvailability}
           onSaveExtractorSettings={handleSaveExtractorSettings}
@@ -1033,11 +1108,9 @@ export function App() {
             selectedMessageId={selectedMessageId}
             messageDetail={selectedMessageDetail}
             messageBusy={messageBusy}
-            connectingMailboxId={connectingMailboxId}
             syncingMailboxId={syncingMailboxId}
             onOpenSettings={handleOpenMailboxSettings}
             onSelectMailbox={handleSelectMailbox}
-            onConnectMailbox={handleConnectMailbox}
             onSyncMailbox={handleSyncMailbox}
             onLoadMoreMessages={handleLoadMoreMailboxMessages}
             onSelectMessage={handleSelectMailboxMessage}

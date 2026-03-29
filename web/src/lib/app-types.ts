@@ -8,7 +8,7 @@ export type JobControlOptions = {
 };
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
-export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated";
+export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 
 export type AccountRecord = {
   id: number;

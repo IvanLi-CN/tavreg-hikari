@@ -28,11 +28,9 @@ function MailboxesStorySurface(props?: {
       selectedMessageId={selectedMessageId}
       messageDetail={props?.messageDetail === undefined ? sampleMailboxMessageDetail : props.messageDetail}
       messageBusy={false}
-      connectingMailboxId={null}
       syncingMailboxId={null}
       onOpenSettings={fn()}
       onSelectMailbox={(mailboxId) => setSelectedMailboxId(mailboxId)}
-      onConnectMailbox={fn(async () => undefined)}
       onSyncMailbox={fn(async () => undefined)}
       onLoadMoreMessages={fn(async () => undefined)}
       onSelectMessage={async (messageId) => {

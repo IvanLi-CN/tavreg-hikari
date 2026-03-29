@@ -111,12 +111,16 @@ const baseArgs = {
   importBusy: false,
   previewBusy: false,
   batchBusy: false,
+  connectBusy: false,
+  connectProgress: null,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
   extractorHistory: sampleExtractorHistory,
   extractorHistoryQuery: createDefaultExtractorHistoryQuery(),
   extractorHistoryBusy: false,
   allCurrentPageSelected: false,
+  graphSettingsConfigured: true,
+  connectingAccountIds: [],
   onImportContentChange: fn(),
   onImportGroupChange: fn(),
   onBatchGroupNameChange: fn(),
@@ -129,6 +133,8 @@ const baseArgs = {
   onApplyBatchGroup: fn(),
   onDeleteSelected: fn(),
   onClearSelection: fn(),
+  onConnectAccount: fn(async () => undefined),
+  onConnectSelectedAccounts: fn(async () => undefined),
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
   onSaveExtractorSettings: fn(async () => undefined),
@@ -145,12 +151,17 @@ type AccountsStorySurfaceProps = {
   importBusy?: boolean;
   previewBusy?: boolean;
   batchBusy?: boolean;
+  connectBusy?: boolean;
   extractorSettings?: AccountExtractorSettings | null;
   extractorHistory?: AccountExtractorHistoryPayload;
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
   frameClassName?: string;
   initialSelectedIds?: number[];
+  graphSettingsConfigured?: boolean;
+  connectingAccountIds?: number[];
+  onConnectAccount?: (accountId: number) => Promise<void>;
+  onConnectSelectedAccounts?: () => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
 };
@@ -185,12 +196,16 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         importBusy={Boolean(props.importBusy)}
         previewBusy={Boolean(props.previewBusy)}
         batchBusy={Boolean(props.batchBusy)}
+        connectBusy={Boolean(props.connectBusy)}
+        connectProgress={props.connectBusy ? { current: 1, total: Math.max(1, selectedIds.length) } : null}
         extractorSettings={extractorSettings}
         extractorSettingsBusy={false}
         extractorHistory={extractorHistory}
         extractorHistoryQuery={extractorHistoryQuery}
         extractorHistoryBusy={Boolean(props.extractorHistoryBusy)}
         allCurrentPageSelected={selectedIds.length > 0 && selectedIds.length === accounts.rows.length}
+        graphSettingsConfigured={props.graphSettingsConfigured ?? true}
+        connectingAccountIds={props.connectingAccountIds ?? []}
         onImportContentChange={setContent}
         onImportGroupChange={setImportGroupName}
         onBatchGroupNameChange={setBatchGroupName}
@@ -203,6 +218,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onApplyBatchGroup={() => undefined}
         onDeleteSelected={() => undefined}
         onClearSelection={() => setSelectedIds([])}
+        onConnectAccount={props.onConnectAccount ?? (async () => undefined)}
+        onConnectSelectedAccounts={props.onConnectSelectedAccounts ?? (async () => undefined)}
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
@@ -271,7 +288,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组和批量删除的交互面。账号池样例额外覆盖瞬时失败可复用、硬账号阻断和人工停用三类状态，便于核对失败复用策略。",
+          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
       },
     },
   },
@@ -518,5 +535,26 @@ export const RestoreBlockedAccountPlay: Story = {
     await expect(restoreButtons.length).toBeGreaterThan(0);
     await userEvent.click(restoreButtons[0]!);
     await expect(restoreAvailabilitySpy).toHaveBeenCalledWith(expect.any(Number), false, null);
+  },
+};
+
+const batchConnectSpy = fn(async () => undefined);
+
+export const BatchConnectSelectionPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialSelectedIds={[1, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "批量连接入口固定在微软账号页；锁定或禁用账号仍可保留在勾选集里，但工具栏只统计可连接账号并串行发起连接。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("可连接 2 条")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "已锁定" })).toBeDisabled();
+    await userEvent.click(canvas.getByRole("button", { name: "批量连接" }));
+    await expect(batchConnectSpy).toHaveBeenCalledTimes(1);
   },
 };

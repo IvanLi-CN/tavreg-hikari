@@ -417,6 +417,25 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("marks locked accounts unavailable with an explicit disabled reason", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "locked-ui@outlook.com", password: "locked-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.markAccountLocked(accountId, "Microsoft 账户已锁定", "microsoft_account_locked");
+    const account = appDb.getAccount(accountId);
+
+    expect(account).toMatchObject({
+      lastResultStatus: "disabled",
+      lastErrorCode: "microsoft_account_locked",
+      skipReason: "microsoft_account_locked",
+      disabledReason: "Microsoft 账户已锁定",
+    });
+    expect(account?.disabledAt).toBeTruthy();
+
+    appDb.close();
+  });
+
   test("clears the unknown recovery block after a proof mailbox is saved", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);

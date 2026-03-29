@@ -3,6 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 export const MICROSOFT_GRAPH_SCOPES = ["openid", "offline_access", "User.Read", "Mail.Read"] as const;
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
 const INVALIDATED_ERROR_CODES = new Set(["invalid_grant", "interaction_required", "consent_required"]);
+const LOCKED_ERROR_CODES = new Set(["microsoft_account_locked"]);
 
 export interface MicrosoftGraphSettingsInput {
   clientId: string;
@@ -102,6 +103,24 @@ function buildMicrosoftError(status: number | null, payload: MicrosoftGraphBody 
     payload?.error?.innerError?.message ||
     fallback;
   return new MicrosoftGraphError(message, { code, status });
+}
+
+function extractOpaqueErrorCode(error: unknown): string | null {
+  if (!(error instanceof Error)) return null;
+  const firstLine = String(error.message || "")
+    .split(/\r?\n/, 1)[0]
+    ?.trim();
+  if (!firstLine) return null;
+  const match = firstLine.match(/^(?:[A-Za-z]*Error:\s*)?([a-z0-9_]+)(?::|$)/i);
+  return match?.[1]?.trim() || null;
+}
+
+function normalizeOpaqueErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const firstLine = String(error.message || "")
+    .split(/\r?\n/, 1)[0]
+    ?.trim();
+  return firstLine?.replace(/^[A-Za-z]*Error:\s*/i, "") || error.message;
 }
 
 function normalizeTokenResult(payload: Record<string, unknown>): MicrosoftTokenResult {
@@ -332,7 +351,18 @@ export function assertMicrosoftGraphSettings(settings: MicrosoftGraphSettingsInp
   }
 }
 
-export function toMailboxFailureStatus(error: unknown): "failed" | "invalidated" {
+export function isLockedMailboxErrorCode(code: string | null | undefined): boolean {
+  return LOCKED_ERROR_CODES.has(String(code || "").trim());
+}
+
+export function toMailboxFailureStatus(error: unknown): "failed" | "invalidated" | "locked" {
+  const opaqueCode = extractOpaqueErrorCode(error);
+  if (isLockedMailboxErrorCode(opaqueCode)) {
+    return "locked";
+  }
+  if (opaqueCode != null && INVALIDATED_ERROR_CODES.has(opaqueCode)) {
+    return "invalidated";
+  }
   if (error instanceof MicrosoftGraphError && error.isInvalidated) {
     return "invalidated";
   }
@@ -343,9 +373,13 @@ export function getMailboxErrorCode(error: unknown): string | null {
   if (error instanceof MicrosoftGraphError) {
     return error.code || null;
   }
-  return error instanceof Error ? error.name || null : null;
+  return extractOpaqueErrorCode(error) || (error instanceof Error ? error.name || null : null);
 }
 
 export function getMailboxErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const code = getMailboxErrorCode(error);
+  if (isLockedMailboxErrorCode(code)) {
+    return "Microsoft 账户已锁定";
+  }
+  return normalizeOpaqueErrorMessage(error);
 }

@@ -37,6 +37,7 @@ import {
   fetchMicrosoftProfile,
   getMailboxErrorCode,
   getMailboxErrorMessage,
+  isLockedMailboxErrorCode,
   isMicrosoftTokenExpired,
   refreshMicrosoftAccessToken,
   syncMicrosoftInbox,
@@ -479,6 +480,58 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
   return Response.redirect(target.toString(), 302);
 }
 
+function isLockedAccountRecord(
+  account: Pick<MicrosoftAccountRecord, "skipReason" | "lastErrorCode" | "disabledAt"> | null | undefined,
+): boolean {
+  return (
+    String(account?.skipReason || "").trim() === "microsoft_account_locked"
+    || /^microsoft_account_locked/i.test(String(account?.lastErrorCode || "").trim())
+  );
+}
+
+function getAccountConnectBlockMessage(
+  account: Pick<MicrosoftAccountRecord, "skipReason" | "lastErrorCode" | "disabledAt">,
+): string | null {
+  if (isLockedAccountRecord(account)) {
+    return "Microsoft 账户已锁定，请先恢复可用后再连接";
+  }
+  if (account.disabledAt) {
+    return "账号已被禁用，请先恢复可用后再连接";
+  }
+  return null;
+}
+
+function applyMailboxFailureState(input: {
+  db: AppDatabase;
+  mailbox: MicrosoftMailboxRecord;
+  error: unknown;
+  action: "oauth_error" | "sync_failed";
+  broadcast: (event: ServerEvent) => void;
+}): MicrosoftMailboxRecord {
+  const errorCode = getMailboxErrorCode(input.error);
+  const errorMessage = getMailboxErrorMessage(input.error);
+  const status = toMailboxFailureStatus(input.error);
+  const failedMailbox = input.db.markMailboxStatus(input.mailbox.id, {
+    status,
+    lastErrorCode: errorCode,
+    lastErrorMessage: errorMessage,
+  });
+  if (status === "locked" || isLockedMailboxErrorCode(errorCode)) {
+    input.db.markAccountLocked(input.mailbox.accountId, errorMessage, errorCode || "microsoft_account_locked");
+  }
+  input.broadcast({
+    type: "mailbox.updated",
+    payload: { mailboxIds: [failedMailbox.id], action: input.action },
+    timestamp: nowIso(),
+  });
+  input.broadcast({
+    type: "account.updated",
+    payload: { affectedIds: [input.mailbox.accountId], action: "mailbox_status" },
+    timestamp: nowIso(),
+  });
+  return failedMailbox;
+}
+
 function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
   const job = db.getCurrentJob();
   if (!job) {
@@ -771,20 +824,12 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   } catch (error) {
     const currentMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
     if (currentMailbox.status === "preparing") {
-      const failedMailbox = input.db.markMailboxStatus(nextMailbox.id, {
-        status: "failed",
-        lastErrorCode: "microsoft_oauth_automation_failed",
-        lastErrorMessage: getMailboxErrorMessage(error),
-      });
-      input.broadcast({
-        type: "mailbox.updated",
-        payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
-        timestamp: nowIso(),
-      });
-      input.broadcast({
-        type: "account.updated",
-        payload: { affectedIds: [input.accountId], action: "mailbox_status" },
-        timestamp: nowIso(),
+      applyMailboxFailureState({
+        db: input.db,
+        mailbox: currentMailbox,
+        error,
+        action: "oauth_error",
+        broadcast: input.broadcast,
       });
     }
     throw error;
@@ -919,6 +964,10 @@ async function main(): Promise<void> {
         const graphSettings = readMicrosoftGraphSettings(readSettings());
         if (graphSettings.clientId.trim() && graphSettings.clientSecret.trim() && graphSettings.redirectUri.trim()) {
           for (const accountId of summary.affectedIds) {
+            const account = db.getAccount(accountId);
+            if (!account || getAccountConnectBlockMessage(account)) {
+              continue;
+            }
             const mailbox = db.getMailboxByAccountId(accountId);
             const shouldAutoAuthorize =
               !mailbox ||
@@ -1238,6 +1287,14 @@ async function main(): Promise<void> {
         if (!Number.isInteger(accountId) || accountId < 1) {
           return badRequest("invalid account id");
         }
+        const account = db.getAccount(accountId);
+        if (!account) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
+        const connectBlockMessage = getAccountConnectBlockMessage(account);
+        if (connectBlockMessage) {
+          return badRequest(connectBlockMessage, 409);
+        }
         try {
           const { mailbox: refreshedMailbox, workerResult } = await runExclusiveMailboxOauth(() =>
             authorizeMailboxWithBrowserAutomation({
@@ -1257,7 +1314,7 @@ async function main(): Promise<void> {
         } catch (error) {
           const failedMailbox = db.getMailboxByAccountId(accountId);
           const status = failedMailbox?.status;
-          return badRequest(getMailboxErrorMessage(error), status === "invalidated" ? 409 : 502);
+          return badRequest(getMailboxErrorMessage(error), status === "invalidated" || status === "locked" ? 409 : 502);
         }
       }
 
@@ -1272,21 +1329,12 @@ async function main(): Promise<void> {
         }
         try {
           if (oauthError) {
-            const status = oauthError === "interaction_required" || oauthError === "consent_required" ? "invalidated" : "failed";
-            const failedMailbox = db.markMailboxStatus(mailbox.id, {
-              status,
-              lastErrorCode: oauthError,
-              lastErrorMessage: oauthErrorDescription || oauthError,
-            });
-            broadcast({
-              type: "mailbox.updated",
-              payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
-              timestamp: nowIso(),
-            });
-            broadcast({
-              type: "account.updated",
-              payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
-              timestamp: nowIso(),
+            applyMailboxFailureState({
+              db,
+              mailbox,
+              error: new Error(`${oauthError}:${oauthErrorDescription || oauthError}`),
+              action: "oauth_error",
+              broadcast,
             });
             return buildMailboxRedirect(req, mailbox.accountId, "error");
           }
@@ -1331,20 +1379,12 @@ async function main(): Promise<void> {
           });
           return buildMailboxRedirect(req, mailbox.accountId, "success");
         } catch (error) {
-          const failedMailbox = db.markMailboxStatus(mailbox.id, {
-            status: toMailboxFailureStatus(error),
-            lastErrorCode: getMailboxErrorCode(error),
-            lastErrorMessage: getMailboxErrorMessage(error),
-          });
-          broadcast({
-            type: "mailbox.updated",
-            payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
-            timestamp: nowIso(),
-          });
-          broadcast({
-            type: "account.updated",
-            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
-            timestamp: nowIso(),
+          applyMailboxFailureState({
+            db,
+            mailbox,
+            error,
+            action: "oauth_error",
+            broadcast,
           });
           return buildMailboxRedirect(req, mailbox.accountId, "error");
         }
@@ -1379,22 +1419,14 @@ async function main(): Promise<void> {
             mailbox: serializeMailbox(nextMailbox),
           });
         } catch (error) {
-          const failedMailbox = db.markMailboxStatus(mailbox.id, {
-            status: toMailboxFailureStatus(error),
-            lastErrorCode: getMailboxErrorCode(error),
-            lastErrorMessage: getMailboxErrorMessage(error),
+          const failedMailbox = applyMailboxFailureState({
+            db,
+            mailbox,
+            error,
+            action: "sync_failed",
+            broadcast,
           });
-          broadcast({
-            type: "mailbox.updated",
-            payload: { mailboxIds: [failedMailbox.id], action: "sync_failed" },
-            timestamp: nowIso(),
-          });
-          broadcast({
-            type: "account.updated",
-            payload: { affectedIds: [mailbox.accountId], action: "mailbox_status" },
-            timestamp: nowIso(),
-          });
-          return badRequest(getMailboxErrorMessage(error), failedMailbox.status === "invalidated" ? 409 : 502);
+          return badRequest(getMailboxErrorMessage(error), failedMailbox.status === "invalidated" || failedMailbox.status === "locked" ? 409 : 502);
         }
       }
 

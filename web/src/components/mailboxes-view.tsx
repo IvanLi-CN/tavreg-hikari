@@ -127,11 +127,9 @@ export function MailboxesView(props: {
   selectedMessageId: number | null;
   messageDetail: MailboxMessageDetail | null;
   messageBusy: boolean;
-  connectingMailboxId: number | null;
   syncingMailboxId: number | null;
   onOpenSettings: () => void;
   onSelectMailbox: (mailboxId: number) => void;
-  onConnectMailbox: (mailboxId: number) => Promise<void>;
   onSyncMailbox: (mailboxId: number) => Promise<void>;
   onLoadMoreMessages: () => Promise<void>;
   onSelectMessage: (messageId: number) => Promise<void>;
@@ -143,6 +141,7 @@ export function MailboxesView(props: {
   const totalUnread = props.mailboxes.reduce((sum, mailbox) => sum + mailbox.unreadCount, 0);
   const selectedMailboxSyncing = props.selectedMailbox ? props.syncingMailboxId === props.selectedMailbox.id : false;
   const invalidatedCount = props.mailboxes.filter((mailbox) => mailbox.status === "invalidated").length;
+  const lockedCount = props.mailboxes.filter((mailbox) => mailbox.status === "locked").length;
 
   return (
     <div className="space-y-4">
@@ -185,6 +184,7 @@ export function MailboxesView(props: {
             <Badge variant="neutral">邮箱 {props.mailboxes.length}</Badge>
             <Badge variant={totalUnread > 0 ? "info" : "neutral"}>未读 {totalUnread}</Badge>
             <Badge variant={invalidatedCount > 0 ? "warning" : "neutral"}>需重连 {invalidatedCount}</Badge>
+            <Badge variant={lockedCount > 0 ? "danger" : "neutral"}>锁定 {lockedCount}</Badge>
             {props.selectedMailbox ? (
               <span className="ml-auto text-slate-500">
                 当前账号 {props.selectedMailbox.graphDisplayName || props.selectedMailbox.microsoftEmail}
@@ -194,7 +194,7 @@ export function MailboxesView(props: {
 
           {!props.settingsConfigured ? (
             <div className="rounded-xl border border-amber-300/20 bg-amber-300/[0.06] px-3 py-2 text-sm text-amber-50">
-              还没有保存 Microsoft Graph 凭据。先完成配置，再对账号发起授权。
+              还没有保存 Microsoft Graph 凭据。先完成配置，再回到微软账号页发起连接。
             </div>
           ) : null}
         </CardContent>
@@ -204,29 +204,15 @@ export function MailboxesView(props: {
         <Card className="border-white/10 bg-slate-950/55 shadow-none">
           <PaneHeader
             title="邮箱账号"
-            description="导入的微软账号会自动加入这里。"
+            description="导入的微软账号会自动加入这里，连接入口统一放在微软账号页。"
             actions={
               props.selectedMailbox ? (
                 <div className="flex gap-2">
                   <Button
-                    variant={props.selectedMailbox.isAuthorized ? "secondary" : "outline"}
-                    size="sm"
-                    onClick={() => void props.onConnectMailbox(props.selectedMailbox!.id)}
-                    disabled={!props.settingsConfigured || props.connectingMailboxId === props.selectedMailbox.id}
-                  >
-                    {props.connectingMailboxId === props.selectedMailbox.id
-                      ? "授权中…"
-                      : !props.settingsConfigured
-                        ? "先配置"
-                        : props.selectedMailbox.isAuthorized
-                          ? "重连"
-                          : "连接"}
-                  </Button>
-                  <Button
                     variant="outline"
                     size="sm"
                     onClick={() => void props.onSyncMailbox(props.selectedMailbox!.id)}
-                    disabled={!props.selectedMailbox.isAuthorized || props.syncingMailboxId === props.selectedMailbox.id}
+                    disabled={!props.selectedMailbox.isAuthorized || props.selectedMailbox.status === "locked" || props.syncingMailboxId === props.selectedMailbox.id}
                   >
                     {props.syncingMailboxId === props.selectedMailbox.id ? "刷新中…" : "刷新"}
                   </Button>

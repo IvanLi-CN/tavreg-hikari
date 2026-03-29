@@ -4,7 +4,7 @@
 
 - Status: 已实现
 - Created: 2026-03-28
-- Last: 2026-03-29
+- Last: 2026-03-30
 
 ## 背景 / 问题陈述
 
@@ -21,7 +21,7 @@
 - 每次导入或更新微软账号时自动确保存在对应 `microsoft_mailboxes` 记录，默认状态为 `preparing`。
 - 用 Microsoft Graph OAuth 授权码流 + web callback 接入 Inbox 只读同步，固定回调路径为 `/api/microsoft-mail/oauth/callback`。
 - Graph 设置完整后，系统在自有 Chromium 浏览器中自动完成 Microsoft 登录、proof 与 consent，不要求用户手动点击 OAuth 页面。
-- 在本地 `app_settings` 中保存 Graph 设置，在账号页显示收信状态；邮箱页只保留连接、重连和手动刷新，配置维护移到独立设置页。
+- 在本地 `app_settings` 中保存 Graph 设置，在账号页显示收信状态，并由账号页承载单账号与批量串行连接；邮箱页只保留浏览与手动刷新，配置维护移到独立设置页。
 - 本地缓存 Inbox 邮件，并保留 HTML 正文净化渲染能力。
 
 ### Non-goals
@@ -43,7 +43,7 @@
 ### `microsoft_mailboxes`
 
 - `account_id`：与 `microsoft_accounts.id` 一对一
-- `status`：`preparing | available | failed | invalidated`
+- `status`：`preparing | available | failed | invalidated | locked`
 - `sync_enabled`
 - `refresh_token`
 - `access_token`
@@ -102,6 +102,7 @@
 
 - Graph 设置默认 authority 为 `common`，以兼容任意 Entra ID 租户与个人 Microsoft 账号。
 - `/mailboxes/settings` 是 Graph 凭据的唯一维护入口；收件箱工作台不再内嵌配置表单。
+- 微软账号页是唯一连接入口：支持单账号连接与基于勾选集的批量串行连接；锁定或人工禁用账号不会发起连接。
 - OAuth start 为每个 mailbox 生成独立 `state + PKCE`，然后由后端拉起自有 Chromium 浏览器完成授权，不再把 `authUrl` 暴露给前端跳转。
 - 导入账号成功后，如果 Graph 设置完整且该 mailbox 仍未授权、已失败或已失效，系统会自动排队触发一次浏览器授权。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
@@ -112,6 +113,7 @@
 - `available`：refresh token 可用，最近一次同步成功。
 - `failed`：最近一次 OAuth 或同步失败，但仍可直接重试。
 - `invalidated`：Graph 返回 `invalid_grant`、`interaction_required`、`consent_required` 等必须重新授权的错误。
+- `locked`：微软明确返回账号锁定，系统同步把账号标记为不可用并阻断后续连接与自动授权。
 
 ### 同步与缓存
 
@@ -122,15 +124,17 @@
 
 ### 界面
 
-- 账号页在桌面表格与移动卡片中都显示“收信状态”，并增加“收件箱”入口按钮。
+- 账号页在桌面表格与移动卡片中都显示“收信状态”，并增加“收件箱”入口、单账号连接按钮以及批量串行连接工具栏。
 - `/mailboxes/settings` 负责维护 Graph `client id / client secret / redirect uri / authority`，并提供 callback 与权限范围提示。
-- 邮箱页左栏显示 mailbox 状态、未读数、连接/重连与刷新按钮；中栏显示 Inbox 列表；右栏显示正文与邮件头信息。
+- 邮箱页左栏显示 mailbox 状态、未读数与最近异常，但不再提供连接入口；中栏显示 Inbox 列表；右栏显示正文与邮件头信息。
 
 ## 验收标准
 
 - Given 新导入或重复导入同一微软账号，When 导入完成，Then `microsoft_mailboxes` 中对应账号始终只有一条记录，默认状态为 `preparing`，且不会清空已有 OAuth token。
 - Given Graph 设置已保存并点击连接邮箱，When 浏览器授权与 callback 成功，Then mailbox 会写入 refresh token 与 Graph 用户信息，并返回 `/mailboxes`。
 - Given Graph 设置已保存并导入新微软账号，When mailbox 尚未授权，Then 系统会自动排队拉起浏览器完成 OAuth；如果失败，则 mailbox 状态转为 `failed` 或 `invalidated`。
+- Given 微软返回账号锁定错误，When 自动授权、手动连接或同步失败，Then mailbox 状态转为 `locked`，对应微软账号同步标记为不可用，且账号页连接按钮保持禁用。
+- Given 在微软账号页勾选多个账号，When 触发批量连接，Then 系统按勾选顺序逐个执行连接，并自动跳过已锁定或已禁用账号。
 - Given mailbox 已授权但尚未同步，When 首次进入 `/mailboxes` 并选中它，Then 自动触发一次同步；成功后状态变为 `available`。
 - Given Graph 返回授权失效类错误，When 刷新 token 或同步失败，Then mailbox 状态转为 `invalidated`，账号页与邮箱页都会暴露该状态。
 - Given 邮件正文是 HTML，When 右栏展示正文，Then 内容必须经过净化后再渲染。
@@ -147,7 +151,7 @@
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/MailboxesView/Default
 - state: compact toolbar + mailbox list + inbox + message detail
-- evidence_note: 验证收件箱页采用紧凑工具栏与三栏工作区，移除展示型大卡片，并保留账号状态标签、未读邮件列表和净化后的正文展示。
+- evidence_note: 验证收件箱页采用紧凑工具栏与三栏工作区，显示锁定计数并把连接入口明确收回微软账号页，同时保留账号状态标签、未读邮件列表和净化后的正文展示。
 
 ![微软邮箱独立设置页](./assets/mailbox-settings-view.png)
 
@@ -169,7 +173,7 @@
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/AccountsView/Default
 - state: account table with mailbox status
-- evidence_note: 验证微软账号页新增“收信状态”列与“收件箱”入口，并同时展示 `preparing / available / invalidated` 样例。
+- evidence_note: 验证微软账号页新增“收信状态”列、单账号连接、批量串行连接工具栏与“收件箱”入口，并同时展示 `preparing / available / locked` 样例。
 
 ## 里程碑
 

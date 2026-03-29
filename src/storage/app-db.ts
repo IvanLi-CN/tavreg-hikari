@@ -84,7 +84,7 @@ export type AccountExtractBatchStatus =
   | "error";
 export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
-export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated";
+export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -1489,6 +1489,39 @@ export class AppDatabase {
         WHERE id = ?
       `)
       .run(now, reason.trim(), current.skipReason, now, errorCode ?? null, now, accountId);
+  }
+
+  markAccountLocked(
+    accountId: number,
+    reason = "Microsoft 账户已锁定",
+    errorCode: string | null = "microsoft_account_locked",
+    options?: { releaseLease?: boolean },
+  ): void {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
+    const now = nowIso();
+    const releaseLease = options?.releaseLease !== false;
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET disabled_at = COALESCE(disabled_at, ?),
+            disabled_reason = ?,
+            skip_reason = 'microsoft_account_locked',
+            last_result_status = 'disabled',
+            last_result_at = ?,
+            last_error_code = COALESCE(?, last_error_code),
+            updated_at = ?${
+              releaseLease
+                ? `,
+            lease_job_id = NULL,
+            lease_started_at = NULL`
+                : ""
+            }
+        WHERE id = ?
+      `)
+      .run(now, reason.trim() || "Microsoft 账户已锁定", now, errorCode ?? "microsoft_account_locked", now, accountId);
   }
 
   deleteAccounts(ids: number[]): { deleted: number; blockedIds: number[] } {
