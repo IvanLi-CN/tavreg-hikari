@@ -46,6 +46,11 @@ function isRestorableAccountBlock(reason: string | null | undefined): boolean {
   return ["microsoft_password_incorrect", "microsoft_account_locked", "microsoft_unknown_recovery_email"].includes(String(reason || "").trim());
 }
 
+function getAccountDisplayStatus(account: Pick<AccountRecord, "lastResultStatus" | "skipReason" | "disabledAt">): string {
+  if (account.disabledAt || isRestorableAccountBlock(account.skipReason)) return "disabled";
+  return account.lastResultStatus;
+}
+
 function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
   if (!account.skipReason) return "—";
   if (account.skipReason === "has_api_key") return "已有 API key";
@@ -659,7 +664,7 @@ export function AccountsView({
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
-                              <dd><StatusBadge status={row.lastResultStatus} /></dd>
+                              <dd><StatusBadge status={getAccountDisplayStatus(row)} /></dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">导入时间</dt>
@@ -730,7 +735,7 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
-                          <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
+                          <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{formatAccountBlockReason(row)}</TableCell>

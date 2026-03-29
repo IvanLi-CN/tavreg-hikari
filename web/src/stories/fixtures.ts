@@ -123,8 +123,8 @@ export const sampleAccounts = {
   summary: {
     ready: 1,
     linked: 1,
-    failed: 3,
-    disabled: 1,
+    failed: 1,
+    disabled: 3,
   },
   groups: ["default", "linked", "failed-pool", "manual-hold", "retry-pool"],
   rows: [
@@ -189,7 +189,7 @@ export const sampleAccounts = {
       accountSource: "shanyouxiang",
       sourceRawPayload: "gamma@outlook.com----pass-111",
       lastUsedAt: "2026-03-18T06:59:00.000Z",
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       lastResultAt: "2026-03-18T07:01:00.000Z",
       lastErrorCode: "microsoft_password_incorrect",
       skipReason: "microsoft_password_incorrect",
@@ -212,7 +212,7 @@ export const sampleAccounts = {
       accountSource: "zhanghaoya",
       sourceRawPayload: "delta@outlook.com----pass-222",
       lastUsedAt: "2026-03-18T06:56:00.000Z",
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       lastResultAt: "2026-03-18T06:57:00.000Z",
       lastErrorCode: "microsoft_unknown_recovery_email:de*****@genq.top",
       skipReason: "microsoft_unknown_recovery_email",

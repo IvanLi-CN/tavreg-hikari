@@ -219,8 +219,8 @@ const failureReuseAccounts: AccountsPayload = {
   summary: {
     ready: 0,
     linked: 0,
-    failed: 3,
-    disabled: 1,
+    failed: 1,
+    disabled: 3,
   },
   groups: ["failed-pool", "manual-hold", "retry-pool"],
   rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),

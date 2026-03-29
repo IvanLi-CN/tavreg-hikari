@@ -4,7 +4,7 @@
 
 - Status: 部分完成（4/5）
 - Created: 2026-03-28
-- Last: 2026-03-28
+- Last: 2026-03-29
 
 ## 背景 / 问题陈述
 
@@ -18,9 +18,9 @@
 
 - 把 failed 微软账号在“同一 job”和“新 job”两个维度上的复用规则改成显式、统一、可测试的判定。
 - 将 `microsoft_password_incorrect`、`microsoft_account_locked`、`microsoft_unknown_recovery_email` 固定为硬账号阻断，并落在 `skip_reason`。
-- 保留 `last_result_status='failed'` 作为最近运行结果，收敛 `disabled_at` / `disabled_reason` 为纯人工停用语义。
+- 将硬账号阻断在列表“最近状态”中展示为 `disabled`，同时收敛 `disabled_at` / `disabled_reason` 为纯人工停用语义。
 - 打通密码更新、Proof 邮箱保存与“恢复可用”三个解封入口，确保修复后账号能重新进入后续任务调度池。
-- 更新账号页状态文案、Storybook 与视觉证据，明确展示“failed 但可在新任务复用”和“failed 且被硬阻断”的差异。
+- 更新账号页状态文案、Storybook 与视觉证据，明确展示“failed 但可在新任务复用”和“disabled 且被硬阻断”的差异。
 
 ### Non-goals
 
@@ -38,7 +38,8 @@
   - `microsoft_account_locked`
   - `microsoft_unknown_recovery_email`
 - `last_result_status`
-  - 继续保留 `failed` / `success` / `skipped` 等运行结果语义。
+  - 瞬时失败继续使用 `failed`。
+  - 三类硬账号阻断显示并持久化为 `disabled`，但不写入 `disabled_at` / `disabled_reason`。
 - `disabled_at` / `disabled_reason`
   - 仅表示操作者显式“标记账号不可用”。
   - 自动化硬账号错误不得再覆写这两个字段。
@@ -63,13 +64,13 @@
 - 同一 job 内，只要该账号已经被当前 job 尝试过，无论结果如何，都不得再次派发。
 - 新 job 创建后：
   - `failed` 且 `skip_reason` 为空的账号，允许重新进入候选池。
-  - `failed` 且 `skip_reason` 为三类硬账号阻断之一的账号，不得进入候选池。
+  - `skip_reason` 为三类硬账号阻断之一的账号，不得进入候选池，且最近状态显示为 `disabled`。
   - `has_api_key` 与人工停用账号继续保持不可调度。
 
 ### 失败结果落盘
 
 - 自动化运行失败时：
-  - 若错误码属于硬账号阻断，则写入 `skip_reason`，同时保留 `last_result_status='failed'`。
+  - 若错误码属于硬账号阻断，则写入 `skip_reason`，并把 `last_result_status` 收敛为 `disabled`。
   - 若错误码属于瞬时失败，例如 `network_connection_closed`、代理故障、浏览器异常、`microsoft_auth_try_again_later`、`microsoft_password_rate_limited`，则保留 `skip_reason = null`。
 - 人工停用状态优先级高于自动化失败写入；自动化失败不得清空或改写既有 `disabled_*`。
 
@@ -87,7 +88,7 @@
 
 - UI 必须明确区分：
   - `failed` 但可在新任务复用
-  - `failed` 且被硬账号阻断
+  - `disabled` 且被硬账号阻断
   - 人工停用
 - 对三类硬账号阻断展示清晰的人类可读文案。
 - “恢复可用”按钮同时适用于人工停用与硬账号阻断。
@@ -105,25 +106,36 @@
 
 ![账号失败复用总览](./assets/accounts-failure-reuse-overview.png)
 
-- source_type: storybook_docs
+- source_type: storybook_canvas
 - target_program: mock-only
 - capture_scope: element
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
-- docs_entry_or_title: Views/AccountsView/Failure Reuse Compact Cards
+- story_id_or_title: Views/AccountsView/Failure Reuse Matrix
 - scenario: overview matrix
 - evidence_note: 验证账号池中同时存在瞬时失败可复用、密码错误阻断、未知辅助邮箱阻断与人工停用四类状态，并保持 failed/disabled 统计分离。
 
 ![账号阻断与恢复入口细节](./assets/accounts-failure-reuse-block-reasons.png)
 
-- source_type: storybook_docs
+- source_type: storybook_canvas
 - target_program: mock-only
 - capture_scope: element
 - sensitive_exclusion: N/A
 - submission_gate: pending-owner-approval
-- docs_entry_or_title: Views/AccountsView/Failure Reuse Compact Cards
+- story_id_or_title: Views/AccountsView/Failure Reuse Compact Cards
 - scenario: blocking reasons and restore actions
 - evidence_note: 验证 `Microsoft 密码错误`、`未知辅助邮箱`、瞬时失败空阻断与人工停用 `人工复核中` 在同一视图下可区分展示，并为硬阻断/人工停用暴露统一的“恢复可用”入口。
+
+![运行中 Attempts 无横向滚动](./assets/dashboard-active-attempts-no-wrap.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: element
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/DashboardView/Active Attempts No Wrap
+- state: no-horizontal-scroll
+- evidence_note: 验证长邮箱、长代理节点与 IPv6 出口 IP 会保持单行截断，代理节点 / 出口 IP / 开始时间收敛到第二行信息带，桌面卡片不再出现横向滚动条。
 
 ## 里程碑
 
@@ -141,3 +153,4 @@
 
 - 2026-03-28: 初始化 failed 微软账号复用策略规格，冻结硬账号阻断语义、恢复路径与 merge-ready 验证门禁。
 - 2026-03-28: 完成账号调度判定、恢复路径、账号页 Storybook 状态矩阵与 owner-facing 视觉证据。
+- 2026-03-29: 重新截取账号状态矩阵与阻断入口证据，并补充 Dashboard 运行中 Attempts 在长邮箱 / IPv6 场景下无横向滚动的界面图。

@@ -300,10 +300,26 @@ function resolveAccountStatus(input: {
 }): AccountStatus {
   if (input.disabledAt != null) return "disabled";
   if (input.hasApiKey) return "skipped_has_key";
+  if (isHardAccountSkipReason(input.skipReason)) return "disabled";
   if (input.leaseJobId != null) {
     return input.lastResultStatus === "running" ? "running" : "leased";
   }
   return isBlockingAccountSkipReason(input.skipReason) ? "failed" : "ready";
+}
+
+function resolveFailureResultStatus(input: { disabledAt: string | null; skipReason: string | null }): AccountStatus {
+  return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
+}
+
+function deriveLegacyHardBlockReason(reason: string | null | undefined, errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
+  const fromErrorCode = deriveAccountSkipReasonFromErrorCode(errorCode);
+  if (fromErrorCode) return fromErrorCode;
+  const normalizedReason = String(reason || "").trim().toLowerCase();
+  if (!normalizedReason) return null;
+  if (normalizedReason.includes("锁定") || normalizedReason.includes("locked")) return "microsoft_account_locked";
+  if (normalizedReason.includes("辅助邮箱") || normalizedReason.includes("recovery")) return "microsoft_unknown_recovery_email";
+  if (normalizedReason.includes("密码错误") || normalizedReason.includes("incorrect password")) return "microsoft_password_incorrect";
+  return null;
 }
 
 function resolveFailureSkipReason(input: {
@@ -731,7 +747,41 @@ export class AppDatabase {
         .run(now);
       this.db
         .query(
-          "UPDATE microsoft_accounts SET lease_job_id = NULL, lease_started_at = NULL, last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' WHEN has_api_key = 1 THEN 'skipped_has_key' WHEN COALESCE(skip_reason, '') <> '' THEN 'failed' ELSE 'ready' END WHERE lease_job_id IS NOT NULL",
+          "UPDATE microsoft_accounts SET lease_job_id = NULL, lease_started_at = NULL, last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' WHEN has_api_key = 1 THEN 'skipped_has_key' WHEN skip_reason IN ('microsoft_password_incorrect', 'microsoft_account_locked', 'microsoft_unknown_recovery_email') THEN 'disabled' WHEN COALESCE(skip_reason, '') <> '' THEN 'failed' ELSE 'ready' END WHERE lease_job_id IS NOT NULL",
+        )
+        .run();
+      const legacyHardBlockedRows = this.db
+        .query(`
+          SELECT id, skip_reason, disabled_reason, last_error_code
+          FROM microsoft_accounts
+          WHERE disabled_at IS NOT NULL OR COALESCE(disabled_reason, '') <> ''
+        `)
+        .all() as Array<Record<string, unknown>>;
+      const normalizeLegacyHardBlock = this.db.query(`
+        UPDATE microsoft_accounts
+        SET skip_reason = ?,
+            disabled_at = NULL,
+            disabled_reason = NULL,
+            last_result_status = 'disabled',
+            last_error_code = ?,
+            last_result_at = COALESCE(last_result_at, ?)
+        WHERE id = ?
+      `);
+      for (const row of legacyHardBlockedRows) {
+        const currentSkipReason = row.skip_reason == null ? null : String(row.skip_reason);
+        const nextSkipReason = isHardAccountSkipReason(currentSkipReason)
+          ? currentSkipReason
+          : deriveLegacyHardBlockReason(
+              row.disabled_reason == null ? null : String(row.disabled_reason),
+              row.last_error_code == null ? null : String(row.last_error_code),
+            );
+        if (!nextSkipReason) continue;
+        const nextErrorCode = row.last_error_code == null ? nextSkipReason : String(row.last_error_code);
+        normalizeLegacyHardBlock.run(nextSkipReason, nextErrorCode, now, Number(row.id));
+      }
+      this.db
+        .query(
+          "UPDATE microsoft_accounts SET last_result_status = 'disabled' WHERE disabled_at IS NOT NULL OR skip_reason IN ('microsoft_password_incorrect', 'microsoft_account_locked', 'microsoft_unknown_recovery_email')",
         )
         .run();
       this.db.exec("COMMIT;");
@@ -1891,7 +1941,7 @@ export class AppDatabase {
     this.db
       .query(`
         UPDATE microsoft_accounts
-        SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
+        SET last_result_status = ?,
             skip_reason = ?,
             last_result_at = ?,
             last_error_code = ?,
@@ -1904,7 +1954,7 @@ export class AppDatabase {
             }
         WHERE id = ?
       `)
-      .run(nextSkipReason, now, errorCode ?? null, now, accountId);
+      .run(resolveFailureResultStatus({ disabledAt: current.disabledAt, skipReason: nextSkipReason }), nextSkipReason, now, errorCode ?? null, now, accountId);
   }
 
   completeAttemptFailure(
@@ -1941,7 +1991,7 @@ export class AppDatabase {
     this.db
       .query(`
         UPDATE microsoft_accounts
-        SET last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'failed' END,
+        SET last_result_status = ?,
             skip_reason = ?,
             last_result_at = ?,
             last_error_code = ?,
@@ -1950,7 +2000,7 @@ export class AppDatabase {
             lease_started_at = NULL
         WHERE id = ?
       `)
-      .run(nextSkipReason, now, errorCode, now, accountId);
+      .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,
       status: shouldEnterCompleting(currentJob) ? "completing" : currentJob.status,

@@ -400,7 +400,7 @@ describe("AppDatabase account import", () => {
     const account = appDb.getAccount(accountId);
 
     expect(account).toMatchObject({
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       lastErrorCode: "microsoft_account_locked",
       skipReason: "microsoft_account_locked",
       disabledAt: null,
@@ -418,7 +418,7 @@ describe("AppDatabase account import", () => {
     appDb.markAccountDirectFailure(accountId, "microsoft_unknown_recovery_email:pr*****@mail.test");
     let account = appDb.getAccount(accountId);
     expect(account).toMatchObject({
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       skipReason: "microsoft_unknown_recovery_email",
       lastErrorCode: "microsoft_unknown_recovery_email:pr*****@mail.test",
     });
@@ -448,7 +448,7 @@ describe("AppDatabase account import", () => {
     appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "old-pass" }]);
     let account = appDb.getAccount(accountId);
     expect(account).toMatchObject({
-      lastResultStatus: "failed",
+      lastResultStatus: "disabled",
       skipReason: "microsoft_password_incorrect",
       lastErrorCode: "microsoft_password_incorrect",
     });
@@ -504,6 +504,63 @@ describe("AppDatabase account import", () => {
     expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
 
     appDb.close();
+  });
+
+  test("normalizes legacy hard-blocked failed accounts to disabled on reopen", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-locked@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET last_result_status = 'failed',
+            skip_reason = 'microsoft_account_locked',
+            last_error_code = 'microsoft_account_locked'
+        WHERE id = ?
+      `)
+      .run(accountId);
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    expect(reopened.getAccount(accountId)).toMatchObject({
+      lastResultStatus: "disabled",
+      skipReason: "microsoft_account_locked",
+      disabledAt: null,
+      disabledReason: null,
+    });
+
+    reopened.close();
+  });
+
+  test("migrates legacy locked accounts out of manual disabled fields on reopen", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-disabled@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET disabled_at = '2026-03-27T11:11:11.000Z',
+            disabled_reason = '微软账户已锁定',
+            skip_reason = NULL,
+            last_result_status = 'disabled',
+            last_error_code = NULL
+        WHERE id = ?
+      `)
+      .run(accountId);
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    expect(reopened.getAccount(accountId)).toMatchObject({
+      lastResultStatus: "disabled",
+      skipReason: "microsoft_account_locked",
+      disabledAt: null,
+      disabledReason: null,
+      lastErrorCode: "microsoft_account_locked",
+    });
+
+    reopened.close();
   });
 
   test("ignores proof mailbox mappings when leasing the next account", async () => {
