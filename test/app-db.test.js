@@ -465,17 +465,21 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
-  test("reuses transient failed accounts in a new job but not in the same job", async () => {
+  test("reuses transient failed accounts in the same job and in a new job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "retryable@outlook.com", password: "retry-pass" }]);
     const accountId = imported.affectedIds[0];
-    const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
     const leased = appDb.leaseNextAccount(firstJob.id);
     const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "retryable-attempt"));
 
     expect(leased?.id).toBe(accountId);
     appDb.completeAttemptFailure(firstJob.id, attempt.id, accountId, { errorCode: "network_connection_closed" });
-    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(0);
+    expect(appDb.isAccountSchedulableForJob(firstJob.id, accountId)).toBe(true);
+    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(1);
+    expect(appDb.leaseNextAccount(firstJob.id)?.id).toBe(accountId);
+    const retryAttempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "retryable-attempt-2"));
+    appDb.completeAttemptFailure(firstJob.id, retryAttempt.id, accountId, { errorCode: "browser_proxy_ip_mismatch" });
     appDb.completeJob(firstJob.id, false, "transient failure exhausted the first job");
 
     const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -495,6 +499,8 @@ describe("AppDatabase account import", () => {
 
     expect(leased?.id).toBe(accountId);
     appDb.completeAttemptFailure(firstJob.id, attempt.id, accountId, { errorCode: "microsoft_account_locked" });
+    expect(appDb.isAccountSchedulableForJob(firstJob.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(0);
     appDb.completeJob(firstJob.id, false, "locked account exhausted the first job");
 
     const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -502,6 +508,24 @@ describe("AppDatabase account import", () => {
 
     appDb.updateAccountAvailability(accountId, { disabled: false, reason: null });
     expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
+
+    appDb.close();
+  });
+
+  test("does not reschedule succeeded accounts within the same job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "same-job-success@outlook.com", password: "success-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
+    const leased = appDb.leaseNextAccount(job.id);
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "same-job-success-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptSuccess(job.id, attempt.id, accountId, "tvly-same-job-success");
+
+    expect(appDb.isAccountSchedulableForJob(job.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(appDb.leaseNextAccount(job.id)).toBeNull();
 
     appDb.close();
   });
