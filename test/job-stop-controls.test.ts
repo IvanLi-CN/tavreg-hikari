@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -262,6 +262,7 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
     if (spawnCalls === 1) {
       scheduler.stopCurrentJob();
     }
+    return true;
   };
 
   const job = await scheduler.startJob({
@@ -276,6 +277,89 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
 
   expect(spawnCalls).toBe(1);
   expect(appDb.getJob(job.id)?.status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("force stop wins over a last-moment successful worker exit", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  const imported = appDb.importAccounts([{ email: "force-stop-success@outlook.com", password: "pw123456" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  const outputDir = path.join(path.dirname(dbPath), "force-stop-success-exit");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "result.json"), JSON.stringify({ apiKey: "tvly-force-stop-win-001" }));
+  const attempt = appDb.createAttempt(job.id, accountId, outputDir);
+
+  await scheduler["handleAttemptExit"](
+    job.id,
+    attempt.id,
+    accountId,
+    outputDir,
+    0,
+    null,
+    {
+      child: { pid: 0, kill: () => true },
+      attempt,
+      account,
+      outputDir,
+      reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+      tail: [],
+      stopRequested: "force_stop",
+    } as any,
+  );
+
+  expect(appDb.getAttempt(attempt.id)).toMatchObject({
+    status: "stopped",
+    stage: "stopped",
+  });
+  expect(appDb.getAccount(accountId)?.hasApiKey).toBe(false);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("pending launches block stop finalization until setup drains", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  const imported = appDb.importAccounts([{ email: "pending-stop@outlook.com", password: "pw123456" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-pending-stop-attempt"));
+  scheduler["pendingAttemptLaunches"].set(attempt.id, {
+    jobId: job.id,
+    attempt,
+    account,
+    stopRequested: null,
+  });
+
+  const stopping = scheduler.stopCurrentJob();
+  expect(stopping.status).toBe("stopping");
+
+  const forceStopping = scheduler.forceStopCurrentJob(true);
+  expect(forceStopping.status).toBe("force_stopping");
+  expect(scheduler["pendingAttemptLaunches"].get(attempt.id)?.stopRequested).toBe("force_stop");
+
+  scheduler["pendingAttemptLaunches"].delete(attempt.id);
+  const stopped = scheduler["maybeFinalizeStoppedJob"](job.id);
+  expect(stopped?.status).toBe("stopped");
 
   await scheduler.shutdown();
   appDb.close();

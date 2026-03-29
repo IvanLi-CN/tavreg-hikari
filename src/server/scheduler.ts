@@ -36,6 +36,13 @@ interface ActiveAttempt {
   stopRequested: "force_stop" | null;
 }
 
+interface PendingAttemptLaunch {
+  jobId: number;
+  attempt: JobAttemptRecord;
+  account: MicrosoftAccountRecord;
+  stopRequested: "force_stop" | null;
+}
+
 type AutoExtractPhase = "idle" | "waiting" | "extracting";
 
 interface AutoExtractState {
@@ -410,6 +417,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 
 export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
+  private readonly pendingAttemptLaunches = new Map<number, PendingAttemptLaunch>();
   private readonly autoExtractStates = new Map<number, AutoExtractState>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
   private loopPromise: Promise<void> | null = null;
@@ -667,6 +675,10 @@ export class JobScheduler {
         }
       });
     }
+    for (const pending of this.pendingAttemptLaunches.values()) {
+      if (pending.jobId !== jobId) continue;
+      pending.stopRequested = "force_stop";
+    }
   }
 
   private abortAutoExtractRequests(jobId: number, reason: string): void {
@@ -684,10 +696,17 @@ export class JobScheduler {
     return Boolean(state && state.inFlightCount > 0);
   }
 
+  private hasPendingAttemptLaunch(jobId: number): boolean {
+    for (const pending of this.pendingAttemptLaunches.values()) {
+      if (pending.jobId === jobId) return true;
+    }
+    return false;
+  }
+
   private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
     const job = this.db.getJob(jobId);
     if (!job || !isStopInProgressStatus(job.status)) return null;
-    if (this.activeAttempts.size > 0 || this.hasInFlightAutoExtract(jobId)) {
+    if (this.activeAttempts.size > 0 || this.hasPendingAttemptLaunch(jobId) || this.hasInFlightAutoExtract(jobId)) {
       return null;
     }
     const stopped = this.db.stopJob(jobId);
@@ -795,8 +814,18 @@ export class JobScheduler {
         if (!account) break;
         const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${dispatchJob.id}`, `attempt-${Date.now()}-${account.id}`);
         const attempt = this.db.createAttempt(dispatchJob.id, account.id, attemptOutputDir);
+        const pendingLaunch: PendingAttemptLaunch = {
+          jobId: dispatchJob.id,
+          attempt,
+          account,
+          stopRequested: null,
+        };
+        this.pendingAttemptLaunches.set(attempt.id, pendingLaunch);
         try {
-          await this.spawnAttempt(dispatchJob, account, attempt, attemptOutputDir);
+          const started = await this.spawnAttempt(dispatchJob, account, attempt, attemptOutputDir, pendingLaunch);
+          if (!started) {
+            continue;
+          }
           this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
           this.emit("account.updated", { account: this.db.getAccount(account.id) });
           this.emit("job.updated", { job: this.db.getJob(dispatchJob.id) });
@@ -805,6 +834,8 @@ export class JobScheduler {
             errorCode: "launch_setup_failed",
             errorMessage: error instanceof Error ? error.message : String(error),
           });
+        } finally {
+          this.pendingAttemptLaunches.delete(attempt.id);
         }
       }
 
@@ -867,7 +898,13 @@ export class JobScheduler {
     }
   }
 
-  private async spawnAttempt(job: JobRecord, account: MicrosoftAccountRecord, attempt: JobAttemptRecord, outputDir: string): Promise<void> {
+  private async spawnAttempt(
+    job: JobRecord,
+    account: MicrosoftAccountRecord,
+    attempt: JobAttemptRecord,
+    outputDir: string,
+    pendingLaunch: PendingAttemptLaunch,
+  ): Promise<boolean> {
     let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
     let portLeases: { apiPort: PortLease; mixedPort: PortLease } | null = null;
     try {
@@ -888,11 +925,32 @@ export class JobScheduler {
         reservedPorts,
         selectedProxyNode,
       });
+      const latestJob = this.db.getJob(job.id);
+      const launchBlockedByStop =
+        pendingLaunch.stopRequested === "force_stop"
+        || Boolean(latestJob && (latestJob.status === "stopped" || isStopInProgressStatus(latestJob.status)));
+      if (launchBlockedByStop) {
+        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+        const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
+          job.id,
+          attempt.id,
+          account.id,
+          {
+            errorCode: pendingLaunch.stopRequested === "force_stop" ? "force_stopped" : "job_stop_before_spawn",
+            errorMessage: "stopped by user",
+          },
+          null,
+        );
+        this.emit("attempt.updated", { attempt: stoppedAttempt });
+        this.emit("account.updated", { account: this.db.getAccount(account.id) });
+        this.emit("job.updated", { job: stoppedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+        this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped before launch for account #${account.id}` });
+        return false;
+      }
       const child = spawn(runtimeSpec.command, runtimeSpec.args, {
         ...buildAttemptSpawnOptions(this.repoRoot, runtimeSpec),
         stdio: ["pipe", "pipe", "pipe"],
       });
-      child.stdin.end();
       const active: ActiveAttempt = {
         child,
         attempt,
@@ -902,6 +960,10 @@ export class JobScheduler {
         tail: [],
         stopRequested: null,
       };
+      if (pendingLaunch.stopRequested === "force_stop") {
+        active.stopRequested = "force_stop";
+      }
+      child.stdin.end();
       let leasesReleased = false;
       const releasePortLeases = async () => {
         if (leasesReleased) return;
@@ -969,6 +1031,7 @@ export class JobScheduler {
       child.once("close", (code, signal) => {
         void finalize(() => this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal, active));
       });
+      return true;
     } catch (error) {
       if (portLeases) {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
@@ -1045,20 +1108,10 @@ export class JobScheduler {
       this.emit("proxy.updated", { nodes: this.db.listProxyNodes() });
     }
 
-    if (code === 0 && signal == null && apiKey) {
-      const { job, attempt } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
-      this.emit("attempt.updated", { attempt });
-      this.emit("account.updated", { account: this.db.getAccount(accountId) });
-      this.emit("job.updated", { job });
-      this.emit("toast", { level: "success", message: `attempt #${attempt.id} succeeded for account #${accountId}` });
-      return;
-    }
-
     const message =
       error?.error ||
       (signupTask?.error_message ? String(signupTask.error_message) : "") ||
       (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
-    const errorCode = signupTask?.error_code ? String(signupTask.error_code) : code == null ? "process_exit" : `exit_${code}`;
     if (active.stopRequested === "force_stop") {
       const { job, attempt } = this.db.completeAttemptStopped(
         jobId,
@@ -1076,6 +1129,15 @@ export class JobScheduler {
       this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped for account #${accountId}` });
       return;
     }
+    if (code === 0 && signal == null && apiKey) {
+      const { job, attempt } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
+      this.emit("attempt.updated", { attempt });
+      this.emit("account.updated", { account: this.db.getAccount(accountId) });
+      this.emit("job.updated", { job });
+      this.emit("toast", { level: "success", message: `attempt #${attempt.id} succeeded for account #${accountId}` });
+      return;
+    }
+    const errorCode = signupTask?.error_code ? String(signupTask.error_code) : code == null ? "process_exit" : `exit_${code}`;
     const { job, attempt } = this.db.completeAttemptFailure(
       jobId,
       attemptId,
