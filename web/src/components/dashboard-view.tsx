@@ -1,9 +1,10 @@
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -11,9 +12,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { AccountExtractorProvider, EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
+import type { AccountExtractorProvider, EventRecord, JobControlAction, JobControlOptions, JobDraft, JobSnapshot } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { normalizeJobDraft } from "@/lib/job-draft";
+import {
+  canForceStop,
+  canGracefullyStop,
+  canUpdateJobLimits,
+  primaryJobActionDisabled,
+  resolvePrimaryJobAction,
+  resolvePrimaryJobLabel,
+  resolveStopHint,
+} from "@/lib/job-controls";
 
 const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "zhanghaoya", label: "账号鸭" },
@@ -59,13 +69,14 @@ export function DashboardView({
     hotmail666: boolean;
   };
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
-  onJobAction: (action: "start" | "pause" | "resume" | "update_limits", draft?: JobDraft) => void;
+  onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
   const maxAttemptsRef = useRef<BufferedNumberInputHandle>(null);
   const autoExtractQuantityRef = useRef<BufferedNumberInputHandle>(null);
   const autoExtractMaxWaitSecRef = useRef<BufferedNumberInputHandle>(null);
+  const [forceStopDialogOpen, setForceStopDialogOpen] = useState(false);
 
   const toggleExtractorSource = (provider: AccountExtractorProvider, checked: boolean) => {
     const current = new Set(jobDraft.autoExtractSources);
@@ -84,16 +95,16 @@ export function DashboardView({
       autoExtractMaxWaitSec: autoExtractMaxWaitSecRef.current?.commit() ?? jobDraft.autoExtractMaxWaitSec,
     });
 
-  const handleJobActionClick = (action: "start" | "pause" | "resume" | "update_limits") => {
+  const handleJobActionClick = (action: JobControlAction, options?: JobControlOptions) => {
     if (action === "start" || action === "update_limits") {
       let committedDraft = jobDraft;
       flushSync(() => {
         committedDraft = commitDraftInputs();
       });
-      onJobAction(action, committedDraft);
+      void onJobAction(action, { ...(options || {}), draft: committedDraft });
       return;
     }
-    onJobAction(action);
+    void onJobAction(action, options);
   };
 
   const autoExtractHint = job.autoExtractState
@@ -101,6 +112,11 @@ export function DashboardView({
     : jobDraft.autoExtractSources.length > 0
       ? `已启用 · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 500ms/次 · 最多 4 并发`
       : "未启用自动提取";
+  const currentStatus = job.job?.status ?? null;
+  const primaryAction = resolvePrimaryJobAction(currentStatus);
+  const primaryLabel = resolvePrimaryJobLabel(currentStatus);
+  const primaryDisabled = primaryJobActionDisabled(currentStatus);
+  const stopHint = resolveStopHint(currentStatus);
 
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
@@ -260,13 +276,76 @@ export function DashboardView({
               ) : null}
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={() => handleJobActionClick("start")}>启动</Button>
-              <Button variant="secondary" onClick={() => handleJobActionClick("pause")}>暂停</Button>
-              <Button variant="secondary" onClick={() => handleJobActionClick("resume")}>恢复</Button>
-              <Button variant="outline" onClick={() => handleJobActionClick("update_limits")}>应用调参</Button>
+              <Button
+                onClick={() => {
+                  if (!primaryAction) return;
+                  handleJobActionClick(primaryAction);
+                }}
+                disabled={primaryDisabled}
+              >
+                {primaryLabel}
+              </Button>
+              {canGracefullyStop(currentStatus) || currentStatus === "stopping" ? (
+                <Button
+                  variant="secondary"
+                  onClick={() => handleJobActionClick("stop")}
+                  disabled={currentStatus === "stopping"}
+                >
+                  {currentStatus === "stopping" ? "停止中" : "停止"}
+                </Button>
+              ) : null}
+              {canForceStop(currentStatus) || currentStatus === "force_stopping" ? (
+                <Button
+                  variant="danger"
+                  onClick={() => setForceStopDialogOpen(true)}
+                  disabled={currentStatus === "force_stopping"}
+                >
+                  {currentStatus === "force_stopping" ? "强停中" : "强行停止"}
+                </Button>
+              ) : null}
+              <Button
+                variant="outline"
+                onClick={() => handleJobActionClick("update_limits")}
+                disabled={!canUpdateJobLimits(currentStatus)}
+              >
+                应用调参
+              </Button>
             </div>
+            {stopHint ? (
+              <div className="rounded-2xl border border-amber-300/18 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-100">
+                {stopHint}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
+
+        <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
+          <DialogContent className="w-[min(92vw,34rem)]">
+            <DialogHeader>
+              <DialogTitle>确认强行停止</DialogTitle>
+              <DialogDescription>
+                强行停止会立即中断当前 worker 与补号请求；已经在跑的 attempt 会标记为“已停止”，不会继续自然收尾。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="px-6 text-sm leading-6 text-slate-300">
+              只有在优雅停止仍无法尽快收束时才建议使用这一步，别乱点哦。
+            </div>
+            <DialogFooter>
+              <Button variant="secondary" onClick={() => setForceStopDialogOpen(false)}>
+                取消
+              </Button>
+              <Button
+                variant="danger"
+                onClick={() => {
+                  void onJobAction("force_stop", { confirmForceStop: true });
+                  setForceStopDialogOpen(false);
+                }}
+              >
+                确认强停
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Card>
           <CardHeader>

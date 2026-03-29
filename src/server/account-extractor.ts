@@ -151,9 +151,21 @@ function mapFailure(provider: AccountExtractorProvider, message: string): Accoun
   return "upstream_error";
 }
 
-async function fetchText(request: ExtractorRequestSpec, timeoutMs: number): Promise<{ status: number; rawResponse: string }> {
+async function fetchText(
+  request: ExtractorRequestSpec,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<{ status: number; rawResponse: string }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const forwardAbort = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+    } else {
+      signal.addEventListener("abort", forwardAbort, { once: true });
+    }
+  }
   try {
     const response = await fetch(request.url, {
       method: request.init?.method || "GET",
@@ -171,6 +183,9 @@ async function fetchText(request: ExtractorRequestSpec, timeoutMs: number): Prom
     };
   } finally {
     clearTimeout(timer);
+    if (signal) {
+      signal.removeEventListener("abort", forwardAbort);
+    }
   }
 }
 
@@ -319,13 +334,14 @@ export async function fetchSingleExtractedAccount(input: {
   provider: AccountExtractorProvider;
   accountType?: AccountExtractorAccountType;
   config: AccountExtractorRuntimeConfig;
+  signal?: AbortSignal;
 }): Promise<AccountExtractorFetchResult> {
   const accountType = input.accountType || "outlook";
   const timeoutMs = Math.max(3000, input.config.timeoutMs || 20000);
   const descriptor = EXTRACTOR_DESCRIPTORS[input.provider];
   const key = descriptor.getKey(input.config).trim();
   const request = descriptor.buildRequest(key, accountType);
-  const { status, rawResponse } = await fetchText(request, timeoutMs);
+  const { status, rawResponse } = await fetchText(request, timeoutMs, input.signal);
   if (status < 200 || status >= 300) {
     const message = extractJsonMessage(rawResponse) || `HTTP ${status}`;
     return buildFailureResult(input.provider, accountType, rawResponse, message, key);

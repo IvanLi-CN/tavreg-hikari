@@ -62,8 +62,8 @@ export type AccountStatus =
   | "failed"
   | "skipped_has_key"
   | "disabled";
-export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
-export type AttemptStatus = "running" | "succeeded" | "failed";
+export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
+export type AttemptStatus = "running" | "succeeded" | "failed" | "stopped";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "moemail";
 export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
@@ -311,6 +311,20 @@ function resolveFailureResultStatus(input: { disabledAt: string | null; skipReas
   return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
 }
 
+function resolveReleasedLeaseAccountStatus(input: {
+  disabledAt: string | null;
+  hasApiKey: boolean;
+  skipReason: string | null;
+}): AccountStatus {
+  return resolveAccountStatus({
+    disabledAt: input.disabledAt,
+    hasApiKey: input.hasApiKey,
+    leaseJobId: null,
+    lastResultStatus: "ready",
+    skipReason: input.skipReason,
+  });
+}
+
 function deriveLegacyHardBlockReason(reason: string | null | undefined, errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
   const fromErrorCode = deriveAccountSkipReasonFromErrorCode(errorCode);
   if (fromErrorCode) return fromErrorCode;
@@ -478,6 +492,10 @@ export function normalizeJobMaxAttempts(need: number, maxAttempts: number): numb
 
 export function shouldEnterCompleting(job: Pick<JobRecord, "need" | "successCount" | "maxAttempts" | "launchedCount">): boolean {
   return job.successCount >= job.need || job.launchedCount >= job.maxAttempts;
+}
+
+function shouldPreserveManualStopStatus(status: JobStatus): boolean {
+  return status === "stopping" || status === "force_stopping";
 }
 
 export class AppDatabase {
@@ -739,6 +757,14 @@ export class AppDatabase {
     const now = nowIso();
     this.db.exec("BEGIN IMMEDIATE;");
     try {
+      this.db
+        .query(
+          "UPDATE job_attempts SET status = 'stopped', stage = 'stopped', completed_at = ?, duration_ms = 0, error_code = COALESCE(error_code, 'force_stopped'), error_message = COALESCE(error_message, 'stopped by user') WHERE status = 'running' AND job_id IN (SELECT id FROM jobs WHERE status IN ('stopping', 'force_stopping'))",
+        )
+        .run(now);
+      this.db
+        .query("UPDATE jobs SET status = 'stopped', paused_at = NULL, completed_at = ?, updated_at = ?, last_error = NULL WHERE status IN ('stopping', 'force_stopping')")
+        .run(now, now);
       this.db
         .query("UPDATE jobs SET status = 'failed', completed_at = ?, updated_at = ?, last_error = COALESCE(last_error, 'server_restart') WHERE status IN ('running', 'completing', 'paused')")
         .run(now, now);
@@ -1351,7 +1377,7 @@ export class AppDatabase {
     autoExtractAccountType?: AccountExtractorAccountType;
   }): JobRecord {
     const active = this.getCurrentJob();
-    if (active && ["running", "paused", "completing"].includes(active.status)) {
+    if (active && ["running", "paused", "stopping", "force_stopping", "completing"].includes(active.status)) {
       throw new Error(`active job exists: ${active.id}`);
     }
     const now = nowIso();
@@ -1921,14 +1947,16 @@ export class AppDatabase {
       .run(now, now, accountId);
     const job = this.updateJobState(jobId, {
       successCount: currentJob.successCount + 1,
-      status: shouldEnterCompleting({
-        need: currentJob.need,
-        successCount: currentJob.successCount + 1,
-        maxAttempts: currentJob.maxAttempts,
-        launchedCount: currentJob.launchedCount,
-      })
-        ? "completing"
-        : currentJob.status,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting({
+            need: currentJob.need,
+            successCount: currentJob.successCount + 1,
+            maxAttempts: currentJob.maxAttempts,
+            launchedCount: currentJob.launchedCount,
+          })
+          ? "completing"
+          : currentJob.status,
     });
     return { job, attempt };
   }
@@ -2026,9 +2054,53 @@ export class AppDatabase {
       .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,
-      status: shouldEnterCompleting(currentJob) ? "completing" : currentJob.status,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting(currentJob)
+          ? "completing"
+          : currentJob.status,
     });
     return { job, attempt };
+  }
+
+  rollbackAttemptBeforeLaunch(jobId: number, attemptId: number, accountId: number): { job: JobRecord; account: MicrosoftAccountRecord | null } {
+    const currentJob = this.getJob(jobId);
+    if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const currentAccount = this.getAccount(accountId);
+    if (!currentAccount) throw new Error(`account not found: ${accountId}`);
+    if (!this.getAttempt(attemptId)) {
+      throw new Error(`attempt not found: ${attemptId}`);
+    }
+    const now = nowIso();
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      this.db.query("DELETE FROM job_attempts WHERE id = ?").run(attemptId);
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET last_result_status = ?,
+              updated_at = ?,
+              lease_job_id = NULL,
+              lease_started_at = NULL
+          WHERE id = ?
+        `)
+        .run(resolveReleasedLeaseAccountStatus(currentAccount), now, accountId);
+      this.db
+        .query(`
+          UPDATE jobs
+          SET launched_count = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(Math.max(0, currentJob.launchedCount - 1), now, jobId);
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+    return {
+      job: this.getJob(jobId)!,
+      account: this.getAccount(accountId),
+    };
   }
 
   completeJob(jobId: number, success: boolean, errorMessage?: string): JobRecord {
@@ -2037,6 +2109,62 @@ export class AppDatabase {
       completedAt: nowIso(),
       lastError: errorMessage || null,
     });
+  }
+
+  stopJob(jobId: number): JobRecord {
+    return this.updateJobState(jobId, {
+      status: "stopped",
+      pausedAt: null,
+      completedAt: nowIso(),
+      lastError: null,
+    });
+  }
+
+  completeAttemptStopped(
+    jobId: number,
+    attemptId: number,
+    accountId: number,
+    input?: { errorCode?: string | null; errorMessage?: string | null },
+    signupTask?: Record<string, unknown> | null,
+  ): { job: JobRecord; attempt: JobAttemptRecord } {
+    const now = nowIso();
+    const currentJob = this.getJob(jobId);
+    if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const startedAt = this.getAttempt(attemptId)?.startedAt || now;
+    const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
+    const errorCode = input?.errorCode || "force_stopped";
+    const errorMessage = input?.errorMessage || "stopped by user";
+    const attempt = this.updateAttempt(attemptId, {
+      status: "stopped",
+      stage: "stopped",
+      completedAt: now,
+      durationMs,
+      errorCode,
+      errorMessage,
+      runId: signupTask?.run_id ? String(signupTask.run_id) : null,
+      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
+      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
+    });
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET last_result_status = CASE
+              WHEN disabled_at IS NOT NULL THEN 'disabled'
+              WHEN has_api_key = 1 THEN 'skipped_has_key'
+              ELSE 'ready'
+            END,
+            last_result_at = ?,
+            last_error_code = ?,
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(now, errorCode, now, accountId);
+    return {
+      job: currentJob,
+      attempt,
+    };
   }
 
   listProxyNodes(): ProxyNodeRecord[] {

@@ -35,15 +35,17 @@ export function serializeAttemptForApi(db: AppDatabase, row: JobAttemptRecord): 
       accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
     };
   }
+  const preferRuntimeSnapshot = row.status === "running";
+  const preferLedgerDiagnostics = row.status === "running" || row.status === "failed";
   return {
     ...row,
     runId: signupTask?.run_id ? String(signupTask.run_id) : row.runId,
-    status: signupTask?.status ? String(signupTask.status) : row.status,
-    stage: signupTask?.failure_stage ? String(signupTask.failure_stage) : row.stage,
-    proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : row.proxyNode,
-    proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : row.proxyIp,
-    errorCode: signupTask?.error_code ? String(signupTask.error_code) : row.errorCode,
-    errorMessage: signupTask?.error_message ? String(signupTask.error_message) : row.errorMessage,
+    status: preferRuntimeSnapshot && signupTask?.status ? String(signupTask.status) : row.status,
+    stage: preferLedgerDiagnostics && signupTask?.failure_stage ? String(signupTask.failure_stage) : row.stage,
+    proxyNode: preferLedgerDiagnostics && signupTask?.proxy_node ? String(signupTask.proxy_node) : row.proxyNode,
+    proxyIp: preferLedgerDiagnostics && signupTask?.proxy_ip ? String(signupTask.proxy_ip) : row.proxyIp,
+    errorCode: preferLedgerDiagnostics && signupTask?.error_code ? String(signupTask.error_code) : row.errorCode,
+    errorMessage: preferLedgerDiagnostics && signupTask?.error_message ? String(signupTask.error_message) : row.errorMessage,
     accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
   };
 }

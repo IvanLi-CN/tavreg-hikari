@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import {
@@ -33,6 +33,14 @@ interface ActiveAttempt {
   outputDir: string;
   reservedPorts: { apiPort: number; mixedPort: number };
   tail: string[];
+  stopRequested: "force_stop" | null;
+}
+
+interface PendingAttemptLaunch {
+  jobId: number;
+  attempt: JobAttemptRecord;
+  account: MicrosoftAccountRecord;
+  stopRequested: "force_stop" | null;
 }
 
 type AutoExtractPhase = "idle" | "waiting" | "extracting";
@@ -56,6 +64,7 @@ interface AutoExtractState {
   lastMessage: string | null;
   updatedAt: string;
   lastBudgetTickMs: number | null;
+  requestControllers: Map<string, AbortController>;
 }
 
 interface AutoExtractRequestContext {
@@ -66,6 +75,7 @@ interface AutoExtractRequestContext {
   attemptBudget: number;
   dispatchStartedAt: string;
   roundStartedAt: string | null;
+  requestId: string;
 }
 
 export interface AutoExtractSnapshot {
@@ -207,7 +217,11 @@ export function resolveWorkerRuntime(baseEnv: NodeJS.ProcessEnv | undefined = pr
 }
 
 function isTerminalJobStatus(status: JobRecord["status"]): boolean {
-  return status === "completed" || status === "failed";
+  return status === "completed" || status === "failed" || status === "stopped";
+}
+
+function isStopInProgressStatus(status: JobRecord["status"]): boolean {
+  return status === "stopping" || status === "force_stopping";
 }
 
 function normalizeExtractorSources(sources: AccountExtractorProvider[] | undefined): AccountExtractorProvider[] {
@@ -226,11 +240,12 @@ function providerLabel(provider: AccountExtractorProvider): string {
 }
 
 function mapFailureCodeToBatchStatus(
-  code: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | null,
-): "invalid_key" | "insufficient_stock" | "parse_failed" | "error" {
+  code: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | "job_force_stopping" | null,
+): "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error" {
   if (code === "invalid_key") return "invalid_key";
   if (code === "insufficient_stock") return "insufficient_stock";
   if (code === "parse_failed") return "parse_failed";
+  if (code === "job_force_stopping") return "rejected";
   return "error";
 }
 
@@ -313,12 +328,43 @@ export function buildAttemptRuntimeSpec(input: {
   };
 }
 
+export function buildAttemptSpawnOptions(repoRoot: string, runtimeSpec: { env: NodeJS.ProcessEnv }): SpawnOptionsWithoutStdio {
+  return {
+    cwd: repoRoot,
+    env: runtimeSpec.env,
+    detached: true,
+  };
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | "kill">, signal: NodeJS.Signals): void {
+  const pid = child.pid;
+  if (pid) {
+    try {
+      process.kill(-pid, signal);
+      return;
+    } catch {
+      // Fall through to direct child signalling when no process group exists.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Ignore races during shutdown or force stop.
+  }
+}
+
+function isAbortError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : "";
+  return name === "AbortError" || /abort/i.test(message);
 }
 
 function parseMillis(value: unknown): number | null {
@@ -371,8 +417,11 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
 
 export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
+  private readonly pendingAttemptLaunches = new Map<number, PendingAttemptLaunch>();
   private readonly autoExtractStates = new Map<number, AutoExtractState>();
+  private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
   private loopPromise: Promise<void> | null = null;
+  private shuttingDown = false;
 
   constructor(
     private readonly db: AppDatabase,
@@ -452,6 +501,12 @@ export class JobScheduler {
 
   pauseCurrentJob(): JobRecord {
     const job = this.requireCurrentJob();
+    if (job.status === "paused") {
+      return job;
+    }
+    if (job.status !== "running") {
+      throw new Error(`current job cannot be paused from ${job.status}`);
+    }
     const next = this.db.updateJobState(job.id, { status: "paused", pausedAt: nowIso() });
     this.emit("job.updated", { job: next });
     this.emit("toast", { level: "info", message: `job #${job.id} paused` });
@@ -460,12 +515,80 @@ export class JobScheduler {
 
   resumeCurrentJob(): JobRecord {
     const job = this.requireCurrentJob();
+    if (job.status === "running") {
+      return job;
+    }
+    if (job.status !== "paused") {
+      throw new Error(`current job cannot be resumed from ${job.status}`);
+    }
     const next = this.db.updateJobState(job.id, { status: "running", pausedAt: null });
     this.syncAutoExtractState(next);
     this.emit("job.updated", { job: next });
     this.emit("toast", { level: "info", message: `job #${job.id} resumed` });
     this.ensureLoop(job.id);
     return next;
+  }
+
+  stopCurrentJob(): JobRecord {
+    const job = this.db.getCurrentJob();
+    if (!job) throw new Error("no current job");
+    if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
+    if (!["running", "paused"].includes(job.status)) {
+      throw new Error(`current job cannot be stopped from ${job.status}`);
+    }
+    const next = this.db.updateJobState(job.id, {
+      status: "stopping",
+      pausedAt: null,
+    });
+    this.syncAutoExtractState(next);
+    const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
+    this.emit("job.updated", { job: finalized, autoExtractState: this.getAutoExtractSnapshot(next.id) });
+    this.emit("toast", {
+      level: "info",
+      message:
+        finalized.status === "stopped"
+          ? `job #${job.id} stopped`
+          : `job #${job.id} stopping gracefully; waiting for active work to finish`,
+    });
+    if (finalized.status !== "stopped") {
+      this.ensureLoop(job.id);
+    }
+    return finalized;
+  }
+
+  forceStopCurrentJob(confirmForceStop = false): JobRecord {
+    if (!confirmForceStop) {
+      throw new Error("force stop requires confirmForceStop=true");
+    }
+    const job = this.db.getCurrentJob();
+    if (!job) throw new Error("no current job");
+    if (job.status === "stopped" || job.status === "force_stopping") {
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
+    if (!["running", "paused", "stopping"].includes(job.status)) {
+      throw new Error(`current job cannot be force stopped from ${job.status}`);
+    }
+    const next = this.db.updateJobState(job.id, {
+      status: "force_stopping",
+      pausedAt: null,
+    });
+    this.abortAutoExtractRequests(job.id, "force stop requested by user");
+    this.terminateActiveAttempts(job.id);
+    const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
+    this.emit("job.updated", { job: finalized, autoExtractState: this.getAutoExtractSnapshot(next.id) });
+    this.emit("toast", {
+      level: "warning",
+      message:
+        finalized.status === "stopped"
+          ? `job #${job.id} force stopped`
+          : `job #${job.id} force stopping; terminating active work`,
+    });
+    if (finalized.status !== "stopped") {
+      this.ensureLoop(job.id);
+    }
+    return finalized;
   }
 
   updateCurrentJobLimits(
@@ -483,6 +606,9 @@ export class JobScheduler {
     >,
   ): JobRecord {
     const job = this.requireCurrentJob();
+    if (!["running", "paused", "completing"].includes(job.status)) {
+      throw new Error(`current job cannot update limits from ${job.status}`);
+    }
     const settings = this.getSettings();
     const patch: Partial<JobRecord> = {};
     const requestedParallel =
@@ -537,10 +663,70 @@ export class JobScheduler {
     return this.db.getJob(job.id)!;
   }
 
+  private terminateActiveAttempts(jobId: number): void {
+    for (const active of this.activeAttempts.values()) {
+      if (active.attempt.jobId !== jobId) continue;
+      active.stopRequested = "force_stop";
+      signalChildProcess(active.child, "SIGTERM");
+      void delay(5_000).then(() => {
+        const current = this.activeAttempts.get(active.attempt.id);
+        if (current?.stopRequested === "force_stop") {
+          signalChildProcess(current.child, "SIGKILL");
+        }
+      });
+    }
+    for (const pending of this.pendingAttemptLaunches.values()) {
+      if (pending.jobId !== jobId) continue;
+      pending.stopRequested = "force_stop";
+    }
+  }
+
+  private abortAutoExtractRequests(jobId: number, reason: string): void {
+    const state = this.autoExtractStates.get(jobId);
+    if (!state) return;
+    for (const controller of state.requestControllers.values()) {
+      controller.abort(new Error(reason));
+    }
+    state.lastMessage = reason;
+    state.updatedAt = nowIso();
+  }
+
+  private hasInFlightAutoExtract(jobId: number): boolean {
+    const state = this.autoExtractStates.get(jobId);
+    return Boolean(state && state.inFlightCount > 0);
+  }
+
+  private hasPendingAttemptLaunch(jobId: number): boolean {
+    for (const pending of this.pendingAttemptLaunches.values()) {
+      if (pending.jobId === jobId) return true;
+    }
+    return false;
+  }
+
+  private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
+    const job = this.db.getJob(jobId);
+    if (!job || !isStopInProgressStatus(job.status)) return null;
+    if (this.activeAttempts.size > 0 || this.hasPendingAttemptLaunch(jobId) || this.hasInFlightAutoExtract(jobId)) {
+      return null;
+    }
+    const stopped = this.db.stopJob(jobId);
+    this.deleteAutoExtractStateIfIdle(jobId);
+    return stopped;
+  }
+
   async shutdown(): Promise<void> {
+    this.shuttingDown = true;
+    const currentJob = this.db.getCurrentJob();
+    for (const job of [currentJob].filter(Boolean) as JobRecord[]) {
+      this.abortAutoExtractRequests(job.id, "server shutdown");
+    }
+    const preserveManualStopSemantics = currentJob ? isStopInProgressStatus(currentJob.status) : false;
     const waits: Promise<void>[] = [];
     for (const active of this.activeAttempts.values()) {
-      active.child.kill("SIGTERM");
+      if (preserveManualStopSemantics) {
+        active.stopRequested = "force_stop";
+      }
+      signalChildProcess(active.child, "SIGTERM");
       waits.push(
         new Promise((resolve) => {
           active.child.once("close", () => resolve());
@@ -548,6 +734,12 @@ export class JobScheduler {
       );
     }
     await Promise.allSettled(waits);
+    await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
+    const job = this.db.getCurrentJob();
+    if (job && isStopInProgressStatus(job.status)) {
+      this.maybeFinalizeStoppedJob(job.id);
+    }
+    await this.loopPromise;
   }
 
   private requireCurrentJob(): JobRecord {
@@ -560,7 +752,7 @@ export class JobScheduler {
   }
 
   private ensureLoop(jobId: number): void {
-    if (this.loopPromise) return;
+    if (this.loopPromise || this.shuttingDown) return;
     this.loopPromise = this.runLoop(jobId).finally(() => {
       this.loopPromise = null;
     });
@@ -568,6 +760,7 @@ export class JobScheduler {
 
   private async runLoop(jobId: number): Promise<void> {
     while (true) {
+      if (this.shuttingDown) return;
       for (const active of this.activeAttempts.values()) {
         this.syncActiveAttemptFromLedger(active);
       }
@@ -577,6 +770,20 @@ export class JobScheduler {
       const activeCount = this.activeAttempts.size;
 
       if (job.status === "paused") {
+        await delay(100);
+        continue;
+      }
+
+      if (isStopInProgressStatus(job.status)) {
+        const stopped = this.maybeFinalizeStoppedJob(jobId);
+        if (stopped) {
+          this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(jobId) });
+          this.emit("toast", {
+            level: "info",
+            message: job.status === "force_stopping" ? `job #${job.id} force stopped` : `job #${job.id} stopped`,
+          });
+          return;
+        }
         await delay(100);
         continue;
       }
@@ -599,25 +806,61 @@ export class JobScheduler {
 
       const capacity = computeLaunchCapacity(job, activeCount);
       for (let i = 0; i < capacity; i += 1) {
+        const dispatchJob = this.db.getJob(jobId);
+        if (!dispatchJob || dispatchJob.status !== "running") {
+          break;
+        }
         const account = this.db.leaseNextAccount(jobId);
         if (!account) break;
-        const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${job.id}`, `attempt-${Date.now()}-${account.id}`);
-        const attempt = this.db.createAttempt(job.id, account.id, attemptOutputDir);
+        const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${dispatchJob.id}`, `attempt-${Date.now()}-${account.id}`);
+        const attempt = this.db.createAttempt(dispatchJob.id, account.id, attemptOutputDir);
+        const pendingLaunch: PendingAttemptLaunch = {
+          jobId: dispatchJob.id,
+          attempt,
+          account,
+          stopRequested: null,
+        };
+        this.pendingAttemptLaunches.set(attempt.id, pendingLaunch);
         try {
-          await this.spawnAttempt(job, account, attempt, attemptOutputDir);
+          const started = await this.spawnAttempt(dispatchJob, account, attempt, attemptOutputDir, pendingLaunch);
+          if (!started) {
+            continue;
+          }
           this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
           this.emit("account.updated", { account: this.db.getAccount(account.id) });
-          this.emit("job.updated", { job: this.db.getJob(job.id) });
+          this.emit("job.updated", { job: this.db.getJob(dispatchJob.id) });
         } catch (error) {
-          this.failAttempt(job.id, attempt.id, account.id, {
+          this.failAttempt(dispatchJob.id, attempt.id, account.id, {
             errorCode: "launch_setup_failed",
             errorMessage: error instanceof Error ? error.message : String(error),
           });
+        } finally {
+          this.pendingAttemptLaunches.delete(attempt.id);
         }
       }
 
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
+      if (refreshed.status === "paused") {
+        await delay(100);
+        continue;
+      }
+      if (isStopInProgressStatus(refreshed.status)) {
+        const stopped = this.maybeFinalizeStoppedJob(jobId);
+        if (stopped) {
+          this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(jobId) });
+          this.emit("toast", {
+            level: "info",
+            message: refreshed.status === "force_stopping" ? `job #${refreshed.id} force stopped` : `job #${refreshed.id} stopped`,
+          });
+          return;
+        }
+        await delay(100);
+        continue;
+      }
+      if (isTerminalJobStatus(refreshed.status)) {
+        return;
+      }
       const eligible = this.db.countEligibleAccounts(jobId);
       const hasAutoExtractState = this.autoExtractStates.has(jobId);
       if (eligible === 0 && refreshed.successCount < refreshed.need && refreshed.launchedCount < refreshed.maxAttempts) {
@@ -655,7 +898,13 @@ export class JobScheduler {
     }
   }
 
-  private async spawnAttempt(job: JobRecord, account: MicrosoftAccountRecord, attempt: JobAttemptRecord, outputDir: string): Promise<void> {
+  private async spawnAttempt(
+    job: JobRecord,
+    account: MicrosoftAccountRecord,
+    attempt: JobAttemptRecord,
+    outputDir: string,
+    pendingLaunch: PendingAttemptLaunch,
+  ): Promise<boolean> {
     let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
     let portLeases: { apiPort: PortLease; mixedPort: PortLease } | null = null;
     try {
@@ -676,12 +925,42 @@ export class JobScheduler {
         reservedPorts,
         selectedProxyNode,
       });
+      const latestJob = this.db.getJob(job.id);
+      const launchBlockedByStop =
+        pendingLaunch.stopRequested === "force_stop"
+        || Boolean(latestJob && (latestJob.status === "stopped" || isStopInProgressStatus(latestJob.status)));
+      if (launchBlockedByStop) {
+        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+        if (pendingLaunch.stopRequested === "force_stop") {
+          const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
+            job.id,
+            attempt.id,
+            account.id,
+            {
+              errorCode: "force_stopped",
+              errorMessage: "stopped by user",
+            },
+            null,
+          );
+          this.emit("attempt.updated", { attempt: stoppedAttempt });
+          this.emit("account.updated", { account: this.db.getAccount(account.id) });
+          this.emit("job.updated", { job: stoppedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped before launch for account #${account.id}` });
+        } else {
+          const { job: releasedJob, account: releasedAccount } = this.db.rollbackAttemptBeforeLaunch(job.id, attempt.id, account.id);
+          this.emit("account.updated", { account: releasedAccount });
+          this.emit("job.updated", { job: releasedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          this.emit("toast", {
+            level: "info",
+            message: `attempt #${attempt.id} skipped before launch because job #${job.id} is stopping`,
+          });
+        }
+        return false;
+      }
       const child = spawn(runtimeSpec.command, runtimeSpec.args, {
-        cwd: this.repoRoot,
-        env: runtimeSpec.env,
+        ...buildAttemptSpawnOptions(this.repoRoot, runtimeSpec),
         stdio: ["pipe", "pipe", "pipe"],
       });
-      child.stdin.end();
       const active: ActiveAttempt = {
         child,
         attempt,
@@ -689,7 +968,12 @@ export class JobScheduler {
         outputDir,
         reservedPorts,
         tail: [],
+        stopRequested: null,
       };
+      if (pendingLaunch.stopRequested === "force_stop") {
+        active.stopRequested = "force_stop";
+      }
+      child.stdin.end();
       let leasesReleased = false;
       const releasePortLeases = async () => {
         if (leasesReleased) return;
@@ -725,11 +1009,19 @@ export class JobScheduler {
       const finalize = async (runner: () => Promise<void> | void) => {
         if (settled) return;
         settled = true;
+        const finalizer = (async () => {
+          try {
+            await runner();
+          } finally {
+            this.activeAttempts.delete(attempt.id);
+            await releasePortLeases();
+          }
+        })();
+        this.pendingAttemptFinalizers.add(finalizer);
         try {
-          await runner();
+          await finalizer;
         } finally {
-          this.activeAttempts.delete(attempt.id);
-          await releasePortLeases();
+          this.pendingAttemptFinalizers.delete(finalizer);
         }
       };
 
@@ -747,8 +1039,9 @@ export class JobScheduler {
       });
 
       child.once("close", (code, signal) => {
-        void finalize(() => this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal));
+        void finalize(() => this.handleAttemptExit(job.id, attempt.id, account.id, outputDir, code, signal, active));
       });
+      return true;
     } catch (error) {
       if (portLeases) {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
@@ -803,6 +1096,7 @@ export class JobScheduler {
     outputDir: string,
     code: number | null,
     signal: NodeJS.Signals | null,
+    active: ActiveAttempt,
   ): Promise<void> {
     const result = await readJsonFile<{ apiKey?: string | null; email?: string; password?: string }>(path.join(outputDir, "result.json"));
     const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
@@ -824,6 +1118,27 @@ export class JobScheduler {
       this.emit("proxy.updated", { nodes: this.db.listProxyNodes() });
     }
 
+    const message =
+      error?.error ||
+      (signupTask?.error_message ? String(signupTask.error_message) : "") ||
+      (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+    if (active.stopRequested === "force_stop") {
+      const { job, attempt } = this.db.completeAttemptStopped(
+        jobId,
+        attemptId,
+        accountId,
+        {
+          errorCode: signal ? `force_stop_${String(signal).toLowerCase()}` : "force_stopped",
+          errorMessage: message || "stopped by user",
+        },
+        signupTask,
+      );
+      this.emit("attempt.updated", { attempt });
+      this.emit("account.updated", { account: this.db.getAccount(accountId) });
+      this.emit("job.updated", { job });
+      this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped for account #${accountId}` });
+      return;
+    }
     if (code === 0 && signal == null && apiKey) {
       const { job, attempt } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
       this.emit("attempt.updated", { attempt });
@@ -832,11 +1147,6 @@ export class JobScheduler {
       this.emit("toast", { level: "success", message: `attempt #${attempt.id} succeeded for account #${accountId}` });
       return;
     }
-
-    const message =
-      error?.error ||
-      (signupTask?.error_message ? String(signupTask.error_message) : "") ||
-      (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
     const errorCode = signupTask?.error_code ? String(signupTask.error_code) : code == null ? "process_exit" : `exit_${code}`;
     const { job, attempt } = this.db.completeAttemptFailure(
       jobId,
@@ -941,6 +1251,7 @@ export class JobScheduler {
       lastMessage: null,
       updatedAt: now,
       lastBudgetTickMs: null,
+      requestControllers: new Map<string, AbortController>(),
     };
   }
 
@@ -978,6 +1289,7 @@ export class JobScheduler {
       current.startedAt = null;
       current.lastBudgetTickMs = null;
       current.providerNextAttemptAtMs = createProviderAttemptClock();
+      current.requestControllers.clear();
     }
   }
 
@@ -1007,6 +1319,7 @@ export class JobScheduler {
     state.lastBudgetTickMs = null;
     state.lastMessage = message;
     state.updatedAt = nowIso();
+    state.requestControllers.clear();
   }
 
   private startAutoExtractRound(job: JobRecord, state: AutoExtractState): string | null {
@@ -1135,13 +1448,16 @@ export class JobScheduler {
       ok: boolean;
       result?: Awaited<ReturnType<typeof fetchSingleExtractedAccount>>;
       errorMessage?: string;
-      failureCode?: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | null;
+      failureCode?: "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error" | "job_force_stopping" | null;
       rawResponse?: string | null;
       maskedKey?: string | null;
     }) => {
       const state = this.autoExtractStates.get(context.jobId);
+      state?.requestControllers.delete(context.requestId);
       const startedAt = context.dispatchStartedAt;
       const completedAt = nowIso();
+      const currentJobAtFinish = this.db.getJob(context.jobId);
+      const forceStopping = currentJobAtFinish?.status === "force_stopping";
 
       let acceptedInBatch = 0;
       const affectedIds = new Set<number>();
@@ -1213,6 +1529,21 @@ export class JobScheduler {
               parseStatus: "parsed",
               acceptStatus: "rejected",
               rejectReason: "round_target_reached",
+            });
+            continue;
+          }
+
+          if (forceStopping) {
+            rejectReasons.add("job_force_stopping");
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "rejected",
+              rejectReason: "job_force_stopping",
             });
             continue;
           }
@@ -1303,6 +1634,11 @@ export class JobScheduler {
       }
 
       const currentJob = this.db.getJob(context.jobId);
+      const stopped = this.maybeFinalizeStoppedJob(context.jobId);
+      if (stopped) {
+        this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(context.jobId) });
+        return;
+      }
       if (state && currentJob) {
         const decision = this.evaluateAutoExtractState(currentJob, state);
         if (decision == null) {
@@ -1324,10 +1660,15 @@ export class JobScheduler {
       return;
     }
 
+    const state = this.autoExtractStates.get(context.jobId);
+    const controller = new AbortController();
+    state?.requestControllers.set(context.requestId, controller);
+
     void fetchSingleExtractedAccount({
       provider: context.provider,
       accountType: context.accountType,
       config: runtimeConfig,
+      signal: controller.signal,
     })
       .then((result) => {
         finish({
@@ -1340,10 +1681,14 @@ export class JobScheduler {
         });
       })
       .catch((error) => {
+        const requestAborted = controller.signal.aborted || isAbortError(error);
+        const abortedByManualStop =
+          controller.signal.aborted
+          && this.db.getJob(context.jobId)?.status === "force_stopping";
         finish({
           ok: false,
-          errorMessage: error instanceof Error ? error.message : String(error),
-          failureCode: "upstream_error",
+          errorMessage: abortedByManualStop ? "stopped by user" : requestAborted ? "request aborted" : error instanceof Error ? error.message : String(error),
+          failureCode: abortedByManualStop ? "job_force_stopping" : "upstream_error",
           rawResponse: null,
           maskedKey: maskLocalSecret(getConfiguredExtractorKey(context.provider, runtimeConfig)),
         });
@@ -1405,6 +1750,7 @@ export class JobScheduler {
         attemptBudget: state.attemptBudget,
         dispatchStartedAt,
         roundStartedAt: state.startedAt,
+        requestId: `${job.id}:${provider}:${state.rawAttemptCount}:${dispatchStartedAt}`,
       });
     }
 

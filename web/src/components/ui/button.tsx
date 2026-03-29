@@ -11,6 +11,7 @@ const buttonVariants = cva(
         default: "bg-emerald-500 text-slate-950 shadow-[0_10px_30px_rgba(34,197,94,0.28)] hover:bg-emerald-400 hover:shadow-[0_14px_36px_rgba(34,197,94,0.34)]",
         secondary: "border border-white/10 bg-white/8 text-slate-100 hover:bg-white/12",
         outline: "border border-sky-400/24 bg-sky-400/6 text-sky-100 hover:border-sky-300/36 hover:bg-sky-400/12",
+        danger: "bg-rose-500 text-white shadow-[0_10px_30px_rgba(244,63,94,0.28)] hover:bg-rose-400 hover:shadow-[0_14px_36px_rgba(244,63,94,0.34)]",
         ghost: "text-slate-200 hover:bg-white/8",
       },
       size: {
