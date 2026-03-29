@@ -114,3 +114,66 @@ test("serializeAttemptForApi ignores stale signup task rows for a fresh retry at
     db.close();
   }
 });
+
+test("serializeAttemptForApi keeps ledger diagnostics for failed attempts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tavreg-attempt-view-failed-"));
+  const dbPath = path.join(root, "ledger.sqlite");
+  const db = await AppDatabase.open(dbPath);
+  const ledger = await TaskLedger.open({
+    enabled: true,
+    dbPath,
+    busyTimeoutMs: 1000,
+    ipRateLimitCooldownMs: 60_000,
+    ipRateLimitMax: 3,
+    captchaMissingCooldownMs: 60_000,
+    captchaMissingMax: 3,
+    captchaMissingThreshold: 1,
+    invalidCaptchaCooldownMs: 60_000,
+    invalidCaptchaMax: 3,
+    invalidCaptchaThreshold: 1,
+    allowRateLimitedIpFallback: false,
+  });
+
+  try {
+    const imported = db.importAccounts([{ email: "failed@outlook.com", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0]!;
+    const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = db.createAttempt(job.id, accountId, path.join(root, "attempt-output"));
+
+    ledger!.upsertTask({
+      runId: "run-failed-1",
+      jobId: job.id,
+      accountId,
+      batchId: "batch-failed-1",
+      mode: "headed",
+      attemptIndex: 1,
+      modeRetryMax: 1,
+      status: "failed",
+      startedAt: attempt.startedAt,
+      completedAt: new Date().toISOString(),
+      failureStage: "extract_api_key",
+      proxyNode: "Tokyo-2",
+      proxyIp: "5.6.7.8",
+      errorCode: "extract_timeout",
+      errorMessage: "API key extraction timed out",
+    });
+    db.updateAttempt(attempt.id, {
+      status: "failed",
+      stage: "failed",
+      completedAt: new Date().toISOString(),
+      errorCode: "exit_1",
+      errorMessage: "process exited with code 1",
+    });
+
+    const serialized = serializeAttemptForApi(db, db.getAttempt(attempt.id)!);
+    expect(serialized.status).toBe("failed");
+    expect(serialized.stage).toBe("extract_api_key");
+    expect(serialized.proxyNode).toBe("Tokyo-2");
+    expect(serialized.proxyIp).toBe("5.6.7.8");
+    expect(serialized.errorCode).toBe("extract_timeout");
+    expect(serialized.errorMessage).toBe("API key extraction timed out");
+  } finally {
+    ledger?.close();
+    db.close();
+  }
+});

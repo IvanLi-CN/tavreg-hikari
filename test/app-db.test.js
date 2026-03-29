@@ -4,7 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
-import { JobScheduler, buildAttemptRuntimeSpec, pickWorkerRuntime, resolveAttemptProxyNode, resolveWorkerRuntime } from "../src/server/scheduler.ts";
+import {
+  JobScheduler,
+  buildAttemptRuntimeSpec,
+  buildAttemptSpawnOptions,
+  pickWorkerRuntime,
+  resolveAttemptProxyNode,
+  resolveWorkerRuntime,
+} from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -2008,6 +2015,40 @@ describe("scheduler runtime spec", () => {
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
+  });
+
+  test("launches child attempts in their own process group for force-stop cleanup", () => {
+    const runtime = buildAttemptRuntimeSpec({
+      job: { id: 9, runMode: "headless" },
+      account: {
+        id: 22,
+        microsoftEmail: "grouped@outlook.com",
+        passwordPlaintext: "worker-pass",
+        proofMailboxProvider: null,
+        proofMailboxAddress: null,
+        proofMailboxId: null,
+      },
+      outputDir: "/tmp/tavreg/job-9/attempt-22",
+      sharedLedgerPath: "/tmp/tavreg/app.sqlite",
+      settings: {
+        subscriptionUrl: "https://example.com/sub.yaml",
+        groupName: "WEB_AUTO",
+        routeGroupName: "WEB_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 4321,
+        maxLatencyMs: 987,
+      },
+      reservedPorts: {
+        apiPort: 40125,
+        mixedPort: 40126,
+      },
+    });
+
+    expect(buildAttemptSpawnOptions("/tmp/tavreg", runtime)).toEqual({
+      cwd: "/tmp/tavreg",
+      env: runtime.env,
+      detached: true,
+    });
   });
 
   test("only forwards pinned proxy nodes that still exist in inventory", async () => {

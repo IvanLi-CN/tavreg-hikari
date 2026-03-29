@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import {
@@ -317,6 +317,14 @@ export function buildAttemptRuntimeSpec(input: {
           }
         : {}),
     },
+  };
+}
+
+export function buildAttemptSpawnOptions(repoRoot: string, runtimeSpec: { env: NodeJS.ProcessEnv }): SpawnOptionsWithoutStdio {
+  return {
+    cwd: repoRoot,
+    env: runtimeSpec.env,
+    detached: true,
   };
 }
 
@@ -837,8 +845,7 @@ export class JobScheduler {
         selectedProxyNode,
       });
       const child = spawn(runtimeSpec.command, runtimeSpec.args, {
-        cwd: this.repoRoot,
-        env: runtimeSpec.env,
+        ...buildAttemptSpawnOptions(this.repoRoot, runtimeSpec),
         stdio: ["pipe", "pipe", "pipe"],
       });
       child.stdin.end();
