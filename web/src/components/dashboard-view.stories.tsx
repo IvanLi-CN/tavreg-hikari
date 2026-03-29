@@ -6,6 +6,33 @@ import type { JobDraft } from "@/lib/app-types";
 import { normalizeJobDraft } from "@/lib/job-draft";
 import { sampleEvents, sampleExtractorSettings, sampleJob } from "@/stories/fixtures";
 
+const defaultDraft: JobDraft = {
+  runMode: "headed",
+  need: 5,
+  parallel: 2,
+  maxAttempts: 9,
+  autoExtractSources: ["zhanghaoya", "hotmail666"],
+  autoExtractQuantity: 1,
+  autoExtractMaxWaitSec: 60,
+  autoExtractAccountType: "outlook",
+};
+
+function buildJob(status: NonNullable<typeof sampleJob.job>["status"]) {
+  return {
+    ...sampleJob,
+    activeAttempts: status === "stopped" ? [] : sampleJob.activeAttempts,
+    job: sampleJob.job
+      ? {
+          ...sampleJob.job,
+          status,
+          pausedAt: status === "paused" ? "2026-03-18T07:25:00.000Z" : null,
+          completedAt: status === "stopped" ? "2026-03-18T07:28:00.000Z" : null,
+          lastError: null,
+        }
+      : null,
+  };
+}
+
 const meta = {
   title: "Views/DashboardView",
   component: DashboardView,
@@ -26,31 +53,13 @@ export const Running: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: {
-      runMode: "headed",
-      need: 5,
-      parallel: 2,
-      maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya", "hotmail666"],
-      autoExtractQuantity: 1,
-      autoExtractMaxWaitSec: 60,
-      autoExtractAccountType: "outlook",
-    },
+    jobDraft: defaultDraft,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
   render: () => {
-    const [draft, setDraft] = useState<JobDraft>({
-      runMode: "headed",
-      need: 5,
-      parallel: 2,
-      maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya", "hotmail666"],
-      autoExtractQuantity: 1,
-      autoExtractMaxWaitSec: 60,
-      autoExtractAccountType: "outlook",
-    });
+    const [draft, setDraft] = useState<JobDraft>(defaultDraft);
     return (
       <>
         <DashboardView
@@ -86,6 +95,34 @@ export const Empty: Story = {
     extractorAvailability: { zhanghaoya: false, shanyouxiang: true, shankeyun: true, hotmail666: false },
     onJobDraftChange: fn(),
     onJobAction: fn(),
+  },
+};
+
+export const Paused: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("paused"),
+  },
+};
+
+export const Stopping: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("stopping"),
+  },
+};
+
+export const ForceStopping: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("force_stopping"),
+  },
+};
+
+export const Stopped: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("stopped"),
   },
 };
 
@@ -259,26 +296,27 @@ export const ControlPlay: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: {
-      runMode: "headed",
-      need: 5,
-      parallel: 2,
-      maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya", "hotmail666"],
-      autoExtractQuantity: 1,
-      autoExtractMaxWaitSec: 60,
-      autoExtractAccountType: "outlook",
-    },
+    jobDraft: defaultDraft,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "启动" }));
-    await expect(args.onJobAction).toHaveBeenCalledWith("start");
-    await userEvent.click(canvas.getByRole("button", { name: "应用调参" }));
-    await expect(args.onJobAction).toHaveBeenCalledWith("update_limits");
+    await userEvent.click(canvas.getByRole("button", { name: "暂停" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("pause", undefined);
+
+    await userEvent.click(canvas.getByRole("button", { name: "停止" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);
+
+    await userEvent.click(canvas.getByRole("button", { name: "强行停止" }));
+    await expect(within(document.body).getByRole("dialog", { name: "确认强行停止" })).toBeInTheDocument();
+    await userEvent.click(within(document.body).getByRole("button", { name: "取消" }));
+    await expect(args.onJobAction).not.toHaveBeenCalledWith("force_stop", expect.anything());
+
+    await userEvent.click(canvas.getByRole("button", { name: "强行停止" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "确认强停" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("force_stop", { confirmForceStop: true });
   },
 };
 
@@ -286,16 +324,7 @@ export const BufferedNumberFlowPlay: Story = {
   args: {
     job: sampleJob,
     events: sampleEvents,
-    jobDraft: {
-      runMode: "headed",
-      need: 5,
-      parallel: 2,
-      maxAttempts: 9,
-      autoExtractSources: ["zhanghaoya", "hotmail666"],
-      autoExtractQuantity: 1,
-      autoExtractMaxWaitSec: 60,
-      autoExtractAccountType: "outlook",
-    },
+    jobDraft: defaultDraft,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),

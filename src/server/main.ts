@@ -837,6 +837,15 @@ async function main(): Promise<void> {
           if (action === "resume") {
             return json({ ok: true, job: scheduler.resumeCurrentJob() });
           }
+          if (action === "stop") {
+            return json({ ok: true, job: scheduler.stopCurrentJob() });
+          }
+          if (action === "force_stop") {
+            return json({
+              ok: true,
+              job: scheduler.forceStopCurrentJob(body?.confirmForceStop === true),
+            });
+          }
           if (action === "update_limits") {
             const job = scheduler.updateCurrentJobLimits({
               parallel: body?.parallel == null ? undefined : Number(body.parallel),

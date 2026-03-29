@@ -20,6 +20,8 @@ import type {
   ApiKeysPayload,
   ApiKeyQuery,
   EventRecord,
+  JobControlAction,
+  JobControlOptions,
   JobDraft,
   JobSnapshot,
   PageKey,
@@ -356,14 +358,15 @@ export function App() {
     setJobDraft((current) => normalizeJobDraft({ ...current, ...patch }));
   };
 
-  const handleJobAction = async (action: "start" | "pause" | "resume" | "update_limits", draftOverride?: JobDraft) => {
+  const handleJobAction = async (action: JobControlAction, options?: JobControlOptions) => {
     try {
       setError(null);
-      const draft = draftOverride || jobDraft;
+      const draft = options?.draft || jobDraft;
       const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify({
           action,
+          ...(options?.confirmForceStop ? { confirmForceStop: true } : {}),
           ...draft,
         }),
       });

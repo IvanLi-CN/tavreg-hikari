@@ -1,6 +1,11 @@
 export type PageKey = "dashboard" | "accounts" | "apiKeys" | "proxies";
 
-export type JobStatus = "idle" | "running" | "paused" | "completing" | "completed" | "failed";
+export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
+export type JobControlAction = "start" | "pause" | "resume" | "stop" | "force_stop" | "update_limits";
+export type JobControlOptions = {
+  draft?: JobDraft;
+  confirmForceStop?: boolean;
+};
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
 
