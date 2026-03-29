@@ -1469,7 +1469,13 @@ export class AppDatabase {
             AND has_api_key = 0
             AND COALESCE(skip_reason, '') = ''
             AND lease_job_id IS NULL
-            AND id NOT IN (SELECT account_id FROM job_attempts WHERE job_id = ?)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM job_attempts attempts
+              WHERE attempts.job_id = ?
+                AND attempts.account_id = microsoft_accounts.id
+                AND attempts.status IN ('running', 'succeeded')
+            )
           ORDER BY
             CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END,
             last_used_at ASC,
@@ -1506,7 +1512,13 @@ export class AppDatabase {
           AND has_api_key = 0
           AND COALESCE(skip_reason, '') = ''
           AND lease_job_id IS NULL
-          AND id NOT IN (SELECT account_id FROM job_attempts WHERE job_id = ?)
+          AND NOT EXISTS (
+            SELECT 1
+            FROM job_attempts attempts
+            WHERE attempts.job_id = ?
+              AND attempts.account_id = microsoft_accounts.id
+              AND attempts.status IN ('running', 'succeeded')
+          )
       `)
       .get(jobId) as { count?: number } | null;
     return Number(row?.count || 0);
@@ -1517,6 +1529,20 @@ export class AppDatabase {
     return row ? mapAccountRow(row) : null;
   }
 
+  private hasNonRetryableAttemptForJob(jobId: number, accountId: number): boolean {
+    const attempted = this.db
+      .query(`
+        SELECT 1 AS blocked
+        FROM job_attempts
+        WHERE job_id = ?
+          AND account_id = ?
+          AND status IN ('running', 'succeeded')
+        LIMIT 1
+      `)
+      .get(jobId, accountId) as { blocked?: number } | null;
+    return Boolean(attempted?.blocked);
+  }
+
   isAccountSchedulableForJob(jobId: number, accountId: number): boolean {
     const account = this.getAccount(accountId);
     if (!account) return false;
@@ -1524,10 +1550,7 @@ export class AppDatabase {
     if (account.hasApiKey) return false;
     if (isBlockingAccountSkipReason(account.skipReason)) return false;
     if (account.leaseJobId != null) return false;
-    const attempted = this.db
-      .query("SELECT 1 AS ok FROM job_attempts WHERE job_id = ? AND account_id = ? LIMIT 1")
-      .get(jobId, accountId) as { ok?: number } | null;
-    return !Boolean(attempted?.ok);
+    return !this.hasNonRetryableAttemptForJob(jobId, accountId);
   }
 
   createAttempt(jobId: number, accountId: number, outputDir: string): JobAttemptRecord {

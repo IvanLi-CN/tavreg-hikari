@@ -24,7 +24,6 @@
 
 ### Non-goals
 
-- 不支持同一 job 内回头再次派发同一微软账号。
 - 不重写 Microsoft 登录自动化主链或错误码体系。
 - 不新增数据库列、额外 REST endpoint 或新的 WebSocket 事件类型。
 
@@ -61,7 +60,9 @@
 
 ### 账号可调度判定
 
-- 同一 job 内，只要该账号已经被当前 job 尝试过，无论结果如何，都不得再次派发。
+- 同一 job 内：
+  - `failed` 且 `skip_reason` 为空的账号，允许继续派发。
+  - 已成功产出 API key、仍处于当前租用中、人工停用或被三类硬账号阻断的账号，不得再次派发。
 - 新 job 创建后：
   - `failed` 且 `skip_reason` 为空的账号，允许重新进入候选池。
   - `skip_reason` 为三类硬账号阻断之一的账号，不得进入候选池，且最近状态显示为 `disabled`。
@@ -87,7 +88,7 @@
 ### 账号页展示
 
 - UI 必须明确区分：
-  - `failed` 但可在新任务复用
+  - `failed` 但可继续重试
   - `disabled` 且被硬账号阻断
   - 人工停用
 - 对三类硬账号阻断展示清晰的人类可读文案。
@@ -96,7 +97,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 某账号在 job A 因 `network_connection_closed`、代理、浏览器或临时风控失败，When 创建 job B，Then 该账号会重新计入 `eligibleCount` 并可再次被派发。
-- Given 某账号已经在当前 job 里失败过，When 当前 job 继续调度，Then 该账号不会在同一 job 内被再次派发。
+- Given 某账号已经在当前 job 里因瞬时错误失败过，When 当前 job 继续调度，Then 该账号会重新计入 `eligibleCount` 并允许再次派发。
 - Given 某账号失败码为 `microsoft_password_incorrect`、`microsoft_account_locked` 或 `microsoft_unknown_recovery_email`，When 创建新 job，Then 该账号不会进入候选池，且账号页会显示明确阻断原因。
 - Given 操作者更新了密码、保存了正确的 Proof 邮箱，或点击“恢复可用”，When 刷新账号列表并创建新 job，Then 对应阻断会被清除，账号重新可调度。
 - Given 账号被人工停用，When 自动化再写失败结果，Then 人工停用状态不会被覆盖，且仍优先阻止调度。
@@ -155,3 +156,4 @@
 - 2026-03-28: 完成账号调度判定、恢复路径、账号页 Storybook 状态矩阵与 owner-facing 视觉证据。
 - 2026-03-29: 重新截取账号状态矩阵与阻断入口证据，并补充 Dashboard 运行中 Attempts 在长邮箱 / IPv6 场景下无横向滚动的界面图。
 - 2026-03-29: 完成 PR 收敛前最终验证与 Spec 状态收口，准备合并并执行后续收尾。
+- 2026-03-29: 修正瞬时失败账号的同 job 复用规则，改为同 job 与新 job 都允许继续重试，仅对成功、租用中、人工停用与硬账号阻断维持不可调度。

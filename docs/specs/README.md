@@ -17,4 +17,4 @@
 | svjx5 | 微软账号自动提取与本地历史接入 | 已完成 | `svjx5-microsoft-account-auto-extractor/SPEC.md` | 2026-03-27 | 四源适配、自动补号、本地历史 |
 | gw9zj | 主工作区运行态同步到新 Worktree 的自动 Bootstrap | 已完成 | `gw9zj-worktree-runtime-bootstrap/SPEC.md` | 2026-03-27 | `.env.local` 与 SQLite ledger 自动补齐 |
 | 9h2xd | 收敛 macOS 下 fingerprint Chromium + CDP 登录恢复链路 | 已完成 | `9h2xd-macos-headless-chrome-launch/SPEC.md` | 2026-03-27 | 保持 fingerprint-chromium + CDP，worker 优先走 Node，并修正 Tavily home / passkey 恢复链路 |
-| b5baw | Failed 微软账号复用策略收敛 | 已完成 | `b5baw-failed-account-reuse-policy/SPEC.md` | 2026-03-29 | 账号复用策略、阻断状态收敛、Dashboard 布局修正与视觉证据已完成 |
+| b5baw | Failed 微软账号复用策略收敛 | 已完成 | `b5baw-failed-account-reuse-policy/SPEC.md` | 2026-03-29 | 账号复用策略、同 job 瞬时失败重试、阻断状态收敛与 Dashboard 布局修正已完成 |
