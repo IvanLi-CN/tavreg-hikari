@@ -38,22 +38,16 @@ function MetaRow(props: { label: string; value: string }) {
 function MailboxListItem(props: {
   mailbox: MailboxRecord;
   selected: boolean;
-  settingsConfigured: boolean;
-  connecting: boolean;
-  syncing: boolean;
   onSelect: () => void;
-  onConnect: () => void;
-  onSync: () => void;
 }) {
   const label = props.mailbox.graphDisplayName || props.mailbox.microsoftEmail;
-  const connectDisabled = !props.settingsConfigured || props.connecting;
 
   return (
     <button
       type="button"
       onClick={props.onSelect}
       className={cn(
-        "w-full cursor-pointer rounded-2xl border px-4 py-4 text-left transition-colors duration-200",
+        "w-full cursor-pointer rounded-xl border px-3 py-3 text-left transition-colors duration-200",
         props.selected
           ? "border-sky-400/35 bg-slate-900/95"
           : "border-white/8 bg-slate-950/40 hover:border-white/14 hover:bg-slate-900/70",
@@ -62,62 +56,29 @@ function MailboxListItem(props: {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-white">{label}</div>
-          <div className="mt-1 truncate text-xs text-slate-500">{props.mailbox.microsoftEmail}</div>
+          <div className="mt-0.5 truncate text-xs text-slate-500">{props.mailbox.microsoftEmail}</div>
         </div>
-        <div className="rounded-full border border-white/8 bg-white/[0.03] px-2.5 py-1 text-xs font-medium text-slate-300">
+        <div className="rounded-full border border-white/8 bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-slate-300">
           {props.mailbox.unreadCount}
         </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <StatusBadge status={props.mailbox.status} />
         <Badge variant="neutral">{props.mailbox.isAuthorized ? "已授权" : "未授权"}</Badge>
         {props.mailbox.groupName ? <Badge variant="neutral">{props.mailbox.groupName}</Badge> : null}
       </div>
 
-      <div className="mt-4 space-y-2">
-        <MetaRow label="最近同步" value={formatDate(props.mailbox.lastSyncedAt)} />
-        <MetaRow label="最近授权" value={formatDate(props.mailbox.oauthConnectedAt)} />
+      <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+        <MetaRow label="同步" value={formatDate(props.mailbox.lastSyncedAt)} />
+        <MetaRow label="授权" value={formatDate(props.mailbox.oauthConnectedAt)} />
       </div>
 
       {props.mailbox.lastErrorMessage ? (
-        <div className="mt-3 rounded-xl border border-rose-400/20 bg-rose-500/[0.06] px-3 py-2 text-xs text-rose-100">
+        <div className="mt-2 truncate rounded-lg border border-rose-400/20 bg-rose-500/[0.06] px-2.5 py-1.5 text-[11px] text-rose-100">
           {props.mailbox.lastErrorMessage}
         </div>
       ) : null}
-
-      <div className="mt-4 flex gap-2">
-        <Button
-          variant={props.mailbox.isAuthorized ? "secondary" : "outline"}
-          size="sm"
-          className="flex-1"
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onConnect();
-          }}
-          disabled={connectDisabled}
-        >
-          {props.connecting
-            ? "跳转中…"
-            : !props.settingsConfigured
-              ? "先配置"
-              : props.mailbox.isAuthorized
-                ? "重新授权"
-                : "连接邮箱"}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="flex-1"
-          onClick={(event) => {
-            event.stopPropagation();
-            props.onSync();
-          }}
-          disabled={!props.mailbox.isAuthorized || props.syncing}
-        >
-          {props.syncing ? "刷新中…" : "刷新"}
-        </Button>
-      </div>
     </button>
   );
 }
@@ -132,7 +93,7 @@ function MessageListItem(props: {
       type="button"
       onClick={props.onSelect}
       className={cn(
-        "w-full cursor-pointer rounded-2xl border px-4 py-4 text-left transition-colors duration-200",
+        "w-full cursor-pointer rounded-xl border px-3 py-3 text-left transition-colors duration-200",
         props.selected
           ? "border-sky-400/35 bg-slate-900/95"
           : "border-white/8 bg-slate-950/40 hover:border-white/14 hover:bg-slate-900/70",
@@ -141,7 +102,7 @@ function MessageListItem(props: {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-white">{props.message.subject || "(无主题)"}</div>
-          <div className="mt-1 truncate text-xs text-slate-500">
+          <div className="mt-0.5 truncate text-xs text-slate-500">
             {props.message.fromName || props.message.fromAddress || "未知发件人"}
           </div>
         </div>
@@ -150,7 +111,7 @@ function MessageListItem(props: {
           <span className="text-[11px] text-slate-500">{formatDate(props.message.receivedAt)}</span>
         </div>
       </div>
-      <div className="mt-3 line-clamp-2 text-sm leading-6 text-slate-300">{props.message.bodyPreview || "无预览"}</div>
+      <div className="mt-2 line-clamp-2 text-sm leading-5 text-slate-300">{props.message.bodyPreview || "无预览"}</div>
     </button>
   );
 }
@@ -244,21 +205,44 @@ export function MailboxesView(props: {
           <PaneHeader
             title="邮箱账号"
             description="导入的微软账号会自动加入这里。"
+            actions={
+              props.selectedMailbox ? (
+                <div className="flex gap-2">
+                  <Button
+                    variant={props.selectedMailbox.isAuthorized ? "secondary" : "outline"}
+                    size="sm"
+                    onClick={() => void props.onConnectMailbox(props.selectedMailbox!.id)}
+                    disabled={!props.settingsConfigured || props.connectingMailboxId === props.selectedMailbox.id}
+                  >
+                    {props.connectingMailboxId === props.selectedMailbox.id
+                      ? "跳转中…"
+                      : !props.settingsConfigured
+                        ? "先配置"
+                        : props.selectedMailbox.isAuthorized
+                          ? "重连"
+                          : "连接"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void props.onSyncMailbox(props.selectedMailbox!.id)}
+                    disabled={!props.selectedMailbox.isAuthorized || props.syncingMailboxId === props.selectedMailbox.id}
+                  >
+                    {props.syncingMailboxId === props.selectedMailbox.id ? "刷新中…" : "刷新"}
+                  </Button>
+                </div>
+              ) : null
+            }
           />
           <CardContent className="p-0">
-            <ScrollArea className="h-[68vh] px-4 py-4">
-              <div className="space-y-3">
+            <ScrollArea className="h-[68vh] px-3 py-3">
+              <div className="space-y-2">
                 {props.mailboxes.map((mailbox) => (
                   <MailboxListItem
                     key={mailbox.id}
                     mailbox={mailbox}
                     selected={props.selectedMailbox?.id === mailbox.id}
-                    settingsConfigured={props.settingsConfigured}
-                    connecting={props.connectingMailboxId === mailbox.id}
-                    syncing={props.syncingMailboxId === mailbox.id}
                     onSelect={() => props.onSelectMailbox(mailbox.id)}
-                    onConnect={() => void props.onConnectMailbox(mailbox.id)}
-                    onSync={() => void props.onSyncMailbox(mailbox.id)}
                   />
                 ))}
                 {props.mailboxes.length === 0 ? (
@@ -279,8 +263,8 @@ export function MailboxesView(props: {
             }
           />
           <CardContent className="p-0">
-            <ScrollArea className="h-[68vh] px-4 py-4">
-              <div className="space-y-3">
+            <ScrollArea className="h-[68vh] px-3 py-3">
+              <div className="space-y-2">
                 {props.messages.map((message) => (
                   <MessageListItem
                     key={message.id}
@@ -318,31 +302,38 @@ export function MailboxesView(props: {
                 : "选中邮件后，在这里查看正文。"
             }
           />
-          <CardContent className="space-y-4 p-4">
+          <CardContent className="space-y-3 p-3">
             {props.messageBusy ? (
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-10 text-center text-sm text-slate-400">
                 正在读取邮件正文…
               </div>
             ) : props.messageDetail ? (
               <div className="space-y-4">
-                <div className="rounded-2xl border border-white/8 bg-slate-900/70 px-4 py-4">
+                <div className="space-y-2 border-b border-white/8 pb-3">
                   <div className="text-lg font-semibold text-white">{props.messageDetail.subject || "(无主题)"}</div>
-                  <div className="mt-3 flex flex-wrap gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Badge variant={props.messageDetail.isRead ? "neutral" : "info"}>
                       {props.messageDetail.isRead ? "已读" : "未读"}
                     </Badge>
                     {props.messageDetail.hasAttachments ? <Badge variant="warning">含附件</Badge> : null}
                     {props.messageDetail.webLink ? <Badge variant="neutral">Outlook Web</Badge> : null}
                   </div>
+                  <div className="grid gap-1 text-xs text-slate-400 md:grid-cols-2">
+                    <MetaRow
+                      label="发件人"
+                      value={props.messageDetail.fromName || props.messageDetail.fromAddress || "未知发件人"}
+                    />
+                    <MetaRow label="收件时间" value={formatDate(props.messageDetail.receivedAt)} />
+                  </div>
                 </div>
 
                 {props.messageDetail.bodyContentType === "html" ? (
                   <div
-                    className="prose prose-invert max-w-none rounded-2xl border border-white/8 bg-slate-900/70 px-5 py-4 prose-a:text-sky-300 prose-p:text-slate-200 prose-strong:text-white"
+                    className="prose prose-invert max-w-none px-1 py-1 prose-a:text-sky-300 prose-p:text-slate-200 prose-strong:text-white"
                     dangerouslySetInnerHTML={{ __html: sanitizedBody || "" }}
                   />
                 ) : (
-                  <pre className="whitespace-pre-wrap rounded-2xl border border-white/8 bg-slate-900/70 px-5 py-4 font-sans text-sm leading-6 text-slate-200">
+                  <pre className="whitespace-pre-wrap px-1 py-1 font-sans text-sm leading-6 text-slate-200">
                     {props.messageDetail.bodyContent || props.messageDetail.bodyPreview || "正文为空。"}
                   </pre>
                 )}
