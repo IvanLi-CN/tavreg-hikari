@@ -944,6 +944,50 @@ describe("scheduler helpers", () => {
     ).toBe(true);
   });
 
+  test("preserves stopping status when the final successful attempt finishes after a graceful stop request", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "stop-success@outlook.com", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-stop-success-attempt");
+    appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+
+    const { job: nextJob, attempt: nextAttempt } = appDb.completeAttemptSuccess(
+      job.id,
+      attempt.id,
+      accountId,
+      "tvly-stop-success-0001",
+      null,
+    );
+
+    expect(nextAttempt.status).toBe("succeeded");
+    expect(nextJob.status).toBe("stopping");
+
+    appDb.close();
+  });
+
+  test("preserves force stopping status when a remaining attempt fails during manual shutdown", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "stop-failure@outlook.com", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-stop-failure-attempt");
+    appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+
+    const { job: nextJob, attempt: nextAttempt } = appDb.completeAttemptFailure(
+      job.id,
+      attempt.id,
+      accountId,
+      { errorCode: "network_connection_closed" },
+      null,
+    );
+
+    expect(nextAttempt.status).toBe("failed");
+    expect(nextJob.status).toBe("force_stopping");
+
+    appDb.close();
+  });
+
   test("rejects job starts before proxy subscription is configured", async () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(

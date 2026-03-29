@@ -480,6 +480,10 @@ export function shouldEnterCompleting(job: Pick<JobRecord, "need" | "successCoun
   return job.successCount >= job.need || job.launchedCount >= job.maxAttempts;
 }
 
+function shouldPreserveManualStopStatus(status: JobStatus): boolean {
+  return status === "stopping" || status === "force_stopping";
+}
+
 export class AppDatabase {
   readonly dbPath: string;
   private readonly db: SqliteDatabase;
@@ -1898,14 +1902,16 @@ export class AppDatabase {
       .run(now, now, accountId);
     const job = this.updateJobState(jobId, {
       successCount: currentJob.successCount + 1,
-      status: shouldEnterCompleting({
-        need: currentJob.need,
-        successCount: currentJob.successCount + 1,
-        maxAttempts: currentJob.maxAttempts,
-        launchedCount: currentJob.launchedCount,
-      })
-        ? "completing"
-        : currentJob.status,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting({
+            need: currentJob.need,
+            successCount: currentJob.successCount + 1,
+            maxAttempts: currentJob.maxAttempts,
+            launchedCount: currentJob.launchedCount,
+          })
+          ? "completing"
+          : currentJob.status,
     });
     return { job, attempt };
   }
@@ -2003,7 +2009,11 @@ export class AppDatabase {
       .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,
-      status: shouldEnterCompleting(currentJob) ? "completing" : currentJob.status,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting(currentJob)
+          ? "completing"
+          : currentJob.status,
     });
     return { job, attempt };
   }
