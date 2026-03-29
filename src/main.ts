@@ -2781,34 +2781,12 @@ async function syncLinkedMicrosoftAccountOutcome(
       db.markAccountDirectSuccess(envAccountId);
       return;
     }
-    const unavailableReason = deriveLinkedMicrosoftUnavailableReason(outcome.errorCode ?? null);
-    if (unavailableReason) {
-      db.markAccountUnavailable(envAccountId, unavailableReason, outcome.errorCode ?? null, {
-        releaseLease: !preserveLease,
-      });
-      return;
-    }
     db.markAccountDirectFailure(envAccountId, outcome.errorCode ?? null, {
       releaseLease: !preserveLease,
     });
   } finally {
     db.close();
   }
-}
-
-function deriveLinkedMicrosoftUnavailableReason(errorCode: string | null | undefined): string | null {
-  const normalized = String(errorCode || "").trim();
-  if (/^microsoft_account_locked/i.test(normalized)) {
-    return "微软账户已锁定";
-  }
-  if (/^microsoft_unknown_recovery_email/i.test(normalized)) {
-    const detail = normalized.split(":").slice(1).join(":").trim();
-    if (!detail || /challenge_mismatch|unknown_recovery_email/i.test(detail)) {
-      return "未知辅助邮箱";
-    }
-    return `未知辅助邮箱：${detail}`;
-  }
-  return null;
 }
 
 async function provisionMicrosoftProofMailbox(cfg: AppConfig, proxyUrl?: string): Promise<{ address: string; mailboxId: string }> {

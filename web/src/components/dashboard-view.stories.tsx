@@ -146,6 +146,83 @@ export const OverflowGuard: Story = {
   ],
 };
 
+export const ActiveAttemptsNoWrap: Story = {
+  args: {
+    job: {
+      ...sampleJob,
+      activeAttempts: [
+        {
+          id: 307,
+          accountId: 91,
+          accountEmail: "jmunyxy196@outlook.com",
+          status: "failed",
+          stage: "login_home",
+          proxyNode: "美国03 | 合适下载使用-0.01倍率",
+          proxyIp: "208.87.242.97",
+          errorCode: null,
+          errorMessage: null,
+          startedAt: "2026-03-28T15:57:20.000Z",
+          completedAt: null,
+        },
+        {
+          id: 309,
+          accountId: 93,
+          accountEmail: "myarjzor2958@outlook.com",
+          status: "running",
+          stage: "login_home",
+          proxyNode: "美国圣何塞07 | 三网推荐",
+          proxyIp: "2602:feda:dd0:7705:add5:6893:e933:3196",
+          errorCode: null,
+          errorMessage: null,
+          startedAt: "2026-03-28T15:57:20.000Z",
+          completedAt: null,
+        },
+        {
+          id: 310,
+          accountId: 94,
+          accountEmail: "lbajazwav629@outlook.com",
+          status: "running",
+          stage: "proxy_select",
+          proxyNode: "香港04 | 移动联通推荐",
+          proxyIp: "—",
+          errorCode: null,
+          errorMessage: null,
+          startedAt: "2026-03-28T15:58:14.000Z",
+          completedAt: null,
+        },
+      ],
+    },
+    events: sampleEvents,
+    jobDraft: {
+      runMode: "headed",
+      need: 5,
+      parallel: 2,
+      maxAttempts: 9,
+      autoExtractSources: ["zhanghaoya", "hotmail666"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 60,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: sampleExtractorSettings.availability,
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "长邮箱、长代理节点与 IPv6 出口 IP 在同一行内截断显示，表格改为固定列宽，不再把整行撑成多行。",
+      },
+    },
+  },
+  decorators: [
+    (Story) => (
+      <div className="mx-auto w-full max-w-[1180px] overflow-hidden">
+        <Story />
+      </div>
+    ),
+  ],
+};
+
 export const FourSourceCompact: Story = {
   args: {
     job: sampleJob,

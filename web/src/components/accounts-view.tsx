@@ -42,6 +42,30 @@ function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
 }
 
+function isRestorableAccountBlock(reason: string | null | undefined): boolean {
+  return ["microsoft_password_incorrect", "microsoft_account_locked", "microsoft_unknown_recovery_email"].includes(String(reason || "").trim());
+}
+
+function getAccountDisplayStatus(account: Pick<AccountRecord, "lastResultStatus" | "skipReason" | "disabledAt">): string {
+  if (account.disabledAt || isRestorableAccountBlock(account.skipReason)) return "disabled";
+  return account.lastResultStatus;
+}
+
+function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
+  if (!account.skipReason) return "—";
+  if (account.skipReason === "has_api_key") return "已有 API key";
+  if (account.skipReason === "microsoft_password_incorrect") return "Microsoft 密码错误";
+  if (account.skipReason === "microsoft_account_locked") return "Microsoft 账户已锁定";
+  if (account.skipReason === "microsoft_unknown_recovery_email") {
+    const detail = String(account.lastErrorCode || "").split(":").slice(1).join(":").trim();
+    if (detail && !/challenge_mismatch|unknown_recovery_email/i.test(detail)) {
+      return `未知辅助邮箱：${detail}`;
+    }
+    return "未知辅助邮箱";
+  }
+  return account.skipReason;
+}
+
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-2">
@@ -340,7 +364,7 @@ export function AccountsView({
 
   const openAvailabilityDialog = (account: AccountRecord) => {
     setAvailabilityAccount(account);
-    setAvailabilityReasonDraft(account.disabledReason || "未知辅助邮箱");
+    setAvailabilityReasonDraft(account.disabledReason || "手动停用");
     setAvailabilityError(null);
     setAvailabilityDialogOpen(true);
   };
@@ -617,7 +641,7 @@ export function AccountsView({
                                   <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
                                     绑定邮箱
                                   </Button>
-                                  {row.disabledAt ? (
+                                  {row.disabledAt || isRestorableAccountBlock(row.skipReason) ? (
                                     <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
                                       恢复可用
                                     </Button>
@@ -640,7 +664,7 @@ export function AccountsView({
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
-                              <dd><StatusBadge status={row.lastResultStatus} /></dd>
+                              <dd><StatusBadge status={getAccountDisplayStatus(row)} /></dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">导入时间</dt>
@@ -651,11 +675,11 @@ export function AccountsView({
                               <dd>{formatDate(row.lastUsedAt)}</dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="text-slate-500">跳过原因</dt>
-                              <dd>{row.skipReason || "—"}</dd>
+                              <dt className="text-slate-500">账号阻断</dt>
+                              <dd className="max-w-[18rem] text-right">{formatAccountBlockReason(row)}</dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
-                              <dt className="text-slate-500">不可用原因</dt>
+                              <dt className="text-slate-500">人工停用</dt>
                               <dd className="max-w-[18rem] text-right">{row.disabledReason || "—"}</dd>
                             </div>
                           </dl>
@@ -684,8 +708,8 @@ export function AccountsView({
                         <TableHead>最近状态</TableHead>
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
-                        <TableHead>跳过原因</TableHead>
-                        <TableHead>不可用原因</TableHead>
+                        <TableHead>账号阻断</TableHead>
+                        <TableHead>人工停用</TableHead>
                         <TableHead className="text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
@@ -711,17 +735,17 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
-                          <TableCell className="whitespace-nowrap"><StatusBadge status={row.lastResultStatus} /></TableCell>
+                          <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
-                          <TableCell className="min-w-[10rem]">{row.skipReason || "—"}</TableCell>
+                          <TableCell className="min-w-[10rem]">{formatAccountBlockReason(row)}</TableCell>
                           <TableCell className="min-w-[12rem]">{row.disabledReason || "—"}</TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
                               <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
                                 绑定邮箱
                               </Button>
-                              {row.disabledAt ? (
+                              {row.disabledAt || isRestorableAccountBlock(row.skipReason) ? (
                                 <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
                                   恢复可用
                                 </Button>

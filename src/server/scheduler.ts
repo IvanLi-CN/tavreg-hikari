@@ -1040,6 +1040,7 @@ export class JobScheduler {
     if (!account) return "import_missing";
     if (account.disabledAt != null) return "disabled";
     if (account.hasApiKey || account.skipReason === "has_api_key") return "has_api_key";
+    if (account.skipReason) return account.skipReason;
     if (account.leaseJobId != null) return "leased";
     return this.db.isAccountSchedulableForJob(jobId, account.id) ? "unknown" : "already_attempted";
   }

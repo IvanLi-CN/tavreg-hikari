@@ -9,7 +9,6 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import type { AccountExtractorProvider, EventRecord, JobDraft, JobSnapshot } from "@/lib/app-types";
@@ -285,60 +284,98 @@ export function DashboardView({
                   {job.activeAttempts.map((attempt) => (
                     <article key={attempt.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
                       <div className="flex items-start justify-between gap-3">
-                        <div>
+                        <div className="min-w-0">
                           <div className="text-sm font-medium text-white">Attempt #{attempt.id}</div>
-                          <div className="mt-1 break-all text-sm text-slate-300">{attempt.accountEmail || `#${attempt.accountId}`}</div>
+                          <div
+                            className="mt-1 truncate whitespace-nowrap text-sm text-slate-300"
+                            title={attempt.accountEmail || `#${attempt.accountId}`}
+                          >
+                            {attempt.accountEmail || `#${attempt.accountId}`}
+                          </div>
                         </div>
                         <StatusBadge status={attempt.status} />
                       </div>
                       <dl className="mt-4 grid gap-3 text-sm text-slate-300">
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
                           <dt className="text-slate-500">阶段</dt>
-                          <dd>{attempt.stage}</dd>
+                          <dd className="truncate whitespace-nowrap text-right" title={attempt.stage}>
+                            {attempt.stage}
+                          </dd>
                         </div>
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
                           <dt className="text-slate-500">代理节点</dt>
-                          <dd>{attempt.proxyNode || "—"}</dd>
+                          <dd className="truncate whitespace-nowrap text-right" title={attempt.proxyNode || "—"}>
+                            {attempt.proxyNode || "—"}
+                          </dd>
                         </div>
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
                           <dt className="text-slate-500">出口 IP</dt>
-                          <dd>{attempt.proxyIp || "—"}</dd>
+                          <dd className="truncate whitespace-nowrap text-right font-mono text-[0.92rem]" title={attempt.proxyIp || "—"}>
+                            {attempt.proxyIp || "—"}
+                          </dd>
                         </div>
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
                           <dt className="text-slate-500">开始时间</dt>
-                          <dd>{formatDate(attempt.startedAt)}</dd>
+                          <dd className="whitespace-nowrap text-right">{formatDate(attempt.startedAt)}</dd>
                         </div>
                       </dl>
                     </article>
                   ))}
                 </div>
                 <div className="hidden md:block">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>ID</TableHead>
-                        <TableHead>账号</TableHead>
-                        <TableHead>状态</TableHead>
-                        <TableHead>阶段</TableHead>
-                        <TableHead>代理节点</TableHead>
-                        <TableHead>出口 IP</TableHead>
-                        <TableHead>开始时间</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
+                  <div className="overflow-hidden rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                    <div className="grid grid-cols-[5.5rem_minmax(0,2.2fr)_10rem_minmax(0,1fr)] gap-4 border-b border-white/8 bg-white/[0.03] px-4 py-3 text-left text-xs font-medium tracking-[0.14em] uppercase text-slate-400">
+                      <div>ID</div>
+                      <div>账号</div>
+                      <div>状态</div>
+                      <div>阶段</div>
+                    </div>
+                    <div>
                       {job.activeAttempts.map((attempt) => (
-                        <TableRow key={attempt.id}>
-                          <TableCell>#{attempt.id}</TableCell>
-                          <TableCell className="break-all">{attempt.accountEmail || `#${attempt.accountId}`}</TableCell>
-                          <TableCell><StatusBadge status={attempt.status} /></TableCell>
-                          <TableCell>{attempt.stage}</TableCell>
-                          <TableCell>{attempt.proxyNode || "—"}</TableCell>
-                          <TableCell>{attempt.proxyIp || "—"}</TableCell>
-                          <TableCell>{formatDate(attempt.startedAt)}</TableCell>
-                        </TableRow>
+                        <article key={attempt.id} className="border-b border-white/8 px-4 py-4 text-slate-100 transition duration-200 last:border-b-0 hover:bg-white/[0.03]">
+                          <div className="grid grid-cols-[5.5rem_minmax(0,2.2fr)_10rem_minmax(0,1fr)] items-center gap-4">
+                            <div className="whitespace-nowrap">#{attempt.id}</div>
+                            <div className="min-w-0">
+                              <span
+                                className="block truncate whitespace-nowrap font-medium text-slate-100"
+                                title={attempt.accountEmail || `#${attempt.accountId}`}
+                              >
+                                {attempt.accountEmail || `#${attempt.accountId}`}
+                              </span>
+                            </div>
+                            <div className="whitespace-nowrap">
+                              <StatusBadge status={attempt.status} />
+                            </div>
+                            <div className="min-w-0">
+                              <span className="block truncate whitespace-nowrap" title={attempt.stage}>
+                                {attempt.stage}
+                              </span>
+                            </div>
+                          </div>
+                          <dl className="mt-3 grid grid-cols-3 gap-4 text-xs">
+                            <div className="min-w-0">
+                              <dt className="mb-1 uppercase tracking-[0.14em] text-slate-500">代理节点</dt>
+                              <dd className="truncate whitespace-nowrap text-sm text-slate-200" title={attempt.proxyNode || "—"}>
+                                {attempt.proxyNode || "—"}
+                              </dd>
+                            </div>
+                            <div className="min-w-0">
+                              <dt className="mb-1 uppercase tracking-[0.14em] text-slate-500">出口 IP</dt>
+                              <dd className="truncate whitespace-nowrap font-mono text-sm text-slate-200" title={attempt.proxyIp || "—"}>
+                                {attempt.proxyIp || "—"}
+                              </dd>
+                            </div>
+                            <div className="min-w-0">
+                              <dt className="mb-1 uppercase tracking-[0.14em] text-slate-500">开始时间</dt>
+                              <dd className="truncate whitespace-nowrap text-sm text-slate-200" title={formatDate(attempt.startedAt)}>
+                                {formatDate(attempt.startedAt)}
+                              </dd>
+                            </div>
+                          </dl>
+                        </article>
                       ))}
-                    </TableBody>
-                  </Table>
+                    </div>
+                  </div>
                 </div>
               </>
             )}
