@@ -224,6 +224,67 @@ test("force stop records aborted auto extract requests as manual stops", async (
   appDb.close();
 });
 
+test("graceful stop keeps extractor aborts out of manual-stop history", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(
+    appDb,
+    process.cwd(),
+    dbPath,
+    () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+    () => undefined,
+  );
+
+  globalThis.fetch = (async () => {
+    const error = new Error("request timed out");
+    error.name = "AbortError";
+    throw error;
+  }) as unknown as typeof fetch;
+
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "outlook",
+  });
+  const state = scheduler["createAutoExtractState"](job);
+  const roundStartedAt = new Date().toISOString();
+  state.phase = "extracting";
+  state.startedAt = roundStartedAt;
+  state.currentRoundTarget = 1;
+  state.inFlightCount = 1;
+  scheduler["autoExtractStates"].set(job.id, state);
+
+  expect(scheduler.stopCurrentJob().status).toBe("stopping");
+
+  scheduler["launchAutoExtractRequest"]({
+    jobId: job.id,
+    provider: "zhanghaoya",
+    accountType: "outlook",
+    requestedUsableCount: 1,
+    attemptBudget: 1,
+    dispatchStartedAt: roundStartedAt,
+    roundStartedAt,
+    requestId: "req-graceful-stop-batch",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+  expect(history.rows[0]).toMatchObject({
+    provider: "zhanghaoya",
+    status: "error",
+    errorMessage: "request aborted",
+  });
+  expect(appDb.getJob(job.id)?.status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("control actions stay idempotent under duplicate UI submissions", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
@@ -360,6 +421,42 @@ test("pending launches block stop finalization until setup drains", async () => 
   scheduler["pendingAttemptLaunches"].delete(attempt.id);
   const stopped = scheduler["maybeFinalizeStoppedJob"](job.id);
   expect(stopped?.status).toBe("stopped");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("graceful stop rolls back pending launches before they start", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  const leased = appDb.leaseNextAccount(job.id)!;
+  const outputDir = path.join(path.dirname(dbPath), "pending-graceful-stop-attempt");
+  const attempt = appDb.createAttempt(job.id, leased.id, outputDir);
+  const pendingLaunch = {
+    jobId: job.id,
+    attempt,
+    account: leased,
+    stopRequested: null,
+  };
+
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  const started = await scheduler["spawnAttempt"](appDb.getJob(job.id)!, leased, attempt, outputDir, pendingLaunch);
+
+  expect(started).toBe(false);
+  expect(appDb.getAttempt(attempt.id)).toBeNull();
+  expect(appDb.getJob(job.id)?.launchedCount).toBe(0);
+  expect(appDb.getAccount(leased.id)).toMatchObject({
+    lastResultStatus: "ready",
+    leaseJobId: null,
+  });
 
   await scheduler.shutdown();
   appDb.close();

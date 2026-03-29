@@ -931,20 +931,30 @@ export class JobScheduler {
         || Boolean(latestJob && (latestJob.status === "stopped" || isStopInProgressStatus(latestJob.status)));
       if (launchBlockedByStop) {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-        const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
-          job.id,
-          attempt.id,
-          account.id,
-          {
-            errorCode: pendingLaunch.stopRequested === "force_stop" ? "force_stopped" : "job_stop_before_spawn",
-            errorMessage: "stopped by user",
-          },
-          null,
-        );
-        this.emit("attempt.updated", { attempt: stoppedAttempt });
-        this.emit("account.updated", { account: this.db.getAccount(account.id) });
-        this.emit("job.updated", { job: stoppedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
-        this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped before launch for account #${account.id}` });
+        if (pendingLaunch.stopRequested === "force_stop") {
+          const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
+            job.id,
+            attempt.id,
+            account.id,
+            {
+              errorCode: "force_stopped",
+              errorMessage: "stopped by user",
+            },
+            null,
+          );
+          this.emit("attempt.updated", { attempt: stoppedAttempt });
+          this.emit("account.updated", { account: this.db.getAccount(account.id) });
+          this.emit("job.updated", { job: stoppedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped before launch for account #${account.id}` });
+        } else {
+          const { job: releasedJob, account: releasedAccount } = this.db.rollbackAttemptBeforeLaunch(job.id, attempt.id, account.id);
+          this.emit("account.updated", { account: releasedAccount });
+          this.emit("job.updated", { job: releasedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          this.emit("toast", {
+            level: "info",
+            message: `attempt #${attempt.id} skipped before launch because job #${job.id} is stopping`,
+          });
+        }
         return false;
       }
       const child = spawn(runtimeSpec.command, runtimeSpec.args, {
@@ -1673,8 +1683,8 @@ export class JobScheduler {
       .catch((error) => {
         const requestAborted = controller.signal.aborted || isAbortError(error);
         const abortedByManualStop =
-          requestAborted
-          && isStopInProgressStatus(this.db.getJob(context.jobId)?.status ?? "idle");
+          controller.signal.aborted
+          && this.db.getJob(context.jobId)?.status === "force_stopping";
         finish({
           ok: false,
           errorMessage: abortedByManualStop ? "stopped by user" : requestAborted ? "request aborted" : error instanceof Error ? error.message : String(error),

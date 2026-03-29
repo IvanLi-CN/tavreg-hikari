@@ -311,6 +311,20 @@ function resolveFailureResultStatus(input: { disabledAt: string | null; skipReas
   return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
 }
 
+function resolveReleasedLeaseAccountStatus(input: {
+  disabledAt: string | null;
+  hasApiKey: boolean;
+  skipReason: string | null;
+}): AccountStatus {
+  return resolveAccountStatus({
+    disabledAt: input.disabledAt,
+    hasApiKey: input.hasApiKey,
+    leaseJobId: null,
+    lastResultStatus: "ready",
+    skipReason: input.skipReason,
+  });
+}
+
 function deriveLegacyHardBlockReason(reason: string | null | undefined, errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
   const fromErrorCode = deriveAccountSkipReasonFromErrorCode(errorCode);
   if (fromErrorCode) return fromErrorCode;
@@ -2024,6 +2038,46 @@ export class AppDatabase {
           : currentJob.status,
     });
     return { job, attempt };
+  }
+
+  rollbackAttemptBeforeLaunch(jobId: number, attemptId: number, accountId: number): { job: JobRecord; account: MicrosoftAccountRecord | null } {
+    const currentJob = this.getJob(jobId);
+    if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const currentAccount = this.getAccount(accountId);
+    if (!currentAccount) throw new Error(`account not found: ${accountId}`);
+    if (!this.getAttempt(attemptId)) {
+      throw new Error(`attempt not found: ${attemptId}`);
+    }
+    const now = nowIso();
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      this.db.query("DELETE FROM job_attempts WHERE id = ?").run(attemptId);
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET last_result_status = ?,
+              updated_at = ?,
+              lease_job_id = NULL,
+              lease_started_at = NULL
+          WHERE id = ?
+        `)
+        .run(resolveReleasedLeaseAccountStatus(currentAccount), now, accountId);
+      this.db
+        .query(`
+          UPDATE jobs
+          SET launched_count = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(Math.max(0, currentJob.launchedCount - 1), now, jobId);
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+    return {
+      job: this.getJob(jobId)!,
+      account: this.getAccount(accountId),
+    };
   }
 
   completeJob(jobId: number, success: boolean, errorMessage?: string): JobRecord {
