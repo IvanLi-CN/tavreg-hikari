@@ -215,7 +215,7 @@ export function MailboxesView(props: {
                     disabled={!props.settingsConfigured || props.connectingMailboxId === props.selectedMailbox.id}
                   >
                     {props.connectingMailboxId === props.selectedMailbox.id
-                      ? "跳转中…"
+                      ? "授权中…"
                       : !props.settingsConfigured
                         ? "先配置"
                         : props.selectedMailbox.isAuthorized

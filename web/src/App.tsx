@@ -864,7 +864,8 @@ export function App() {
       const payload = await api<MailboxOauthStartPayload>(`/api/microsoft-mail/accounts/${mailbox.accountId}/oauth/start`, {
         method: "POST",
       });
-      window.location.href = payload.authUrl;
+      await refreshMailboxes();
+      navigate(`/mailboxes?accountId=${payload.mailbox.accountId}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       throw err;

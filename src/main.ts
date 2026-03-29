@@ -58,7 +58,7 @@ interface CliArgs {
   need: number;
 }
 
-interface AppConfig {
+export interface AppConfig {
   runMode: RunMode;
   browserEngine: BrowserEngine;
   inspectBrowserEngine: BrowserEngine;
@@ -6238,7 +6238,16 @@ async function handleMicrosoftProofCodePrompt(
   return true;
 }
 
-async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: string): Promise<any> {
+export interface MicrosoftLoginCompletionOptions {
+  completionUrlPatterns?: RegExp[];
+}
+
+export async function completeMicrosoftLogin(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl?: string,
+  options?: MicrosoftLoginCompletionOptions,
+): Promise<any> {
   const email = cfg.microsoftAccountEmail;
   const password = cfg.microsoftAccountPassword;
   if (!email || !password) {
@@ -6287,6 +6296,9 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
   };
 
   page.on("dialog", dialogHandler);
+  const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
+  const hasCompleted = (url: string): boolean => completionUrlPatterns.some((pattern) => pattern.test(url));
+
   try {
     const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
     const socialSignupContinuationPattern = /auth\.tavily\.com\/u\/(?:signup\/identifier|signup\/password|email-identifier\/challenge)/i;
@@ -6366,6 +6378,9 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         providerState.challengeRecoveryKey = null;
       }
       if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+        return page;
+      }
+      if (hasCompleted(currentUrl)) {
         return page;
       }
       if (visitedMicrosoftAccountSurface && socialSignupContinuationPattern.test(currentUrl)) {
@@ -9174,7 +9189,7 @@ function getFingerprintChromiumArgs(
   return args;
 }
 
-function loadConfig(): AppConfig {
+export function loadConfig(): AppConfig {
   const rawRunMode = (process.env.RUN_MODE || "").trim();
   const envRunMode = parseRunMode(rawRunMode);
   if (rawRunMode && !envRunMode) {
@@ -9734,18 +9749,17 @@ async function applyBrowserIdentityToContext(
   }
 }
 
-async function launchBrowserWithEngine(
+export async function launchBrowserWithEngine(
   engine: BrowserEngine,
   cfg: AppConfig,
   mode: "headed" | "headless",
-  proxyServer: string,
+  proxyServer: string | undefined,
   locale: string,
   _geoIp: string,
 ): Promise<Browser> {
   const options: LaunchOptions = {
     headless: mode === "headless",
     slowMo: Math.max(0, cfg.slowMoMs),
-    proxy: { server: proxyServer },
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       `--lang=${locale}`,
@@ -9755,6 +9769,9 @@ async function launchBrowserWithEngine(
     ],
     timeout: 180_000,
   };
+  if (proxyServer?.trim()) {
+    options.proxy = { server: proxyServer.trim() };
+  }
   const executablePath = requireFingerprintChromiumExecutablePath(cfg.chromeExecutablePath);
   options.executablePath = executablePath;
   const browser = await chromium.launch(options);
@@ -9927,7 +9944,7 @@ async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> 
   await cleanupChromeProfileArtifacts(normalizedProfileDir).catch(() => {});
 }
 
-async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
+export async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
   const normalizedBaseDir = `${normalizeProfileDir(baseDir)}${pathSep}`;
   const processes = await readPsTable();
   const profileDirs = new Set<string>();
@@ -12595,4 +12612,9 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+const MAIN_MODULE_PATH = fileURLToPath(import.meta.url);
+const INVOKED_MODULE_PATH = process.argv[1] ? path.resolve(process.argv[1]) : "";
+
+if (MAIN_MODULE_PATH === INVOKED_MODULE_PATH) {
+  await main();
+}

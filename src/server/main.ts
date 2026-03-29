@@ -1,4 +1,6 @@
 import { config as loadDotenv } from "dotenv";
+import { spawn } from "node:child_process";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import {
@@ -212,12 +214,9 @@ function maskSecret(secret: string, visible = 4): string {
   return `${"*".repeat(Math.max(4, secret.length - visible))}${secret.slice(-visible)}`;
 }
 
-function normalizeLoopbackHost(host: string | undefined): string {
+function normalizeServerHost(host: string | undefined): string {
   const normalized = String(host || "").trim();
-  if (normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1") {
-    return normalized;
-  }
-  return "127.0.0.1";
+  return normalized || "127.0.0.1";
 }
 
 function normalizeExtractorSources(value: unknown): AccountExtractorProvider[] {
@@ -316,7 +315,7 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     maxLatencyMs: toInt(process.env.PROXY_LATENCY_MAX_MS, baseDefaults.maxLatencyMs),
     apiPort: toInt(process.env.MIHOMO_API_PORT, baseDefaults.apiPort),
     mixedPort: toInt(process.env.MIHOMO_MIXED_PORT, baseDefaults.mixedPort),
-    serverHost: normalizeLoopbackHost(process.env.WEB_HOST || baseDefaults.serverHost),
+    serverHost: normalizeServerHost(process.env.WEB_HOST || baseDefaults.serverHost),
     serverPort: toInt(process.env.WEB_PORT, baseDefaults.serverPort),
     defaultRunMode: (process.env.RUN_MODE || "").trim().toLowerCase() === "headless" ? "headless" : baseDefaults.defaultRunMode,
     defaultNeed: toInt(process.env.WEB_DEFAULT_NEED, baseDefaults.defaultNeed),
@@ -345,7 +344,7 @@ function getRuntimeServerBinding(settings: AppSettings): { host: string; port: n
   const envHost = (process.env.WEB_HOST || "").trim();
   const envPort = (process.env.WEB_PORT || "").trim();
   return {
-    host: normalizeLoopbackHost(envHost || settings.serverHost),
+    host: normalizeServerHost(envHost || settings.serverHost),
     port: envPort ? toInt(envPort, settings.serverPort) : settings.serverPort,
   };
 }
@@ -454,8 +453,25 @@ function readMicrosoftGraphSettings(settings: AppSettings): MicrosoftGraphSettin
   };
 }
 
+function buildRequestOriginUrl(req: Request): URL {
+  const target = new URL(req.url);
+  const forwardedProto = String(req.headers.get("x-forwarded-proto") || "")
+    .split(",")[0]
+    ?.trim();
+  const forwardedHost = String(req.headers.get("x-forwarded-host") || "")
+    .split(",")[0]
+    ?.trim();
+  if (forwardedProto) {
+    target.protocol = `${forwardedProto}:`;
+  }
+  if (forwardedHost) {
+    target.host = forwardedHost;
+  }
+  return target;
+}
+
 function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "success" | "error"): Response {
-  const target = new URL("/mailboxes", req.url);
+  const target = new URL("/mailboxes", buildRequestOriginUrl(req));
   if (accountId) {
     target.searchParams.set("accountId", String(accountId));
   }
@@ -607,6 +623,174 @@ async function syncMailboxInbox(db: AppDatabase, mailbox: MicrosoftMailboxRecord
   });
 }
 
+interface MailboxOauthWorkerResult {
+  ok: boolean;
+  finalUrl?: string | null;
+  oauthOutcome?: string | null;
+  error?: string | null;
+}
+
+async function runMailboxOauthWorker(input: {
+  account: MicrosoftAccountRecord;
+  mailbox: MicrosoftMailboxRecord;
+  redirectUri: string;
+  authUrl: string;
+}): Promise<MailboxOauthWorkerResult> {
+  const runId = `mailbox-${input.mailbox.id}-${Date.now()}`;
+  const outputDir = path.join(OUTPUT_ROOT, "mailbox-oauth", runId);
+  const resultPath = path.join(outputDir, "result.json");
+  await mkdir(outputDir, { recursive: true });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    OUTPUT_ROOT_DIR: outputDir,
+    CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
+    MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
+    MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
+    MICROSOFT_PROOF_MAILBOX_PROVIDER: input.account.proofMailboxProvider || "",
+    MICROSOFT_PROOF_MAILBOX_ADDRESS: input.account.proofMailboxAddress || "",
+    MICROSOFT_PROOF_MAILBOX_ID: input.account.proofMailboxId || "",
+    KEEP_BROWSER_OPEN_ON_FAILURE: "false",
+    KEEP_BROWSER_OPEN_MS: "0",
+  };
+
+  const result = await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "run",
+        "src/server/microsoft-oauth-worker.ts",
+        `--auth-url=${input.authUrl}`,
+        `--redirect-uri=${input.redirectUri}`,
+        `--result-path=${resultPath}`,
+      ],
+      {
+        cwd: REPO_ROOT,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stderr = "";
+    let stdout = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+    }, 5 * 60_000);
+    child.stdout?.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", async (code) => {
+      clearTimeout(timeout);
+      try {
+        const raw = await readFile(resultPath, "utf8");
+        const parsed = JSON.parse(raw) as MailboxOauthWorkerResult;
+        resolve(parsed);
+      } catch (error) {
+        const tail = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").slice(-4000);
+        reject(new Error(`oauth worker failed (code=${code ?? "unknown"}): ${tail || (error instanceof Error ? error.message : String(error))}`));
+      }
+    });
+  });
+
+  return result;
+}
+
+async function authorizeMailboxWithBrowserAutomation(input: {
+  db: AppDatabase;
+  accountId: number;
+  readSettings: () => AppSettings;
+  broadcast: (event: ServerEvent) => void;
+}): Promise<{ mailbox: MicrosoftMailboxRecord; workerResult: MailboxOauthWorkerResult }> {
+  const account = input.db.getAccount(input.accountId);
+  if (!account) {
+    throw new Error(`account not found: ${input.accountId}`);
+  }
+  const graphSettings = readMicrosoftGraphSettings(input.readSettings());
+  assertMicrosoftGraphSettings(graphSettings);
+  const mailbox = input.db.ensureMailboxForAccount(input.accountId);
+  const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
+  const oauthState = createMicrosoftOauthState();
+  const nextMailbox = input.db.saveMailboxOauthStart(mailbox.id, {
+    oauthState,
+    oauthCodeVerifier: codeVerifier,
+    authority: graphSettings.authority,
+  });
+  const authUrl = buildMicrosoftAuthorizeUrl({
+    clientId: graphSettings.clientId,
+    redirectUri: graphSettings.redirectUri,
+    authority: graphSettings.authority,
+    state: oauthState,
+    codeChallenge,
+    loginHint: account.microsoftEmail,
+  });
+  input.broadcast({
+    type: "mailbox.updated",
+    payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
+    timestamp: nowIso(),
+  });
+  input.broadcast({
+    type: "account.updated",
+    payload: { affectedIds: [input.accountId], action: "mailbox_status" },
+    timestamp: nowIso(),
+  });
+
+  try {
+    const workerResult = await runMailboxOauthWorker({
+      account,
+      mailbox: nextMailbox,
+      redirectUri: graphSettings.redirectUri,
+      authUrl,
+    });
+    const refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
+    const oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
+    input.broadcast({
+      type: "mailbox.updated",
+      payload: { mailboxIds: [refreshedMailbox.id], action: oauthOutcome === "success" ? "oauth_success" : "oauth_finished" },
+      timestamp: nowIso(),
+    });
+    input.broadcast({
+      type: "account.updated",
+      payload: { affectedIds: [input.accountId], action: "mailbox_status" },
+      timestamp: nowIso(),
+    });
+    if (!workerResult.ok) {
+      throw new Error(workerResult.error || "microsoft oauth automation failed");
+    }
+    if (oauthOutcome === "error") {
+      throw new Error(refreshedMailbox.lastErrorMessage || refreshedMailbox.lastErrorCode || "microsoft oauth failed");
+    }
+    return {
+      mailbox: refreshedMailbox,
+      workerResult,
+    };
+  } catch (error) {
+    const currentMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
+    if (currentMailbox.status === "preparing") {
+      const failedMailbox = input.db.markMailboxStatus(nextMailbox.id, {
+        status: "failed",
+        lastErrorCode: "microsoft_oauth_automation_failed",
+        lastErrorMessage: getMailboxErrorMessage(error),
+      });
+      input.broadcast({
+        type: "mailbox.updated",
+        payload: { mailboxIds: [failedMailbox.id], action: "oauth_error" },
+        timestamp: nowIso(),
+      });
+      input.broadcast({
+        type: "account.updated",
+        payload: { affectedIds: [input.accountId], action: "mailbox_status" },
+        timestamp: nowIso(),
+      });
+    }
+    throw error;
+  }
+}
+
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
   const settingsDefaults = buildSettingsCodeDefaults();
@@ -616,6 +800,7 @@ async function main(): Promise<void> {
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
   const runExclusiveProxyOp = createExclusiveRunner();
+  const runExclusiveMailboxOauth = createExclusiveRunner();
   const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, (event) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
@@ -731,6 +916,32 @@ async function main(): Promise<void> {
           payload: { affectedIds: summary.affectedIds, action: "import" },
           timestamp: nowIso(),
         });
+        const graphSettings = readMicrosoftGraphSettings(readSettings());
+        if (graphSettings.clientId.trim() && graphSettings.clientSecret.trim() && graphSettings.redirectUri.trim()) {
+          for (const accountId of summary.affectedIds) {
+            const mailbox = db.getMailboxByAccountId(accountId);
+            const shouldAutoAuthorize =
+              !mailbox ||
+              (!mailbox.refreshToken && !mailbox.accessToken) ||
+              mailbox.status === "failed" ||
+              mailbox.status === "invalidated";
+            if (!shouldAutoAuthorize) {
+              continue;
+            }
+            void runExclusiveMailboxOauth(async () => {
+              try {
+                await authorizeMailboxWithBrowserAutomation({
+                  db,
+                  accountId,
+                  readSettings,
+                  broadcast,
+                });
+              } catch {
+                // mailbox state is updated inside the automation flow
+              }
+            });
+          }
+        }
         return json({
           ok: true,
           summary: { created: summary.created, updated: summary.updated, total: summary.total },
@@ -1027,43 +1238,27 @@ async function main(): Promise<void> {
         if (!Number.isInteger(accountId) || accountId < 1) {
           return badRequest("invalid account id");
         }
-        const account = db.getAccount(accountId);
-        if (!account) {
-          return badRequest(`account not found: ${accountId}`, 404);
+        try {
+          const { mailbox: refreshedMailbox, workerResult } = await runExclusiveMailboxOauth(() =>
+            authorizeMailboxWithBrowserAutomation({
+              db,
+              accountId,
+              readSettings,
+              broadcast,
+            }),
+          );
+          return json({
+            ok: true,
+            mailbox: serializeMailbox(refreshedMailbox),
+            automation: {
+              finalUrl: workerResult.finalUrl || null,
+            },
+          });
+        } catch (error) {
+          const failedMailbox = db.getMailboxByAccountId(accountId);
+          const status = failedMailbox?.status;
+          return badRequest(getMailboxErrorMessage(error), status === "invalidated" ? 409 : 502);
         }
-        const graphSettings = readMicrosoftGraphSettings(readSettings());
-        assertMicrosoftGraphSettings(graphSettings);
-        const mailbox = db.ensureMailboxForAccount(accountId);
-        const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
-        const oauthState = createMicrosoftOauthState();
-        const nextMailbox = db.saveMailboxOauthStart(mailbox.id, {
-          oauthState,
-          oauthCodeVerifier: codeVerifier,
-          authority: graphSettings.authority,
-        });
-        const authUrl = buildMicrosoftAuthorizeUrl({
-          clientId: graphSettings.clientId,
-          redirectUri: graphSettings.redirectUri,
-          authority: graphSettings.authority,
-          state: oauthState,
-          codeChallenge,
-          loginHint: account.microsoftEmail,
-        });
-        broadcast({
-          type: "mailbox.updated",
-          payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
-          timestamp: nowIso(),
-        });
-        broadcast({
-          type: "account.updated",
-          payload: { affectedIds: [accountId], action: "mailbox_status" },
-          timestamp: nowIso(),
-        });
-        return json({
-          ok: true,
-          authUrl,
-          mailbox: serializeMailbox(nextMailbox),
-        });
       }
 
       if (pathname === "/api/microsoft-mail/oauth/callback" && req.method === "GET") {

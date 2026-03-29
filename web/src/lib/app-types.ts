@@ -124,7 +124,9 @@ export type MailboxMessageDetailPayload = {
 export type MailboxOauthStartPayload = {
   ok: true;
   mailbox: MailboxRecord;
-  authUrl: string;
+  automation: {
+    finalUrl: string | null;
+  };
 };
 
 export type MailboxSyncPayload = {

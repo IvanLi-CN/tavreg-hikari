@@ -4,7 +4,7 @@
 
 - Status: 已实现
 - Created: 2026-03-28
-- Last: 2026-03-28
+- Last: 2026-03-29
 
 ## 背景 / 问题陈述
 
@@ -20,6 +20,7 @@
 - 新增独立 `/mailboxes/settings` 页面，用于维护 Microsoft Graph `client id / client secret / redirect uri / authority`。
 - 每次导入或更新微软账号时自动确保存在对应 `microsoft_mailboxes` 记录，默认状态为 `preparing`。
 - 用 Microsoft Graph OAuth 授权码流 + web callback 接入 Inbox 只读同步，固定回调路径为 `/api/microsoft-mail/oauth/callback`。
+- Graph 设置完整后，系统在自有 Chromium 浏览器中自动完成 Microsoft 登录、proof 与 consent，不要求用户手动点击 OAuth 页面。
 - 在本地 `app_settings` 中保存 Graph 设置，在账号页显示收信状态；邮箱页只保留连接、重连和手动刷新，配置维护移到独立设置页。
 - 本地缓存 Inbox 邮件，并保留 HTML 正文净化渲染能力。
 
@@ -27,7 +28,7 @@
 
 - 不实现发信、回复、删除、移动邮件、附件下载与多文件夹树。
 - 不实现全账号后台轮询守护。
-- 不把导入账号自动等同于“已授权可收信”；导入后只自动建 mailbox 记录，仍需用户完成 OAuth。
+- 不把导入账号自动等同于“已授权可收信”；导入后会自动排队执行浏览器授权，但失败后仍需用户手动重试。
 
 ## 数据模型
 
@@ -101,7 +102,8 @@
 
 - Graph 设置默认 authority 为 `common`，以兼容任意 Entra ID 租户与个人 Microsoft 账号。
 - `/mailboxes/settings` 是 Graph 凭据的唯一维护入口；收件箱工作台不再内嵌配置表单。
-- OAuth start 为每个 mailbox 生成独立 `state + PKCE`，并返回跳转用 `authUrl`。
+- OAuth start 为每个 mailbox 生成独立 `state + PKCE`，然后由后端拉起自有 Chromium 浏览器完成授权，不再把 `authUrl` 暴露给前端跳转。
+- 导入账号成功后，如果 Graph 设置完整且该 mailbox 仍未授权、已失败或已失效，系统会自动排队触发一次浏览器授权。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
 
 ### 收信状态语义
@@ -127,7 +129,8 @@
 ## 验收标准
 
 - Given 新导入或重复导入同一微软账号，When 导入完成，Then `microsoft_mailboxes` 中对应账号始终只有一条记录，默认状态为 `preparing`，且不会清空已有 OAuth token。
-- Given Graph 设置已保存并点击连接邮箱，When callback 成功，Then mailbox 会写入 refresh token 与 Graph 用户信息，并返回 `/mailboxes`。
+- Given Graph 设置已保存并点击连接邮箱，When 浏览器授权与 callback 成功，Then mailbox 会写入 refresh token 与 Graph 用户信息，并返回 `/mailboxes`。
+- Given Graph 设置已保存并导入新微软账号，When mailbox 尚未授权，Then 系统会自动排队拉起浏览器完成 OAuth；如果失败，则 mailbox 状态转为 `failed` 或 `invalidated`。
 - Given mailbox 已授权但尚未同步，When 首次进入 `/mailboxes` 并选中它，Then 自动触发一次同步；成功后状态变为 `available`。
 - Given Graph 返回授权失效类错误，When 刷新 token 或同步失败，Then mailbox 状态转为 `invalidated`，账号页与邮箱页都会暴露该状态。
 - Given 邮件正文是 HTML，When 右栏展示正文，Then 内容必须经过净化后再渲染。
