@@ -315,6 +315,7 @@ export const DesktopActionButtonsNoWrap: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const table = canvas.getByRole("table");
+    const tableScroller = table.parentElement as HTMLDivElement | null;
     const connectButton = canvas.getAllByRole("button", { name: "连接" })[0]!;
     const proofButton = canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!;
     const availabilityButton = canvas.getAllByRole("button", { name: "标记不可用" })[0]!;
@@ -328,7 +329,8 @@ export const DesktopActionButtonsNoWrap: Story = {
     expect(window.getComputedStyle(proofButton).whiteSpace).toBe("nowrap");
     expect(window.getComputedStyle(availabilityButton).whiteSpace).toBe("nowrap");
     expect(window.getComputedStyle(mailboxButton).whiteSpace).toBe("nowrap");
-    expect(table.scrollWidth).toBeGreaterThan(table.clientWidth);
+    expect(tableScroller).toBeTruthy();
+    expect(tableScroller!.scrollWidth).toBeGreaterThan(tableScroller!.clientWidth);
   },
 };
 
