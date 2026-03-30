@@ -16,7 +16,7 @@
 
 ### Goals
 
-- 新增独立 `/mailboxes` 页面，使用左侧账号列表 / 中间邮件列表 / 右侧正文的三栏布局。
+- 新增独立 `/mailboxes` 页面，使用左侧账号列表 / 中间邮件列表 / 右侧正文的三栏布局，并且只展示已连通过的微软邮箱。
 - 新增独立 `/mailboxes/settings` 页面，用于维护 Microsoft Graph `client id / client secret / redirect uri / authority`。
 - 每次导入或更新微软账号时自动确保存在对应 `microsoft_mailboxes` 记录，默认状态为 `preparing`。
 - 用 Microsoft Graph OAuth 授权码流 + web callback 接入 Inbox 只读同步，固定回调路径为 `/api/microsoft-mail/oauth/callback`。
@@ -90,6 +90,7 @@
 - `GET /api/microsoft-mail/settings`
 - `POST /api/microsoft-mail/settings`
 - `GET /api/microsoft-mail/mailboxes`
+  - 返回值限定为“已连通过或已有有效收信状态”的 mailbox；仅 `preparing` 且从未完成 OAuth 的账号不会出现在收件箱工作台。
 - `POST /api/microsoft-mail/accounts/:accountId/oauth/start`
 - `GET /api/microsoft-mail/oauth/callback`
 - `POST /api/microsoft-mail/mailboxes/:mailboxId/sync`
@@ -106,6 +107,7 @@
 - OAuth start 为每个 mailbox 生成独立 `state + PKCE`，然后由后端拉起自有 Chromium 浏览器完成授权，不再把 `authUrl` 暴露给前端跳转。
 - 导入账号成功后，如果 Graph 设置完整且该 mailbox 仍未授权、已失败或已失效，系统会自动排队触发一次浏览器授权。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
+- 浏览器自动化若最终没有回到 callback 或 `/mailboxes?...oauth=...`，必须判定为 OAuth 未完成并写入失败态，不能把中间页误当作成功。
 
 ### 收信状态语义
 
@@ -127,6 +129,7 @@
 - 账号页在桌面表格与移动卡片中都显示“收信状态”，并增加“收件箱”入口、单账号连接按钮以及批量串行连接工具栏。
 - `/mailboxes/settings` 负责维护 Graph `client id / client secret / redirect uri / authority`，并提供 callback 与权限范围提示。
 - 邮箱页左栏显示 mailbox 状态、未读数与最近异常，但不再提供连接入口；中栏显示 Inbox 列表；右栏显示正文与邮件头信息。
+- 未完成连接的账号不出现在邮箱页；若当前没有任何已连接邮箱，页面显示“先去微软账号页完成连接”的空态。
 
 ## 验收标准
 

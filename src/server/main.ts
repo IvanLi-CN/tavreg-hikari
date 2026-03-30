@@ -37,6 +37,7 @@ import {
   fetchMicrosoftProfile,
   getMailboxErrorCode,
   getMailboxErrorMessage,
+  isMicrosoftOauthCompletionUrl,
   isLockedMailboxErrorCode,
   isMicrosoftTokenExpired,
   refreshMicrosoftAccessToken,
@@ -814,6 +815,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");
     }
+    if (!isMicrosoftOauthCompletionUrl(workerResult.finalUrl || null, graphSettings.redirectUri) || (!workerResult.oauthOutcome && !refreshedMailbox.refreshToken)) {
+      throw new Error(`microsoft_oauth_incomplete:${workerResult.finalUrl || "unknown"}`);
+    }
     if (oauthOutcome === "error") {
       throw new Error(refreshedMailbox.lastErrorMessage || refreshedMailbox.lastErrorCode || "microsoft oauth failed");
     }
@@ -1278,7 +1282,7 @@ async function main(): Promise<void> {
       if (pathname === "/api/microsoft-mail/mailboxes" && req.method === "GET") {
         return json({
           ok: true,
-          rows: db.listMailboxes().map((row) => serializeMailbox(row)),
+          rows: db.listMailboxes({ connectedOnly: true }).map((row) => serializeMailbox(row)),
         });
       }
 

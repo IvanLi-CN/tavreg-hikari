@@ -155,7 +155,7 @@ export function MailboxesView(props: {
               </div>
               <h1 className="text-2xl font-semibold text-white">微软邮箱</h1>
               <p className="text-sm text-slate-400">
-                账号列表、Inbox 和邮件正文固定在一个工作区里。Graph 接入参数单独放在设置页维护。
+                这里只显示已经连通过的微软邮箱。Graph 接入参数单独放在设置页维护。
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -204,7 +204,7 @@ export function MailboxesView(props: {
         <Card className="border-white/10 bg-slate-950/55 shadow-none">
           <PaneHeader
             title="邮箱账号"
-            description="导入的微软账号会自动加入这里，连接入口统一放在微软账号页。"
+            description="这里只展示已连通过的微软邮箱，连接入口统一放在微软账号页。"
             actions={
               props.selectedMailbox ? (
                 <div className="flex gap-2">
@@ -233,7 +233,7 @@ export function MailboxesView(props: {
                 ))}
                 {props.mailboxes.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-white/10 px-4 py-10 text-center text-sm text-slate-400">
-                    还没有导入微软账号。
+                    还没有已连接的微软邮箱。先回微软账号页完成连接。
                   </div>
                 ) : null}
               </div>

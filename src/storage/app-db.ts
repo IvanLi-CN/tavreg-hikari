@@ -1823,7 +1823,8 @@ export class AppDatabase {
     return this.getMailboxByAccountId(accountId)!;
   }
 
-  listMailboxes(): MicrosoftMailboxRecord[] {
+  listMailboxes(options?: { connectedOnly?: boolean }): MicrosoftMailboxRecord[] {
+    const connectedOnly = options?.connectedOnly === true;
     const rows = this.db
       .query(`
         SELECT
@@ -1833,6 +1834,7 @@ export class AppDatabase {
           a.proof_mailbox_address
         FROM microsoft_mailboxes m
         JOIN microsoft_accounts a ON a.id = m.account_id
+        ${connectedOnly ? "WHERE COALESCE(m.refresh_token, '') <> '' OR m.oauth_connected_at IS NOT NULL OR m.last_synced_at IS NOT NULL" : ""}
         ORDER BY
           CASE WHEN m.last_synced_at IS NULL THEN 1 ELSE 0 END,
           m.last_synced_at DESC,

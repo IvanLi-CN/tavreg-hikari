@@ -474,6 +474,29 @@ export function App() {
         return;
       }
     }
+    if (mailboxes.length === 0) {
+      if (selectedMailboxId !== null) {
+        setSelectedMailboxId(null);
+      }
+      setSelectedMessageId(null);
+      setSelectedMessageDetail(null);
+      setMailboxMessages((current) => ({
+        ...current,
+        rows: [],
+        total: 0,
+        offset: 0,
+        hasMore: false,
+      }));
+      return;
+    }
+    if (selectedMailboxId != null && !mailboxes.some((mailbox) => mailbox.id === selectedMailboxId)) {
+      const firstMailbox = mailboxes[0];
+      if (!firstMailbox) return;
+      setSelectedMailboxId(firstMailbox.id);
+      setSelectedMessageId(null);
+      setSelectedMessageDetail(null);
+      return;
+    }
     if (selectedMailboxId == null && mailboxes.length > 0) {
       const firstMailbox = mailboxes[0];
       if (!firstMailbox) return;

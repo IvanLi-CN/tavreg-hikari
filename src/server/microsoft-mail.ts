@@ -74,6 +74,25 @@ export class MicrosoftGraphError extends Error {
   }
 }
 
+export function isMicrosoftOauthCompletionUrl(finalUrl: string | null | undefined, redirectUri: string): boolean {
+  const normalizedFinalUrl = String(finalUrl || "").trim();
+  const normalizedRedirectUri = String(redirectUri || "").trim();
+  if (!normalizedFinalUrl || !normalizedRedirectUri) return false;
+  try {
+    const current = new URL(normalizedFinalUrl);
+    const redirect = new URL(normalizedRedirectUri);
+    if (current.origin === redirect.origin && current.pathname === redirect.pathname) {
+      return true;
+    }
+    if (current.origin === redirect.origin && current.pathname === "/mailboxes") {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeAuthority(authority: string): string {
   const normalized = authority.trim().replace(/^\/+|\/+$/g, "");
   return normalized || "common";

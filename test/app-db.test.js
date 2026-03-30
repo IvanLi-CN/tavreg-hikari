@@ -436,6 +436,33 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("can hide unconnected mailboxes from the inbox workspace listing", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "connected-mail@outlook.com", password: "connected-pass" },
+      { email: "pending-mail@outlook.com", password: "pending-pass" },
+    ]);
+    const connectedAccountId = imported.affectedIds[0];
+    const pendingAccountId = imported.affectedIds[1];
+    const connectedMailbox = appDb.ensureMailboxForAccount(connectedAccountId);
+    appDb.ensureMailboxForAccount(pendingAccountId);
+
+    appDb.completeMailboxOAuth(connectedMailbox.id, {
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: "2026-03-30T08:00:00.000Z",
+      authority: "common",
+      graphDisplayName: "Connected",
+    });
+
+    expect(appDb.listMailboxes().map((row) => row.accountId).sort((a, b) => a - b)).toEqual(
+      [connectedAccountId, pendingAccountId].sort((a, b) => a - b),
+    );
+    expect(appDb.listMailboxes({ connectedOnly: true }).map((row) => row.accountId)).toEqual([connectedAccountId]);
+
+    appDb.close();
+  });
+
   test("clears the unknown recovery block after a proof mailbox is saved", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);

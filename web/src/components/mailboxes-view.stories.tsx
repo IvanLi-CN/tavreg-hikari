@@ -6,14 +6,14 @@ import type { MailboxMessageDetail, MailboxRecord } from "@/lib/app-types";
 import { sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
 
 function MailboxesStorySurface(props?: {
-  selectedMailboxId?: number;
-  selectedMessageId?: number;
+  selectedMailboxId?: number | null;
+  selectedMessageId?: number | null;
   messageDetail?: MailboxMessageDetail | null;
   mailboxes?: MailboxRecord[];
   settingsConfigured?: boolean;
 }) {
-  const [selectedMailboxId, setSelectedMailboxId] = useState(props?.selectedMailboxId || sampleMailboxes[1]!.id);
-  const [selectedMessageId, setSelectedMessageId] = useState<number | null>(props?.selectedMessageId || sampleMailboxMessages[0]!.id);
+  const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(props?.selectedMailboxId ?? sampleMailboxes[1]!.id);
+  const [selectedMessageId, setSelectedMessageId] = useState<number | null>(props?.selectedMessageId ?? sampleMailboxMessages[0]!.id);
   const activeMailbox = (props?.mailboxes || sampleMailboxes).find((mailbox) => mailbox.id === selectedMailboxId) || null;
 
   return (
@@ -64,6 +64,11 @@ export const Default: Story = {
 export const NeedsSetup: Story = {
   args: {} as Story["args"],
   render: () => <MailboxesStorySurface settingsConfigured={false} selectedMailboxId={sampleMailboxes[0]!.id} messageDetail={null} />,
+};
+
+export const NoConnectedMailboxes: Story = {
+  args: {} as Story["args"],
+  render: () => <MailboxesStorySurface mailboxes={[]} selectedMailboxId={null} selectedMessageId={null} messageDetail={null} />,
 };
 
 export const OpenSettingsPlay: Story = {

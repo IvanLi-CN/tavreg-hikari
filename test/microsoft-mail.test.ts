@@ -4,6 +4,7 @@ import {
   MicrosoftGraphError,
   getMailboxErrorCode,
   getMailboxErrorMessage,
+  isMicrosoftOauthCompletionUrl,
   toMailboxFailureStatus,
 } from "../src/server/microsoft-mail";
 
@@ -33,5 +34,29 @@ describe("Microsoft mail failure helpers", () => {
     expect(toMailboxFailureStatus(error)).toBe("invalidated");
     expect(getMailboxErrorCode(error)).toBe("interaction_required");
     expect(getMailboxErrorMessage(error)).toBe("interaction required");
+  });
+
+  test("recognizes callback and workspace URLs as valid OAuth completion targets", () => {
+    expect(
+      isMicrosoftOauthCompletionUrl(
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+      ),
+    ).toBe(true);
+    expect(
+      isMicrosoftOauthCompletionUrl(
+        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=success",
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects unrelated intermediate URLs as incomplete OAuth results", () => {
+    expect(
+      isMicrosoftOauthCompletionUrl(
+        "https://login.microsoft.com/consumers/fido/create?mkt=zh-CN",
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+      ),
+    ).toBe(false);
   });
 });

@@ -8,6 +8,7 @@ import {
   loadConfig,
   launchBrowserWithEngine,
 } from "../main.js";
+import { isMicrosoftOauthCompletionUrl } from "./microsoft-mail.js";
 
 interface WorkerArgs {
   authUrl: string;
@@ -85,6 +86,14 @@ async function main(): Promise<void> {
       completionUrlPatterns,
     });
     const finalUrl = String(page.url() || "");
+    if (!isMicrosoftOauthCompletionUrl(finalUrl, args.redirectUri)) {
+      await writeResult(args.resultPath, {
+        ok: false,
+        finalUrl,
+        error: `microsoft_oauth_incomplete:${finalUrl || "unknown"}`,
+      });
+      return;
+    }
     await writeResult(args.resultPath, {
       ok: true,
       finalUrl,
