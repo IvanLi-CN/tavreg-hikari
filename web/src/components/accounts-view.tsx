@@ -46,9 +46,31 @@ function isRestorableAccountBlock(reason: string | null | undefined): boolean {
   return ["microsoft_password_incorrect", "microsoft_account_locked", "microsoft_unknown_recovery_email"].includes(String(reason || "").trim());
 }
 
-function getAccountDisplayStatus(account: Pick<AccountRecord, "lastResultStatus" | "skipReason" | "disabledAt">): string {
+function isLockedAccountBlock(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): boolean {
+  return (
+    String(account.skipReason || "").trim() === "microsoft_account_locked"
+    || /^microsoft_account_locked/i.test(String(account.lastErrorCode || "").trim())
+  );
+}
+
+function getAccountDisplayStatus(account: Pick<AccountRecord, "lastResultStatus" | "skipReason" | "disabledAt" | "lastErrorCode">): string {
+  if (isLockedAccountBlock(account)) return "locked";
   if (account.disabledAt || isRestorableAccountBlock(account.skipReason)) return "disabled";
   return account.lastResultStatus;
+}
+
+function isConnectBlockedAccount(account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode">): boolean {
+  return Boolean(account.disabledAt) || isLockedAccountBlock(account);
+}
+
+function getConnectActionLabel(
+  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus">,
+  connecting: boolean,
+): string {
+  if (connecting) return "连接中…";
+  if (isLockedAccountBlock(account)) return "已锁定";
+  if (account.disabledAt) return "已禁用";
+  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重连" : "连接";
 }
 
 function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
@@ -180,12 +202,16 @@ export function AccountsView({
   importBusy,
   previewBusy,
   batchBusy,
+  connectBusy,
+  connectProgress,
   extractorSettings,
   extractorSettingsBusy,
   extractorHistory,
   extractorHistoryQuery,
   extractorHistoryBusy,
   allCurrentPageSelected,
+  graphSettingsConfigured,
+  connectingAccountIds,
   onImportContentChange,
   onImportGroupChange,
   onBatchGroupNameChange,
@@ -198,11 +224,14 @@ export function AccountsView({
   onApplyBatchGroup,
   onDeleteSelected,
   onClearSelection,
+  onConnectAccount,
+  onConnectSelectedAccounts,
   onSaveProofMailbox,
   onSaveAvailability,
   onSaveExtractorSettings,
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
+  onOpenMailbox,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -217,12 +246,16 @@ export function AccountsView({
   importBusy: boolean;
   previewBusy: boolean;
   batchBusy: boolean;
+  connectBusy: boolean;
+  connectProgress: { current: number; total: number } | null;
   extractorSettings: AccountExtractorSettings | null;
   extractorSettingsBusy: boolean;
   extractorHistory: AccountExtractorHistoryPayload;
   extractorHistoryQuery: AccountExtractorHistoryQuery;
   extractorHistoryBusy: boolean;
   allCurrentPageSelected: boolean;
+  graphSettingsConfigured: boolean;
+  connectingAccountIds: number[];
   onImportContentChange: (value: string) => void;
   onImportGroupChange: (value: string) => void;
   onBatchGroupNameChange: (value: string) => void;
@@ -235,11 +268,14 @@ export function AccountsView({
   onApplyBatchGroup: () => void;
   onDeleteSelected: () => void;
   onClearSelection: () => void;
+  onConnectAccount: (accountId: number) => Promise<void>;
+  onConnectSelectedAccounts: () => Promise<void>;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
+  onOpenMailbox: (accountId: number) => void;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -270,6 +306,10 @@ export function AccountsView({
   const failedCount = accounts.summary.failed;
   const disabledCount = accounts.summary.disabled;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
+  const selectedConnectCount = selectedIds.filter((accountId) => {
+    const row = accounts.rows.find((item) => item.id === accountId);
+    return !row || !isConnectBlockedAccount(row);
+  }).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const extractHistoryPageCount = Math.max(
     1,
@@ -523,6 +563,7 @@ export function AccountsView({
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-400">
                 <span>当前页已选 {selectedOnPage} / {accounts.rows.length}</span>
                 <span>总已选 {selectedIds.length} / {accounts.total}</span>
+                <span>可连接 {selectedConnectCount} 条</span>
               </div>
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
                 <div className="min-w-0 flex-1">
@@ -535,6 +576,13 @@ export function AccountsView({
                   />
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" onClick={() => void onConnectSelectedAccounts()} disabled={selectedConnectCount === 0 || connectBusy || !graphSettingsConfigured}>
+                    {connectBusy
+                      ? `连接中 ${connectProgress?.current || 0}/${connectProgress?.total || selectedConnectCount}`
+                      : graphSettingsConfigured
+                        ? "批量连接"
+                        : "先配置 Graph"}
+                  </Button>
                   <Button variant="outline" onClick={onApplyBatchGroup} disabled={selectedIds.length === 0 || batchBusy}>
                     应用分组
                   </Button>
@@ -638,6 +686,14 @@ export function AccountsView({
                               <div className="flex shrink-0 flex-col items-end gap-2">
                                 {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
                                 <div className="flex flex-wrap justify-end gap-2">
+                                  <Button
+                                    variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
+                                    className="h-8 px-3 text-xs"
+                                    onClick={() => void onConnectAccount(row.id)}
+                                    disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                                  >
+                                    {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
+                                  </Button>
                                   <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
                                     绑定邮箱
                                   </Button>
@@ -650,6 +706,9 @@ export function AccountsView({
                                       标记不可用
                                     </Button>
                                   )}
+                                  <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
+                                    收件箱
+                                  </Button>
                                 </div>
                               </div>
                             </div>
@@ -665,6 +724,13 @@ export function AccountsView({
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
                               <dd><StatusBadge status={getAccountDisplayStatus(row)} /></dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">收信状态</dt>
+                              <dd className="flex items-center gap-2">
+                                <StatusBadge status={row.mailboxStatus} />
+                                {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
+                              </dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">导入时间</dt>
@@ -706,6 +772,7 @@ export function AccountsView({
                         <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
                         <TableHead>最近状态</TableHead>
+                        <TableHead>收信状态</TableHead>
                         <TableHead>导入时间</TableHead>
                         <TableHead>最近使用</TableHead>
                         <TableHead>账号阻断</TableHead>
@@ -736,12 +803,26 @@ export function AccountsView({
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
+                          <TableCell className="whitespace-nowrap">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={row.mailboxStatus} />
+                              {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
+                            </div>
+                          </TableCell>
                           <TableCell>{formatDate(row.importedAt)}</TableCell>
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{formatAccountBlockReason(row)}</TableCell>
                           <TableCell className="min-w-[12rem]">{row.disabledReason || "—"}</TableCell>
                           <TableCell className="text-right">
                             <div className="flex justify-end gap-2">
+                              <Button
+                                variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
+                                className="h-8 px-3 text-xs"
+                                onClick={() => void onConnectAccount(row.id)}
+                                disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                              >
+                                {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
+                              </Button>
                               <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
                                 绑定邮箱
                               </Button>
@@ -754,6 +835,9 @@ export function AccountsView({
                                   标记不可用
                                 </Button>
                               )}
+                              <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
+                                收件箱
+                              </Button>
                             </div>
                           </TableCell>
                         </TableRow>

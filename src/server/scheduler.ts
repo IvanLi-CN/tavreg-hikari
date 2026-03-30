@@ -21,7 +21,7 @@ import {
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
-  type: "job.updated" | "attempt.updated" | "account.updated" | "proxy.updated" | "proxy.check.completed" | "toast";
+  type: "job.updated" | "attempt.updated" | "account.updated" | "mailbox.updated" | "proxy.updated" | "proxy.check.completed" | "toast";
   payload: Record<string, unknown>;
   timestamp: string;
 }

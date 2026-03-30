@@ -84,6 +84,7 @@ export type AccountExtractBatchStatus =
   | "error";
 export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
+export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -108,6 +109,10 @@ export interface AppSettings extends Record<string, unknown> {
   defaultAutoExtractQuantity: number;
   defaultAutoExtractMaxWaitSec: number;
   defaultAutoExtractAccountType: AccountExtractorAccountType;
+  microsoftGraphClientId: string;
+  microsoftGraphClientSecret: string;
+  microsoftGraphRedirectUri: string;
+  microsoftGraphAuthority: string;
 }
 
 export interface MicrosoftAccountRecord {
@@ -134,6 +139,10 @@ export interface MicrosoftAccountRecord {
   disabledReason: string | null;
   leaseJobId: number | null;
   leaseStartedAt: string | null;
+  mailboxStatus: MailboxStatus;
+  mailboxLastSyncedAt: string | null;
+  mailboxLastErrorCode: string | null;
+  mailboxUnreadCount: number;
 }
 
 export interface ImportAccountsResult {
@@ -240,6 +249,54 @@ export interface ProxyNodeRecord {
   success24h: number;
 }
 
+export interface MicrosoftMailboxRecord {
+  id: number;
+  accountId: number;
+  microsoftEmail: string;
+  groupName: string | null;
+  proofMailboxAddress: string | null;
+  status: MailboxStatus;
+  syncEnabled: boolean;
+  refreshToken: string | null;
+  accessToken: string | null;
+  accessTokenExpiresAt: string | null;
+  graphUserId: string | null;
+  graphUserPrincipalName: string | null;
+  graphDisplayName: string | null;
+  authority: string;
+  oauthState: string | null;
+  oauthCodeVerifier: string | null;
+  oauthStartedAt: string | null;
+  oauthConnectedAt: string | null;
+  deltaLink: string | null;
+  unreadCount: number;
+  lastSyncedAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MicrosoftMailMessageRecord {
+  id: number;
+  mailboxId: number;
+  graphMessageId: string;
+  internetMessageId: string | null;
+  conversationId: string | null;
+  subject: string;
+  fromName: string | null;
+  fromAddress: string | null;
+  receivedAt: string | null;
+  isRead: boolean;
+  hasAttachments: boolean;
+  bodyContentType: "html" | "text";
+  bodyPreview: string;
+  bodyContent: string;
+  webLink: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface SettingsRow {
   key: string;
   value_json: string;
@@ -325,7 +382,10 @@ function resolveReleasedLeaseAccountStatus(input: {
   });
 }
 
-function deriveLegacyHardBlockReason(reason: string | null | undefined, errorCode: string | null | undefined): Exclude<AccountSkipReason, "has_api_key"> | null {
+function deriveLegacyHardBlockReason(
+  reason: string | null | undefined,
+  errorCode: string | null | undefined,
+): Exclude<AccountSkipReason, "has_api_key"> | null {
   const fromErrorCode = deriveAccountSkipReasonFromErrorCode(errorCode);
   if (fromErrorCode) return fromErrorCode;
   const normalizedReason = String(reason || "").trim().toLowerCase();
@@ -345,6 +405,21 @@ function resolveFailureSkipReason(input: {
   const derived = deriveAccountSkipReasonFromErrorCode(input.errorCode);
   if (derived) return derived;
   return isHardAccountSkipReason(input.currentSkipReason) ? (input.currentSkipReason as AccountSkipReason) : null;
+}
+
+function accountSelectSql(whereClause = "", orderClause = ""): string {
+  return `
+    SELECT
+      a.*,
+      COALESCE(m.status, 'preparing') AS mailbox_status,
+      m.last_synced_at AS mailbox_last_synced_at,
+      m.last_error_code AS mailbox_last_error_code,
+      COALESCE(m.unread_count, 0) AS mailbox_unread_count
+    FROM microsoft_accounts a
+    LEFT JOIN microsoft_mailboxes m ON m.account_id = a.id
+    ${whereClause}
+    ${orderClause}
+  `;
 }
 
 function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
@@ -372,6 +447,62 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     disabledReason: row.disabled_reason == null ? null : String(row.disabled_reason),
     leaseJobId: row.lease_job_id == null ? null : Number(row.lease_job_id),
     leaseStartedAt: row.lease_started_at == null ? null : String(row.lease_started_at),
+    mailboxStatus: String(row.mailbox_status || "preparing") as MailboxStatus,
+    mailboxLastSyncedAt: row.mailbox_last_synced_at == null ? null : String(row.mailbox_last_synced_at),
+    mailboxLastErrorCode: row.mailbox_last_error_code == null ? null : String(row.mailbox_last_error_code),
+    mailboxUnreadCount: Number(row.mailbox_unread_count || 0),
+  };
+}
+
+function mapMailboxRow(row: Record<string, unknown>): MicrosoftMailboxRecord {
+  return {
+    id: Number(row.id),
+    accountId: Number(row.account_id),
+    microsoftEmail: String(row.microsoft_email || ""),
+    groupName: row.group_name == null ? null : String(row.group_name),
+    proofMailboxAddress: row.proof_mailbox_address == null ? null : String(row.proof_mailbox_address),
+    status: String(row.status || "preparing") as MailboxStatus,
+    syncEnabled: asBoolean(row.sync_enabled),
+    refreshToken: row.refresh_token == null ? null : String(row.refresh_token),
+    accessToken: row.access_token == null ? null : String(row.access_token),
+    accessTokenExpiresAt: row.access_token_expires_at == null ? null : String(row.access_token_expires_at),
+    graphUserId: row.graph_user_id == null ? null : String(row.graph_user_id),
+    graphUserPrincipalName: row.graph_user_principal_name == null ? null : String(row.graph_user_principal_name),
+    graphDisplayName: row.graph_display_name == null ? null : String(row.graph_display_name),
+    authority: String(row.authority || "common"),
+    oauthState: row.oauth_state == null ? null : String(row.oauth_state),
+    oauthCodeVerifier: row.oauth_code_verifier == null ? null : String(row.oauth_code_verifier),
+    oauthStartedAt: row.oauth_started_at == null ? null : String(row.oauth_started_at),
+    oauthConnectedAt: row.oauth_connected_at == null ? null : String(row.oauth_connected_at),
+    deltaLink: row.delta_link == null ? null : String(row.delta_link),
+    unreadCount: Number(row.unread_count || 0),
+    lastSyncedAt: row.last_synced_at == null ? null : String(row.last_synced_at),
+    lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
+    lastErrorMessage: row.last_error_message == null ? null : String(row.last_error_message),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapMailboxMessageRow(row: Record<string, unknown>): MicrosoftMailMessageRecord {
+  return {
+    id: Number(row.id),
+    mailboxId: Number(row.mailbox_id),
+    graphMessageId: String(row.graph_message_id || ""),
+    internetMessageId: row.internet_message_id == null ? null : String(row.internet_message_id),
+    conversationId: row.conversation_id == null ? null : String(row.conversation_id),
+    subject: String(row.subject || ""),
+    fromName: row.from_name == null ? null : String(row.from_name),
+    fromAddress: row.from_address == null ? null : String(row.from_address),
+    receivedAt: row.received_at == null ? null : String(row.received_at),
+    isRead: asBoolean(row.is_read),
+    hasAttachments: asBoolean(row.has_attachments),
+    bodyContentType: String(row.body_content_type || "text") === "html" ? "html" : "text",
+    bodyPreview: String(row.body_preview || ""),
+    bodyContent: String(row.body_content || ""),
+    webLink: row.web_link == null ? null : String(row.web_link),
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
   };
 }
 
@@ -678,6 +809,52 @@ export class AppDatabase {
         imported_account_id INTEGER REFERENCES microsoft_accounts(id) ON DELETE SET NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS microsoft_mailboxes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL UNIQUE REFERENCES microsoft_accounts(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'preparing',
+        sync_enabled INTEGER NOT NULL DEFAULT 1,
+        refresh_token TEXT,
+        access_token TEXT,
+        access_token_expires_at TEXT,
+        graph_user_id TEXT,
+        graph_user_principal_name TEXT,
+        graph_display_name TEXT,
+        authority TEXT NOT NULL DEFAULT 'common',
+        oauth_state TEXT,
+        oauth_code_verifier TEXT,
+        oauth_started_at TEXT,
+        oauth_connected_at TEXT,
+        delta_link TEXT,
+        unread_count INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS microsoft_mail_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mailbox_id INTEGER NOT NULL REFERENCES microsoft_mailboxes(id) ON DELETE CASCADE,
+        graph_message_id TEXT NOT NULL,
+        internet_message_id TEXT,
+        conversation_id TEXT,
+        subject TEXT NOT NULL DEFAULT '',
+        from_name TEXT,
+        from_address TEXT,
+        received_at TEXT,
+        is_read INTEGER NOT NULL DEFAULT 0,
+        has_attachments INTEGER NOT NULL DEFAULT 0,
+        body_content_type TEXT NOT NULL DEFAULT 'text',
+        body_preview TEXT NOT NULL DEFAULT '',
+        body_content TEXT NOT NULL DEFAULT '',
+        web_link TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE(mailbox_id, graph_message_id)
+      );
     `);
 
     const signupTaskTableExists = this.hasSignupTasksTable();
@@ -734,6 +911,29 @@ export class AppDatabase {
     if (!apiKeyColumns.has("extracted_ip")) {
       this.db.exec("ALTER TABLE api_keys ADD COLUMN extracted_ip TEXT;");
     }
+    const mailboxTableInfo = this.db.query("PRAGMA table_info(microsoft_mailboxes);").all() as Array<Record<string, unknown>>;
+    const mailboxColumns = new Set(mailboxTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!mailboxColumns.has("authority")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN authority TEXT NOT NULL DEFAULT 'common';");
+    }
+    if (!mailboxColumns.has("oauth_state")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN oauth_state TEXT;");
+    }
+    if (!mailboxColumns.has("oauth_code_verifier")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN oauth_code_verifier TEXT;");
+    }
+    if (!mailboxColumns.has("oauth_started_at")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN oauth_started_at TEXT;");
+    }
+    if (!mailboxColumns.has("oauth_connected_at")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN oauth_connected_at TEXT;");
+    }
+    if (!mailboxColumns.has("delta_link")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN delta_link TEXT;");
+    }
+    if (!mailboxColumns.has("last_error_message")) {
+      this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN last_error_message TEXT;");
+    }
 
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_result ON microsoft_accounts(last_result_status, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_skip_reason ON microsoft_accounts(skip_reason, updated_at DESC);");
@@ -748,9 +948,20 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_provider_started ON account_extract_batches(provider, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_batch_created ON account_extract_items(batch_id, created_at ASC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_email ON account_extract_items(email, created_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mailboxes_status_updated ON microsoft_mailboxes(status, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mailboxes_sync_updated ON microsoft_mailboxes(sync_enabled, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mail_messages_mailbox_received ON microsoft_mail_messages(mailbox_id, received_at DESC, id DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mail_messages_mailbox_unread ON microsoft_mail_messages(mailbox_id, is_read, received_at DESC);");
     if (signupTaskTableExists) {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_job_account ON signup_tasks(job_id, account_id, started_at DESC);");
     }
+
+    this.db.exec(`
+      INSERT INTO microsoft_mailboxes (account_id, status, sync_enabled, authority)
+      SELECT id, 'preparing', 1, 'common'
+      FROM microsoft_accounts
+      WHERE id NOT IN (SELECT account_id FROM microsoft_mailboxes)
+    `);
   }
 
   recoverStaleState(): void {
@@ -956,6 +1167,13 @@ export class AppDatabase {
           last_error_code = ?
       WHERE id = ?
     `);
+    const ensureMailboxStmt = this.db.query(`
+      INSERT INTO microsoft_mailboxes (account_id, status, sync_enabled, authority, updated_at)
+      VALUES (?, 'preparing', 1, 'common', ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        sync_enabled = 1,
+        updated_at = excluded.updated_at
+    `);
 
     this.db.exec("BEGIN IMMEDIATE;");
     try {
@@ -966,7 +1184,9 @@ export class AppDatabase {
           insertStmt.run(email, password, now, now, source, accountSource, rawPayload, normalizedGroupName);
           const inserted = selectStmt.get(email) as Record<string, unknown> | null;
           if (inserted?.id != null) {
-            affectedIds.push(Number(inserted.id));
+            const accountId = Number(inserted.id);
+            affectedIds.push(accountId);
+            ensureMailboxStmt.run(accountId, now);
           }
           created += 1;
           continue;
@@ -1001,6 +1221,7 @@ export class AppDatabase {
           Number(existing.id),
         );
         affectedIds.push(Number(existing.id));
+        ensureMailboxStmt.run(Number(existing.id), now);
         updated += 1;
       }
       this.db.exec("COMMIT;");
@@ -1062,7 +1283,7 @@ export class AppDatabase {
       .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number; disabled_count?: number } | null;
     const total = Number(summaryRow?.total || 0);
     const rows = this.db
-      .query(`SELECT * FROM microsoft_accounts ${whereSql} ORDER BY updated_at DESC LIMIT ? OFFSET ?`)
+      .query(accountSelectSql(whereSql, "ORDER BY a.updated_at DESC LIMIT ? OFFSET ?"))
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
     return {
       rows: rows.map(mapAccountRow),
@@ -1095,7 +1316,7 @@ export class AppDatabase {
     if (normalizedEmails.length === 0) return [];
     const placeholders = normalizedEmails.map(() => "?").join(", ");
     const rows = this.db
-      .query(`SELECT * FROM microsoft_accounts WHERE microsoft_email IN (${placeholders})`)
+      .query(accountSelectSql(`WHERE a.microsoft_email IN (${placeholders})`))
       .all(...normalizedEmails) as Array<Record<string, unknown>>;
     return rows.map(mapAccountRow);
   }
@@ -1268,6 +1489,39 @@ export class AppDatabase {
         WHERE id = ?
       `)
       .run(now, reason.trim(), current.skipReason, now, errorCode ?? null, now, accountId);
+  }
+
+  markAccountLocked(
+    accountId: number,
+    reason = "Microsoft 账户已锁定",
+    errorCode: string | null = "microsoft_account_locked",
+    options?: { releaseLease?: boolean },
+  ): void {
+    const current = this.getAccount(accountId);
+    if (!current) {
+      throw new Error(`account not found: ${accountId}`);
+    }
+    const now = nowIso();
+    const releaseLease = options?.releaseLease !== false;
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET disabled_at = COALESCE(disabled_at, ?),
+            disabled_reason = ?,
+            skip_reason = 'microsoft_account_locked',
+            last_result_status = 'disabled',
+            last_result_at = ?,
+            last_error_code = COALESCE(?, last_error_code),
+            updated_at = ?${
+              releaseLease
+                ? `,
+            lease_job_id = NULL,
+            lease_started_at = NULL`
+                : ""
+            }
+        WHERE id = ?
+      `)
+      .run(now, reason.trim() || "Microsoft 账户已锁定", now, errorCode ?? "microsoft_account_locked", now, accountId);
   }
 
   deleteAccounts(ids: number[]): { deleted: number; blockedIds: number[] } {
@@ -1551,8 +1805,409 @@ export class AppDatabase {
   }
 
   getAccount(accountId: number): MicrosoftAccountRecord | null {
-    const row = this.db.query("SELECT * FROM microsoft_accounts WHERE id = ?").get(accountId) as Record<string, unknown> | null;
+    const row = this.db.query(accountSelectSql("WHERE a.id = ?")).get(accountId) as Record<string, unknown> | null;
     return row ? mapAccountRow(row) : null;
+  }
+
+  ensureMailboxForAccount(accountId: number): MicrosoftMailboxRecord {
+    const now = nowIso();
+    this.db
+      .query(`
+        INSERT INTO microsoft_mailboxes (account_id, status, sync_enabled, authority, updated_at)
+        VALUES (?, 'preparing', 1, 'common', ?)
+        ON CONFLICT(account_id) DO UPDATE SET
+          sync_enabled = 1,
+          updated_at = excluded.updated_at
+      `)
+      .run(accountId, now);
+    return this.getMailboxByAccountId(accountId)!;
+  }
+
+  listMailboxes(options?: { connectedOnly?: boolean }): MicrosoftMailboxRecord[] {
+    const connectedOnly = options?.connectedOnly === true;
+    const rows = this.db
+      .query(`
+        SELECT
+          m.*,
+          a.microsoft_email,
+          a.group_name,
+          a.proof_mailbox_address
+        FROM microsoft_mailboxes m
+        JOIN microsoft_accounts a ON a.id = m.account_id
+        ${connectedOnly ? "WHERE COALESCE(m.refresh_token, '') <> '' OR m.oauth_connected_at IS NOT NULL OR m.last_synced_at IS NOT NULL" : ""}
+        ORDER BY
+          CASE WHEN m.last_synced_at IS NULL THEN 1 ELSE 0 END,
+          m.last_synced_at DESC,
+          a.updated_at DESC,
+          LOWER(a.microsoft_email) ASC
+      `)
+      .all() as Record<string, unknown>[];
+    return rows.map(mapMailboxRow);
+  }
+
+  getMailbox(mailboxId: number): MicrosoftMailboxRecord | null {
+    const row = this.db
+      .query(`
+        SELECT
+          m.*,
+          a.microsoft_email,
+          a.group_name,
+          a.proof_mailbox_address
+        FROM microsoft_mailboxes m
+        JOIN microsoft_accounts a ON a.id = m.account_id
+        WHERE m.id = ?
+      `)
+      .get(mailboxId) as Record<string, unknown> | null;
+    return row ? mapMailboxRow(row) : null;
+  }
+
+  getMailboxByAccountId(accountId: number): MicrosoftMailboxRecord | null {
+    const row = this.db
+      .query(`
+        SELECT
+          m.*,
+          a.microsoft_email,
+          a.group_name,
+          a.proof_mailbox_address
+        FROM microsoft_mailboxes m
+        JOIN microsoft_accounts a ON a.id = m.account_id
+        WHERE m.account_id = ?
+      `)
+      .get(accountId) as Record<string, unknown> | null;
+    return row ? mapMailboxRow(row) : null;
+  }
+
+  getMailboxByOauthState(oauthState: string): MicrosoftMailboxRecord | null {
+    const normalizedState = oauthState.trim();
+    if (!normalizedState) return null;
+    const row = this.db
+      .query(`
+        SELECT
+          m.*,
+          a.microsoft_email,
+          a.group_name,
+          a.proof_mailbox_address
+        FROM microsoft_mailboxes m
+        JOIN microsoft_accounts a ON a.id = m.account_id
+        WHERE m.oauth_state = ?
+      `)
+      .get(normalizedState) as Record<string, unknown> | null;
+    return row ? mapMailboxRow(row) : null;
+  }
+
+  saveMailboxOauthStart(
+    mailboxId: number,
+    input: {
+      oauthState: string;
+      oauthCodeVerifier: string;
+      authority?: string;
+    },
+  ): MicrosoftMailboxRecord {
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_mailboxes
+        SET status = 'preparing',
+            sync_enabled = 1,
+            authority = ?,
+            oauth_state = ?,
+            oauth_code_verifier = ?,
+            oauth_started_at = ?,
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run((input.authority || "common").trim() || "common", input.oauthState, input.oauthCodeVerifier, now, now, mailboxId);
+    return this.getMailbox(mailboxId)!;
+  }
+
+  completeMailboxOAuth(
+    mailboxId: number,
+    input: {
+      refreshToken: string;
+      accessToken: string | null;
+      accessTokenExpiresAt: string | null;
+      authority: string;
+      graphUserId?: string | null;
+      graphUserPrincipalName?: string | null;
+      graphDisplayName?: string | null;
+    },
+  ): MicrosoftMailboxRecord {
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_mailboxes
+        SET status = CASE WHEN last_synced_at IS NULL THEN 'preparing' ELSE 'available' END,
+            sync_enabled = 1,
+            refresh_token = ?,
+            access_token = ?,
+            access_token_expires_at = ?,
+            graph_user_id = ?,
+            graph_user_principal_name = ?,
+            graph_display_name = ?,
+            authority = ?,
+            oauth_state = NULL,
+            oauth_code_verifier = NULL,
+            oauth_started_at = NULL,
+            oauth_connected_at = ?,
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        input.refreshToken,
+        input.accessToken,
+        input.accessTokenExpiresAt,
+        input.graphUserId ?? null,
+        input.graphUserPrincipalName ?? null,
+        input.graphDisplayName ?? null,
+        input.authority.trim() || "common",
+        now,
+        now,
+        mailboxId,
+      );
+    return this.getMailbox(mailboxId)!;
+  }
+
+  updateMailboxTokens(
+    mailboxId: number,
+    input: {
+      refreshToken?: string | null;
+      accessToken?: string | null;
+      accessTokenExpiresAt?: string | null;
+      authority?: string;
+    },
+  ): MicrosoftMailboxRecord {
+    const current = this.getMailbox(mailboxId);
+    if (!current) {
+      throw new Error(`mailbox not found: ${mailboxId}`);
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_mailboxes
+        SET refresh_token = ?,
+            access_token = ?,
+            access_token_expires_at = ?,
+            authority = ?,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        input.refreshToken === undefined ? current.refreshToken : input.refreshToken,
+        input.accessToken === undefined ? current.accessToken : input.accessToken,
+        input.accessTokenExpiresAt === undefined ? current.accessTokenExpiresAt : input.accessTokenExpiresAt,
+        input.authority === undefined ? current.authority : input.authority.trim() || "common",
+        now,
+        mailboxId,
+      );
+    return this.getMailbox(mailboxId)!;
+  }
+
+  markMailboxStatus(
+    mailboxId: number,
+    input: {
+      status: MailboxStatus;
+      lastErrorCode?: string | null;
+      lastErrorMessage?: string | null;
+      accessToken?: string | null;
+      accessTokenExpiresAt?: string | null;
+      refreshToken?: string | null;
+      deltaLink?: string | null;
+      unreadCount?: number;
+      lastSyncedAt?: string | null;
+    },
+  ): MicrosoftMailboxRecord {
+    const current = this.getMailbox(mailboxId);
+    if (!current) {
+      throw new Error(`mailbox not found: ${mailboxId}`);
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_mailboxes
+        SET status = ?,
+            refresh_token = ?,
+            access_token = ?,
+            access_token_expires_at = ?,
+            delta_link = ?,
+            unread_count = ?,
+            last_synced_at = ?,
+            last_error_code = ?,
+            last_error_message = ?,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        input.status,
+        input.refreshToken === undefined ? current.refreshToken : input.refreshToken,
+        input.accessToken === undefined ? current.accessToken : input.accessToken,
+        input.accessTokenExpiresAt === undefined ? current.accessTokenExpiresAt : input.accessTokenExpiresAt,
+        input.deltaLink === undefined ? current.deltaLink : input.deltaLink,
+        input.unreadCount === undefined ? current.unreadCount : Math.max(0, Math.trunc(input.unreadCount)),
+        input.lastSyncedAt === undefined ? current.lastSyncedAt : input.lastSyncedAt,
+        input.lastErrorCode === undefined ? current.lastErrorCode : input.lastErrorCode,
+        input.lastErrorMessage === undefined ? current.lastErrorMessage : input.lastErrorMessage,
+        now,
+        mailboxId,
+      );
+    return this.getMailbox(mailboxId)!;
+  }
+
+  upsertMailboxMessages(
+    mailboxId: number,
+    messages: Array<{
+      graphMessageId: string;
+      internetMessageId?: string | null;
+      conversationId?: string | null;
+      subject?: string | null;
+      fromName?: string | null;
+      fromAddress?: string | null;
+      receivedAt?: string | null;
+      isRead?: boolean;
+      hasAttachments?: boolean;
+      bodyContentType?: "html" | "text";
+      bodyPreview?: string | null;
+      bodyContent?: string | null;
+      webLink?: string | null;
+    }>,
+    options?: {
+      removedGraphMessageIds?: string[];
+      keepLatest?: number;
+    },
+  ): { insertedOrUpdated: number; removed: number } {
+    const keepLatest = Math.max(1, Math.trunc(options?.keepLatest || 500));
+    const normalizedRemovedIds = Array.from(
+      new Set((options?.removedGraphMessageIds || []).map((item) => item.trim()).filter(Boolean)),
+    );
+    const now = nowIso();
+    let insertedOrUpdated = 0;
+    let removed = 0;
+    const upsertStmt = this.db.query(`
+      INSERT INTO microsoft_mail_messages (
+        mailbox_id, graph_message_id, internet_message_id, conversation_id, subject, from_name, from_address, received_at,
+        is_read, has_attachments, body_content_type, body_preview, body_content, web_link, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(mailbox_id, graph_message_id) DO UPDATE SET
+        internet_message_id = excluded.internet_message_id,
+        conversation_id = excluded.conversation_id,
+        subject = excluded.subject,
+        from_name = excluded.from_name,
+        from_address = excluded.from_address,
+        received_at = excluded.received_at,
+        is_read = excluded.is_read,
+        has_attachments = excluded.has_attachments,
+        body_content_type = excluded.body_content_type,
+        body_preview = excluded.body_preview,
+        body_content = excluded.body_content,
+        web_link = excluded.web_link,
+        updated_at = excluded.updated_at
+    `);
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      for (const message of messages) {
+        const graphMessageId = message.graphMessageId.trim();
+        if (!graphMessageId) continue;
+        upsertStmt.run(
+          mailboxId,
+          graphMessageId,
+          message.internetMessageId ?? null,
+          message.conversationId ?? null,
+          message.subject ?? "",
+          message.fromName ?? null,
+          message.fromAddress ?? null,
+          message.receivedAt ?? null,
+          message.isRead ? 1 : 0,
+          message.hasAttachments ? 1 : 0,
+          message.bodyContentType === "html" ? "html" : "text",
+          message.bodyPreview ?? "",
+          message.bodyContent ?? "",
+          message.webLink ?? null,
+          now,
+          now,
+        );
+        insertedOrUpdated += 1;
+      }
+      if (normalizedRemovedIds.length > 0) {
+        const placeholders = normalizedRemovedIds.map(() => "?").join(", ");
+        this.db
+          .query(`DELETE FROM microsoft_mail_messages WHERE mailbox_id = ? AND graph_message_id IN (${placeholders})`)
+          .run(mailboxId, ...normalizedRemovedIds);
+        removed += Number((this.db.query("SELECT changes() AS count").get() as { count?: number } | null)?.count || 0);
+      }
+      this.db
+        .query(`
+          DELETE FROM microsoft_mail_messages
+          WHERE id IN (
+            SELECT id
+            FROM microsoft_mail_messages
+            WHERE mailbox_id = ?
+            ORDER BY
+              CASE WHEN received_at IS NULL THEN 1 ELSE 0 END,
+              received_at DESC,
+              id DESC
+            LIMIT -1 OFFSET ?
+          )
+        `)
+        .run(mailboxId, keepLatest);
+      removed += Number((this.db.query("SELECT changes() AS count").get() as { count?: number } | null)?.count || 0);
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+    return { insertedOrUpdated, removed };
+  }
+
+  countMailboxUnread(mailboxId: number): number {
+    const row = this.db
+      .query("SELECT COUNT(*) AS count FROM microsoft_mail_messages WHERE mailbox_id = ? AND is_read = 0")
+      .get(mailboxId) as { count?: number } | null;
+    return Number(row?.count || 0);
+  }
+
+  listMailboxMessages(mailboxId: number, options?: { limit?: number; offset?: number }): { rows: MicrosoftMailMessageRecord[]; total: number } {
+    const limit = Math.max(1, Math.min(100, Math.trunc(options?.limit || 50)));
+    const offset = Math.max(0, Math.trunc(options?.offset || 0));
+    const total = Number(
+      (
+        this.db
+          .query("SELECT COUNT(*) AS count FROM microsoft_mail_messages WHERE mailbox_id = ?")
+          .get(mailboxId) as { count?: number } | null
+      )?.count || 0,
+    );
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM microsoft_mail_messages
+        WHERE mailbox_id = ?
+        ORDER BY
+          CASE WHEN received_at IS NULL THEN 1 ELSE 0 END,
+          received_at DESC,
+          id DESC
+        LIMIT ? OFFSET ?
+      `)
+      .all(mailboxId, limit, offset) as Record<string, unknown>[];
+    return {
+      rows: rows.map(mapMailboxMessageRow),
+      total,
+    };
+  }
+
+  getMailboxMessage(messageId: number): MicrosoftMailMessageRecord | null {
+    const row = this.db.query("SELECT * FROM microsoft_mail_messages WHERE id = ?").get(messageId) as Record<string, unknown> | null;
+    return row ? mapMailboxMessageRow(row) : null;
+  }
+
+  getMailboxMessageByGraphId(mailboxId: number, graphMessageId: string): MicrosoftMailMessageRecord | null {
+    const normalizedGraphMessageId = graphMessageId.trim();
+    if (!normalizedGraphMessageId) return null;
+    const row = this.db
+      .query("SELECT * FROM microsoft_mail_messages WHERE mailbox_id = ? AND graph_message_id = ?")
+      .get(mailboxId, normalizedGraphMessageId) as Record<string, unknown> | null;
+    return row ? mapMailboxMessageRow(row) : null;
   }
 
   private hasNonRetryableAttemptForJob(jobId: number, accountId: number): boolean {

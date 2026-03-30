@@ -29,6 +29,7 @@ import {
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
 } from "./microsoft-login-state.js";
+import { isMicrosoftPasskeyInterruptUrl } from "./microsoft-passkey.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
@@ -58,7 +59,7 @@ interface CliArgs {
   need: number;
 }
 
-interface AppConfig {
+export interface AppConfig {
   runMode: RunMode;
   browserEngine: BrowserEngine;
   inspectBrowserEngine: BrowserEngine;
@@ -5077,10 +5078,6 @@ interface MicrosoftPasskeyState {
   lastNonPasskeyUrl: string | null;
 }
 
-function isMicrosoftPasskeyInterruptUrl(url: string): boolean {
-  return /login\.microsoft\.com\/consumers\/fido\/create|account\.live\.com\/interrupt\/passkey\/enroll/i.test(url);
-}
-
 async function closeTransientPasskeyPopups(page: any): Promise<boolean> {
   const pageCdp = await createCdpSession(page);
   if (!pageCdp) return false;
@@ -5140,8 +5137,10 @@ async function handleMicrosoftPasskeyInterrupt(
   page: any,
   state?: MicrosoftPasskeyState,
   proofState?: MicrosoftProofFlowState,
+  recoveryUrl?: string,
 ): Promise<boolean | any> {
   const MAX_TAVILY_RELAUNCHES = 1;
+  const normalizedRecoveryUrl = String(recoveryUrl || "").trim() || "https://app.tavily.com/home";
   const onPasskeyInterruptRoute = isMicrosoftPasskeyInterruptUrl(page.url());
   const isPasskeySetupPrompt =
     onPasskeyInterruptRoute ||
@@ -5181,11 +5180,11 @@ async function handleMicrosoftPasskeyInterrupt(
       const recoveryPage = await context.newPage().catch(() => null);
       if (recoveryPage) {
         await stabilizeMicrosoftSessionAfterPasskey(recoveryPage).catch(() => false);
-        await safeGoto(recoveryPage, "https://app.tavily.com/home", 20_000).catch(() => {});
+        await safeGoto(recoveryPage, normalizedRecoveryUrl, 20_000).catch(() => {});
         await recoveryPage.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
         await recoveryPage.bringToFront().catch(() => {});
         log(
-          `login flow: recovered Microsoft passkey by closing interrupt page and reopening Tavily login (${state.tavilyRelaunchCount}/${MAX_TAVILY_RELAUNCHES})`,
+          `login flow: recovered Microsoft passkey by closing interrupt page and reopening the login flow (${state.tavilyRelaunchCount}/${MAX_TAVILY_RELAUNCHES})`,
         );
         return recoveryPage;
       }
@@ -5258,10 +5257,10 @@ async function handleMicrosoftPasskeyInterrupt(
       if (state) {
         state.homeReturnAttempted = true;
       }
-      await safeGoto(page, "https://app.tavily.com/home", 20_000).catch(() => {});
+      await safeGoto(page, normalizedRecoveryUrl, 20_000).catch(() => {});
       await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
       if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
-        log("login flow: bypassed Microsoft passkey setup via Tavily home return");
+        log(`login flow: bypassed Microsoft passkey setup via ${normalizedRecoveryUrl}`);
         return true;
       }
     }
@@ -6238,7 +6237,17 @@ async function handleMicrosoftProofCodePrompt(
   return true;
 }
 
-async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: string): Promise<any> {
+export interface MicrosoftLoginCompletionOptions {
+  completionUrlPatterns?: RegExp[];
+  passkeyRecoveryUrl?: string;
+}
+
+export async function completeMicrosoftLogin(
+  page: any,
+  cfg: AppConfig,
+  proxyUrl?: string,
+  options?: MicrosoftLoginCompletionOptions,
+): Promise<any> {
   const email = cfg.microsoftAccountEmail;
   const password = cfg.microsoftAccountPassword;
   if (!email || !password) {
@@ -6287,6 +6296,10 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
   };
 
   page.on("dialog", dialogHandler);
+  const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
+  const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
+  const hasCompleted = (url: string): boolean => completionUrlPatterns.some((pattern) => pattern.test(url));
+
   try {
     const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
     const socialSignupContinuationPattern = /auth\.tavily\.com\/u\/(?:signup\/identifier|signup\/password|email-identifier\/challenge)/i;
@@ -6349,7 +6362,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       }
       if (!isMicrosoftPasskeyInterruptUrl(currentUrl)) {
         passkeyState.lastNonPasskeyUrl = currentUrl;
-        if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+        if (!completionUrlPatterns.length && /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
           passkeyState.tavilyRelaunchCount = 0;
           passkeyState.homeReturnAttempted = false;
         }
@@ -6365,7 +6378,10 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
         providerState.submittedCount = 0;
         providerState.challengeRecoveryKey = null;
       }
-      if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+      if (!completionUrlPatterns.length && /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+        return page;
+      }
+      if (hasCompleted(currentUrl)) {
         return page;
       }
       if (visitedMicrosoftAccountSurface && socialSignupContinuationPattern.test(currentUrl)) {
@@ -6442,7 +6458,7 @@ async function completeMicrosoftLogin(page: any, cfg: AppConfig, proxyUrl?: stri
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftEmailPrompt(page, email, proofState)) continue;
-      const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState);
+      const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState, passkeyRecoveryUrl);
       if (passkeyResult) {
         if (passkeyResult !== true) {
           page = passkeyResult;
@@ -9174,7 +9190,7 @@ function getFingerprintChromiumArgs(
   return args;
 }
 
-function loadConfig(): AppConfig {
+export function loadConfig(): AppConfig {
   const rawRunMode = (process.env.RUN_MODE || "").trim();
   const envRunMode = parseRunMode(rawRunMode);
   if (rawRunMode && !envRunMode) {
@@ -9734,18 +9750,17 @@ async function applyBrowserIdentityToContext(
   }
 }
 
-async function launchBrowserWithEngine(
+export async function launchBrowserWithEngine(
   engine: BrowserEngine,
   cfg: AppConfig,
   mode: "headed" | "headless",
-  proxyServer: string,
+  proxyServer: string | undefined,
   locale: string,
   _geoIp: string,
 ): Promise<Browser> {
   const options: LaunchOptions = {
     headless: mode === "headless",
     slowMo: Math.max(0, cfg.slowMoMs),
-    proxy: { server: proxyServer },
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
       `--lang=${locale}`,
@@ -9755,6 +9770,9 @@ async function launchBrowserWithEngine(
     ],
     timeout: 180_000,
   };
+  if (proxyServer?.trim()) {
+    options.proxy = { server: proxyServer.trim() };
+  }
   const executablePath = requireFingerprintChromiumExecutablePath(cfg.chromeExecutablePath);
   options.executablePath = executablePath;
   const browser = await chromium.launch(options);
@@ -9927,7 +9945,7 @@ async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> 
   await cleanupChromeProfileArtifacts(normalizedProfileDir).catch(() => {});
 }
 
-async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
+export async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
   const normalizedBaseDir = `${normalizeProfileDir(baseDir)}${pathSep}`;
   const processes = await readPsTable();
   const profileDirs = new Set<string>();
@@ -12595,4 +12613,9 @@ async function main(): Promise<void> {
   }
 }
 
-await main();
+const MAIN_MODULE_PATH = fileURLToPath(import.meta.url);
+const INVOKED_MODULE_PATH = process.argv[1] ? path.resolve(process.argv[1]) : "";
+
+if (MAIN_MODULE_PATH === INVOKED_MODULE_PATH) {
+  await main();
+}
