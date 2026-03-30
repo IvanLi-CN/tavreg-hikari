@@ -756,7 +756,7 @@ export function AccountsView({
                 </div>
 
                 <div className="hidden md:block">
-                  <Table className="min-w-[1180px]">
+                  <Table className="min-w-[1420px]">
                     <TableHeader>
                       <TableRow>
                         <TableHead className="w-14">
@@ -777,7 +777,7 @@ export function AccountsView({
                         <TableHead>最近使用</TableHead>
                         <TableHead>账号阻断</TableHead>
                         <TableHead>人工停用</TableHead>
-                        <TableHead className="text-right">操作</TableHead>
+                        <TableHead className="w-[24rem] min-w-[24rem] whitespace-nowrap text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -813,29 +813,29 @@ export function AccountsView({
                           <TableCell>{formatDate(row.lastUsedAt)}</TableCell>
                           <TableCell className="min-w-[10rem]">{formatAccountBlockReason(row)}</TableCell>
                           <TableCell className="min-w-[12rem]">{row.disabledReason || "—"}</TableCell>
-                          <TableCell className="text-right">
-                            <div className="flex justify-end gap-2">
+                          <TableCell className="w-[24rem] min-w-[24rem] whitespace-nowrap text-right">
+                            <div className="ml-auto flex w-max min-w-full flex-nowrap justify-end gap-2">
                               <Button
                                 variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
-                                className="h-8 px-3 text-xs"
+                                className="h-8 shrink-0 px-3 text-xs"
                                 onClick={() => void onConnectAccount(row.id)}
                                 disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
                               >
                                 {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
                               </Button>
-                              <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openProofDialog(row)}>
+                              <Button variant="outline" className="h-8 shrink-0 px-3 text-xs" onClick={() => openProofDialog(row)}>
                                 绑定邮箱
                               </Button>
                               {row.disabledAt || isRestorableAccountBlock(row.skipReason) ? (
-                                <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
+                                <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={() => handleRestoreAvailability(row)}>
                                   恢复可用
                                 </Button>
                               ) : (
-                                <Button variant="outline" className="h-8 px-3 text-xs" onClick={() => openAvailabilityDialog(row)}>
+                                <Button variant="outline" className="h-8 shrink-0 px-3 text-xs" onClick={() => openAvailabilityDialog(row)}>
                                   标记不可用
                                 </Button>
                               )}
-                              <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
+                              <Button variant="secondary" className="h-8 shrink-0 px-3 text-xs" onClick={() => onOpenMailbox(row.id)}>
                                 收件箱
                               </Button>
                             </div>

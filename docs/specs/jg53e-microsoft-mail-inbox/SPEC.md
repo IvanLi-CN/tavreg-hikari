@@ -4,7 +4,7 @@
 
 - Status: 已实现
 - Created: 2026-03-28
-- Last: 2026-03-30
+- Last: 2026-03-31
 
 ## 背景 / 问题陈述
 
@@ -178,6 +178,19 @@
 - state: account table with mailbox status
 - evidence_note: 验证微软账号页新增“收信状态”列、单账号连接、批量串行连接工具栏与“收件箱”入口，并同时展示 `preparing / available / locked` 样例。
 
+PR: include
+
+![微软账号页操作按钮保持横排](./assets/accounts-action-buttons-nowrap.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/DesktopActionButtonsNoWrap
+- state: desktop action column no-wrap under constrained width
+- evidence_note: 验证桌面账号表格在较窄工作区下保留横向操作按钮组，并通过表格横向滚动消化宽度压力，不再把“连接 / 绑定邮箱 / 标记不可用 / 收件箱”挤成竖排。
+
 ## 里程碑
 
 - [x] M1: 建立 spec 并冻结 OAuth、状态语义、回调路径与 v1 Inbox-only 范围
@@ -190,3 +203,7 @@
 
 - `docs/specs/README.md`
 - `README.md`
+
+## Change log
+
+- 2026-03-31: 修复微软账号页桌面表格操作列按钮挤压回归，为操作列补齐稳定最小宽度、按钮单行约束和 Storybook 回归证据。
