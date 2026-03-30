@@ -77,7 +77,7 @@ async function main(): Promise<void> {
   let context: any = null;
   try {
     await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
-    browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, "headed", undefined, locale, "");
+    browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, "headless", undefined, locale, "");
     context = await browser.newContext(contextOptions);
     let page = await context.newPage();
     await page.goto(args.authUrl, {
