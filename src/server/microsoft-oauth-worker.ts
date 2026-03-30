@@ -8,6 +8,7 @@ import {
   loadConfig,
   launchBrowserWithEngine,
 } from "../main.js";
+import { isMicrosoftPasskeyInterruptUrl } from "../microsoft-passkey.js";
 import { isMicrosoftOauthCompletionUrl } from "./microsoft-mail.js";
 
 interface WorkerArgs {
@@ -52,6 +53,7 @@ async function writeResult(resultPath: string, payload: Record<string, unknown>)
 }
 
 async function main(): Promise<void> {
+  const MAX_PASSKEY_RESTARTS = 2;
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
   const locale = "zh-CN";
@@ -77,16 +79,32 @@ async function main(): Promise<void> {
     await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
     browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, "headed", undefined, locale, "");
     context = await browser.newContext(contextOptions);
-    const page = await context.newPage();
+    let page = await context.newPage();
     await page.goto(args.authUrl, {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
     });
-    await completeMicrosoftLogin(page, cfg, undefined, {
-      completionUrlPatterns,
-    });
-    const finalUrl = String(page.url() || "");
-    if (!isMicrosoftOauthCompletionUrl(finalUrl, args.redirectUri)) {
+    for (let attempt = 1; attempt <= MAX_PASSKEY_RESTARTS; attempt += 1) {
+      page = await completeMicrosoftLogin(page, cfg, undefined, {
+        completionUrlPatterns,
+        passkeyRecoveryUrl: args.authUrl,
+      });
+      const finalUrl = String(page.url() || "");
+      if (isMicrosoftOauthCompletionUrl(finalUrl, args.redirectUri)) {
+        await writeResult(args.resultPath, {
+          ok: true,
+          finalUrl,
+          oauthOutcome: new URL(finalUrl).searchParams.get("oauth") || null,
+        });
+        return;
+      }
+      if (isMicrosoftPasskeyInterruptUrl(finalUrl) && attempt < MAX_PASSKEY_RESTARTS) {
+        await page.goto(args.authUrl, {
+          waitUntil: "domcontentloaded",
+          timeout: 120_000,
+        });
+        continue;
+      }
       await writeResult(args.resultPath, {
         ok: false,
         finalUrl,
@@ -94,11 +112,6 @@ async function main(): Promise<void> {
       });
       return;
     }
-    await writeResult(args.resultPath, {
-      ok: true,
-      finalUrl,
-      oauthOutcome: new URL(finalUrl).searchParams.get("oauth") || null,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.stack || error.message : String(error);
     await writeResult(args.resultPath, {

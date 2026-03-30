@@ -29,6 +29,7 @@ import {
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
 } from "./microsoft-login-state.js";
+import { isMicrosoftPasskeyInterruptUrl } from "./microsoft-passkey.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
@@ -5077,10 +5078,6 @@ interface MicrosoftPasskeyState {
   lastNonPasskeyUrl: string | null;
 }
 
-function isMicrosoftPasskeyInterruptUrl(url: string): boolean {
-  return /login\.microsoft\.com\/consumers\/fido\/create|account\.live\.com\/interrupt\/passkey\/enroll/i.test(url);
-}
-
 async function closeTransientPasskeyPopups(page: any): Promise<boolean> {
   const pageCdp = await createCdpSession(page);
   if (!pageCdp) return false;
@@ -5140,8 +5137,10 @@ async function handleMicrosoftPasskeyInterrupt(
   page: any,
   state?: MicrosoftPasskeyState,
   proofState?: MicrosoftProofFlowState,
+  recoveryUrl?: string,
 ): Promise<boolean | any> {
   const MAX_TAVILY_RELAUNCHES = 1;
+  const normalizedRecoveryUrl = String(recoveryUrl || "").trim() || "https://app.tavily.com/home";
   const onPasskeyInterruptRoute = isMicrosoftPasskeyInterruptUrl(page.url());
   const isPasskeySetupPrompt =
     onPasskeyInterruptRoute ||
@@ -5181,11 +5180,11 @@ async function handleMicrosoftPasskeyInterrupt(
       const recoveryPage = await context.newPage().catch(() => null);
       if (recoveryPage) {
         await stabilizeMicrosoftSessionAfterPasskey(recoveryPage).catch(() => false);
-        await safeGoto(recoveryPage, "https://app.tavily.com/home", 20_000).catch(() => {});
+        await safeGoto(recoveryPage, normalizedRecoveryUrl, 20_000).catch(() => {});
         await recoveryPage.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
         await recoveryPage.bringToFront().catch(() => {});
         log(
-          `login flow: recovered Microsoft passkey by closing interrupt page and reopening Tavily login (${state.tavilyRelaunchCount}/${MAX_TAVILY_RELAUNCHES})`,
+          `login flow: recovered Microsoft passkey by closing interrupt page and reopening the login flow (${state.tavilyRelaunchCount}/${MAX_TAVILY_RELAUNCHES})`,
         );
         return recoveryPage;
       }
@@ -5258,10 +5257,10 @@ async function handleMicrosoftPasskeyInterrupt(
       if (state) {
         state.homeReturnAttempted = true;
       }
-      await safeGoto(page, "https://app.tavily.com/home", 20_000).catch(() => {});
+      await safeGoto(page, normalizedRecoveryUrl, 20_000).catch(() => {});
       await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
       if (!isMicrosoftPasskeyInterruptUrl(page.url())) {
-        log("login flow: bypassed Microsoft passkey setup via Tavily home return");
+        log(`login flow: bypassed Microsoft passkey setup via ${normalizedRecoveryUrl}`);
         return true;
       }
     }
@@ -6240,6 +6239,7 @@ async function handleMicrosoftProofCodePrompt(
 
 export interface MicrosoftLoginCompletionOptions {
   completionUrlPatterns?: RegExp[];
+  passkeyRecoveryUrl?: string;
 }
 
 export async function completeMicrosoftLogin(
@@ -6297,6 +6297,7 @@ export async function completeMicrosoftLogin(
 
   page.on("dialog", dialogHandler);
   const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
+  const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
   const hasCompleted = (url: string): boolean => completionUrlPatterns.some((pattern) => pattern.test(url));
 
   try {
@@ -6361,7 +6362,7 @@ export async function completeMicrosoftLogin(
       }
       if (!isMicrosoftPasskeyInterruptUrl(currentUrl)) {
         passkeyState.lastNonPasskeyUrl = currentUrl;
-        if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+        if (!completionUrlPatterns.length && /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
           passkeyState.tavilyRelaunchCount = 0;
           passkeyState.homeReturnAttempted = false;
         }
@@ -6377,7 +6378,7 @@ export async function completeMicrosoftLogin(
         providerState.submittedCount = 0;
         providerState.challengeRecoveryKey = null;
       }
-      if (/app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+      if (!completionUrlPatterns.length && /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
         return page;
       }
       if (hasCompleted(currentUrl)) {
@@ -6457,7 +6458,7 @@ export async function completeMicrosoftLogin(
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
       if (await handleMicrosoftEmailPrompt(page, email, proofState)) continue;
-      const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState);
+      const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState, passkeyRecoveryUrl);
       if (passkeyResult) {
         if (passkeyResult !== true) {
           page = passkeyResult;
