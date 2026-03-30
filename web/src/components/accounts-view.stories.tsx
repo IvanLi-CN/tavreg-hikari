@@ -302,6 +302,36 @@ export const Default: Story = {
   render: () => <AccountsStorySurface />,
 };
 
+export const DesktopActionButtonsNoWrap: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface frameClassName="mx-auto max-w-[1400px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "桌面表格回归场景，固定较窄工作区宽度，验证操作列保留横向按钮组并通过表格横向滚动消化宽度压力，而不是把中文按钮压成竖排。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const table = canvas.getByRole("table");
+    const connectButton = canvas.getAllByRole("button", { name: "连接" })[0]!;
+    const proofButton = canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!;
+    const availabilityButton = canvas.getAllByRole("button", { name: "标记不可用" })[0]!;
+    const mailboxButton = canvas.getAllByRole("button", { name: "收件箱" })[0]!;
+
+    expect(connectButton).toBeTruthy();
+    expect(proofButton).toBeTruthy();
+    expect(availabilityButton).toBeTruthy();
+    expect(mailboxButton).toBeTruthy();
+    expect(window.getComputedStyle(connectButton).whiteSpace).toBe("nowrap");
+    expect(window.getComputedStyle(proofButton).whiteSpace).toBe("nowrap");
+    expect(window.getComputedStyle(availabilityButton).whiteSpace).toBe("nowrap");
+    expect(window.getComputedStyle(mailboxButton).whiteSpace).toBe("nowrap");
+    expect(table.scrollWidth).toBeGreaterThan(table.clientWidth);
+  },
+};
+
 export const Empty: Story = {
   args: baseArgs,
   render: () => (
