@@ -126,6 +126,14 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
 });
 
+test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusing admin ports", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain('const portLeases = await reserveMihomoPortLeases();');
+  expect(source).toContain('MIHOMO_API_PORT: String(portLeases.apiPort.port)');
+  expect(source).toContain('MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port)');
+  expect(source).toContain('await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});');
+});
+
 test("chrome native CDP automation stays enabled on macOS when configured", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   const start = source.indexOf("function shouldUseNativeChromeAutomation");

@@ -104,7 +104,10 @@ const AUTO_EXTRACT_REQUEST_INTERVAL_MS = 500;
 const AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS = 4;
 const AUTO_EXTRACT_OVERFETCH_ALLOWANCE = AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS - 1;
 const AUTO_EXTRACT_REQUEST_TIMEOUT_MS = 5000;
-export const PENDING_BROWSER_SESSION_WAIT_MS = 30_000;
+// Fresh Tavily + Graph bootstrap runs are serialized and can take several minutes
+// per account. Keep jobs waiting long enough for pending session prep to finish
+// before falling back to auto-extract/failure paths.
+export const PENDING_BROWSER_SESSION_WAIT_MS = 10 * 60_000;
 
 export interface PendingBrowserSessionWaitState {
   count: number;

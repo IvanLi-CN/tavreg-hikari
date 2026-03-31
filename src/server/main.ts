@@ -29,6 +29,7 @@ import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
+import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
@@ -732,75 +733,78 @@ async function runMailboxOauthWorker(input: {
   const outputDir = path.join(OUTPUT_ROOT, "mailbox-oauth", runId);
   const resultPath = path.join(outputDir, "result.json");
   await mkdir(outputDir, { recursive: true });
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    OUTPUT_ROOT_DIR: outputDir,
-    CHROME_PROFILE_DIR: input.profilePath,
-    CHROME_PROFILE_STRATEGY: "exact",
-    INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-    MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
-    MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
-    MICROSOFT_PROOF_MAILBOX_PROVIDER: input.account.proofMailboxProvider || "",
-    MICROSOFT_PROOF_MAILBOX_ADDRESS: input.account.proofMailboxAddress || "",
-    MICROSOFT_PROOF_MAILBOX_ID: input.account.proofMailboxId || "",
-    MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
-    MIHOMO_GROUP_NAME: input.settings.groupName,
-    MIHOMO_ROUTE_GROUP_NAME: input.settings.routeGroupName,
-    MIHOMO_API_PORT: String(input.settings.apiPort),
-    MIHOMO_MIXED_PORT: String(input.settings.mixedPort),
-    PROXY_CHECK_URL: input.settings.checkUrl,
-    PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
-    PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
-    KEEP_BROWSER_OPEN_ON_FAILURE: "false",
-    KEEP_BROWSER_OPEN_MS: "0",
-  };
+  const portLeases = await reserveMihomoPortLeases();
+  try {
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      OUTPUT_ROOT_DIR: outputDir,
+      CHROME_PROFILE_DIR: input.profilePath,
+      CHROME_PROFILE_STRATEGY: "exact",
+      INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+      MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
+      MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
+      MICROSOFT_PROOF_MAILBOX_PROVIDER: input.account.proofMailboxProvider || "",
+      MICROSOFT_PROOF_MAILBOX_ADDRESS: input.account.proofMailboxAddress || "",
+      MICROSOFT_PROOF_MAILBOX_ID: input.account.proofMailboxId || "",
+      MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
+      MIHOMO_GROUP_NAME: input.settings.groupName,
+      MIHOMO_ROUTE_GROUP_NAME: input.settings.routeGroupName,
+      MIHOMO_API_PORT: String(portLeases.apiPort.port),
+      MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
+      PROXY_CHECK_URL: input.settings.checkUrl,
+      PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
+      PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
+      KEEP_BROWSER_OPEN_ON_FAILURE: "false",
+      KEEP_BROWSER_OPEN_MS: "0",
+    };
 
-  const result = await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [
-        "run",
-        "src/server/microsoft-oauth-worker.ts",
-        `--auth-url=${input.authUrl}`,
-        `--redirect-uri=${input.redirectUri}`,
-        `--proxy-node=${input.proxyNode}`,
-        `--result-path=${resultPath}`,
-      ],
-      {
-        cwd: REPO_ROOT,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    let stderr = "";
-    let stdout = "";
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-    }, 5 * 60_000);
-    child.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
+    return await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [
+          "run",
+          "src/server/microsoft-oauth-worker.ts",
+          `--auth-url=${input.authUrl}`,
+          `--redirect-uri=${input.redirectUri}`,
+          `--proxy-node=${input.proxyNode}`,
+          `--result-path=${resultPath}`,
+        ],
+        {
+          cwd: REPO_ROOT,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stderr = "";
+      let stdout = "";
+      const timeout = setTimeout(() => {
+        child.kill("SIGTERM");
+      }, 5 * 60_000);
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk.toString();
+      });
+      child.stderr?.on("data", (chunk) => {
+        stderr += chunk.toString();
+      });
+      child.once("error", (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+      child.once("close", async (code) => {
+        clearTimeout(timeout);
+        try {
+          const raw = await readFile(resultPath, "utf8");
+          const parsed = JSON.parse(raw) as MailboxOauthWorkerResult;
+          resolve(parsed);
+        } catch (error) {
+          const tail = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").slice(-4000);
+          reject(new Error(`oauth worker failed (code=${code ?? "unknown"}): ${tail || (error instanceof Error ? error.message : String(error))}`));
+        }
+      });
     });
-    child.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once("close", async (code) => {
-      clearTimeout(timeout);
-      try {
-        const raw = await readFile(resultPath, "utf8");
-        const parsed = JSON.parse(raw) as MailboxOauthWorkerResult;
-        resolve(parsed);
-      } catch (error) {
-        const tail = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").slice(-4000);
-        reject(new Error(`oauth worker failed (code=${code ?? "unknown"}): ${tail || (error instanceof Error ? error.message : String(error))}`));
-      }
-    });
-  });
-
-  return result;
+  } finally {
+    await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});
+  }
 }
 
 async function authorizeMailboxWithBrowserAutomation(input: {

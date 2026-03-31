@@ -6,6 +6,7 @@ import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts"
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
 import {
   JobScheduler,
+  PENDING_BROWSER_SESSION_WAIT_MS,
   buildAttemptRuntimeSpec,
   buildAttemptSpawnOptions,
   pickWorkerRuntime,
@@ -900,6 +901,10 @@ describe("AppDatabase account import", () => {
 });
 
 describe("scheduler helpers", () => {
+  test("pending browser session wait defaults to a multi-minute bootstrap window", () => {
+    expect(PENDING_BROWSER_SESSION_WAIT_MS).toBeGreaterThanOrEqual(5 * 60_000);
+  });
+
   test("pending browser session wait only blocks for a bounded window per pending-count change", () => {
     const first = resolvePendingBrowserSessionWait({
       state: null,
