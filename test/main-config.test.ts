@@ -131,6 +131,8 @@ test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusin
   expect(source).toContain('const portLeases = await reserveMihomoPortLeases();');
   expect(source).toContain('MIHOMO_API_PORT: String(portLeases.apiPort.port)');
   expect(source).toContain('MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port)');
+  expect(source).toContain('await Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]).catch(() => {});');
+  expect(source).toContain('child.once("spawn", () => {');
   expect(source).toContain('await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});');
 });
 

@@ -759,6 +759,12 @@ async function runMailboxOauthWorker(input: {
     };
 
     return await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
+      let listenersReleased = false;
+      const releasePortListeners = async () => {
+        if (listenersReleased) return;
+        listenersReleased = true;
+        await Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]).catch(() => {});
+      };
       const child = spawn(
         process.execPath,
         [
@@ -775,6 +781,9 @@ async function runMailboxOauthWorker(input: {
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
+      child.once("spawn", () => {
+        void releasePortListeners();
+      });
       let stderr = "";
       let stdout = "";
       const timeout = setTimeout(() => {
