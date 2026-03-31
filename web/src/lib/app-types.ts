@@ -424,6 +424,8 @@ export type AccountQuery = {
   status: string;
   hasApiKey: string;
   groupName: string;
+  sortBy: "" | "importedAt" | "lastUsedAt";
+  sortDir: "desc" | "asc";
   page: number;
   pageSize: number;
 };

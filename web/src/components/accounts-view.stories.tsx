@@ -21,7 +21,7 @@ import {
 } from "@/stories/fixtures";
 
 function createDefaultQuery(): AccountQuery {
-  return { q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 };
+  return { q: "", status: "", hasApiKey: "", groupName: "", sortBy: "", sortDir: "desc", page: 1, pageSize: 20 };
 }
 
 function createDefaultExtractorHistoryQuery(): AccountExtractorHistoryQuery {
@@ -144,6 +144,71 @@ const baseArgs = {
 };
 const restoreAvailabilitySpy = fn(async () => undefined);
 
+function applyStoryAccountQuery(accounts: AccountsPayload, query: AccountQuery): AccountsPayload {
+  const pattern = query.q.trim().toLowerCase();
+  const filteredRows = accounts.rows.filter((row) => {
+    if (query.status && row.lastResultStatus !== query.status) return false;
+    if (query.hasApiKey === "true" && !row.hasApiKey) return false;
+    if (query.hasApiKey === "false" && row.hasApiKey) return false;
+    if (query.groupName && (row.groupName || "") !== query.groupName) return false;
+    if (!pattern) return true;
+    return [
+      row.microsoftEmail,
+      row.passwordPlaintext || "",
+      row.groupName || "",
+      row.proofMailboxAddress || "",
+    ].some((value) => value.toLowerCase().includes(pattern));
+  });
+  const sortedRows = [...filteredRows].sort((left, right) => {
+    const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
+    if (updatedDelta !== 0) return updatedDelta;
+    return right.id - left.id;
+  });
+  if (query.sortBy === "importedAt") {
+    sortedRows.sort((left, right) => {
+      const delta = query.sortDir === "asc"
+        ? left.importedAt.localeCompare(right.importedAt)
+        : right.importedAt.localeCompare(left.importedAt);
+      if (delta !== 0) return delta;
+      const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
+      if (updatedDelta !== 0) return updatedDelta;
+      return right.id - left.id;
+    });
+  } else if (query.sortBy === "lastUsedAt") {
+    sortedRows.sort((left, right) => {
+      const leftValue = left.lastUsedAt;
+      const rightValue = right.lastUsedAt;
+      if (query.sortDir === "asc") {
+        if (leftValue == null && rightValue != null) return -1;
+        if (leftValue != null && rightValue == null) return 1;
+        if (leftValue != null && rightValue != null) {
+          const delta = leftValue.localeCompare(rightValue);
+          if (delta !== 0) return delta;
+        }
+      } else {
+        if (leftValue == null && rightValue != null) return 1;
+        if (leftValue != null && rightValue == null) return -1;
+        if (leftValue != null && rightValue != null) {
+          const delta = rightValue.localeCompare(leftValue);
+          if (delta !== 0) return delta;
+        }
+      }
+      const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
+      if (updatedDelta !== 0) return updatedDelta;
+      return right.id - left.id;
+    });
+  }
+  const start = (query.page - 1) * query.pageSize;
+  const pagedRows = sortedRows.slice(start, start + query.pageSize);
+  return {
+    ...accounts,
+    rows: pagedRows,
+    total: filteredRows.length,
+    page: query.page,
+    pageSize: query.pageSize,
+  };
+}
+
 type AccountsStorySurfaceProps = {
   accounts?: AccountsPayload;
   preview?: AccountImportPreviewPayload | null;
@@ -179,11 +244,12 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
+  const visibleAccounts = applyStoryAccountQuery(accounts, query);
 
   return (
     <div className={props.frameClassName}>
       <AccountsView
-        accounts={accounts}
+        accounts={visibleAccounts}
         importContent={content}
         importGroupName={importGroupName}
         batchGroupName={batchGroupName}
@@ -203,7 +269,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         extractorHistory={extractorHistory}
         extractorHistoryQuery={extractorHistoryQuery}
         extractorHistoryBusy={Boolean(props.extractorHistoryBusy)}
-        allCurrentPageSelected={selectedIds.length > 0 && selectedIds.length === accounts.rows.length}
+        allCurrentPageSelected={selectedIds.length > 0 && selectedIds.length === visibleAccounts.rows.length}
         graphSettingsConfigured={props.graphSettingsConfigured ?? true}
         connectingAccountIds={props.connectingAccountIds ?? []}
         onImportContentChange={setContent}
@@ -214,7 +280,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onConfirmImport={() => undefined}
         onQueryChange={setQuery}
         onToggleSelection={(id, checked) => setSelectedIds((current) => (checked ? Array.from(new Set([...current, id])) : current.filter((item) => item !== id)))}
-        onTogglePageSelection={(checked) => setSelectedIds(checked ? accounts.rows.map((row) => row.id) : [])}
+        onTogglePageSelection={(checked) => setSelectedIds(checked ? visibleAccounts.rows.map((row) => row.id) : [])}
         onApplyBatchGroup={() => undefined}
         onDeleteSelected={() => undefined}
         onClearSelection={() => setSelectedIds([])}
@@ -243,6 +309,25 @@ const failureReuseAccounts: AccountsPayload = {
   },
   groups: ["failed-pool", "manual-hold", "retry-pool"],
   rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),
+};
+
+const sortingDemoAccounts: AccountsPayload = {
+  ...sampleAccounts,
+  rows: sampleAccounts.rows.map((row) => {
+    if (row.id === 1) {
+      return {
+        ...row,
+        updatedAt: "2026-03-18T07:20:00.000Z",
+      };
+    }
+    if (row.id === 2) {
+      return {
+        ...row,
+        updatedAt: "2026-03-18T07:25:00.000Z",
+      };
+    }
+    return row;
+  }),
 };
 
 async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<HTMLElement> {
@@ -288,7 +373,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
+          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
       },
     },
   },
@@ -588,5 +673,37 @@ export const BatchConnectSelectionPlay: Story = {
     await expect(canvas.getByRole("button", { name: "已锁定" })).toBeDisabled();
     await userEvent.click(canvas.getByRole("button", { name: "批量连接" }));
     await expect(batchConnectSpy).toHaveBeenCalledTimes(1);
+  },
+};
+
+export const SortingTimeColumnsPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sortingDemoAccounts} initialSelectedIds={[2]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证导入时间与最近使用列头支持 降序 → 升序 → 恢复默认 的三态排序，并在切换列时清掉上一列状态。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const importedAtButton = canvas.getByRole("button", { name: /导入时间排序/ });
+    const lastUsedButton = canvas.getByRole("button", { name: /最近使用排序/ });
+    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@outlook.com"));
+
+    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+    await userEvent.click(importedAtButton);
+    await expect(rowCells()[0]).toHaveTextContent("alpha@outlook.com");
+    await userEvent.click(importedAtButton);
+    await expect(rowCells()[0]).toHaveTextContent("gamma@outlook.com");
+    await userEvent.click(importedAtButton);
+    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+
+    await userEvent.click(lastUsedButton);
+    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+    await userEvent.click(lastUsedButton);
+    await expect(rowCells()[0]).toHaveTextContent("alpha@outlook.com");
+    await expect(importedAtButton).toHaveAttribute("aria-label", expect.stringContaining("当前未排序"));
   },
 };

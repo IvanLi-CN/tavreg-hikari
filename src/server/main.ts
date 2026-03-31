@@ -1015,6 +1015,8 @@ async function main(): Promise<void> {
           hasApiKey: parseBool(url.searchParams.get("hasApiKey")),
           skipReason: url.searchParams.get("skipReason") || undefined,
           groupName: url.searchParams.get("groupName") || undefined,
+          sortBy: url.searchParams.get("sortBy") || undefined,
+          sortDir: url.searchParams.get("sortDir") || undefined,
           page,
           pageSize,
         });
