@@ -29,7 +29,7 @@
 
 ## Linked Worktree Bootstrap
 
-- 当主工作区已经准备好 `.env.local` 与 `output/registry/registry.sqlite` 后，新建 linked worktree 会在首次 checkout 时自动补齐缺失项。
+- 当主工作区已经准备好 `.env.local` 与 `output/registry/tavreg-hikari.sqlite` 后，新建 linked worktree 会在首次 checkout 时自动补齐缺失项。
 - 若主工作区仍保留历史文件名 `output/registry/signup-tasks.sqlite`，首次启动或 bootstrap 会自动兼容到新的默认库名。
 - 如果 worktree 里还没有 `node_modules`，bootstrap 还会自动执行依赖安装；存在 `bun.lock` 时固定走 `bun install --frozen-lockfile`，没有锁文件时改用 Bun 官方 `bun install --no-save`，避免历史 revision 被自动写出新锁文件。手工 `WORKTREE_SYNC_FORCE=1` 重跑时只有“之前已成功 bootstrap 的依赖状态”才会跳过，半失败残留会继续重试；安装失败也只记日志，不会让 checkout 直接失败。
 - 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 主文件，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图。

@@ -147,7 +147,7 @@ copy_resource() {
   src_rel_path="$rel_path"
   src_path="$source_root/$src_rel_path"
 
-  if [ "$rel_path" = "output/registry/registry.sqlite" ] \
+  if [ "$rel_path" = "output/registry/tavreg-hikari.sqlite" ] \
     && [ ! -e "$src_path" ] && [ ! -L "$src_path" ] \
     && { [ -e "$source_root/output/registry/signup-tasks.sqlite" ] || [ -L "$source_root/output/registry/signup-tasks.sqlite" ]; }
   then

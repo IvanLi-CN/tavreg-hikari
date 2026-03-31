@@ -10,12 +10,12 @@ import {
   resolveTaskLedgerDbPath,
 } from "../src/storage/db-paths.ts";
 
-test("default task ledger path uses registry.sqlite", () => {
+test("default task ledger path uses tavreg-hikari.sqlite", () => {
   const outputRoot = "/tmp/tavreg-output";
-  expect(getDefaultTaskLedgerDbPath(outputRoot)).toBe(path.resolve(outputRoot, "registry", "registry.sqlite"));
+  expect(getDefaultTaskLedgerDbPath(outputRoot)).toBe(path.resolve(outputRoot, "registry", "tavreg-hikari.sqlite"));
 });
 
-test("default task ledger path snapshots the legacy signup database into registry.sqlite", async () => {
+test("default task ledger path snapshots the legacy signup database into tavreg-hikari.sqlite", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-db-paths-"));
   try {
     const outputRoot = path.join(tempRoot, "output");
@@ -41,11 +41,11 @@ test("default task ledger path snapshots the legacy signup database into registr
   }
 });
 
-test("explicit registry.sqlite path does not trigger legacy-path migration", async () => {
+test("explicit tavreg-hikari.sqlite path does not trigger legacy-path migration", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-db-paths-explicit-"));
   try {
     const explicitDir = path.join(tempRoot, "custom");
-    const explicitPath = path.join(explicitDir, "registry.sqlite");
+    const explicitPath = path.join(explicitDir, "tavreg-hikari.sqlite");
     const legacyPath = path.join(explicitDir, "signup-tasks.sqlite");
     await mkdir(explicitDir, { recursive: true });
 

@@ -1,4 +1,4 @@
-# 统一默认 SQLite 数据库文件名为 registry.sqlite（#rxae7）
+# 统一默认 SQLite 数据库文件名为 tavreg-hikari.sqlite（#rxae7）
 
 ## 状态
 
@@ -16,7 +16,7 @@
 
 ### Goals
 
-- 把默认数据库文件名统一收敛为 `output/registry/registry.sqlite`。
+- 把默认数据库文件名统一收敛为 `output/registry/tavreg-hikari.sqlite`。
 - 保留 `TASK_LEDGER_DB_PATH` 显式覆盖能力，不破坏自定义路径。
 - 对历史默认文件名 `signup-tasks.sqlite` 提供兼容迁移，避免现有运行态首次升级后被误判为空库。
 - 同步 worktree bootstrap、shared testbox 脚本、示例 env、README 与相关 spec 引用。
@@ -32,7 +32,7 @@
 ### In scope
 
 - 新增统一数据库路径 helper，供 CLI、主流程与 Web 服务复用。
-- 默认路径改为 `output/registry/registry.sqlite`。
+- 默认路径改为 `output/registry/tavreg-hikari.sqlite`。
 - 当默认新路径不存在但旧默认文件存在时，自动把旧库一致性快照到新文件名后继续使用。
 - 更新 bootstrap/testbox 脚本，让它们优先使用新文件名，同时兼容旧源文件。
 - 新增针对默认路径与兼容迁移的测试。
@@ -46,7 +46,7 @@
 
 ### MUST
 
-- 默认运行态数据库路径必须是 `output/registry/registry.sqlite`。
+- 默认运行态数据库路径必须是 `output/registry/tavreg-hikari.sqlite`。
 - `TASK_LEDGER_DB_PATH` 已显式配置时，必须直接尊重该路径。
 - 兼容迁移只能在“未显式配置路径 + 新默认文件不存在 + 旧默认文件存在”时触发。
 - 兼容迁移必须采用 SQLite 原生一致性快照方式，不能简单复制活跃库的 `-wal/-shm` 伴生文件。
@@ -61,18 +61,18 @@
 
 ### Core flows
 
-- 正常启动时，若未显式配置 `TASK_LEDGER_DB_PATH`，系统默认使用 `output/registry/registry.sqlite`。
-- 若默认新文件不存在，但同目录下存在历史默认文件 `signup-tasks.sqlite`，系统会先把旧库一致性快照到 `registry.sqlite`，随后继续使用新文件名。
-- worktree bootstrap 只向目标 worktree 写入 `output/registry/registry.sqlite`；若源主工作区仍只有旧文件名，脚本会从旧源文件生成新目标文件。
-- shared testbox 远端运行准备阶段会优先传输 `registry.sqlite`；若本地仍只有旧文件名，则自动把旧文件作为源并上传成新目标名。
+- 正常启动时，若未显式配置 `TASK_LEDGER_DB_PATH`，系统默认使用 `output/registry/tavreg-hikari.sqlite`。
+- 若默认新文件不存在，但同目录下存在历史默认文件 `signup-tasks.sqlite`，系统会先把旧库一致性快照到 `tavreg-hikari.sqlite`，随后继续使用新文件名。
+- worktree bootstrap 只向目标 worktree 写入 `output/registry/tavreg-hikari.sqlite`；若源主工作区仍只有旧文件名，脚本会从旧源文件生成新目标文件。
+- shared testbox 远端运行准备阶段会优先传输 `tavreg-hikari.sqlite`；若本地仍只有旧文件名，则自动把旧文件作为源并上传成新目标名。
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 仓库未设置 `TASK_LEDGER_DB_PATH`，When CLI 或 Web 服务解析默认数据库路径，Then 默认值为 `output/registry/registry.sqlite`。
-- Given 本地只有历史默认文件 `output/registry/signup-tasks.sqlite`，When 系统首次按新默认路径启动，Then 新文件 `output/registry/registry.sqlite` 会被自动生成，且保留旧库已提交数据。
-- Given 主工作区仍使用历史默认文件名，When 新 linked worktree 首次 bootstrap，Then 目标 worktree 获得的是 `output/registry/registry.sqlite`，且数据与源库一致。
+- Given 仓库未设置 `TASK_LEDGER_DB_PATH`，When CLI 或 Web 服务解析默认数据库路径，Then 默认值为 `output/registry/tavreg-hikari.sqlite`。
+- Given 本地只有历史默认文件 `output/registry/signup-tasks.sqlite`，When 系统首次按新默认路径启动，Then 新文件 `output/registry/tavreg-hikari.sqlite` 会被自动生成，且保留旧库已提交数据。
+- Given 主工作区仍使用历史默认文件名，When 新 linked worktree 首次 bootstrap，Then 目标 worktree 获得的是 `output/registry/tavreg-hikari.sqlite`，且数据与源库一致。
 - Given 显式设置了 `TASK_LEDGER_DB_PATH`，When 系统启动，Then 不触发默认路径迁移逻辑，而是直接使用显式路径。
-- Given 本次实现完成，When 执行 `bun run typecheck`、`bun test test/app-db.test.js test/db-paths.test.ts test/main-config.test.ts` 与 `bash scripts/test-worktree-bootstrap.sh`，Then 相关验证通过。
+- Given 本次实现完成，When 执行 `bun run typecheck`、`bun test test/app-db.test.js test/db-paths.test.ts test/sqlite-snapshot.test.ts test/main-config.test.ts` 与 `bash scripts/test-worktree-bootstrap.sh`，Then 相关验证通过。
 
 ## 文档更新（Docs to Update）
 
@@ -92,8 +92,8 @@
 
 - 风险：若外部脚本仍硬编码旧默认文件名，需要手工跟进更新或继续依赖兼容源路径。
 - 风险：兼容迁移会在首次升级时额外生成一个新文件，但不会自动删除旧文件。
-- 假设：默认数据库文件名的语义应描述“整套 registry 运行态”，而不是某一张历史子表。
+- 假设：默认数据库文件名应直接表达项目归属，避免继续复用抽象且歧义较强的通用名词。
 
 ## 变更记录（Change log）
 
-- 2026-03-31: 将默认数据库文件名从 `signup-tasks.sqlite` 收敛为 `registry.sqlite`，并补齐旧文件名兼容迁移、脚本与测试同步。
+- 2026-03-31: 将默认数据库文件名从 `signup-tasks.sqlite` 收敛为 `tavreg-hikari.sqlite`，并补齐旧文件名兼容迁移、脚本与测试同步。

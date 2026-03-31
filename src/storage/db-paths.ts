@@ -5,7 +5,7 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 
 export const TASK_LEDGER_DB_DIRNAME = "registry";
-export const TASK_LEDGER_DB_FILENAME = "registry.sqlite";
+export const TASK_LEDGER_DB_FILENAME = "tavreg-hikari.sqlite";
 export const LEGACY_TASK_LEDGER_DB_FILENAME = "signup-tasks.sqlite";
 
 interface SnapshotDatabase {

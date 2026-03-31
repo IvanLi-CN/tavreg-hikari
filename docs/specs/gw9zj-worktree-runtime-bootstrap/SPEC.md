@@ -9,7 +9,7 @@
 ## 背景 / 问题陈述
 
 - 当前 linked worktree 默认只带 Git tracked 内容，`.env.local` 与本地 SQLite ledger 需要手工复制，初始化步骤容易漏掉。
-- 本仓库运行态明显依赖 `.env.local` 与 `output/registry/registry.sqlite`；缺少这些文件时，Web 控制台与 CLI 都会退化到不完整或空状态。
+- 本仓库运行态明显依赖 `.env.local` 与 `output/registry/tavreg-hikari.sqlite`；缺少这些文件时，Web 控制台与 CLI 都会退化到不完整或空状态。
 - 主工作区 `output/` 里同时堆积大量浏览器 profile、诊断截图、批量运行产物与 Mihomo 工作目录，不能用粗暴整目录镜像来同步。
 
 ## 目标 / 非目标
@@ -49,7 +49,7 @@
 
 - `post-checkout` hook 通过 repo-local 安装脚本落到共享 hooks 目录，并记录 `codex.worktree-sync.main-root`。
 - 自动同步仅在 linked worktree 首次 checkout 时触发；main worktree 必须稳定 no-op。
-- manifest 只允许 `.env.local` 与 `output/registry/registry.sqlite`。
+- manifest 只允许 `.env.local` 与 `output/registry/tavreg-hikari.sqlite`。
 - 目标文件已存在时必须保留现状并输出 `keep target exists`。
 - linked worktree 缺少 `node_modules` 时必须自动执行依赖安装；存在 `bun.lock` 时必须使用 `bun install --frozen-lockfile`。
 - linked worktree 若不存在 `bun.lock`，自动依赖安装必须使用 `bun install --no-save`，避免 checkout 自动写出新锁文件。
@@ -104,7 +104,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/registry.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到 `.env.local` 与一致性 ledger 快照。
+- Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/tavreg-hikari.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到 `.env.local` 与一致性 ledger 快照。
 - Given 新 linked worktree 初次 bootstrap 时尚无 `node_modules`，When `post-checkout` hook 触发脚本，Then worktree 会自动完成依赖安装，且带 `bun.lock` 的 revision 使用 `bun install --frozen-lockfile`。
 - Given worktree 已有 `node_modules`，When 执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，Then 脚本只会输出 `keep dependency install: node_modules exists`，不会再次执行依赖安装。
 - Given linked worktree 缺少 `node_modules` 但当前环境下 `bun install` 失败，When hook 或 forced sync 触发依赖 bootstrap，Then 脚本会输出 `skip dependency install failed` 并继续完成非依赖资源同步，不会让 checkout 失败。
@@ -120,7 +120,7 @@
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
-- 主工作区运行态依赖已确认：`.env.local` 与 `output/registry/registry.sqlite`。
+- 主工作区运行态依赖已确认：`.env.local` 与 `output/registry/tavreg-hikari.sqlite`。
 - 不同步的高噪声目录已确认：浏览器 profile、Mihomo 工作目录、批量运行产物、截图与日志。
 - 自动触发点已确认：共享 `post-checkout` hook。
 
@@ -175,7 +175,7 @@
 - 2026-03-27: 将依赖安装收敛为 best-effort，避免网络/凭证类 `bun install` 失败阻断 worktree checkout。
 - 2026-03-27: 将无锁文件 revision 的依赖 bootstrap 切到 `bun install --no-save`，并用成功标记避免半失败 `node_modules` 阻断后续重试。
 - 2026-03-27: 最终实现对齐规格：无锁文件 revision 真实执行 `bun install --no-save`，并修正 smoke test 中的 Bun 包装脚本以避免递归调用。
-- 2026-03-31: 跟随默认运行态数据库文件名规范化，将 bootstrap manifest 与文档口径统一到 `output/registry/registry.sqlite`，并兼容旧源文件名。
+- 2026-03-31: 跟随默认运行态数据库文件名规范化，将 bootstrap manifest 与文档口径统一到 `output/registry/tavreg-hikari.sqlite`，并兼容旧源文件名。
 
 ## 参考（References）
 

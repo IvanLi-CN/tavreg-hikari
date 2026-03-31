@@ -12,7 +12,7 @@ const SQLITE_SNAPSHOT = path.join(REPO_ROOT, "scripts", "sqlite-snapshot.sh");
 test("sqlite snapshot script preserves committed WAL rows", async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-sqlite-snapshot-"));
   const sourcePath = path.join(tempRoot, "signup-tasks.sqlite");
-  const snapshotPath = path.join(tempRoot, "registry.sqlite");
+  const snapshotPath = path.join(tempRoot, "tavreg-hikari.sqlite");
 
   try {
     const sourceDb = new Database(sourcePath);
