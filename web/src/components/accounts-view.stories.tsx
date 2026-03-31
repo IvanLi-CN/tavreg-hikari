@@ -245,6 +245,20 @@ const failureReuseAccounts: AccountsPayload = {
   rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),
 };
 
+const sessionBootstrapAccounts: AccountsPayload = {
+  total: 3,
+  page: 1,
+  pageSize: 20,
+  summary: {
+    ready: 1,
+    linked: 1,
+    failed: 0,
+    disabled: 1,
+  },
+  groups: ["default", "linked", "failed-pool"],
+  rows: sampleAccounts.rows.filter((row) => ["alpha@outlook.com", "beta@outlook.com", "gamma@outlook.com"].includes(row.microsoftEmail)),
+};
+
 async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<HTMLElement> {
   const canvas = within(canvasElement);
   await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
@@ -316,7 +330,7 @@ export const DesktopActionButtonsNoWrap: Story = {
     const canvas = within(canvasElement);
     const table = canvas.getByRole("table");
     const tableScroller = table.parentElement as HTMLDivElement | null;
-    const connectButton = canvas.getAllByRole("button", { name: "连接" })[0]!;
+    const connectButton = canvas.getAllByRole("button", { name: /Bootstrap/ })[0]!;
     const proofButton = canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!;
     const availabilityButton = canvas.getAllByRole("button", { name: "标记不可用" })[0]!;
     const mailboxButton = canvas.getAllByRole("button", { name: "收件箱" })[0]!;
@@ -570,11 +584,59 @@ export const RestoreBlockedAccountPlay: Story = {
   },
 };
 
+export const SessionBootstrapStates: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "账号级持久浏览器会话状态矩阵，固定展示 bootstrap 中、ready 复用、blocked 重试三态，以及对应代理/IP 与 profile 路径摘要。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("BOOTSTRAPPING")).toBeInTheDocument();
+    await expect(canvas.getAllByText("READY").length).toBeGreaterThan(0);
+    await expect(canvas.getByText("BLOCKED")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Bootstrap 中" })).toBeDisabled();
+    await expect(canvas.getAllByRole("button", { name: "重试 Bootstrap" }).length).toBeGreaterThanOrEqual(2);
+    await expect(canvas.getByText("34.91.22.10 · Tokyo-01")).toBeInTheDocument();
+    await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/2/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
+  },
+};
+
+export const SessionBootstrapCompactCards: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "375px 卡片态回归，确保最小账号页在移动宽度下仍能直接看到 session、proxy 与 profile 摘要。",
+      },
+    },
+  },
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getAllByText("Session").length).toBeGreaterThan(0);
+    await expect(canvas.getByText("Session Proxy")).toBeInTheDocument();
+    await expect(canvas.getByText("Profile")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
+  },
+};
+
 const batchConnectSpy = fn(async () => undefined);
 
 export const BatchConnectSelectionPlay: Story = {
   args: baseArgs,
-  render: () => <AccountsStorySurface initialSelectedIds={[1, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
+  render: () => <AccountsStorySurface initialSelectedIds={[2, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
   parameters: {
     docs: {
       description: {

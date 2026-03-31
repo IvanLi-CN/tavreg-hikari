@@ -1604,7 +1604,7 @@ async function readJsonFile(path: URL): Promise<unknown | null> {
   }
 }
 
-class CaptchaSolver {
+export class CaptchaSolver {
   rotatePreferredModel(_reason: string): void {}
 
   async solve(_pngData: Buffer): Promise<string> {
@@ -8812,7 +8812,7 @@ async function completeSignup(
   return { password, emailVerifiedInFlow };
 }
 
-async function loginAndReachHome(
+export async function loginAndReachHome(
   page: any,
   solver: CaptchaSolver,
   email: string,
@@ -9946,7 +9946,8 @@ async function cleanupManagedChromeProcesses(profileDir: string): Promise<void> 
 }
 
 export async function cleanupManagedChromeProcessesUnder(baseDir: string): Promise<void> {
-  const normalizedBaseDir = `${normalizeProfileDir(baseDir)}${pathSep}`;
+  const normalizedTargetDir = normalizeProfileDir(baseDir);
+  const normalizedBaseDir = `${normalizedTargetDir}${pathSep}`;
   const processes = await readPsTable();
   const profileDirs = new Set<string>();
   for (const entry of processes) {
@@ -9954,7 +9955,7 @@ export async function cleanupManagedChromeProcessesUnder(baseDir: string): Promi
     const profileDir = match?.[1]?.trim();
     if (!profileDir) continue;
     const normalizedProfileDir = normalizeProfileDir(profileDir);
-    if (normalizedProfileDir.startsWith(normalizedBaseDir)) {
+    if (normalizedProfileDir === normalizedTargetDir || normalizedProfileDir.startsWith(normalizedBaseDir)) {
       profileDirs.add(normalizedProfileDir);
     }
   }
@@ -9964,6 +9965,10 @@ export async function cleanupManagedChromeProcessesUnder(baseDir: string): Promi
 }
 
 function buildChromeProfileCandidates(baseDir: string): string[] {
+  const strategy = String(process.env.CHROME_PROFILE_STRATEGY || "").trim().toLowerCase();
+  if (strategy === "exact" || strategy === "fixed" || strategy === "persistent") {
+    return [path.resolve(baseDir)];
+  }
   const runProfile = path.join(baseDir, `run-${Date.now()}-${randomInt(1000, 9999)}`);
   // Each registration attempt must get its own isolated Chrome profile.
   return [runProfile];
@@ -10266,7 +10271,7 @@ async function launchNativeChromeCdp(
   throw lastError || new Error("failed to start native chrome cdp session");
 }
 
-async function launchChromePersistent(
+export async function launchChromePersistent(
   cfg: AppConfig,
   mode: "headed" | "headless",
   proxyServer: string,

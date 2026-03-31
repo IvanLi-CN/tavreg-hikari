@@ -16,8 +16,8 @@ import {
   type AccountExtractorProvider,
   type AppSettings,
   type JobAttemptRecord,
-  type MicrosoftAccountRecord,
   type MicrosoftMailboxRecord,
+  type MicrosoftAccountRecord,
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
@@ -379,6 +379,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     mailboxLastSyncedAt: row.mailboxLastSyncedAt,
     mailboxLastErrorCode: row.mailboxLastErrorCode,
     mailboxUnreadCount: row.mailboxUnreadCount,
+    browserSession: serializeBrowserSession(row),
   };
 }
 
@@ -389,6 +390,30 @@ function serializeImportedAccount(row: MicrosoftAccountRecord): Record<string, u
     passwordPlaintext: row.passwordPlaintext,
     passwordMasked: maskSecret(row.passwordPlaintext),
     mailboxStatus: row.mailboxStatus,
+    browserSession: serializeBrowserSession(row),
+  };
+}
+
+function serializeBrowserSession(account: Pick<MicrosoftAccountRecord, "browserSession">): Record<string, unknown> | null {
+  const session = account.browserSession;
+  if (!session) return null;
+  return {
+    id: session.id,
+    status: session.status,
+    profilePath: session.profilePath,
+    browserEngine: session.browserEngine,
+    proxyNode: session.proxyNode,
+    proxyIp: session.proxyIp,
+    proxyCountry: session.proxyCountry,
+    proxyRegion: session.proxyRegion,
+    proxyCity: session.proxyCity,
+    proxyTimezone: session.proxyTimezone,
+    lastBootstrappedAt: session.lastBootstrappedAt,
+    lastUsedAt: session.lastUsedAt,
+    lastErrorCode: session.lastErrorCode,
+    lastErrorMessage: session.lastErrorMessage,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
   };
 }
 
@@ -531,6 +556,18 @@ function applyMailboxFailureState(input: {
     timestamp: nowIso(),
   });
   return failedMailbox;
+}
+
+function broadcastAccountAction(
+  broadcast: (event: ServerEvent) => void,
+  accountId: number,
+  action: string,
+): void {
+  broadcast({
+    type: "account.updated",
+    payload: { affectedIds: [accountId], action },
+    timestamp: nowIso(),
+  });
 }
 
 function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
@@ -681,28 +718,49 @@ interface MailboxOauthWorkerResult {
   ok: boolean;
   finalUrl?: string | null;
   oauthOutcome?: string | null;
+  profilePath?: string | null;
+  proxy?: {
+    nodeName: string;
+    ip: string | null;
+    country: string | null;
+    region: string | null;
+    city: string | null;
+    timezone: string | null;
+  } | null;
   error?: string | null;
 }
 
 async function runMailboxOauthWorker(input: {
   account: MicrosoftAccountRecord;
-  mailbox: MicrosoftMailboxRecord;
+  settings: AppSettings;
+  proxyNode: string;
+  profilePath: string;
   redirectUri: string;
   authUrl: string;
 }): Promise<MailboxOauthWorkerResult> {
-  const runId = `mailbox-${input.mailbox.id}-${Date.now()}`;
+  const runId = `mailbox-${input.account.id}-${Date.now()}`;
   const outputDir = path.join(OUTPUT_ROOT, "mailbox-oauth", runId);
   const resultPath = path.join(outputDir, "result.json");
   await mkdir(outputDir, { recursive: true });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     OUTPUT_ROOT_DIR: outputDir,
-    CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
+    CHROME_PROFILE_DIR: input.profilePath,
+    CHROME_PROFILE_STRATEGY: "exact",
+    INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
     MICROSOFT_ACCOUNT_EMAIL: input.account.microsoftEmail,
     MICROSOFT_ACCOUNT_PASSWORD: input.account.passwordPlaintext,
     MICROSOFT_PROOF_MAILBOX_PROVIDER: input.account.proofMailboxProvider || "",
     MICROSOFT_PROOF_MAILBOX_ADDRESS: input.account.proofMailboxAddress || "",
     MICROSOFT_PROOF_MAILBOX_ID: input.account.proofMailboxId || "",
+    MIHOMO_SUBSCRIPTION_URL: input.settings.subscriptionUrl,
+    MIHOMO_GROUP_NAME: input.settings.groupName,
+    MIHOMO_ROUTE_GROUP_NAME: input.settings.routeGroupName,
+    MIHOMO_API_PORT: String(input.settings.apiPort),
+    MIHOMO_MIXED_PORT: String(input.settings.mixedPort),
+    PROXY_CHECK_URL: input.settings.checkUrl,
+    PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
+    PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
     KEEP_BROWSER_OPEN_ON_FAILURE: "false",
     KEEP_BROWSER_OPEN_MS: "0",
   };
@@ -715,6 +773,7 @@ async function runMailboxOauthWorker(input: {
         "src/server/microsoft-oauth-worker.ts",
         `--auth-url=${input.authUrl}`,
         `--redirect-uri=${input.redirectUri}`,
+        `--proxy-node=${input.proxyNode}`,
         `--result-path=${resultPath}`,
       ],
       {
@@ -764,8 +823,36 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   if (!account) {
     throw new Error(`account not found: ${input.accountId}`);
   }
-  const graphSettings = readMicrosoftGraphSettings(input.readSettings());
+  const runtimeSettings = input.readSettings();
+  const graphSettings = readMicrosoftGraphSettings(runtimeSettings);
+  if (!graphSettings.clientId.trim() || !graphSettings.clientSecret.trim() || !graphSettings.redirectUri.trim()) {
+    input.db.markBrowserSessionFailure(input.accountId, {
+      status: "blocked",
+      browserEngine: "chrome",
+      errorCode: "microsoft_graph_settings_incomplete",
+      errorMessage: "Microsoft Graph 设置不完整，无法完成账号 bootstrap",
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "session_blocked");
+    throw new Error("Microsoft Graph 设置不完整，无法完成账号 bootstrap");
+  }
   assertMicrosoftGraphSettings(graphSettings);
+  const proxyNode = input.db.selectReusableProxyNodeForAccount(input.accountId)?.nodeName;
+  if (!proxyNode) {
+    input.db.markBrowserSessionFailure(input.accountId, {
+      status: "failed",
+      browserEngine: "chrome",
+      errorCode: "proxy_node_unavailable",
+      errorMessage: "当前代理池中没有可复用的健康节点",
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
+    throw new Error("当前代理池中没有可复用的健康节点");
+  }
+  const session = input.db.markBrowserSessionBootstrapping(input.accountId, {
+    browserEngine: "chrome",
+    proxyNode,
+  });
+  input.db.touchProxyLease(proxyNode);
+  broadcastAccountAction(input.broadcast, input.accountId, "session_bootstrap_started");
   const mailbox = input.db.ensureMailboxForAccount(input.accountId);
   const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
   const oauthState = createMicrosoftOauthState();
@@ -787,31 +874,26 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
     timestamp: nowIso(),
   });
-  input.broadcast({
-    type: "account.updated",
-    payload: { affectedIds: [input.accountId], action: "mailbox_status" },
-    timestamp: nowIso(),
-  });
+  broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
 
+  let workerResult: MailboxOauthWorkerResult | null = null;
   try {
-    const workerResult = await runMailboxOauthWorker({
+    workerResult = await runMailboxOauthWorker({
       account,
-      mailbox: nextMailbox,
+      settings: runtimeSettings,
+      proxyNode,
+      profilePath: session.profilePath,
       redirectUri: graphSettings.redirectUri,
       authUrl,
     });
-    const refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
+    let refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
     const oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
     input.broadcast({
       type: "mailbox.updated",
       payload: { mailboxIds: [refreshedMailbox.id], action: oauthOutcome === "success" ? "oauth_success" : "oauth_finished" },
       timestamp: nowIso(),
     });
-    input.broadcast({
-      type: "account.updated",
-      payload: { affectedIds: [input.accountId], action: "mailbox_status" },
-      timestamp: nowIso(),
-    });
+    broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");
     }
@@ -821,14 +903,52 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     if (oauthOutcome === "error") {
       throw new Error(refreshedMailbox.lastErrorMessage || refreshedMailbox.lastErrorCode || "microsoft oauth failed");
     }
+    refreshedMailbox = await syncMailboxInbox(input.db, refreshedMailbox, runtimeSettings);
+    input.broadcast({
+      type: "mailbox.updated",
+      payload: { mailboxIds: [refreshedMailbox.id], action: "sync" },
+      timestamp: nowIso(),
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+    if (workerResult.proxy) {
+      input.db.recordProxyCheck({
+        nodeName: proxyNode,
+        status: "ok",
+        egressIp: workerResult.proxy.ip,
+        country: workerResult.proxy.country,
+        region: workerResult.proxy.region,
+        city: workerResult.proxy.city,
+        error: null,
+      });
+      input.db.touchProxyLease(proxyNode, {
+        status: "ok",
+        egressIp: workerResult.proxy.ip,
+        country: workerResult.proxy.country,
+        region: workerResult.proxy.region,
+        city: workerResult.proxy.city,
+        leasedAt: nowIso(),
+      });
+    } else {
+      input.db.touchProxyLease(proxyNode, { status: "ok" });
+    }
+    input.db.markBrowserSessionReady(input.accountId, {
+      browserEngine: "chrome",
+      proxyNode,
+      proxyIp: workerResult.proxy?.ip ?? null,
+      proxyCountry: workerResult.proxy?.country ?? null,
+      proxyRegion: workerResult.proxy?.region ?? null,
+      proxyCity: workerResult.proxy?.city ?? null,
+      proxyTimezone: workerResult.proxy?.timezone ?? null,
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "session_ready");
     return {
       mailbox: refreshedMailbox,
       workerResult,
     };
   } catch (error) {
-    const currentMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
+    let currentMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
     if (currentMailbox.status === "preparing") {
-      applyMailboxFailureState({
+      currentMailbox = applyMailboxFailureState({
         db: input.db,
         mailbox: currentMailbox,
         error,
@@ -836,6 +956,22 @@ async function authorizeMailboxWithBrowserAutomation(input: {
         broadcast: input.broadcast,
       });
     }
+    const sessionStatus = currentMailbox.status === "locked" || currentMailbox.status === "invalidated" ? "blocked" : "failed";
+    const errorCode = getMailboxErrorCode(error);
+    const errorMessage = getMailboxErrorMessage(error);
+    input.db.markBrowserSessionFailure(input.accountId, {
+      status: sessionStatus,
+      browserEngine: "chrome",
+      proxyNode,
+      proxyIp: workerResult?.proxy?.ip ?? null,
+      proxyCountry: workerResult?.proxy?.country ?? null,
+      proxyRegion: workerResult?.proxy?.region ?? null,
+      proxyCity: workerResult?.proxy?.city ?? null,
+      proxyTimezone: workerResult?.proxy?.timezone ?? null,
+      errorCode: errorCode || currentMailbox.lastErrorCode || "session_bootstrap_failed",
+      errorMessage: errorMessage || currentMailbox.lastErrorMessage || "账号 bootstrap 失败",
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, sessionStatus === "blocked" ? "session_blocked" : "session_failed");
     throw error;
   }
 }
@@ -850,19 +986,53 @@ async function main(): Promise<void> {
   const clients = new Set<any>();
   const runExclusiveProxyOp = createExclusiveRunner();
   const runExclusiveMailboxOauth = createExclusiveRunner();
-  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, (event) => {
-    const message = toEventMessage(event);
-    for (const ws of clients) {
-      ws.send(message);
-    }
-  });
-
   const broadcast = (event: ServerEvent) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
       ws.send(message);
     }
   };
+  const sessionBootstrapQueuedIds = new Set<number>();
+  const queueAccountSessionBootstrap = (accountId: number): boolean => {
+    const account = db.getAccount(accountId);
+    if (!account || getAccountConnectBlockMessage(account)) {
+      return false;
+    }
+    if (sessionBootstrapQueuedIds.has(accountId)) {
+      return false;
+    }
+    db.queueBrowserSessionBootstrap(accountId);
+    sessionBootstrapQueuedIds.add(accountId);
+    void runExclusiveMailboxOauth(async () => {
+      try {
+        const latest = db.getAccount(accountId);
+        if (!latest || getAccountConnectBlockMessage(latest)) {
+          return;
+        }
+        await authorizeMailboxWithBrowserAutomation({
+          db,
+          accountId,
+          readSettings,
+          broadcast,
+        });
+      } catch {
+        // mailbox/session state is updated inside the bootstrap flow
+      } finally {
+        sessionBootstrapQueuedIds.delete(accountId);
+      }
+    });
+    return true;
+  };
+  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
+    onImportedAccounts: (accountIds) => {
+      for (const accountId of accountIds) {
+        queueAccountSessionBootstrap(accountId);
+      }
+    },
+  });
+  for (const accountId of db.listPendingBrowserSessionAccountIds()) {
+    queueAccountSessionBootstrap(accountId);
+  }
 
   await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
@@ -890,6 +1060,7 @@ async function main(): Promise<void> {
       const url = new URL(req.url);
       const pathname = url.pathname;
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
+      const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
       const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
       const mailboxMessagesMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/messages$/);
@@ -965,35 +1136,8 @@ async function main(): Promise<void> {
           payload: { affectedIds: summary.affectedIds, action: "import" },
           timestamp: nowIso(),
         });
-        const graphSettings = readMicrosoftGraphSettings(readSettings());
-        if (graphSettings.clientId.trim() && graphSettings.clientSecret.trim() && graphSettings.redirectUri.trim()) {
-          for (const accountId of summary.affectedIds) {
-            const account = db.getAccount(accountId);
-            if (!account || getAccountConnectBlockMessage(account)) {
-              continue;
-            }
-            const mailbox = db.getMailboxByAccountId(accountId);
-            const shouldAutoAuthorize =
-              !mailbox ||
-              (!mailbox.refreshToken && !mailbox.accessToken) ||
-              mailbox.status === "failed" ||
-              mailbox.status === "invalidated";
-            if (!shouldAutoAuthorize) {
-              continue;
-            }
-            void runExclusiveMailboxOauth(async () => {
-              try {
-                await authorizeMailboxWithBrowserAutomation({
-                  db,
-                  accountId,
-                  readSettings,
-                  broadcast,
-                });
-              } catch {
-                // mailbox state is updated inside the automation flow
-              }
-            });
-          }
+        for (const accountId of summary.affectedIds) {
+          queueAccountSessionBootstrap(accountId);
         }
         return json({
           ok: true,
@@ -1132,6 +1276,27 @@ async function main(): Promise<void> {
           }
           return badRequest(message);
         }
+      }
+
+        if (accountSessionRebootstrapMatch && req.method === "POST") {
+        const accountId = Number.parseInt(accountSessionRebootstrapMatch[1] || "", 10);
+        if (!Number.isInteger(accountId) || accountId < 1) {
+          return badRequest("invalid account id");
+        }
+        const account = db.getAccount(accountId);
+        if (!account) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
+        const connectBlockMessage = getAccountConnectBlockMessage(account);
+        if (connectBlockMessage) {
+          return badRequest(connectBlockMessage, 409);
+        }
+        queueAccountSessionBootstrap(accountId);
+        return json({
+          ok: true,
+          queued: true,
+          account: serializeAccount(db.getAccount(accountId) || account),
+        });
       }
 
         if (pathname === "/api/accounts" && req.method === "DELETE") {
@@ -1299,27 +1464,12 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        try {
-          const { mailbox: refreshedMailbox, workerResult } = await runExclusiveMailboxOauth(() =>
-            authorizeMailboxWithBrowserAutomation({
-              db,
-              accountId,
-              readSettings,
-              broadcast,
-            }),
-          );
-          return json({
-            ok: true,
-            mailbox: serializeMailbox(refreshedMailbox),
-            automation: {
-              finalUrl: workerResult.finalUrl || null,
-            },
-          });
-        } catch (error) {
-          const failedMailbox = db.getMailboxByAccountId(accountId);
-          const status = failedMailbox?.status;
-          return badRequest(getMailboxErrorMessage(error), status === "invalidated" || status === "locked" ? 409 : 502);
-        }
+        queueAccountSessionBootstrap(accountId);
+        return json({
+          ok: true,
+          queued: true,
+          account: serializeAccount(db.getAccount(accountId) || account),
+        });
       }
 
       if (pathname === "/api/microsoft-mail/oauth/callback" && req.method === "GET") {
@@ -1696,6 +1846,7 @@ async function main(): Promise<void> {
                   latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
                   egressIp: result.geo?.ip || null,
                   country: result.geo?.country || null,
+                  region: result.geo?.region || null,
                   city: result.geo?.city || null,
                   org: result.geo?.org || null,
                   error: typeof result.error === "string" ? result.error : null,

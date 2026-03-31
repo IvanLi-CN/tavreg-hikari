@@ -31,7 +31,6 @@ import type {
   MailboxMessageDetailPayload,
   MailboxMessageSummary,
   MailboxMessagesPayload,
-  MailboxOauthStartPayload,
   MailboxRecord,
   MailboxesPayload,
   MailboxSyncPayload,
@@ -101,8 +100,10 @@ function isLockedBatchConnectAccount(account: Pick<AccountRecord, "skipReason" |
   );
 }
 
-function isBatchConnectBlockedAccount(account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode">): boolean {
-  return Boolean(account.disabledAt) || isLockedBatchConnectAccount(account);
+function isBatchConnectBlockedAccount(
+  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "browserSession">,
+): boolean {
+  return Boolean(account.disabledAt) || isLockedBatchConnectAccount(account) || account.browserSession?.status === "bootstrapping";
 }
 
 export function App() {
@@ -875,7 +876,7 @@ export function App() {
   };
 
   const startMailboxConnectionForAccount = async (accountId: number) => {
-    const payload = await api<MailboxOauthStartPayload>(`/api/microsoft-mail/accounts/${accountId}/oauth/start`, {
+    const payload = await api<AccountUpdatePayload>(`/api/accounts/${accountId}/session/rebootstrap`, {
       method: "POST",
     });
     await refreshMailboxAccountState();

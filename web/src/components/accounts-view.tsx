@@ -64,13 +64,16 @@ function isConnectBlockedAccount(account: Pick<AccountRecord, "disabledAt" | "sk
 }
 
 function getConnectActionLabel(
-  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus">,
+  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus" | "browserSession">,
   connecting: boolean,
 ): string {
   if (connecting) return "连接中…";
   if (isLockedAccountBlock(account)) return "已锁定";
   if (account.disabledAt) return "已禁用";
-  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重连" : "连接";
+  if (account.browserSession?.status === "bootstrapping") return "Bootstrap 中";
+  if (account.browserSession?.status === "failed" || account.browserSession?.status === "blocked") return "重试 Bootstrap";
+  if (account.browserSession?.status === "ready") return "重试 Bootstrap";
+  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重试 Bootstrap" : "启动 Bootstrap";
 }
 
 function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
@@ -86,6 +89,34 @@ function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "l
     return "未知辅助邮箱";
   }
   return account.skipReason;
+}
+
+function formatBrowserSessionProxy(account: Pick<AccountRecord, "browserSession">): string {
+  const session = account.browserSession;
+  if (!session) return "—";
+  const ip = session.proxyIp?.trim();
+  const node = session.proxyNode?.trim();
+  const region = session.proxyRegion?.trim();
+  const country = session.proxyCountry?.trim();
+  if (ip && node) {
+    return `${ip} · ${node}`;
+  }
+  if (ip && region) {
+    return `${ip} · ${region}`;
+  }
+  if (ip) return ip;
+  if (node && region) return `${node} · ${region}`;
+  if (node && country) return `${node} · ${country}`;
+  return node || region || country || "—";
+}
+
+function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">): string {
+  const profilePath = account.browserSession?.profilePath?.trim();
+  if (!profilePath) return "—";
+  const normalized = profilePath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 4) return normalized;
+  return `…/${parts.slice(-4).join("/")}`;
 }
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -308,7 +339,7 @@ export function AccountsView({
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const selectedConnectCount = selectedIds.filter((accountId) => {
     const row = accounts.rows.find((item) => item.id === accountId);
-    return !row || !isConnectBlockedAccount(row);
+    return !row || (!isConnectBlockedAccount(row) && row.browserSession?.status !== "bootstrapping");
   }).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const extractHistoryPageCount = Math.max(
@@ -690,7 +721,14 @@ export function AccountsView({
                                     variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
                                     className="h-8 px-3 text-xs"
                                     onClick={() => void onConnectAccount(row.id)}
-                                    disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                                    disabled={
+                                      !graphSettingsConfigured
+                                      || batchBusy
+                                      || connectBusy
+                                      || isConnectBlockedAccount(row)
+                                      || connectingAccountIds.includes(row.id)
+                                      || row.browserSession?.status === "bootstrapping"
+                                    }
                                   >
                                     {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
                                   </Button>
@@ -720,6 +758,18 @@ export function AccountsView({
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">Proof 邮箱</dt>
                               <dd className="break-all text-right">{row.proofMailboxAddress || "—"}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Session</dt>
+                              <dd><StatusBadge status={row.browserSession?.status || "pending"} /></dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Session Proxy</dt>
+                              <dd className="max-w-[18rem] text-right">{formatBrowserSessionProxy(row)}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Profile</dt>
+                              <dd className="max-w-[18rem] text-right font-mono text-xs">{formatBrowserSessionPath(row)}</dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
@@ -771,6 +821,9 @@ export function AccountsView({
                         <TableHead>分组</TableHead>
                         <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
+                        <TableHead>Session</TableHead>
+                        <TableHead>Session Proxy</TableHead>
+                        <TableHead>Profile</TableHead>
                         <TableHead>最近状态</TableHead>
                         <TableHead>收信状态</TableHead>
                         <TableHead>导入时间</TableHead>
@@ -802,6 +855,9 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
+                          <TableCell className="whitespace-nowrap"><StatusBadge status={row.browserSession?.status || "pending"} /></TableCell>
+                          <TableCell className="min-w-[12rem]">{formatBrowserSessionProxy(row)}</TableCell>
+                          <TableCell className="min-w-[14rem] font-mono text-xs text-slate-300">{formatBrowserSessionPath(row)}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
                           <TableCell className="whitespace-nowrap">
                             <div className="flex items-center gap-2">
@@ -819,7 +875,14 @@ export function AccountsView({
                                 variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
                                 className="h-8 shrink-0 px-3 text-xs"
                                 onClick={() => void onConnectAccount(row.id)}
-                                disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                                disabled={
+                                  !graphSettingsConfigured
+                                  || batchBusy
+                                  || connectBusy
+                                  || isConnectBlockedAccount(row)
+                                  || connectingAccountIds.includes(row.id)
+                                  || row.browserSession?.status === "bootstrapping"
+                                }
                               >
                                 {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
                               </Button>

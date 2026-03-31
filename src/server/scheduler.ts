@@ -279,7 +279,9 @@ export function buildAttemptRuntimeSpec(input: {
   account: Pick<
     MicrosoftAccountRecord,
     "id" | "microsoftEmail" | "passwordPlaintext" | "proofMailboxProvider" | "proofMailboxAddress" | "proofMailboxId"
-  >;
+  > & {
+    browserSession?: Pick<NonNullable<MicrosoftAccountRecord["browserSession"]>, "profilePath"> | null;
+  };
   outputDir: string;
   sharedLedgerPath: string;
   settings: Pick<AppSettings, "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs">;
@@ -293,6 +295,9 @@ export function buildAttemptRuntimeSpec(input: {
     args.push("--proxy-node", input.selectedProxyNode.trim());
   }
   const inheritedEnv = buildAttemptBaseEnv(input.baseEnv);
+  const persistentProfilePath = input.account.browserSession?.profilePath?.trim()
+    ? path.resolve(input.account.browserSession.profilePath.trim())
+    : null;
   return {
     command: runtime.command,
     args,
@@ -316,7 +321,12 @@ export function buildAttemptRuntimeSpec(input: {
       TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
       TASK_LEDGER_DB_PATH: input.sharedLedgerPath,
       OUTPUT_ROOT_DIR: input.outputDir,
-      CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-profile"),
+      CHROME_PROFILE_DIR: persistentProfilePath || path.join(input.outputDir, "chrome-profile"),
+      ...(persistentProfilePath
+        ? {
+            CHROME_PROFILE_STRATEGY: "exact",
+          }
+        : {}),
       INSPECT_CHROME_PROFILE_DIR: path.join(input.outputDir, "chrome-inspect-profile"),
       ...(input.job.runMode === "headed"
         ? {
@@ -429,6 +439,9 @@ export class JobScheduler {
     private readonly sharedLedgerPath: string,
     private readonly getSettings: () => AppSettings,
     private readonly publish: (event: ServerEvent) => void,
+    private readonly hooks?: {
+      onImportedAccounts?: (accountIds: number[]) => void | Promise<void>;
+    },
   ) {}
 
   currentJob(): JobRecord | null {
@@ -862,7 +875,12 @@ export class JobScheduler {
         return;
       }
       const eligible = this.db.countEligibleAccounts(jobId);
+      const pendingBrowserSessions = this.db.countPendingBrowserSessions(jobId);
       const hasAutoExtractState = this.autoExtractStates.has(jobId);
+      if (eligible === 0 && pendingBrowserSessions > 0) {
+        await delay(100);
+        continue;
+      }
       if (eligible === 0 && refreshed.successCount < refreshed.need && refreshed.launchedCount < refreshed.maxAttempts) {
         const extraction = await this.maybeAutoExtract(refreshed);
         if (extraction.status === "ready" || extraction.status === "waiting") {
@@ -885,7 +903,7 @@ export class JobScheduler {
           this.emit("toast", { level: "success", message: `job #${job.id} completed` });
           return;
         }
-        if ((eligible === 0 && !hasAutoExtractState) || refreshed.launchedCount >= refreshed.maxAttempts) {
+        if ((eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) || refreshed.launchedCount >= refreshed.maxAttempts) {
           const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
@@ -915,7 +933,10 @@ export class JobScheduler {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
-      const selectedProxyNode = resolveAttemptProxyNode(this.db);
+      const selectedProxyNode = this.db.selectReusableProxyNodeForAccount(account.id)?.nodeName || resolveAttemptProxyNode(this.db);
+      if (selectedProxyNode) {
+        this.db.touchProxyLease(selectedProxyNode);
+      }
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
         account,
@@ -1355,6 +1376,7 @@ export class JobScheduler {
     if (account.hasApiKey || account.skipReason === "has_api_key") return "has_api_key";
     if (account.skipReason) return account.skipReason;
     if (account.leaseJobId != null) return "leased";
+    if (account.browserSession && account.browserSession.status !== "ready") return "session_not_ready";
     return this.db.isAccountSchedulableForJob(jobId, account.id) ? "unknown" : "already_attempted";
   }
 
@@ -1563,7 +1585,8 @@ export class JobScheduler {
           }
           const importedAccount = this.db.getAccountsByEmails([candidate.email])[0] || null;
           const rejectReason = this.describeExtractRejectReason(context.jobId, importedAccount);
-          if (rejectReason !== "unknown") {
+          const acceptBootstrapPending = rejectReason === "session_not_ready";
+          if (rejectReason !== "unknown" && !acceptBootstrapPending) {
             rejectReasons.add(rejectReason);
             this.db.createAccountExtractItem({
               batchId: batch.id,
@@ -1625,6 +1648,9 @@ export class JobScheduler {
 
       if (affectedIds.size > 0) {
         this.emit("account.updated", { affectedIds: Array.from(affectedIds), action: "extractor_import" });
+        if (acceptedInBatch > 0) {
+          void this.hooks?.onImportedAccounts?.(Array.from(affectedIds));
+        }
       }
       if (acceptedInBatch > 0) {
         this.emit("toast", {

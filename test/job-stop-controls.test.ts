@@ -50,6 +50,18 @@ async function createTempDb() {
   return { dbPath, appDb };
 }
 
+function markBrowserSessionReady(appDb: AppDatabase, accountId: number) {
+  return appDb.markBrowserSessionReady(accountId, {
+    browserEngine: "chrome",
+    proxyNode: "Tokyo-01",
+    proxyIp: "1.1.1.1",
+    proxyCountry: "JP",
+    proxyRegion: "Tokyo",
+    proxyCity: "Tokyo",
+    proxyTimezone: "Asia/Tokyo",
+  });
+}
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   while (tempDirs.length > 0) {
@@ -316,10 +328,11 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  appDb.importAccounts([
+  const imported = appDb.importAccounts([
     { email: "loop-stop-1@outlook.com", password: "pw123456" },
     { email: "loop-stop-2@outlook.com", password: "pw123456" },
   ]);
+  imported.affectedIds.forEach((accountId) => markBrowserSessionReady(appDb, accountId));
 
   let spawnCalls = 0;
   scheduler["spawnAttempt"] = async () => {
@@ -434,7 +447,8 @@ test("graceful stop rolls back pending launches before they start", async () => 
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);
+  markBrowserSessionReady(appDb, imported.affectedIds[0]!);
   const job = appDb.createJob({
     runMode: "headed",
     need: 1,
