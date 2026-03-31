@@ -5,15 +5,12 @@ ZERO_OID=0000000000000000000000000000000000000000
 MAIN_ROOT_KEY=codex.worktree-sync.main-root
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 MANIFEST_PATH="$SCRIPT_DIR/worktree-sync.paths"
+SQLITE_SNAPSHOT="$SCRIPT_DIR/sqlite-snapshot.sh"
 FORCE_SYNC=${WORKTREE_SYNC_FORCE:-0}
 DRY_RUN=${WORKTREE_SYNC_DRY_RUN:-0}
 
 log() {
   printf 'worktree-sync: %s\n' "$*"
-}
-
-sqlite_quote() {
-  printf "%s" "$1" | sed "s/'/''/g"
 }
 
 bootstrap_dependencies() {
@@ -76,44 +73,10 @@ bootstrap_dependencies() {
   log "installed dependencies"
 }
 
-snapshot_sqlite_with_bun() {
-  src_path=$1
-  tmp_path=$2
-
-  if ! command -v bun >/dev/null 2>&1; then
-    return 1
-  fi
-
-  bun --eval '
-    import { Database } from "bun:sqlite";
-
-    const sourcePath = process.argv[1];
-    const destPath = process.argv[2];
-    const db = new Database(sourcePath);
-    db.exec("PRAGMA busy_timeout = 5000;");
-    const escapedDestPath = destPath.replaceAll("'"'"'", "'"'"''"'"'");
-    db.exec(`VACUUM INTO '"'"'${escapedDestPath}'"'"'`);
-    db.close(false);
-  ' "$src_path" "$tmp_path"
-}
-
 snapshot_sqlite() {
   src_path=$1
   tmp_path=$2
-  tmp_sql=$(sqlite_quote "$tmp_path")
-
-  rm -f "$tmp_path"
-  if command -v sqlite3 >/dev/null 2>&1; then
-    if sqlite3 "$src_path" \
-      ".timeout 5000" \
-      "VACUUM INTO '$tmp_sql';"
-    then
-      return 0
-    fi
-    rm -f "$tmp_path"
-  fi
-
-  snapshot_sqlite_with_bun "$src_path" "$tmp_path"
+  "$SQLITE_SNAPSHOT" "$src_path" "$tmp_path"
 }
 
 canonical_dir() {
@@ -180,8 +143,17 @@ discover_main_root() {
 
 copy_resource() {
   rel_path=$1
-  src_path="$source_root/$rel_path"
   dst_path="$current_root/$rel_path"
+  src_rel_path="$rel_path"
+  src_path="$source_root/$src_rel_path"
+
+  if [ "$rel_path" = "output/registry/tavreg-hikari.sqlite" ] \
+    && [ ! -e "$src_path" ] && [ ! -L "$src_path" ] \
+    && { [ -e "$source_root/output/registry/signup-tasks.sqlite" ] || [ -L "$source_root/output/registry/signup-tasks.sqlite" ]; }
+  then
+    src_rel_path="output/registry/signup-tasks.sqlite"
+    src_path="$source_root/$src_rel_path"
+  fi
 
   if [ ! -e "$src_path" ] && [ ! -L "$src_path" ]; then
     log "skip source missing: $rel_path"

@@ -635,7 +635,7 @@ export class AppDatabase {
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
-    this.db = openSqliteDatabase(dbPath);
+    this.db = openSqliteDatabase(this.dbPath);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA synchronous=NORMAL;");
     this.db.exec("PRAGMA temp_store=MEMORY;");
