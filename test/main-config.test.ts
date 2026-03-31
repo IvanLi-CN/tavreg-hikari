@@ -134,6 +134,13 @@ test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusin
   expect(source).toContain('await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});');
 });
 
+test("mailbox bootstrap keeps proxy geo lookup best-effort", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
+  expect(source).toContain('proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({');
+  expect(source).toContain('ip: "",');
+  expect(source).toContain("const locale = deriveLocale(proxyGeo.country);");
+});
+
 test("chrome native CDP automation stays enabled on macOS when configured", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   const start = source.indexOf("function shouldUseNativeChromeAutomation");

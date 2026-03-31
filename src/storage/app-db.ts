@@ -2190,17 +2190,18 @@ export class AppDatabase {
   ): AccountBrowserSessionRecord {
     this.ensureBrowserSessionForAccount(accountId);
     const now = nowIso();
+    const hasProxyNodeSnapshot = input.proxyNode !== undefined;
     this.db
       .query(`
         UPDATE account_browser_sessions
         SET status = ?,
             browser_engine = COALESCE(?, browser_engine, 'chrome'),
             proxy_node = COALESCE(?, proxy_node),
-            proxy_ip = COALESCE(?, proxy_ip),
-            proxy_country = COALESCE(?, proxy_country),
-            proxy_region = COALESCE(?, proxy_region),
-            proxy_city = COALESCE(?, proxy_city),
-            proxy_timezone = COALESCE(?, proxy_timezone),
+            proxy_ip = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_ip) END,
+            proxy_country = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_country) END,
+            proxy_region = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_region) END,
+            proxy_city = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_city) END,
+            proxy_timezone = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_timezone) END,
             last_error_code = ?,
             last_error_message = ?,
             updated_at = ?
@@ -2210,10 +2211,20 @@ export class AppDatabase {
         input.status,
         input.browserEngine ?? null,
         input.proxyNode ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
         input.proxyIp ?? null,
+        input.proxyIp ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
         input.proxyCountry ?? null,
+        input.proxyCountry ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
         input.proxyRegion ?? null,
+        input.proxyRegion ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
         input.proxyCity ?? null,
+        input.proxyCity ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
+        input.proxyTimezone ?? null,
         input.proxyTimezone ?? null,
         input.errorCode ?? null,
         input.errorMessage ?? null,

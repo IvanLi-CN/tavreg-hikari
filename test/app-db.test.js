@@ -2158,6 +2158,36 @@ describe("proxy aggregation", () => {
 
     appDb.close();
   });
+
+  test("failed rebootstrap clears stale proxy identity when switching to a new node", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-failed-bootstrap@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "1.1.1.1",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
+    });
+
+    appDb.markBrowserSessionBootstrapping(accountId, { proxyNode: "Osaka-01" });
+    appDb.markBrowserSessionFailure(accountId, {
+      status: "failed",
+      proxyNode: "Osaka-01",
+      errorCode: "session_bootstrap_failed",
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "failed",
+      proxyNode: "Osaka-01",
+      proxyIp: null,
+      proxyRegion: null,
+      proxyCity: null,
+    });
+
+    appDb.close();
+  });
 });
 
 describe("static asset path resolution", () => {

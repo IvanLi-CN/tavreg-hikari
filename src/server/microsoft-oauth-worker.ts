@@ -127,7 +127,9 @@ async function main(): Promise<void> {
       downloadDir: downloadsDir,
     });
     await mihomoController.setGroupProxy(args.proxyNode);
-    proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken);
+    proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({
+      ip: "",
+    }));
     const locale = deriveLocale(proxyGeo.country);
     const acceptLanguage = buildAcceptLanguage(locale);
     const launched = await launchChromePersistent(cfg, "headless", mihomoController.proxyServer, locale, {
