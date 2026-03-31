@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { ensureTaskLedgerDbPath } from "./db-paths.js";
 
 type SqliteBindValue = string | number | boolean | null | undefined;
 type SqliteNamedParams = Record<string, SqliteBindValue>;
@@ -245,9 +246,10 @@ export class TaskLedger {
 
   static async open(cfg: TaskLedgerConfig): Promise<TaskLedger | null> {
     if (!cfg.enabled) return null;
-    await mkdir(path.dirname(cfg.dbPath), { recursive: true });
+    const dbPath = ensureTaskLedgerDbPath(cfg.dbPath);
+    await mkdir(path.dirname(dbPath), { recursive: true });
 
-    const db = await openSqliteDatabase(cfg.dbPath, true);
+    const db = await openSqliteDatabase(dbPath, true);
     db.exec("PRAGMA journal_mode=WAL;");
     db.exec("PRAGMA synchronous=NORMAL;");
     db.exec("PRAGMA temp_store=MEMORY;");

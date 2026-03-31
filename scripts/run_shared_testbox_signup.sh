@@ -55,12 +55,18 @@ rsync -az --delete \
 
 for extra in \
   ".env.local" \
-  "output/registry/signup-tasks.sqlite" \
+  "output/registry/registry.sqlite" \
   "output/proxy/node-usage.json" \
   "downloads/mihomo/subscription-cache"; do
-  if [ -e "$REPO_ROOT/$extra" ]; then
-    ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN/$(dirname "$extra")'"
-    rsync -az "$REPO_ROOT/$extra" "$TESTBOX:$REMOTE_RUN/$extra"
+  source_extra="$extra"
+  target_extra="$extra"
+  if [ "$extra" = "output/registry/registry.sqlite" ] && [ ! -e "$REPO_ROOT/$source_extra" ] && [ -e "$REPO_ROOT/output/registry/signup-tasks.sqlite" ]; then
+    source_extra="output/registry/signup-tasks.sqlite"
+  fi
+
+  if [ -e "$REPO_ROOT/$source_extra" ]; then
+    ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN/$(dirname "$target_extra")'"
+    rsync -az "$REPO_ROOT/$source_extra" "$TESTBOX:$REMOTE_RUN/$target_extra"
   fi
 done
 

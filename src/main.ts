@@ -33,6 +33,7 @@ import { isMicrosoftPasskeyInterruptUrl } from "./microsoft-passkey.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
+import { resolveTaskLedgerDbPath } from "./storage/db-paths.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -9341,7 +9342,7 @@ export function loadConfig(): AppConfig {
     inspectChromeProfileDir: path.resolve(process.env.INSPECT_CHROME_PROFILE_DIR || path.join(OUTPUT_PATH, "chrome-inspect-profile")),
     taskLedger: {
       enabled: toBool(process.env.TASK_LEDGER_ENABLED, true),
-      dbPath: path.resolve(process.env.TASK_LEDGER_DB_PATH || path.join(OUTPUT_PATH, "registry", "signup-tasks.sqlite")),
+      dbPath: resolveTaskLedgerDbPath(OUTPUT_PATH, process.env.TASK_LEDGER_DB_PATH),
       busyTimeoutMs: Math.max(500, toInt(process.env.TASK_LEDGER_BUSY_TIMEOUT_MS, 5000)),
       ipRateLimitCooldownMs: Math.max(
         60_000,

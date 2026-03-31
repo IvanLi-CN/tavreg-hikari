@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { resolveTaskLedgerDbPath } from "./storage/db-paths.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -121,9 +122,7 @@ function normalizeStatus(raw: string | undefined): TaskStatus | undefined {
 }
 
 function defaultDbPath(): string {
-  const fromEnv = (process.env.TASK_LEDGER_DB_PATH || "").trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return path.resolve(path.join(OUTPUT_PATH, "registry", "signup-tasks.sqlite"));
+  return resolveTaskLedgerDbPath(OUTPUT_PATH, process.env.TASK_LEDGER_DB_PATH);
 }
 
 function parseArgs(argv: string[]): QueryOptions {

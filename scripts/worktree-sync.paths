@@ -2,4 +2,4 @@
 # Copy happens only when the source exists and the destination is missing.
 .env.local
 .tools/Chromium.app
-output/registry/signup-tasks.sqlite
+output/registry/registry.sqlite

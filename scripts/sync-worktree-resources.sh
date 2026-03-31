@@ -180,8 +180,17 @@ discover_main_root() {
 
 copy_resource() {
   rel_path=$1
-  src_path="$source_root/$rel_path"
   dst_path="$current_root/$rel_path"
+  src_rel_path="$rel_path"
+  src_path="$source_root/$src_rel_path"
+
+  if [ "$rel_path" = "output/registry/registry.sqlite" ] \
+    && [ ! -e "$src_path" ] && [ ! -L "$src_path" ] \
+    && { [ -e "$source_root/output/registry/signup-tasks.sqlite" ] || [ -L "$source_root/output/registry/signup-tasks.sqlite" ]; }
+  then
+    src_rel_path="output/registry/signup-tasks.sqlite"
+    src_path="$source_root/$src_rel_path"
+  fi
 
   if [ ! -e "$src_path" ] && [ ! -L "$src_path" ]; then
     log "skip source missing: $rel_path"

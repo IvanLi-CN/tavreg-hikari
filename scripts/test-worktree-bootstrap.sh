@@ -185,16 +185,16 @@ if [[ -e "$worktree_default/bun.lock" ]]; then
   echo "expected bootstrap install without source bun.lock to avoid creating a lockfile" >&2
   exit 1
 fi
-assert_exists "$worktree_default/output/registry/signup-tasks.sqlite"
-if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-shm" ]]; then
+assert_exists "$worktree_default/output/registry/registry.sqlite"
+if [[ -e "$worktree_default/output/registry/registry.sqlite-shm" ]]; then
   echo "expected bootstrapped worktree SQLite snapshot to omit shm companion file" >&2
   exit 1
 fi
-if [[ -e "$worktree_default/output/registry/signup-tasks.sqlite-wal" ]]; then
+if [[ -e "$worktree_default/output/registry/registry.sqlite-wal" ]]; then
   echo "expected bootstrapped worktree SQLite snapshot to omit wal companion file" >&2
   exit 1
 fi
-if [[ "$(sqlite_latest_value "$worktree_default/output/registry/signup-tasks.sqlite")" != "main-ledger" ]]; then
+if [[ "$(sqlite_latest_value "$worktree_default/output/registry/registry.sqlite")" != "main-ledger" ]]; then
   echo "expected copied SQLite ledger to contain source fixture data" >&2
   exit 1
 fi
@@ -202,12 +202,12 @@ fi
 cat > "$worktree_default/.env.local" <<'ENVLOCAL'
 SOURCE_ENV=worktree-custom
 ENVLOCAL
-sqlite_insert_value "$worktree_default/output/registry/signup-tasks.sqlite" "worktree-ledger"
+sqlite_insert_value "$worktree_default/output/registry/registry.sqlite" "worktree-ledger"
 preserve_output="$(cd "$worktree_default" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
 assert_output_contains "$preserve_output" "keep target exists: .env.local"
-assert_output_contains "$preserve_output" "keep target exists: output/registry/signup-tasks.sqlite"
+assert_output_contains "$preserve_output" "keep target exists: output/registry/registry.sqlite"
 assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=worktree-custom"
-if [[ "$(sqlite_latest_value "$worktree_default/output/registry/signup-tasks.sqlite")" != "worktree-ledger" ]]; then
+if [[ "$(sqlite_latest_value "$worktree_default/output/registry/registry.sqlite")" != "worktree-ledger" ]]; then
   echo "forced sync should not overwrite existing SQLite ledger" >&2
   exit 1
 fi
@@ -217,22 +217,22 @@ assert_output_contains "$main_output" "skip main worktree"
 
 rm -f "$fixture_repo/output/registry/signup-tasks.sqlite"
 missing_output="$(git -C "$fixture_repo" worktree add --detach "$worktree_missing" HEAD 2>&1)"
-assert_output_contains "$missing_output" "skip source missing: output/registry/signup-tasks.sqlite"
+assert_output_contains "$missing_output" "skip source missing: output/registry/registry.sqlite"
 assert_file_content "$worktree_missing/.env.local" "SOURCE_ENV=main-root"
-if [[ -e "$worktree_missing/output/registry/signup-tasks.sqlite" ]]; then
+if [[ -e "$worktree_missing/output/registry/registry.sqlite" ]]; then
   echo "expected missing source SQLite file to stay absent in target worktree" >&2
   exit 1
 fi
 
 sqlite_insert_value "$fixture_repo/output/registry/signup-tasks.sqlite" "restored-ledger"
-rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+rm -f "$worktree_missing/output/registry/registry.sqlite"
 sqlite_hold_writer "$fixture_repo/output/registry/signup-tasks.sqlite" "live-ledger"
 writer_pid="$SQLITE_WRITER_PID"
 sleep 1
 live_sync_output="$(cd "$worktree_missing" && WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
 wait "$writer_pid"
-assert_output_contains "$live_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
-if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+assert_output_contains "$live_sync_output" "snapshotted sqlite: output/registry/registry.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/registry.sqlite")" != "live-ledger" ]]; then
   echo "expected forced sync to snapshot a live SQLite source without losing committed rows" >&2
   exit 1
 fi
@@ -245,10 +245,10 @@ echo "Error: near \"INTO\": syntax error" >&2
 exit 1
 EOF
 chmod +x "$fallback_bin/sqlite3"
-rm -f "$worktree_missing/output/registry/signup-tasks.sqlite"
+rm -f "$worktree_missing/output/registry/registry.sqlite"
 fallback_sync_output="$(cd "$worktree_missing" && PATH="$fallback_bin:$PATH" WORKTREE_SYNC_FORCE=1 "$fixture_repo/scripts/sync-worktree-resources.sh" 2>&1)"
-assert_output_contains "$fallback_sync_output" "snapshotted sqlite: output/registry/signup-tasks.sqlite"
-if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/signup-tasks.sqlite")" != "live-ledger" ]]; then
+assert_output_contains "$fallback_sync_output" "snapshotted sqlite: output/registry/registry.sqlite"
+if [[ "$(sqlite_latest_value "$worktree_missing/output/registry/registry.sqlite")" != "live-ledger" ]]; then
   echo "expected SQLite snapshot to fall back when sqlite3 lacks VACUUM INTO" >&2
   exit 1
 fi

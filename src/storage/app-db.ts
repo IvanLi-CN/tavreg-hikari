@@ -1,6 +1,7 @@
 import { access, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { ensureTaskLedgerDbPath } from "./db-paths.js";
 
 const require = createRequire(import.meta.url);
 
@@ -634,8 +635,8 @@ export class AppDatabase {
   private readonly db: SqliteDatabase;
 
   constructor(dbPath: string) {
-    this.dbPath = dbPath;
-    this.db = openSqliteDatabase(dbPath);
+    this.dbPath = ensureTaskLedgerDbPath(dbPath);
+    this.db = openSqliteDatabase(this.dbPath);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA synchronous=NORMAL;");
     this.db.exec("PRAGMA temp_store=MEMORY;");
