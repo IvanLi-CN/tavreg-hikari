@@ -9,6 +9,7 @@ import {
   buildAttemptRuntimeSpec,
   buildAttemptSpawnOptions,
   pickWorkerRuntime,
+  resolvePendingBrowserSessionWait,
   resolveAttemptProxyNode,
   resolveWorkerRuntime,
 } from "../src/server/scheduler.ts";
@@ -703,7 +704,7 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
-  test("ignores proof mailbox mappings when leasing the next account", async () => {
+  test("proof mailbox mappings do not make an account ineligible for leasing", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
       { email: "plain-a@outlook.com", password: "pass-a" },
@@ -720,11 +721,14 @@ describe("AppDatabase account import", () => {
       address: "proof-b@mail-us.707079.xyz",
       mailboxId: "proof-b-id",
     });
+    for (const accountId of imported.affectedIds.filter((accountId) => accountId !== proofAccountId)) {
+      appDb.recordApiKey(accountId, `tvly-proof-skip-${accountId}`);
+    }
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(job.id);
 
-    expect(leased?.microsoftEmail).not.toBe("proof-b@outlook.com");
+    expect(leased?.microsoftEmail).toBe("proof-b@outlook.com");
 
     appDb.close();
   });
@@ -874,6 +878,51 @@ describe("AppDatabase account import", () => {
 });
 
 describe("scheduler helpers", () => {
+  test("pending browser session wait only blocks for a bounded window per pending-count change", () => {
+    const first = resolvePendingBrowserSessionWait({
+      state: null,
+      pendingCount: 1,
+      nowMs: 1_000,
+      maxWaitMs: 5_000,
+    });
+    expect(first.wait).toBe(true);
+    expect(first.state).toMatchObject({ count: 1, startedAtMs: 1_000, exhausted: false });
+
+    const second = resolvePendingBrowserSessionWait({
+      state: first.state,
+      pendingCount: 1,
+      nowMs: 4_000,
+      maxWaitMs: 5_000,
+    });
+    expect(second.wait).toBe(true);
+
+    const exhausted = resolvePendingBrowserSessionWait({
+      state: second.state,
+      pendingCount: 1,
+      nowMs: 6_500,
+      maxWaitMs: 5_000,
+    });
+    expect(exhausted.wait).toBe(false);
+    expect(exhausted.state).toMatchObject({ count: 1, startedAtMs: 1_000, exhausted: true });
+
+    const sameCountAfterExhausted = resolvePendingBrowserSessionWait({
+      state: exhausted.state,
+      pendingCount: 1,
+      nowMs: 9_000,
+      maxWaitMs: 5_000,
+    });
+    expect(sameCountAfterExhausted.wait).toBe(false);
+
+    const changedCount = resolvePendingBrowserSessionWait({
+      state: exhausted.state,
+      pendingCount: 2,
+      nowMs: 9_500,
+      maxWaitMs: 5_000,
+    });
+    expect(changedCount.wait).toBe(true);
+    expect(changedCount.state).toMatchObject({ count: 2, startedAtMs: 9_500, exhausted: false });
+  });
+
   test("normalizes extractor upstream responses", async () => {
     const hotmailBodies = [];
     const hotmailUrls = [];
@@ -1985,6 +2034,30 @@ describe("proxy aggregation", () => {
       proxyRegion: "Osaka",
     });
     expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Seoul-01");
+
+    appDb.close();
+  });
+
+  test("does not select never-checked proxy nodes for session reuse", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-unverified@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-01");
+    markBrowserSessionReady(appDb, accountId, {
+      proxyIp: "3.3.3.3",
+      proxyRegion: "Tokyo",
+    });
+
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)).toBeNull();
+
+    appDb.touchProxyLease("Tokyo-02", {
+      status: "ok",
+      egressIp: "4.4.4.4",
+      region: "Tokyo",
+      leasedAt: "2026-03-04T00:00:00.000Z",
+    });
+
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-02");
 
     appDb.close();
   });

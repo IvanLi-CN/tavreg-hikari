@@ -2308,7 +2308,7 @@ export class AppDatabase {
 
   selectReusableProxyNodeForAccount(accountId: number): ProxyNodeRecord | null {
     const session = this.getBrowserSessionByAccountId(accountId);
-    const healthyWhere = "(p.last_status IS NULL OR LOWER(TRIM(p.last_status)) IN ('ok', 'succeeded'))";
+    const healthyWhere = "LOWER(TRIM(COALESCE(p.last_status, ''))) IN ('ok', 'succeeded')";
     const selectByWhere = (whereClause: string, ...params: string[]): ProxyNodeRecord | null => {
       const row = this.db
         .query(`

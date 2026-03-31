@@ -104,6 +104,13 @@ const AUTO_EXTRACT_REQUEST_INTERVAL_MS = 500;
 const AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS = 4;
 const AUTO_EXTRACT_OVERFETCH_ALLOWANCE = AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS - 1;
 const AUTO_EXTRACT_REQUEST_TIMEOUT_MS = 5000;
+export const PENDING_BROWSER_SESSION_WAIT_MS = 30_000;
+
+export interface PendingBrowserSessionWaitState {
+  count: number;
+  startedAtMs: number;
+  exhausted: boolean;
+}
 
 const STRIPPED_ATTEMPT_ENV_KEYS = [
   "EXISTING_EMAIL",
@@ -122,6 +129,41 @@ function buildAttemptBaseEnv(baseEnv: NodeJS.ProcessEnv | undefined): NodeJS.Pro
     delete next[key];
   }
   return next;
+}
+
+export function resolvePendingBrowserSessionWait(input: {
+  state: PendingBrowserSessionWaitState | null;
+  pendingCount: number;
+  nowMs: number;
+  maxWaitMs?: number;
+}): { wait: boolean; state: PendingBrowserSessionWaitState | null } {
+  const maxWaitMs = Math.max(0, input.maxWaitMs ?? PENDING_BROWSER_SESSION_WAIT_MS);
+  if (input.pendingCount <= 0) {
+    return { wait: false, state: null };
+  }
+  if (!input.state || input.state.count !== input.pendingCount) {
+    return {
+      wait: true,
+      state: {
+        count: input.pendingCount,
+        startedAtMs: input.nowMs,
+        exhausted: false,
+      },
+    };
+  }
+  if (input.state.exhausted) {
+    return { wait: false, state: input.state };
+  }
+  if (input.nowMs - input.state.startedAtMs < maxWaitMs) {
+    return { wait: true, state: input.state };
+  }
+  return {
+    wait: false,
+    state: {
+      ...input.state,
+      exhausted: true,
+    },
+  };
 }
 
 let cachedNodeCommandAvailability: boolean | null = null;
@@ -429,6 +471,7 @@ export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptLaunches = new Map<number, PendingAttemptLaunch>();
   private readonly autoExtractStates = new Map<number, AutoExtractState>();
+  private readonly pendingBrowserSessionWaits = new Map<number, PendingBrowserSessionWaitState>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
   private loopPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -877,7 +920,17 @@ export class JobScheduler {
       const eligible = this.db.countEligibleAccounts(jobId);
       const pendingBrowserSessions = this.db.countPendingBrowserSessions(jobId);
       const hasAutoExtractState = this.autoExtractStates.has(jobId);
-      if (eligible === 0 && pendingBrowserSessions > 0) {
+      const pendingWait = resolvePendingBrowserSessionWait({
+        state: this.pendingBrowserSessionWaits.get(jobId) || null,
+        pendingCount: eligible === 0 ? pendingBrowserSessions : 0,
+        nowMs: Date.now(),
+      });
+      if (pendingWait.state) {
+        this.pendingBrowserSessionWaits.set(jobId, pendingWait.state);
+      } else {
+        this.pendingBrowserSessionWaits.delete(jobId);
+      }
+      if (eligible === 0 && pendingWait.wait) {
         await delay(100);
         continue;
       }
