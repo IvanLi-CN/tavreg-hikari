@@ -2038,7 +2038,7 @@ describe("proxy aggregation", () => {
     appDb.close();
   });
 
-  test("does not select never-checked proxy nodes for session reuse", async () => {
+  test("falls back to untested proxy nodes only when no verified healthy node exists", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-unverified@outlook.com", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -2048,7 +2048,7 @@ describe("proxy aggregation", () => {
       proxyRegion: "Tokyo",
     });
 
-    expect(appDb.selectReusableProxyNodeForAccount(accountId)).toBeNull();
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-01");
 
     appDb.touchProxyLease("Tokyo-02", {
       status: "ok",
@@ -2058,6 +2058,43 @@ describe("proxy aggregation", () => {
     });
 
     expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-02");
+
+    appDb.close();
+  });
+
+  test("attempt completion refreshes stored proxy region for later reuse", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-region@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Osaka-01"], "Osaka-01");
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "3.3.3.3",
+      proxyRegion: "Tokyo",
+    });
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/proxy-region-attempt");
+    appDb.completeAttemptSuccess(job.id, attempt.id, accountId, "tvly-proxy-region-001", {
+      proxy_node: "Osaka-01",
+      proxy_ip: "5.5.5.5",
+      proxy_country: "JP",
+      proxy_region: "Osaka",
+      proxy_city: "Osaka",
+      proxy_timezone: "Asia/Tokyo",
+      status: "succeeded",
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      proxyNode: "Osaka-01",
+      proxyIp: "5.5.5.5",
+      proxyRegion: "Osaka",
+    });
+    expect(appDb.getProxyNode("Osaka-01")).toMatchObject({
+      lastEgressIp: "5.5.5.5",
+      lastRegion: "Osaka",
+    });
 
     appDb.close();
   });

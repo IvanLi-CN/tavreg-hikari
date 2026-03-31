@@ -1023,11 +1023,12 @@ async function main(): Promise<void> {
       }
     },
   });
+
+  await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
+
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
     queueAccountSessionBootstrap(accountId);
   }
-
-  await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   const server = Bun.serve({
     hostname: runtimeBinding.host,

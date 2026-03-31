@@ -2308,13 +2308,12 @@ export class AppDatabase {
 
   selectReusableProxyNodeForAccount(accountId: number): ProxyNodeRecord | null {
     const session = this.getBrowserSessionByAccountId(accountId);
-    const healthyWhere = "LOWER(TRIM(COALESCE(p.last_status, ''))) IN ('ok', 'succeeded')";
-    const selectByWhere = (whereClause: string, ...params: string[]): ProxyNodeRecord | null => {
+    const selectByWhere = (healthWhere: string, whereClause: string, ...params: string[]): ProxyNodeRecord | null => {
       const row = this.db
         .query(`
           SELECT p.*, 0 AS success24h
           FROM proxy_nodes p
-          WHERE ${healthyWhere}
+          WHERE ${healthWhere}
             AND ${whereClause}
           ORDER BY ${proxyNodeLruOrderSql("p")}
           LIMIT 1
@@ -2322,25 +2321,32 @@ export class AppDatabase {
         .get(...params) as Record<string, unknown> | null;
       return row ? mapProxyNodeRow(row) : null;
     };
+    const selectByHealth = (healthWhere: string): ProxyNodeRecord | null => {
+      if (session?.proxyIp?.trim()) {
+        const exactIp = selectByWhere(healthWhere, "p.last_egress_ip = ?", session.proxyIp.trim());
+        if (exactIp) return exactIp;
+      }
+      if (session?.proxyRegion?.trim()) {
+        const sameRegion = selectByWhere(healthWhere, "p.last_region = ?", session.proxyRegion.trim());
+        if (sameRegion) return sameRegion;
+      }
+      const fallback = this.db
+        .query(`
+          SELECT p.*, 0 AS success24h
+          FROM proxy_nodes p
+          WHERE ${healthWhere}
+          ORDER BY ${proxyNodeLruOrderSql("p")}
+          LIMIT 1
+        `)
+        .get() as Record<string, unknown> | null;
+      return fallback ? mapProxyNodeRow(fallback) : null;
+    };
+    const verifiedHealthyWhere = "LOWER(TRIM(COALESCE(p.last_status, ''))) IN ('ok', 'succeeded')";
+    const verified = selectByHealth(verifiedHealthyWhere);
+    if (verified) return verified;
 
-    if (session?.proxyIp?.trim()) {
-      const exactIp = selectByWhere("p.last_egress_ip = ?", session.proxyIp.trim());
-      if (exactIp) return exactIp;
-    }
-    if (session?.proxyRegion?.trim()) {
-      const sameRegion = selectByWhere("p.last_region = ?", session.proxyRegion.trim());
-      if (sameRegion) return sameRegion;
-    }
-    const fallback = this.db
-      .query(`
-        SELECT p.*, 0 AS success24h
-        FROM proxy_nodes p
-        WHERE ${healthyWhere}
-        ORDER BY ${proxyNodeLruOrderSql("p")}
-        LIMIT 1
-      `)
-      .get() as Record<string, unknown> | null;
-    return fallback ? mapProxyNodeRow(fallback) : null;
+    const untestedWhere = "TRIM(COALESCE(p.last_status, '')) = ''";
+    return selectByHealth(untestedWhere);
   }
 
   touchProxyLease(
@@ -3180,6 +3186,7 @@ export class AppDatabase {
       proxyNode: attempt.proxyNode,
       proxyIp: attempt.proxyIp,
       proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
       proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
       proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
       lastUsedAt: now,
@@ -3189,6 +3196,7 @@ export class AppDatabase {
         status: "ok",
         egressIp: attempt.proxyIp,
         country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
         city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
         leasedAt: now,
       });
@@ -3298,6 +3306,7 @@ export class AppDatabase {
       proxyNode: attempt.proxyNode,
       proxyIp: attempt.proxyIp,
       proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
       proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
       proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
       lastUsedAt: now,
@@ -3307,6 +3316,7 @@ export class AppDatabase {
         status: errorCode ? "failed" : null,
         egressIp: attempt.proxyIp,
         country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
         city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
         leasedAt: now,
       });
@@ -3426,6 +3436,7 @@ export class AppDatabase {
       proxyNode: attempt.proxyNode,
       proxyIp: attempt.proxyIp,
       proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
       proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
       proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
       lastUsedAt: now,
@@ -3434,6 +3445,7 @@ export class AppDatabase {
       this.touchProxyLease(attempt.proxyNode, {
         egressIp: attempt.proxyIp,
         country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
         city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
         leasedAt: now,
       });
