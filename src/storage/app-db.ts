@@ -442,6 +442,12 @@ function isHealthyProxyNodeStatus(status: string | null | undefined): boolean {
   return !normalized || normalized === "ok" || normalized === "succeeded";
 }
 
+function shouldMarkProxyLeaseFailedForAttemptError(errorCode: string | null | undefined): boolean {
+  const normalized = String(errorCode || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(browser_)?proxy_/.test(normalized) || /^mihomo_/.test(normalized);
+}
+
 function proxyNodeLruOrderSql(alias = "p"): string {
   return `
     CASE WHEN ${alias}.last_leased_at IS NULL THEN 0 ELSE 1 END,
@@ -2290,6 +2296,7 @@ export class AppDatabase {
         JOIN account_browser_sessions s ON s.account_id = a.id
         WHERE a.disabled_at IS NULL
           AND a.has_api_key = 0
+          AND COALESCE(a.skip_reason, '') = ''
           AND s.status IN ('pending', 'bootstrapping')
         ORDER BY a.id ASC
       `)
@@ -3313,7 +3320,7 @@ export class AppDatabase {
     });
     if (attempt.proxyNode) {
       this.touchProxyLease(attempt.proxyNode, {
-        status: errorCode ? "failed" : null,
+        status: shouldMarkProxyLeaseFailedForAttemptError(errorCode) ? "failed" : null,
         egressIp: attempt.proxyIp,
         country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
         region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,

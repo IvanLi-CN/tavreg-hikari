@@ -628,6 +628,28 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("startup bootstrap recovery skips accounts that are already hard-blocked", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "pending-hard-blocked@outlook.com", password: "hard-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "pending-hard-blocked-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, { errorCode: "microsoft_password_incorrect" });
+    expect(appDb.getAccount(accountId)?.skipReason).toBe("microsoft_password_incorrect");
+
+    appDb.queueBrowserSessionBootstrap(accountId);
+
+    expect(appDb.getAccount(accountId)?.browserSession?.status).toBe("pending");
+    expect(appDb.listPendingBrowserSessionAccountIds()).not.toContain(accountId);
+
+    appDb.close();
+  });
+
   test("does not reschedule succeeded accounts within the same job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "same-job-success@outlook.com", password: "success-pass" }]);
@@ -2095,6 +2117,39 @@ describe("proxy aggregation", () => {
       lastEgressIp: "5.5.5.5",
       lastRegion: "Osaka",
     });
+
+    appDb.close();
+  });
+
+  test("account-level failures do not blacklist an otherwise healthy proxy node", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-health@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Tokyo-01"], "Tokyo-01");
+    appDb.touchProxyLease("Tokyo-01", {
+      status: "ok",
+      egressIp: "1.1.1.1",
+      country: "JP",
+      region: "Tokyo",
+      city: "Tokyo",
+    });
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/proxy-health-attempt");
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, { errorCode: "microsoft_account_locked" }, {
+      proxy_node: "Tokyo-01",
+      proxy_ip: "1.1.1.1",
+      proxy_country: "JP",
+      proxy_region: "Tokyo",
+      proxy_city: "Tokyo",
+      proxy_timezone: "Asia/Tokyo",
+      status: "failed",
+    });
+
+    expect(appDb.getProxyNode("Tokyo-01")?.lastStatus).toBe("ok");
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
 
     appDb.close();
   });
