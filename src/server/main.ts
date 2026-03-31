@@ -20,6 +20,11 @@ import {
   type MicrosoftAccountRecord,
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
+import {
+  getAccountSessionBootstrapBlockMessage,
+  isLockedAccountRecord,
+  shouldQueueImportedAccountBootstrap,
+} from "./account-session-bootstrap.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
@@ -506,25 +511,10 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
   return Response.redirect(target.toString(), 302);
 }
 
-function isLockedAccountRecord(
-  account: Pick<MicrosoftAccountRecord, "skipReason" | "lastErrorCode" | "disabledAt"> | null | undefined,
-): boolean {
-  return (
-    String(account?.skipReason || "").trim() === "microsoft_account_locked"
-    || /^microsoft_account_locked/i.test(String(account?.lastErrorCode || "").trim())
-  );
-}
-
 function getAccountConnectBlockMessage(
-  account: Pick<MicrosoftAccountRecord, "skipReason" | "lastErrorCode" | "disabledAt">,
+  account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "browserSession">,
 ): string | null {
-  if (isLockedAccountRecord(account)) {
-    return "Microsoft 账户已锁定，请先恢复可用后再连接";
-  }
-  if (account.disabledAt) {
-    return "账号已被禁用，请先恢复可用后再连接";
-  }
-  return null;
+  return getAccountSessionBootstrapBlockMessage(account);
 }
 
 function applyMailboxFailureState(input: {
@@ -993,9 +983,12 @@ async function main(): Promise<void> {
     }
   };
   const sessionBootstrapQueuedIds = new Set<number>();
-  const queueAccountSessionBootstrap = (accountId: number): boolean => {
+  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean }): boolean => {
     const account = db.getAccount(accountId);
     if (!account || getAccountConnectBlockMessage(account)) {
+      return false;
+    }
+    if (!options?.force && !shouldQueueImportedAccountBootstrap(account)) {
       return false;
     }
     if (sessionBootstrapQueuedIds.has(accountId)) {
@@ -1291,10 +1284,10 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        queueAccountSessionBootstrap(accountId);
+        const queued = queueAccountSessionBootstrap(accountId, { force: true });
         return json({
           ok: true,
-          queued: true,
+          queued,
           account: serializeAccount(db.getAccount(accountId) || account),
         });
       }
@@ -1464,10 +1457,10 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        queueAccountSessionBootstrap(accountId);
+        const queued = queueAccountSessionBootstrap(accountId, { force: true });
         return json({
           ok: true,
-          queued: true,
+          queued,
           account: serializeAccount(db.getAccount(accountId) || account),
         });
       }
