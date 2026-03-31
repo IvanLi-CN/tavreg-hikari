@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -94,6 +95,53 @@ function FilterField(props: { label: string; children: ReactNode }) {
       <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">{props.label}</span>
       {props.children}
     </label>
+  );
+}
+
+function resolveAccountSortState(
+  query: Pick<AccountQuery, "sortBy" | "sortDir">,
+  column: Exclude<AccountQuery["sortBy"], "">,
+): "inactive" | "desc" | "asc" {
+  if (query.sortBy !== column) return "inactive";
+  return query.sortDir;
+}
+
+function SortableTimeTableHead(props: {
+  label: string;
+  column: Exclude<AccountQuery["sortBy"], "">;
+  query: AccountQuery;
+  onQueryChange: (value: AccountQuery) => void;
+}) {
+  const state = resolveAccountSortState(props.query, props.column);
+  const ariaSort = state === "asc" ? "ascending" : state === "desc" ? "descending" : "none";
+  const nextQuery: AccountQuery =
+    state === "inactive"
+      ? { ...props.query, sortBy: props.column, sortDir: "desc" as const, page: 1 }
+      : state === "desc"
+        ? { ...props.query, sortBy: props.column, sortDir: "asc" as const, page: 1 }
+        : { ...props.query, sortBy: "" as const, sortDir: "desc" as const, page: 1 };
+
+  return (
+    <TableHead aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={cn(
+          "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
+          state === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
+        )}
+        onClick={() => props.onQueryChange(nextQuery)}
+        aria-label={`${props.label}排序：${state === "desc" ? "当前降序，再点升序" : state === "asc" ? "当前升序，再点恢复默认" : "当前未排序，点击按降序排序"}`}
+      >
+        <span>{props.label}</span>
+        {state === "desc" ? (
+          <ArrowDown className="size-3.5" aria-hidden="true" />
+        ) : state === "asc" ? (
+          <ArrowUp className="size-3.5" aria-hidden="true" />
+        ) : (
+          <ArrowUpDown className="size-3.5" aria-hidden="true" />
+        )}
+      </button>
+    </TableHead>
   );
 }
 
@@ -773,8 +821,8 @@ export function AccountsView({
                         <TableHead>Has Key</TableHead>
                         <TableHead>最近状态</TableHead>
                         <TableHead>收信状态</TableHead>
-                        <TableHead>导入时间</TableHead>
-                        <TableHead>最近使用</TableHead>
+                        <SortableTimeTableHead label="导入时间" column="importedAt" query={query} onQueryChange={onQueryChange} />
+                        <SortableTimeTableHead label="最近使用" column="lastUsedAt" query={query} onQueryChange={onQueryChange} />
                         <TableHead>账号阻断</TableHead>
                         <TableHead>人工停用</TableHead>
                         <TableHead className="w-[24rem] min-w-[24rem] whitespace-nowrap text-right">操作</TableHead>

@@ -200,6 +200,10 @@
 - 支持批量设置分组与批量删除
 - 导入成功后自动勾选刚刚新增或更新的账号
 - 分组选择器使用可搜索、可直接新建的组合框
+- 桌面表格中的“导入时间”“最近使用”列支持三态排序：降序、升序、恢复默认
+- 时间列排序作用于当前筛选后的全量结果集，而不是仅当前页
+- `last_used_at` 排序规则：降序时 `null` 置底，升序时 `null` 置顶
+- 未启用自定义排序时保持现有默认列表顺序，不影响主流程派发规则
 
 ### 主流程调度
 
@@ -223,6 +227,8 @@
 - Given 用户输入多行账号后点击导入，When 预览弹窗打开，Then 界面先展示解析出的邮箱密码、输入重复、与已有账号冲突和最终导入决策。
 - Given 某账号已有有效 API key，When 创建主流程任务，Then 调度器不会派发该账号，并在账号页标记为跳过。
 - Given 用户在账号页跨分页勾选若干账号，When 执行批量分组或批量删除，Then 操作作用于完整勾选集而不是仅当前页。
+- Given 用户点击账号页“导入时间”列头，When 连续点击三次，Then 列表按导入时间降序、导入时间升序、默认顺序依次切换。
+- Given 用户点击账号页“最近使用”列头，When 在升序与降序之间切换，Then 排序作用于当前筛选后的全量结果集，且 `last_used_at=null` 分别在顶部或底部。
 - Given 主流程正在运行，When 用户点击暂停，Then 不再派发新账号，已运行账号继续完成。
 - Given 主流程正在运行，When 用户修改 `parallel` / `need` / `maxAttempts`，Then 修改立即作用于后续派发，不中断当前账号。
 - Given 主流程页包含长 JSON 日志、长邮箱或较窄视口，When 页面渲染完成，Then 内容仍保持在 shell 宽度内，且只允许卡片或表格自身出现内部滚动。
@@ -235,6 +241,10 @@
 ![Dashboard buffered number input](./assets/dashboard-buffered-number.png)
 
 ![Proxies buffered number input](./assets/proxies-buffered-number.png)
+
+![Accounts imported time descending sort](./assets/accounts-sort-imported-desc.png)
+
+![Accounts last used ascending sort](./assets/accounts-sort-last-used-asc.png)
 
 ## 里程碑
 
