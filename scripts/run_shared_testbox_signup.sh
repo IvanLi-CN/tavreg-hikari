@@ -9,6 +9,21 @@ BROWSER_ENGINE="${BROWSER_ENGINE:-chrome}"
 CHROME_NATIVE_AUTOMATION="${CHROME_NATIVE_AUTOMATION:-false}"
 NEED="${NEED:-1}"
 PARALLEL="${PARALLEL:-1}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SQLITE_SNAPSHOT="$SCRIPT_DIR/sqlite-snapshot.sh"
+TEMP_UPLOADS=()
+
+cleanup() {
+  if [ "${#TEMP_UPLOADS[@]}" -eq 0 ]; then
+    return
+  fi
+
+  for temp_path in "${TEMP_UPLOADS[@]}"; do
+    rm -f "$temp_path"
+  done
+}
+
+trap cleanup EXIT
 
 printf -v RUN_MODE_Q '%q' "$RUN_MODE"
 printf -v BROWSER_ENGINE_Q '%q' "$BROWSER_ENGINE"
@@ -65,8 +80,16 @@ for extra in \
   fi
 
   if [ -e "$REPO_ROOT/$source_extra" ]; then
+    upload_path="$REPO_ROOT/$source_extra"
+    if [ "${target_extra##*.}" = "sqlite" ]; then
+      upload_path="$(mktemp "${TMPDIR:-/tmp}/tavreg-testbox-sqlite.XXXXXX")"
+      rm -f "$upload_path"
+      "$SQLITE_SNAPSHOT" "$REPO_ROOT/$source_extra" "$upload_path"
+      TEMP_UPLOADS+=("$upload_path")
+    fi
+
     ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN/$(dirname "$target_extra")'"
-    rsync -az "$REPO_ROOT/$source_extra" "$TESTBOX:$REMOTE_RUN/$target_extra"
+    rsync -az "$upload_path" "$TESTBOX:$REMOTE_RUN/$target_extra"
   fi
 done
 

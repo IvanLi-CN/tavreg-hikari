@@ -147,10 +147,12 @@ base_sha="$(git -C "$fixture_repo" rev-parse HEAD)"
 
 mkdir -p "$fixture_repo/scripts"
 cp "$repo_root/scripts/install-hooks.sh" "$fixture_repo/scripts/install-hooks.sh"
+cp "$repo_root/scripts/sqlite-snapshot.sh" "$fixture_repo/scripts/sqlite-snapshot.sh"
 cp "$repo_root/scripts/sync-worktree-resources.sh" "$fixture_repo/scripts/sync-worktree-resources.sh"
 cp "$repo_root/scripts/worktree-sync.paths" "$fixture_repo/scripts/worktree-sync.paths"
 chmod +x \
   "$fixture_repo/scripts/install-hooks.sh" \
+  "$fixture_repo/scripts/sqlite-snapshot.sh" \
   "$fixture_repo/scripts/sync-worktree-resources.sh"
 git -C "$fixture_repo" add scripts
 git -C "$fixture_repo" commit -m 'test: add worktree bootstrap scripts' >/dev/null
