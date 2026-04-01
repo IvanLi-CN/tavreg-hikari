@@ -153,6 +153,16 @@
 
 ## Visual Evidence
 
+- Storybook canvas：`Views/AccountsView / ExtractorRuntimeRunning`
+  - 证明 `/accounts` 左侧已升级为“提号器”实时面板，包含号源选择、数量/等待时长、SSE 在线状态，以及“提号后立即自动 bootstrap + 自动连邮箱”的运行摘要。
+
+![账号页提号器运行态](./assets/accounts-extractor-runtime-running.png)
+
+- Storybook canvas：`Views/AccountsView / ExtractorRuntimeOutcomeStates`
+  - 证明提号器在成功/失败收敛态都会保留最终摘要，包含 accepted/raw 计数、错误文案与 SSE 异常提示，便于后续重试与人工排障。
+
+![账号页提号器收敛态](./assets/accounts-extractor-runtime-outcomes.png)
+
 - Storybook canvas：`Views/AccountsView / SessionBootstrapStates`
   - 证明账号页桌面态已展示 `bootstrapping / ready / blocked` 三态，以及代理/IP 与 profile 路径摘要。
 

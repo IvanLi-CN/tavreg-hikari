@@ -23,11 +23,14 @@ import type {
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
   AccountExtractorProvider,
+  AccountExtractorRunDraft,
+  AccountExtractorRuntime,
   AccountExtractorSettings,
   AccountImportPreviewPayload,
   AccountQuery,
   AccountRecord,
   AccountsPayload,
+  ExtractorSseState,
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -118,6 +121,18 @@ function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">
   const parts = normalized.split("/").filter(Boolean);
   if (parts.length <= 4) return normalized;
   return `…/${parts.slice(-4).join("/")}`;
+}
+
+function formatExtractorSourceSummary(sources: AccountExtractorProvider[]): string {
+  if (sources.length === 0) return "未选择号源";
+  return sources.map(extractorProviderLabel).join("、");
+}
+
+function extractorSseStateCopy(state: ExtractorSseState): { label: string; variant: "neutral" | "success" | "warning" | "danger" | "info" } {
+  if (state === "open") return { label: "SSE 已连接", variant: "success" };
+  if (state === "connecting") return { label: "SSE 连接中", variant: "info" };
+  if (state === "error") return { label: "SSE 异常", variant: "danger" };
+  return { label: "SSE 已关闭", variant: "warning" };
 }
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -285,6 +300,10 @@ export function AccountsView({
   connectProgress,
   extractorSettings,
   extractorSettingsBusy,
+  extractorRuntime,
+  extractorRunDraft,
+  extractorRunBusy,
+  extractorSseState,
   extractorHistory,
   extractorHistoryQuery,
   extractorHistoryBusy,
@@ -308,6 +327,8 @@ export function AccountsView({
   onSaveProofMailbox,
   onSaveAvailability,
   onSaveExtractorSettings,
+  onExtractorRunDraftChange,
+  onRunExtractor,
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
   onOpenMailbox,
@@ -329,6 +350,10 @@ export function AccountsView({
   connectProgress: { current: number; total: number } | null;
   extractorSettings: AccountExtractorSettings | null;
   extractorSettingsBusy: boolean;
+  extractorRuntime: AccountExtractorRuntime;
+  extractorRunDraft: AccountExtractorRunDraft;
+  extractorRunBusy: boolean;
+  extractorSseState: ExtractorSseState;
   extractorHistory: AccountExtractorHistoryPayload;
   extractorHistoryQuery: AccountExtractorHistoryQuery;
   extractorHistoryBusy: boolean;
@@ -352,6 +377,8 @@ export function AccountsView({
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
+  onExtractorRunDraftChange: (patch: Partial<AccountExtractorRunDraft>) => void;
+  onRunExtractor: () => Promise<void>;
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
@@ -394,6 +421,15 @@ export function AccountsView({
     1,
     Math.ceil(Math.max(1, extractorHistory.total) / Math.max(1, extractorHistory.pageSize)),
   );
+  const extractorSseBadge = extractorSseStateCopy(extractorSseState);
+  const extractorSummarySources =
+    extractorRuntime.enabledSources.length > 0 ? extractorRuntime.enabledSources : extractorRunDraft.sources;
+  const extractorCanStart =
+    graphSettingsConfigured
+    && extractorRuntime.status !== "running"
+    && extractorRunDraft.sources.length > 0
+    && extractorRunDraft.quantity > 0
+    && extractorRunDraft.maxWaitSec > 0;
   useEffect(() => {
     return () => {
       if (passwordCopyResetTimerRef.current != null) {
@@ -597,28 +633,133 @@ export function AccountsView({
 
           <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
             <CardHeader>
-              <CardTitle>提取器设置</CardTitle>
+              <CardTitle>提号器</CardTitle>
               <CardDescription>
-                配置四个号源的 KEY，并查询本地提取历史。这里只读取 SQLite 本地记录，不直连远端历史接口。
+                这里会直接提号、自动登录 Microsoft、保存持久 Profile，并自动连接邮箱。提号状态和账号列表通过 SSE 实时刷新。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge status={extractorRuntime.status} />
+                <Badge variant={extractorSseBadge.variant}>{extractorSseBadge.label}</Badge>
+                <Badge variant={graphSettingsConfigured ? "success" : "warning"}>
+                  {graphSettingsConfigured ? "Graph 已配置" : "Graph 未配置"}
+                </Badge>
+              </div>
+
               <div className="grid gap-3 sm:grid-cols-2">
-                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
-                  <div key={provider} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                    <div className="text-sm font-medium text-white">{label}</div>
-                    <div className="mt-1 text-sm text-slate-400">
-                      {extractorSettings?.availability[provider] ? "KEY 已配置" : "KEY 未配置"}
-                    </div>
-                  </div>
-                ))}
+                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => {
+                  const available = Boolean(extractorSettings?.availability[provider]);
+                  const checked = extractorRunDraft.sources.includes(provider);
+                  return (
+                    <label
+                      key={provider}
+                      className={cn(
+                        "flex items-start gap-3 rounded-2xl border border-white/8 bg-white/[0.03] p-4 transition",
+                        available ? "cursor-pointer hover:border-cyan-300/24" : "opacity-60",
+                      )}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        disabled={!available || extractorRuntime.status === "running"}
+                        onCheckedChange={(next) => {
+                          const enabled = next === true;
+                          onExtractorRunDraftChange({
+                            sources: enabled
+                              ? Array.from(new Set([...extractorRunDraft.sources, provider]))
+                              : extractorRunDraft.sources.filter((item) => item !== provider),
+                          });
+                        }}
+                        aria-label={`toggle-${provider}`}
+                      />
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-white">{label}</div>
+                        <div className="mt-1 text-sm text-slate-400">{available ? "KEY 已配置" : "KEY 未配置"}</div>
+                      </div>
+                    </label>
+                  );
+                })}
               </div>
-              <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-400">
-                本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">提号数量</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={String(extractorRunDraft.quantity)}
+                    disabled={extractorRuntime.status === "running"}
+                    onChange={(event) =>
+                      onExtractorRunDraftChange({
+                        quantity: Math.max(1, Math.trunc(Number(event.target.value) || 1)),
+                      })
+                    }
+                  />
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">最长等待（秒）</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={String(extractorRunDraft.maxWaitSec)}
+                    disabled={extractorRuntime.status === "running"}
+                    onChange={(event) =>
+                      onExtractorRunDraftChange({
+                        maxWaitSec: Math.max(1, Math.trunc(Number(event.target.value) || 1)),
+                      })
+                    }
+                  />
+                </label>
               </div>
-              <Button variant="outline" onClick={openExtractorDialog} className="w-full sm:w-auto" data-testid="open-extractor-settings">
-                打开提取器设置
-              </Button>
+
+              <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-300">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-white">当前号源：</span>
+                  <span>{formatExtractorSourceSummary(extractorSummarySources)}</span>
+                </div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <div>目标接受：{extractorRuntime.acceptedCount} / {extractorRuntime.requestedUsableCount || extractorRunDraft.quantity}</div>
+                  <div>原始请求：{extractorRuntime.rawAttemptCount} / {extractorRuntime.attemptBudget || "—"}</div>
+                  <div>在途请求：{extractorRuntime.inFlightCount}</div>
+                  <div>剩余等待：{extractorRuntime.remainingWaitSec}s / {extractorRuntime.maxWaitSec || extractorRunDraft.maxWaitSec}s</div>
+                  <div>最近来源：{extractorRuntime.lastProvider ? extractorProviderLabel(extractorRuntime.lastProvider) : "—"}</div>
+                  <div>最近批次：{extractorRuntime.lastBatchId || "—"}</div>
+                </div>
+                <div className="mt-3 rounded-2xl border border-white/8 bg-[#030712]/60 px-4 py-3 text-sm text-slate-300">
+                  {extractorRuntime.errorMessage || extractorRuntime.lastMessage || "等待启动提号器。"}
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  最近更新：{formatDate(extractorRuntime.updatedAt)} · 本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
+                </div>
+              </div>
+
+              {!graphSettingsConfigured ? (
+                <div className="rounded-2xl border border-amber-300/18 bg-amber-400/8 px-4 py-3 text-sm text-amber-100">
+                  请先配置 Microsoft Graph 回调，再启动提号器；否则账号无法自动连邮箱。
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <Button
+                  onClick={() => {
+                    void onRunExtractor();
+                  }}
+                  disabled={!extractorCanStart || extractorRunBusy}
+                  className="sm:flex-1"
+                >
+                  {extractorRuntime.status === "running" || extractorRunBusy ? "提号中…" : "开始提号 + 自动 Bootstrap"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={openExtractorDialog}
+                  className="sm:w-auto"
+                  data-testid="open-extractor-settings"
+                >
+                  KEY / 历史
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>

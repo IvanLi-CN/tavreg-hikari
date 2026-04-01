@@ -34,6 +34,7 @@ import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
+import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
 import {
   assertMicrosoftGraphSettings,
   buildMicrosoftAuthorizeUrl,
@@ -589,6 +590,10 @@ function toEventMessage(event: ServerEvent): string {
   return JSON.stringify(event);
 }
 
+function toSseEventMessage(event: ServerEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
+
 async function createProxyController(settings: AppSettings) {
   if (!settings.subscriptionUrl.trim()) {
     throw new Error("MIHOMO_SUBSCRIPTION_URL is not configured");
@@ -988,15 +993,20 @@ async function main(): Promise<void> {
   const readSettings = () => db.getSettings(settingsDefaults);
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
+  const accountEventSubscribers = new Set<(event: ServerEvent) => void>();
+  const sseEncoder = new TextEncoder();
   const runExclusiveProxyOp = createExclusiveRunner();
   const runExclusiveMailboxOauth = createExclusiveRunner();
+  const sessionBootstrapQueuedIds = new Set<number>();
   const broadcast = (event: ServerEvent) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
       ws.send(message);
     }
+    for (const subscriber of accountEventSubscribers) {
+      subscriber(event);
+    }
   };
-  const sessionBootstrapQueuedIds = new Set<number>();
   const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean }): boolean => {
     const account = db.getAccount(accountId);
     if (!account || getAccountConnectBlockMessage(account)) {
@@ -1030,6 +1040,7 @@ async function main(): Promise<void> {
     });
     return true;
   };
+  const accountExtractorRuntime = new AccountExtractorRuntime(db, readSettings, broadcast, queueAccountSessionBootstrap);
   const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
     onImportedAccounts: (accountIds) => {
       for (const accountId of accountIds) {
@@ -1080,6 +1091,55 @@ async function main(): Promise<void> {
             return new Response(null);
           }
           return badRequest("websocket upgrade failed", 500);
+        }
+
+        if (pathname === "/api/accounts/events" && req.method === "GET") {
+          let cleanup = () => {};
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              let closed = false;
+              const write = (chunk: string) => {
+                if (closed) return;
+                controller.enqueue(sseEncoder.encode(chunk));
+              };
+              const sendEvent = (event: ServerEvent) => {
+                write(toSseEventMessage(event));
+              };
+              const heartbeat = setInterval(() => {
+                write(`: ping ${Date.now()}\n\n`);
+              }, 15_000);
+              const closeStream = () => {
+                if (closed) return;
+                closed = true;
+                clearInterval(heartbeat);
+                accountEventSubscribers.delete(sendEvent);
+                req.signal.removeEventListener("abort", closeStream);
+                try {
+                  controller.close();
+                } catch {}
+              };
+              cleanup = closeStream;
+              accountEventSubscribers.add(sendEvent);
+              req.signal.addEventListener("abort", closeStream, { once: true });
+              write(": connected\n\n");
+              sendEvent({
+                type: "extractor.updated",
+                payload: { runtime: accountExtractorRuntime.getSnapshot() },
+                timestamp: nowIso(),
+              });
+            },
+            cancel() {
+              cleanup();
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "content-type": "text/event-stream; charset=utf-8",
+              "cache-control": "no-cache, no-transform",
+              connection: "keep-alive",
+              "x-accel-buffering": "no",
+            },
+          });
         }
 
         if (pathname === "/api/health") {
@@ -1374,6 +1434,34 @@ async function main(): Promise<void> {
           ok: true,
           settings: serializeExtractorSettings(settings),
         });
+      }
+
+      if (pathname === "/api/account-extractors/runtime" && req.method === "GET") {
+        return json({
+          ok: true,
+          runtime: accountExtractorRuntime.getSnapshot(),
+        });
+      }
+
+      if (pathname === "/api/account-extractors/run" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as {
+          sources?: unknown;
+          quantity?: unknown;
+          maxWaitSec?: unknown;
+          accountType?: unknown;
+        } | null;
+        const settings = readSettings();
+        try {
+          const runtime = await accountExtractorRuntime.start({
+            sources: normalizeExtractorSources(body?.sources ?? settings.defaultAutoExtractSources),
+            quantity: toOptionalPositiveInt(body?.quantity) ?? settings.defaultAutoExtractQuantity,
+            maxWaitSec: toOptionalPositiveInt(body?.maxWaitSec) ?? settings.defaultAutoExtractMaxWaitSec,
+            accountType: body?.accountType === "outlook" ? "outlook" : settings.defaultAutoExtractAccountType,
+          });
+          return json({ ok: true, runtime });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
       }
 
       if (pathname === "/api/account-extractors/settings" && req.method === "POST") {

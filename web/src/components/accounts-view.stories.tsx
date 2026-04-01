@@ -6,10 +6,13 @@ import { buildImportCommitEntries } from "@/lib/account-import";
 import type {
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
+  AccountExtractorRunDraft,
+  AccountExtractorRuntime,
   AccountExtractorSettings,
   AccountImportPreviewPayload,
   AccountQuery,
   AccountsPayload,
+  ExtractorSseState,
 } from "@/lib/app-types";
 import {
   sampleAccounts,
@@ -17,6 +20,10 @@ import {
   sampleExtractorHistoryDense,
   sampleExtractorHistoryEmpty,
   sampleExtractorHistoryFailureMatrix,
+  sampleExtractorRuntimeFailed,
+  sampleExtractorRuntimeIdle,
+  sampleExtractorRuntimeRunning,
+  sampleExtractorRuntimeSucceeded,
   sampleExtractorSettings,
 } from "@/stories/fixtures";
 
@@ -115,6 +122,15 @@ const baseArgs = {
   connectProgress: null,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
+  extractorRuntime: sampleExtractorRuntimeIdle,
+  extractorRunDraft: {
+    sources: ["zhanghaoya"],
+    quantity: 1,
+    maxWaitSec: 60,
+    accountType: "outlook",
+  } satisfies AccountExtractorRunDraft,
+  extractorRunBusy: false,
+  extractorSseState: "open" as ExtractorSseState,
   extractorHistory: sampleExtractorHistory,
   extractorHistoryQuery: createDefaultExtractorHistoryQuery(),
   extractorHistoryBusy: false,
@@ -138,6 +154,8 @@ const baseArgs = {
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
   onSaveExtractorSettings: fn(async () => undefined),
+  onExtractorRunDraftChange: fn(),
+  onRunExtractor: fn(async () => undefined),
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
@@ -218,6 +236,10 @@ type AccountsStorySurfaceProps = {
   batchBusy?: boolean;
   connectBusy?: boolean;
   extractorSettings?: AccountExtractorSettings | null;
+  extractorRuntime?: AccountExtractorRuntime;
+  extractorRunDraft?: AccountExtractorRunDraft;
+  extractorRunBusy?: boolean;
+  extractorSseState?: ExtractorSseState;
   extractorHistory?: AccountExtractorHistoryPayload;
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
@@ -235,6 +257,12 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const accounts = props.accounts || sampleAccounts;
   const extractorSettings = props.extractorSettings ?? sampleExtractorSettings;
   const extractorHistory = props.extractorHistory || sampleExtractorHistory;
+  const extractorRunDraft = props.extractorRunDraft ?? {
+    sources: ["zhanghaoya"],
+    quantity: 1,
+    maxWaitSec: 60,
+    accountType: "outlook" as const,
+  };
   const [content, setContent] = useState("");
   const [importGroupName, setImportGroupName] = useState("");
   const [batchGroupName, setBatchGroupName] = useState("");
@@ -266,6 +294,10 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         connectProgress={props.connectBusy ? { current: 1, total: Math.max(1, selectedIds.length) } : null}
         extractorSettings={extractorSettings}
         extractorSettingsBusy={false}
+        extractorRuntime={props.extractorRuntime ?? sampleExtractorRuntimeIdle}
+        extractorRunDraft={extractorRunDraft}
+        extractorRunBusy={Boolean(props.extractorRunBusy)}
+        extractorSseState={props.extractorSseState ?? "open"}
         extractorHistory={extractorHistory}
         extractorHistoryQuery={extractorHistoryQuery}
         extractorHistoryBusy={Boolean(props.extractorHistoryBusy)}
@@ -289,6 +321,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
+        onExtractorRunDraftChange={() => undefined}
+        onRunExtractor={async () => undefined}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
@@ -346,7 +380,7 @@ const sortingDemoAccounts: AccountsPayload = {
 
 async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<HTMLElement> {
   const canvas = within(canvasElement);
-  await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+  await userEvent.click(canvas.getByTestId("open-extractor-settings"));
   await waitFor(() => {
     expect(within(document.body).getByRole("dialog", { name: "微软账号提取器设置" })).toBeInTheDocument();
   });
@@ -387,7 +421,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
+          "微软账号导入与查询页，包含提号器实时面板、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
       },
     },
   },
@@ -584,11 +618,60 @@ export const ExtractorSettingsCompact: Story = {
   render: () => <AccountsStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+    await userEvent.click(canvas.getByTestId("open-extractor-settings"));
     const dialog = within(document.body).getByRole("dialog", { name: "微软账号提取器设置" });
     await expect(dialog).toBeInTheDocument();
     await expect(within(dialog).getByText("闪客云 KEY")).toBeInTheDocument();
     await expect(within(dialog).getByText("Hotmail666 KEY")).toBeInTheDocument();
+  },
+};
+
+export const ExtractorRuntimeRunning: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      extractorRuntime={sampleExtractorRuntimeRunning}
+      extractorRunDraft={{ sources: ["zhanghaoya", "shanyouxiang"], quantity: 2, maxWaitSec: 45, accountType: "outlook" }}
+      extractorSseState="open"
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "提号器运行中场景，展示实时 accepted/raw/in-flight/remaining wait 指标，以及 SSE 已连接状态。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("SSE 已连接")).toBeInTheDocument();
+    await expect(canvas.getByText("目标接受：1 / 2")).toBeInTheDocument();
+    await expect(canvas.getByText("原始请求：3 / 5")).toBeInTheDocument();
+    await expect(canvas.getByText("剩余等待：27s / 45s")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "提号中…" })).toBeDisabled();
+  },
+};
+
+export const ExtractorRuntimeOutcomeStates: Story = {
+  args: baseArgs,
+  render: () => (
+    <div className="space-y-6">
+      <AccountsStorySurface extractorRuntime={sampleExtractorRuntimeSucceeded} extractorRunDraft={{ sources: ["zhanghaoya", "shankeyun"], quantity: 2, maxWaitSec: 45, accountType: "outlook" }} />
+      <AccountsStorySurface extractorRuntime={sampleExtractorRuntimeFailed} extractorRunDraft={{ sources: ["zhanghaoya"], quantity: 1, maxWaitSec: 30, accountType: "outlook" }} extractorSseState="error" />
+    </div>
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "提号器收敛态矩阵，覆盖成功与失败两类结果，便于核对重试前的最终摘要和错误文案。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("已接受 2 / 2 个账号")).toBeInTheDocument();
+    await expect(canvas.getByText("提号预算耗尽（4 次请求）")).toBeInTheDocument();
+    await expect(canvas.getByText("SSE 异常")).toBeInTheDocument();
   },
 };
 

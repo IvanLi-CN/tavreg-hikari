@@ -12,6 +12,9 @@ import type {
   AccountRecord,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
+  AccountExtractorRunDraft,
+  AccountExtractorRuntime,
+  AccountExtractorRuntimePayload,
   AccountExtractorSettings,
   AccountExtractorSettingsPayload,
   AccountImportPayload,
@@ -23,6 +26,7 @@ import type {
   ApiKeysPayload,
   ApiKeyQuery,
   EventRecord,
+  ExtractorSseState,
   JobControlAction,
   JobControlOptions,
   JobDraft,
@@ -106,6 +110,31 @@ function isBatchConnectBlockedAccount(
   return Boolean(account.disabledAt) || isLockedBatchConnectAccount(account) || account.browserSession?.status === "bootstrapping";
 }
 
+function createIdleExtractorRuntime(): AccountExtractorRuntime {
+  return {
+    status: "idle",
+    enabledSources: [],
+    accountType: "outlook",
+    requestedUsableCount: 0,
+    acceptedCount: 0,
+    rawAttemptCount: 0,
+    attemptBudget: 0,
+    inFlightCount: 0,
+    remainingWaitSec: 0,
+    maxWaitSec: 0,
+    startedAt: null,
+    lastProvider: null,
+    lastMessage: null,
+    updatedAt: null,
+    errorMessage: null,
+    lastBatchId: null,
+  };
+}
+
+function isExtractorRuntimeTerminal(runtime: AccountExtractorRuntime): boolean {
+  return runtime.status === "idle" || runtime.status === "succeeded" || runtime.status === "failed";
+}
+
 export function App() {
   const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>({
@@ -181,6 +210,13 @@ export function App() {
     page: 1,
     pageSize: 10,
   });
+  const [extractorRuntime, setExtractorRuntime] = useState<AccountExtractorRuntime>(createIdleExtractorRuntime);
+  const [extractorRunDraft, setExtractorRunDraft] = useState<AccountExtractorRunDraft>({
+    sources: [],
+    quantity: 1,
+    maxWaitSec: 60,
+    accountType: "outlook",
+  });
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [importContent, setImportContent] = useState("");
@@ -229,6 +265,9 @@ export function App() {
   const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
   const [extractorSettingsBusy, setExtractorSettingsBusy] = useState(false);
   const [extractorHistoryBusy, setExtractorHistoryBusy] = useState(false);
+  const [extractorRunBusy, setExtractorRunBusy] = useState(false);
+  const [extractorRunDraftTouched, setExtractorRunDraftTouched] = useState(false);
+  const [extractorSseState, setExtractorSseState] = useState<ExtractorSseState>("connecting");
   const [graphSettingsBusy, setGraphSettingsBusy] = useState(false);
   const [mailboxesBusy, setMailboxesBusy] = useState(false);
   const [messagesBusy, setMessagesBusy] = useState(false);
@@ -255,6 +294,7 @@ export function App() {
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
   const extractorHistoryQueryRef = useRef(extractorHistoryQuery);
+  const extractorRuntimeRef = useRef(extractorRuntime);
   const activePageRef = useRef(activePage);
   const importCommitEntries = useMemo(
     () => buildImportCommitEntries(importPreview, importGroupName),
@@ -305,6 +345,10 @@ export function App() {
   const refreshExtractorSettings = async () => {
     const payload = await api<AccountExtractorSettingsPayload>("/api/account-extractors/settings");
     setExtractorSettings(payload.settings);
+  };
+  const refreshExtractorRuntime = async () => {
+    const payload = await api<AccountExtractorRuntimePayload>("/api/account-extractors/runtime");
+    setExtractorRuntime(payload.runtime);
   };
   const refreshExtractorHistory = async (nextQuery = extractorHistoryQuery) => {
     try {
@@ -384,6 +428,7 @@ export function App() {
       refreshApiKeys(),
       refreshProxies(),
       refreshExtractorSettings(),
+      refreshExtractorRuntime(),
       refreshExtractorHistory(),
       refreshMicrosoftGraphSettings(),
       refreshMailboxes(),
@@ -412,6 +457,16 @@ export function App() {
   }, [job.job, jobDraftTouched]);
 
   useEffect(() => {
+    if (!extractorSettings || extractorRunDraftTouched) return;
+    setExtractorRunDraft({
+      sources: extractorSettings.defaultAutoExtractSources,
+      quantity: extractorSettings.defaultAutoExtractQuantity,
+      maxWaitSec: extractorSettings.defaultAutoExtractMaxWaitSec,
+      accountType: extractorSettings.defaultAutoExtractAccountType,
+    });
+  }, [extractorRunDraftTouched, extractorSettings]);
+
+  useEffect(() => {
     accountQueryRef.current = accountQuery;
   }, [accountQuery]);
 
@@ -422,6 +477,10 @@ export function App() {
   useEffect(() => {
     extractorHistoryQueryRef.current = extractorHistoryQuery;
   }, [extractorHistoryQuery]);
+
+  useEffect(() => {
+    extractorRuntimeRef.current = extractorRuntime;
+  }, [extractorRuntime]);
 
   useEffect(() => {
     activePageRef.current = activePage;
@@ -460,6 +519,53 @@ export function App() {
     socket.onerror = () => setError("WebSocket disconnected");
     return () => socket.close();
   }, []);
+
+  useEffect(() => {
+    if (activePage !== "accounts") {
+      setExtractorSseState("closed");
+      return;
+    }
+    setExtractorSseState("connecting");
+    const source = new EventSource("/api/accounts/events");
+    source.onopen = () => {
+      setExtractorSseState("open");
+    };
+    source.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as EventRecord;
+        if (next.type === "extractor.updated") {
+          const runtime = (next.payload.runtime || createIdleExtractorRuntime()) as AccountExtractorRuntime;
+          const previous = extractorRuntimeRef.current;
+          setExtractorRuntime(runtime);
+          if (
+            runtime.lastBatchId !== previous.lastBatchId
+            || (runtime.status !== previous.status && isExtractorRuntimeTerminal(runtime))
+          ) {
+            void refreshExtractorHistory(extractorHistoryQueryRef.current);
+          }
+          return;
+        }
+        if (next.type === "account.updated") {
+          void refreshAccounts(accountQueryRef.current);
+          void refreshExtractorHistory(extractorHistoryQueryRef.current);
+          return;
+        }
+        if (next.type === "mailbox.updated") {
+          void refreshAccounts(accountQueryRef.current);
+          return;
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    source.onerror = () => {
+      setExtractorSseState("error");
+    };
+    return () => {
+      source.close();
+      setExtractorSseState("closed");
+    };
+  }, [activePage]);
 
   useEffect(() => {
     void refreshAccounts(accountQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -640,6 +746,23 @@ export function App() {
       throw err;
     } finally {
       setExtractorSettingsBusy(false);
+    }
+  };
+
+  const handleRunExtractor = async () => {
+    try {
+      setExtractorRunBusy(true);
+      setError(null);
+      const payload = await api<AccountExtractorRuntimePayload>("/api/account-extractors/run", {
+        method: "POST",
+        body: JSON.stringify(extractorRunDraft),
+      });
+      setExtractorRuntime(payload.runtime);
+      await refreshExtractorHistory(extractorHistoryQueryRef.current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExtractorRunBusy(false);
     }
   };
 
@@ -1084,6 +1207,10 @@ export function App() {
           connectProgress={accountConnectProgress}
           extractorSettings={extractorSettings}
           extractorSettingsBusy={extractorSettingsBusy}
+          extractorRuntime={extractorRuntime}
+          extractorRunDraft={extractorRunDraft}
+          extractorRunBusy={extractorRunBusy}
+          extractorSseState={extractorSseState}
           extractorHistory={extractorHistory}
           extractorHistoryQuery={extractorHistoryQuery}
           extractorHistoryBusy={extractorHistoryBusy}
@@ -1110,6 +1237,14 @@ export function App() {
           onSaveProofMailbox={handleSaveProofMailbox}
           onSaveAvailability={handleSaveAvailability}
           onSaveExtractorSettings={handleSaveExtractorSettings}
+          onExtractorRunDraftChange={(patch) => {
+            setExtractorRunDraftTouched(true);
+            setExtractorRunDraft((current) => ({
+              ...current,
+              ...patch,
+            }));
+          }}
+          onRunExtractor={handleRunExtractor}
           onExtractorHistoryQueryChange={setExtractorHistoryQuery}
           onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
           onOpenMailbox={handleOpenMailbox}

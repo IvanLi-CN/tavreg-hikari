@@ -365,6 +365,41 @@ export type EventRecord = {
   payload: Record<string, unknown>;
 };
 
+export type AccountExtractorRuntimeStatus = "idle" | "running" | "succeeded" | "failed";
+
+export type AccountExtractorRuntime = {
+  status: AccountExtractorRuntimeStatus;
+  enabledSources: AccountExtractorProvider[];
+  accountType: AccountExtractorAccountType;
+  requestedUsableCount: number;
+  acceptedCount: number;
+  rawAttemptCount: number;
+  attemptBudget: number;
+  inFlightCount: number;
+  remainingWaitSec: number;
+  maxWaitSec: number;
+  startedAt: string | null;
+  lastProvider: AccountExtractorProvider | null;
+  lastMessage: string | null;
+  updatedAt: string | null;
+  errorMessage: string | null;
+  lastBatchId: number | null;
+};
+
+export type AccountExtractorRuntimePayload = {
+  ok: true;
+  runtime: AccountExtractorRuntime;
+};
+
+export type AccountExtractorRunDraft = {
+  sources: AccountExtractorProvider[];
+  quantity: number;
+  maxWaitSec: number;
+  accountType: AccountExtractorAccountType;
+};
+
+export type ExtractorSseState = "connecting" | "open" | "error" | "closed";
+
 export type JobDraft = {
   runMode: "headed" | "headless";
   need: number;
