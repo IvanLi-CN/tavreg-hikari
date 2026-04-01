@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -133,6 +133,14 @@ function extractorSseStateCopy(state: ExtractorSseState): { label: string; varia
   if (state === "connecting") return { label: "SSE 连接中", variant: "info" };
   if (state === "error") return { label: "SSE 异常", variant: "danger" };
   return { label: "SSE 已关闭", variant: "warning" };
+}
+
+function normalizeExtractorNumericInput(rawValue: string, committedValue: number): number {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return committedValue;
+  const parsed = Math.trunc(Number(trimmed));
+  if (!Number.isFinite(parsed)) return committedValue;
+  return Math.max(1, parsed);
 }
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -407,6 +415,8 @@ export function AccountsView({
     status: "idle" | "copied" | "failed";
   }>({ accountId: null, status: "idle" });
   const passwordCopyResetTimerRef = useRef<number | null>(null);
+  const [extractorQuantityInput, setExtractorQuantityInput] = useState(() => String(extractorRunDraft.quantity));
+  const [extractorMaxWaitInput, setExtractorMaxWaitInput] = useState(() => String(extractorRunDraft.maxWaitSec));
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -437,6 +447,14 @@ export function AccountsView({
       }
     };
   }, []);
+
+  useEffect(() => {
+    setExtractorQuantityInput(String(extractorRunDraft.quantity));
+  }, [extractorRunDraft.quantity]);
+
+  useEffect(() => {
+    setExtractorMaxWaitInput(String(extractorRunDraft.maxWaitSec));
+  }, [extractorRunDraft.maxWaitSec]);
 
   const queuePasswordCopyFeedbackReset = () => {
     if (passwordCopyResetTimerRef.current != null) {
@@ -594,43 +612,26 @@ export function AccountsView({
     }
   };
 
+  const commitExtractorQuantityInput = () => {
+    const normalized = normalizeExtractorNumericInput(extractorQuantityInput, extractorRunDraft.quantity);
+    setExtractorQuantityInput(String(normalized));
+    if (normalized !== extractorRunDraft.quantity) {
+      onExtractorRunDraftChange({ quantity: normalized });
+    }
+  };
+
+  const commitExtractorMaxWaitInput = () => {
+    const normalized = normalizeExtractorNumericInput(extractorMaxWaitInput, extractorRunDraft.maxWaitSec);
+    setExtractorMaxWaitInput(String(normalized));
+    if (normalized !== extractorRunDraft.maxWaitSec) {
+      onExtractorRunDraftChange({ maxWaitSec: normalized });
+    }
+  };
+
   return (
     <>
       <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]">
         <div className="space-y-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>导入微软账号</CardTitle>
-              <CardDescription>
-                每行一个账号。支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code>、
-                <code>email password</code>、<code>email----password</code>，也会自动纠正邮箱前后顺序。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <Textarea
-                name="account-import"
-                className="min-h-72"
-                placeholder={"example@outlook.com,password123\nexample@outlook.com----password123\npassword123 example@outlook.com"}
-                value={importContent}
-                onChange={(event) => onImportContentChange(event.target.value)}
-              />
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-                <div className="min-w-0 flex-1">
-                  <GroupCombobox
-                    groups={accounts.groups}
-                    value={importGroupName}
-                    onChange={onImportGroupChange}
-                    placeholder="导入分组（可直接新建）"
-                    emptyLabel="不设置分组"
-                  />
-                </div>
-                <Button onClick={onOpenPreview} disabled={!importContent.trim() || previewBusy} className="sm:self-stretch">
-                  {previewBusy ? "解析中…" : "导入预览"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
           <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
             <CardHeader>
               <CardTitle>提号器</CardTitle>
@@ -688,13 +689,10 @@ export function AccountsView({
                     type="number"
                     min={1}
                     step={1}
-                    value={String(extractorRunDraft.quantity)}
+                    value={extractorQuantityInput}
                     disabled={extractorRuntime.status === "running"}
-                    onChange={(event) =>
-                      onExtractorRunDraftChange({
-                        quantity: Math.max(1, Math.trunc(Number(event.target.value) || 1)),
-                      })
-                    }
+                    onChange={(event) => setExtractorQuantityInput(event.target.value)}
+                    onBlur={commitExtractorQuantityInput}
                   />
                 </label>
                 <label className="flex flex-col gap-2">
@@ -703,13 +701,10 @@ export function AccountsView({
                     type="number"
                     min={1}
                     step={1}
-                    value={String(extractorRunDraft.maxWaitSec)}
+                    value={extractorMaxWaitInput}
                     disabled={extractorRuntime.status === "running"}
-                    onChange={(event) =>
-                      onExtractorRunDraftChange({
-                        maxWaitSec: Math.max(1, Math.trunc(Number(event.target.value) || 1)),
-                      })
-                    }
+                    onChange={(event) => setExtractorMaxWaitInput(event.target.value)}
+                    onBlur={commitExtractorMaxWaitInput}
                   />
                 </label>
               </div>
@@ -753,11 +748,48 @@ export function AccountsView({
                 </Button>
                 <Button
                   variant="outline"
+                  size="icon"
                   onClick={openExtractorDialog}
-                  className="sm:w-auto"
+                  className="shrink-0 rounded-2xl"
                   data-testid="open-extractor-settings"
+                  aria-label="打开提号器 KEY 与历史"
+                  title="打开提号器 KEY 与历史"
                 >
-                  KEY / 历史
+                  <SlidersHorizontal className="size-4" />
+                  <span className="sr-only">KEY / 历史</span>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>导入微软账号</CardTitle>
+              <CardDescription>
+                每行一个账号。支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code>、
+                <code>email password</code>、<code>email----password</code>，也会自动纠正邮箱前后顺序。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <Textarea
+                name="account-import"
+                className="min-h-72"
+                placeholder={"example@outlook.com,password123\nexample@outlook.com----password123\npassword123 example@outlook.com"}
+                value={importContent}
+                onChange={(event) => onImportContentChange(event.target.value)}
+              />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div className="min-w-0 flex-1">
+                  <GroupCombobox
+                    groups={accounts.groups}
+                    value={importGroupName}
+                    onChange={onImportGroupChange}
+                    placeholder="导入分组（可直接新建）"
+                    emptyLabel="不设置分组"
+                  />
+                </div>
+                <Button onClick={onOpenPreview} disabled={!importContent.trim() || previewBusy} className="sm:self-stretch">
+                  {previewBusy ? "解析中…" : "导入预览"}
                 </Button>
               </div>
             </CardContent>

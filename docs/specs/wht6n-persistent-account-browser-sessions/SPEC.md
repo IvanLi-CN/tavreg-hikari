@@ -158,6 +158,11 @@
 
 ![账号页提号器运行态](./assets/accounts-extractor-runtime-running.png)
 
+- Storybook canvas：`Views/AccountsView / ExtractorRunInputsBlurCorrectionPlay`
+  - 证明提号器的“提号数量 / 最长等待”输入框允许先清空再重输，只在失焦后回写订正后的数值，避免边删边被立即改写。
+
+![提号器输入框失焦订正](./assets/accounts-extractor-input-blur-correction.png)
+
 - Storybook canvas：`Views/AccountsView / ExtractorRuntimeOutcomeStates`
   - 证明提号器在成功/失败收敛态都会保留最终摘要，包含 accepted/raw 计数、错误文案与 SSE 异常提示，便于后续重试与人工排障。
 

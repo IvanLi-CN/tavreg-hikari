@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
@@ -257,22 +257,29 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const accounts = props.accounts || sampleAccounts;
   const extractorSettings = props.extractorSettings ?? sampleExtractorSettings;
   const extractorHistory = props.extractorHistory || sampleExtractorHistory;
-  const extractorRunDraft = props.extractorRunDraft ?? {
-    sources: ["zhanghaoya"],
-    quantity: 1,
-    maxWaitSec: 60,
-    accountType: "outlook" as const,
-  };
   const [content, setContent] = useState("");
   const [importGroupName, setImportGroupName] = useState("");
   const [batchGroupName, setBatchGroupName] = useState("");
   const [query, setQuery] = useState<AccountQuery>(createDefaultQuery());
   const [selectedIds, setSelectedIds] = useState<number[]>(props.initialSelectedIds ?? [2]);
   const [previewOpen, setPreviewOpen] = useState(Boolean(props.previewOpen));
+  const [extractorRunDraft, setExtractorRunDraft] = useState<AccountExtractorRunDraft>(
+    props.extractorRunDraft ?? {
+      sources: ["zhanghaoya"],
+      quantity: 1,
+      maxWaitSec: 60,
+      accountType: "outlook" as const,
+    },
+  );
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
   const visibleAccounts = applyStoryAccountQuery(accounts, query);
+
+  useEffect(() => {
+    if (!props.extractorRunDraft) return;
+    setExtractorRunDraft(props.extractorRunDraft);
+  }, [props.extractorRunDraft]);
 
   return (
     <div className={props.frameClassName}>
@@ -321,7 +328,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
-        onExtractorRunDraftChange={() => undefined}
+        onExtractorRunDraftChange={(patch) => setExtractorRunDraft((current) => ({ ...current, ...patch }))}
         onRunExtractor={async () => undefined}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
@@ -649,6 +656,37 @@ export const ExtractorRuntimeRunning: Story = {
     await expect(canvas.getByText("原始请求：3 / 5")).toBeInTheDocument();
     await expect(canvas.getByText("剩余等待：27s / 45s")).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "提号中…" })).toBeDisabled();
+  },
+};
+
+export const ExtractorRunInputsBlurCorrectionPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证提号数量与最长等待输入框允许先清空再重输，只在失焦后做数值订正，避免边删边被立即改写。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const quantityInput = canvas.getByRole("spinbutton", { name: "提号数量" }) as HTMLInputElement;
+    const maxWaitInput = canvas.getByRole("spinbutton", { name: "最长等待（秒）" }) as HTMLInputElement;
+
+    await userEvent.clear(quantityInput);
+    expect(quantityInput.value).toBe("");
+    await userEvent.type(quantityInput, "12");
+    expect(quantityInput.value).toBe("12");
+    await userEvent.tab();
+    await expect(quantityInput).toHaveValue(12);
+
+    await userEvent.clear(maxWaitInput);
+    expect(maxWaitInput.value).toBe("");
+    await userEvent.type(maxWaitInput, "300");
+    expect(maxWaitInput.value).toBe("300");
+    await userEvent.tab();
+    await expect(maxWaitInput).toHaveValue(300);
   },
 };
 
