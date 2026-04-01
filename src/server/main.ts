@@ -25,6 +25,7 @@ import {
   isLockedAccountRecord,
   shouldQueueImportedAccountBootstrap,
 } from "./account-session-bootstrap.js";
+import { resolveTaskLedgerDbPath } from "../storage/db-paths.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
@@ -57,7 +58,7 @@ loadDotenv({ path: ".env.local", quiet: true });
 const REPO_ROOT = process.cwd();
 const OUTPUT_ROOT = path.join(REPO_ROOT, "output");
 const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json");
-const DEFAULT_DB_PATH = path.resolve(process.env.TASK_LEDGER_DB_PATH || path.join(OUTPUT_ROOT, "registry", "signup-tasks.sqlite"));
+const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -1166,6 +1167,8 @@ async function main(): Promise<void> {
           hasApiKey: parseBool(url.searchParams.get("hasApiKey")),
           skipReason: url.searchParams.get("skipReason") || undefined,
           groupName: url.searchParams.get("groupName") || undefined,
+          sortBy: url.searchParams.get("sortBy") || undefined,
+          sortDir: url.searchParams.get("sortDir") || undefined,
           page,
           pageSize,
         });

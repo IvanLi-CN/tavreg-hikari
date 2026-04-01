@@ -201,7 +201,16 @@ export function App() {
     autoExtractMaxWaitSec: 60,
     autoExtractAccountType: "outlook",
   });
-  const [accountQuery, setAccountQuery] = useState<AccountQuery>({ q: "", status: "", hasApiKey: "", groupName: "", page: 1, pageSize: 20 });
+  const [accountQuery, setAccountQuery] = useState<AccountQuery>({
+    q: "",
+    status: "",
+    hasApiKey: "",
+    groupName: "",
+    sortBy: "",
+    sortDir: "desc",
+    page: 1,
+    pageSize: 20,
+  });
   const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", groupName: "", page: 1, pageSize: 20 });
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>({
     provider: "",
@@ -263,6 +272,8 @@ export function App() {
     if (nextQuery.status) params.set("status", nextQuery.status);
     if (nextQuery.hasApiKey) params.set("hasApiKey", nextQuery.hasApiKey);
     if (nextQuery.groupName) params.set("groupName", nextQuery.groupName);
+    if (nextQuery.sortBy) params.set("sortBy", nextQuery.sortBy);
+    if (nextQuery.sortBy && nextQuery.sortDir) params.set("sortDir", nextQuery.sortDir);
     params.set("page", String(nextQuery.page));
     params.set("pageSize", String(nextQuery.pageSize));
 

@@ -515,6 +515,20 @@ function mapAccountBrowserSessionRow(row: Record<string, unknown>): AccountBrows
   };
 }
 
+function resolveAccountListOrderClause(sortBy?: string, sortDir?: string): string {
+  const normalizedDirection = sortDir === "asc" ? "asc" : "desc";
+  if (sortBy === "importedAt") {
+    return `ORDER BY a.imported_at ${normalizedDirection.toUpperCase()}, a.updated_at DESC, a.id DESC`;
+  }
+  if (sortBy === "lastUsedAt") {
+    if (normalizedDirection === "asc") {
+      return "ORDER BY CASE WHEN a.last_used_at IS NULL THEN 0 ELSE 1 END ASC, a.last_used_at ASC, a.updated_at DESC, a.id DESC";
+    }
+    return "ORDER BY CASE WHEN a.last_used_at IS NULL THEN 1 ELSE 0 END ASC, a.last_used_at DESC, a.updated_at DESC, a.id DESC";
+  }
+  return "ORDER BY a.updated_at DESC";
+}
+
 function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
   return {
     id: Number(row.id),
@@ -770,7 +784,7 @@ export class AppDatabase {
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
-    this.db = openSqliteDatabase(dbPath);
+    this.db = openSqliteDatabase(this.dbPath);
     this.db.exec("PRAGMA journal_mode=WAL;");
     this.db.exec("PRAGMA synchronous=NORMAL;");
     this.db.exec("PRAGMA temp_store=MEMORY;");
@@ -1484,6 +1498,8 @@ export class AppDatabase {
     hasApiKey?: boolean;
     skipReason?: string;
     groupName?: string;
+    sortBy?: string;
+    sortDir?: string;
     page?: number;
     pageSize?: number;
   }): { rows: MicrosoftAccountRecord[]; total: number; summary: { ready: number; linked: number; failed: number; disabled: number } } {
@@ -1527,8 +1543,9 @@ export class AppDatabase {
       `)
       .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number; disabled_count?: number } | null;
     const total = Number(summaryRow?.total || 0);
+    const orderClause = resolveAccountListOrderClause(filters.sortBy, filters.sortDir);
     const rows = this.db
-      .query(accountSelectSql(whereSql, "ORDER BY a.updated_at DESC LIMIT ? OFFSET ?"))
+      .query(accountSelectSql(whereSql, `${orderClause} LIMIT ? OFFSET ?`))
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
     return {
       rows: rows.map(mapAccountRow),

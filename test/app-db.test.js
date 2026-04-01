@@ -319,6 +319,51 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("supports importedAt sorting across the full filtered result set", async () => {
+    const { appDb } = await createTempDb();
+    appDb.importAccounts([{ email: "first@outlook.com", password: "pass-a" }]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    appDb.importAccounts([{ email: "second@outlook.com", password: "pass-b" }]);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    appDb.importAccounts([{ email: "third@outlook.com", password: "pass-c" }]);
+
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "importedAt", sortDir: "desc" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["third@outlook.com", "second@outlook.com", "first@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "importedAt", sortDir: "asc" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["first@outlook.com", "second@outlook.com", "third@outlook.com"]);
+
+    appDb.close();
+  });
+
+  test("supports lastUsedAt sorting with nulls last in desc and first in asc", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "never-used@outlook.com", password: "pass-a" },
+      { email: "older-used@outlook.com", password: "pass-b" },
+      { email: "recent-used@outlook.com", password: "pass-c" },
+    ]);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
+    const olderAccountId = imported.affectedIds[1];
+    const recentAccountId = imported.affectedIds[2];
+    const olderAttempt = appDb.createAttempt(job.id, olderAccountId, "/tmp/tavreg-sort-older");
+    appDb.completeAttemptFailure(job.id, olderAttempt.id, olderAccountId, { errorCode: "older-sort-check" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const recentAttempt = appDb.createAttempt(job.id, recentAccountId, "/tmp/tavreg-sort-recent");
+    appDb.completeAttemptFailure(job.id, recentAttempt.id, recentAccountId, { errorCode: "recent-sort-check" });
+
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "lastUsedAt", sortDir: "desc" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["recent-used@outlook.com", "older-used@outlook.com", "never-used@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "lastUsedAt", sortDir: "asc" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["never-used@outlook.com", "older-used@outlook.com", "recent-used@outlook.com"]);
+
+    appDb.close();
+  });
+
   test("preserves the original imported_at when an existing account is re-imported", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "stable@outlook.com", password: "first-pass" }]);
