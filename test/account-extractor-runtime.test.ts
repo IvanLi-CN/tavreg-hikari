@@ -1,8 +1,30 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
+  AccountExtractorRuntime,
   decideManualExtractorAcceptance,
   normalizeExtractorSources,
 } from "../src/server/account-extractor-runtime.ts";
+import { AppDatabase } from "../src/storage/app-db.ts";
+
+const tempDirs: string[] = [];
+
+async function createTempDb() {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-runtime-"));
+  tempDirs.push(tempDir);
+  const appDb = await AppDatabase.open(path.join(tempDir, "app.sqlite"));
+  return { appDb };
+}
+
+afterEach(async () => {
+  while (tempDirs.length > 0) {
+    const target = tempDirs.pop();
+    if (!target) continue;
+    await rm(target, { recursive: true, force: true });
+  }
+});
 
 function createExistingAccount(overrides: Record<string, unknown> = {}) {
   return {
@@ -149,5 +171,74 @@ describe("account extractor runtime helpers", () => {
       shouldImport: false,
       forceBootstrap: false,
     });
+  });
+
+  test("manual stop drains in-flight requests into the stopped terminal state", async () => {
+    const { appDb } = await createTempDb();
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      () => undefined,
+      () => false,
+    );
+    const controller = new AbortController();
+    const now = "2026-04-03T03:20:00.000Z";
+    runtime["state"] = {
+      runId: 7,
+      status: "running",
+      enabledSources: ["zhanghaoya"],
+      accountType: "outlook",
+      requestedUsableCount: 1,
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      attemptBudget: 0,
+      inFlightCount: 1,
+      remainingWaitMs: 60_000,
+      maxWaitMs: 60_000,
+      startedAt: now,
+      lastProvider: "zhanghaoya",
+      lastMessage: "账号鸭 请求已发出",
+      updatedAt: now,
+      errorMessage: null,
+      lastBatchId: null,
+      nextProviderIndex: 0,
+      providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerInFlightCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      lastBudgetTickMs: Date.now(),
+      lastPublishedAtMs: 0,
+      requestControllers: new Map([["req-1", controller]]),
+    };
+
+    const stopping = await runtime.stop();
+    expect(stopping.status).toBe("stopping");
+    expect(stopping.lastMessage).toContain("等待 1 个在途请求收尾");
+    expect(controller.signal.aborted).toBe(true);
+
+    runtime["finishRequest"]({
+      runId: 7,
+      provider: "zhanghaoya",
+      requestId: "req-1",
+      dispatchStartedAt: now,
+      result: null,
+      rawResponse: null,
+      maskedKey: "zhya****0001",
+      errorMessage: "提号已取消",
+      failureCode: "manual_stop",
+    });
+
+    const stopped = runtime.getSnapshot();
+    expect(stopped.status).toBe("stopped");
+    expect(stopped.inFlightCount).toBe(0);
+    expect(stopped.lastMessage).toBe("提号已取消");
+    appDb.close();
   });
 });

@@ -58,6 +58,7 @@ interface AutoExtractState {
   inFlightCount: number;
   nextProviderIndex: number;
   providerNextAttemptAtMs: Record<AccountExtractorProvider, number>;
+  providerInFlightCount: Record<AccountExtractorProvider, number>;
   phase: AutoExtractPhase;
   startedAt: string | null;
   lastProvider: AccountExtractorProvider | null;
@@ -101,8 +102,7 @@ type AutoExtractDecision =
   | { status: "unavailable"; reason: string };
 
 const AUTO_EXTRACT_REQUEST_INTERVAL_MS = 500;
-const AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS = 4;
-const AUTO_EXTRACT_OVERFETCH_ALLOWANCE = AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS - 1;
+const AUTO_EXTRACT_WORKERS_PER_PROVIDER = 3;
 const AUTO_EXTRACT_REQUEST_TIMEOUT_MS = 5000;
 // Fresh Tavily + Graph bootstrap runs are serialized and can take several minutes
 // per account. Keep jobs waiting long enough for pending session prep to finish
@@ -453,6 +453,15 @@ function shouldIgnoreSignupTaskForAttempt(
 }
 
 function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
+  return {
+    zhanghaoya: 0,
+    shanyouxiang: 0,
+    shankeyun: 0,
+    hotmail666: 0,
+  };
+}
+
+function createProviderInFlightCounter(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
     shanyouxiang: 0,
@@ -1322,6 +1331,7 @@ export class JobScheduler {
       inFlightCount: 0,
       nextProviderIndex: 0,
       providerNextAttemptAtMs: createProviderAttemptClock(),
+      providerInFlightCount: createProviderInFlightCounter(),
       phase: "idle",
       startedAt: null,
       lastProvider: null,
@@ -1366,6 +1376,7 @@ export class JobScheduler {
       current.startedAt = null;
       current.lastBudgetTickMs = null;
       current.providerNextAttemptAtMs = createProviderAttemptClock();
+      current.providerInFlightCount = createProviderInFlightCounter();
       current.requestControllers.clear();
     }
   }
@@ -1393,6 +1404,7 @@ export class JobScheduler {
     state.inFlightCount = 0;
     state.startedAt = null;
     state.providerNextAttemptAtMs = createProviderAttemptClock();
+    state.providerInFlightCount = createProviderInFlightCounter();
     state.lastBudgetTickMs = null;
     state.lastMessage = message;
     state.updatedAt = nowIso();
@@ -1408,12 +1420,13 @@ export class JobScheduler {
     }
     state.phase = "waiting";
     state.currentRoundTarget = currentRoundTarget;
-    state.attemptBudget = currentRoundTarget + AUTO_EXTRACT_OVERFETCH_ALLOWANCE;
+    state.attemptBudget = 0;
     state.acceptedCount = 0;
     state.rawAttemptCount = 0;
     state.inFlightCount = 0;
     state.startedAt = nowIso();
     state.providerNextAttemptAtMs = createProviderAttemptClock();
+    state.providerInFlightCount = createProviderInFlightCounter();
     state.lastProvider = null;
     state.lastMessage = `waiting to extract ${currentRoundTarget} usable account(s)`;
     state.lastBudgetTickMs = Date.now();
@@ -1460,9 +1473,9 @@ export class JobScheduler {
       state.phase = "waiting";
       state.lastMessage = targetReached
         ? `target reached, waiting for ${state.inFlightCount} in-flight request(s)`
-        : waitExhausted
+        : waitExhausted || rawBudgetExhausted
           ? `wait budget exhausted, waiting for ${state.inFlightCount} in-flight request(s)`
-          : `raw request budget exhausted, waiting for ${state.inFlightCount} in-flight request(s)`;
+          : `waiting for ${state.inFlightCount} in-flight request(s)`;
       state.updatedAt = nowIso();
       return { status: "waiting" };
     }
@@ -1481,7 +1494,7 @@ export class JobScheduler {
     if (rawBudgetExhausted) {
       return this.finalizeAutoExtractRound(state, {
         status: state.acceptedCount > 0 ? "ready" : "unavailable",
-        reason: `auto extract stopped after ${state.attemptBudget} raw request(s)`,
+        reason: `auto extract timed out after ${Math.ceil(state.maxWaitMs / 1000)}s`,
       });
     }
     if (job.autoExtractSources.length === 0) {
@@ -1504,7 +1517,10 @@ export class JobScheduler {
       if (!provider) {
         continue;
       }
-      if (state.providerNextAttemptAtMs[provider] <= nowMs) {
+      if (
+        state.providerNextAttemptAtMs[provider] <= nowMs
+        && state.providerInFlightCount[provider] < AUTO_EXTRACT_WORKERS_PER_PROVIDER
+      ) {
         state.nextProviderIndex = (index + 1) % total;
         return provider;
       }
@@ -1692,6 +1708,7 @@ export class JobScheduler {
 
       if (state && state.startedAt === context.roundStartedAt) {
         state.inFlightCount = Math.max(0, state.inFlightCount - 1);
+        state.providerInFlightCount[context.provider] = Math.max(0, state.providerInFlightCount[context.provider] - 1);
         state.lastProvider = context.provider;
         state.acceptedCount += acceptedInBatch;
         state.phase = state.inFlightCount > 0 ? "waiting" : state.acceptedCount >= state.currentRoundTarget ? "waiting" : "extracting";
@@ -1808,8 +1825,7 @@ export class JobScheduler {
       state.enabledSources.length > 0
       && state.remainingWaitMs > 0
       && state.acceptedCount < state.currentRoundTarget
-      && state.rawAttemptCount < state.attemptBudget
-      && state.inFlightCount < AUTO_EXTRACT_MAX_CONCURRENT_REQUESTS
+      && (state.attemptBudget <= 0 || state.rawAttemptCount < state.attemptBudget)
     ) {
       const nowMs = Date.now();
       const provider = this.pickDueProvider(state, nowMs);
@@ -1822,6 +1838,7 @@ export class JobScheduler {
       state.lastMessage = `${providerLabel(provider)} request dispatched`;
       state.rawAttemptCount += 1;
       state.inFlightCount += 1;
+      state.providerInFlightCount[provider] += 1;
       state.providerNextAttemptAtMs[provider] = nowMs + AUTO_EXTRACT_REQUEST_INTERVAL_MS;
       state.updatedAt = dispatchStartedAt;
       this.launchAutoExtractRequest({

@@ -1,6 +1,6 @@
 import { config as loadDotenv } from "dotenv";
 import { spawn } from "node:child_process";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import {
@@ -729,6 +729,7 @@ interface MailboxOauthWorkerResult {
 
 async function runMailboxOauthWorker(input: {
   account: MicrosoftAccountRecord;
+  mailboxId: number;
   settings: AppSettings;
   proxyNode: string;
   profilePath: string;
@@ -738,6 +739,12 @@ async function runMailboxOauthWorker(input: {
   const runId = `mailbox-${input.account.id}-${Date.now()}`;
   const outputDir = path.join(OUTPUT_ROOT, "mailbox-oauth", runId);
   const resultPath = path.join(outputDir, "result.json");
+  const runtimeBinding = getRuntimeServerBinding(input.settings);
+  const localServerHost =
+    runtimeBinding.host === "0.0.0.0" || runtimeBinding.host === "::" || runtimeBinding.host === "[::]"
+      ? "127.0.0.1"
+      : runtimeBinding.host;
+  const localServerOrigin = `http://${localServerHost}:${runtimeBinding.port}`;
   await mkdir(outputDir, { recursive: true });
   const portLeases = await reserveMihomoPortLeases();
   try {
@@ -777,7 +784,9 @@ async function runMailboxOauthWorker(input: {
           "run",
           "src/server/microsoft-oauth-worker.ts",
           `--auth-url=${input.authUrl}`,
+          `--mailbox-id=${input.mailboxId}`,
           `--redirect-uri=${input.redirectUri}`,
+          `--local-server-origin=${localServerOrigin}`,
           `--proxy-node=${input.proxyNode}`,
           `--result-path=${resultPath}`,
         ],
@@ -807,6 +816,10 @@ async function runMailboxOauthWorker(input: {
       });
       child.once("close", async (code) => {
         clearTimeout(timeout);
+        const combinedLog = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+        if (combinedLog) {
+          await writeFile(path.join(outputDir, "worker.log"), combinedLog, "utf8").catch(() => {});
+        }
         try {
           const raw = await readFile(resultPath, "utf8");
           const parsed = JSON.parse(raw) as MailboxOauthWorkerResult;
@@ -889,6 +902,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   try {
     workerResult = await runMailboxOauthWorker({
       account,
+      mailboxId: nextMailbox.id,
       settings: runtimeSettings,
       proxyNode,
       profilePath: session.profilePath,
@@ -1081,6 +1095,7 @@ async function main(): Promise<void> {
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
+      const mailboxDetailMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)$/);
       const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
       const mailboxMessagesMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/messages$/);
       const mailboxMessageDetailMatch = pathname.match(/^\/api\/microsoft-mail\/messages\/(\d+)$/);
@@ -1464,6 +1479,15 @@ async function main(): Promise<void> {
         }
       }
 
+      if (pathname === "/api/account-extractors/stop" && req.method === "POST") {
+        try {
+          const runtime = await accountExtractorRuntime.stop();
+          return json({ ok: true, runtime });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+      }
+
       if (pathname === "/api/account-extractors/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
         const current = readSettings();
@@ -1546,6 +1570,21 @@ async function main(): Promise<void> {
         return json({
           ok: true,
           rows: db.listMailboxes({ connectedOnly: true }).map((row) => serializeMailbox(row)),
+        });
+      }
+
+      if (mailboxDetailMatch && req.method === "GET") {
+        const mailboxId = Number.parseInt(mailboxDetailMatch[1] || "", 10);
+        if (!Number.isInteger(mailboxId) || mailboxId < 1) {
+          return badRequest("invalid mailbox id");
+        }
+        const mailbox = db.getMailbox(mailboxId);
+        if (!mailbox) {
+          return badRequest(`mailbox not found: ${mailboxId}`, 404);
+        }
+        return json({
+          ok: true,
+          row: serializeMailbox(mailbox),
         });
       }
 

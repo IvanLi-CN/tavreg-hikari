@@ -4,6 +4,7 @@ import {
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftPasswordError,
   isMicrosoftAuthorizeShellUnready,
+  isMicrosoftKeepSignedInPrompt,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
@@ -57,6 +58,21 @@ describe("Microsoft login state", () => {
       code: "microsoft_account_locked",
       message:
         "microsoft account | your account has been locked we've detected some activity that violates our microsoft services agreement and have locked your account.",
+    });
+  });
+
+  test("classifies Microsoft identity-confirm secondary verification gate as lockworthy", () => {
+    const classification = classifyMicrosoftFlowInterrupt({
+      url: "https://account.live.com/identity/confirm?mkt=JA-JP",
+      title: "お客様のアカウント保護にご協力ください",
+      bodyText:
+        "今回のサインインには、通常と異なる点があるようです。たとえば、お客様が新しい場所、新しいデバイス、新しいアプリからサインインしている可能性があります。",
+    });
+
+    expect(classification).toEqual({
+      code: "microsoft_account_locked",
+      message:
+        "お客様のアカウント保護にご協力ください | 今回のサインインには、通常と異なる点があるようです。たとえば、お客様が新しい場所、新しいデバイス、新しいアプリからサインインしている可能性があります。".toLowerCase(),
     });
   });
 
@@ -143,14 +159,14 @@ describe("Microsoft login state", () => {
     ).toBe(false);
   });
 
-  test("classifies unknown recovery email on identity-confirm surfaces", () => {
+  test("keeps identity-confirm surfaces on password fallback when available", () => {
     expect(
       shouldClassifyMicrosoftUnknownRecoveryEmail({
         surfaceKind: "identity_confirm",
         configuredMailboxMatchesChallenge: false,
         hasPasswordFallback: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("keeps verify-email surfaces on password fallback when available", () => {
@@ -186,6 +202,44 @@ describe("Microsoft login state", () => {
         url: "https://login.live.com/oauth20_authorize.srf?client_id=123",
         title: "Verify your email",
         bodyText: "We'll send a code to ha*****@genq.top",
+      }),
+    ).toBe(false);
+  });
+
+  test("detects localized blank Microsoft authorize shell without visible form copy", () => {
+    expect(
+      isMicrosoftAuthorizeShellUnready({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=123&ui_locales=zh-TW",
+        title: "登入您的 Microsoft 帳戶",
+        bodyText: "",
+      }),
+    ).toBe(true);
+    expect(
+      isMicrosoftAuthorizeShellUnready({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=123&ui_locales=zh-TW",
+        title: "登入您的 Microsoft 帳戶",
+        bodyText: "輸入您的密碼",
+      }),
+    ).toBe(false);
+  });
+
+  test("detects traditional Chinese keep-signed-in prompt", () => {
+    expect(
+      isMicrosoftKeepSignedInPrompt({
+        url: "https://login.live.com/ppsecure/post.srf?client_id=123",
+        title: "要保持登入嗎?",
+        bodyText:
+          "ngadilick0360@outlook.com 要保持登入嗎? 不要每次都要重新登入。深入了解 是 否 說明 使用條款 隱私權與 Cookie",
+      }),
+    ).toBe(true);
+  });
+
+  test("does not confuse password prompt with keep-signed-in prompt", () => {
+    expect(
+      isMicrosoftKeepSignedInPrompt({
+        url: "https://login.live.com/ppsecure/post.srf?client_id=123",
+        title: "輸入您的密碼",
+        bodyText: "輸入您的密碼 忘記密碼?",
       }),
     ).toBe(false);
   });

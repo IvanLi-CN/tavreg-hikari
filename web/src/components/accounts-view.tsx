@@ -46,6 +46,10 @@ function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
 }
 
+function formatRawAttemptProgress(rawAttemptCount: number, attemptBudget: number): string {
+  return attemptBudget > 0 ? `${rawAttemptCount} / ${attemptBudget}` : String(rawAttemptCount);
+}
+
 function isRestorableAccountBlock(reason: string | null | undefined): boolean {
   return ["microsoft_password_incorrect", "microsoft_account_locked", "microsoft_unknown_recovery_email"].includes(String(reason || "").trim());
 }
@@ -337,6 +341,7 @@ export function AccountsView({
   onSaveExtractorSettings,
   onExtractorRunDraftChange,
   onRunExtractor,
+  onStopExtractor,
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
   onOpenMailbox,
@@ -387,6 +392,7 @@ export function AccountsView({
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onExtractorRunDraftChange: (patch: Partial<AccountExtractorRunDraft>) => void;
   onRunExtractor: () => Promise<void>;
+  onStopExtractor: () => Promise<void>;
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
@@ -417,6 +423,9 @@ export function AccountsView({
   const passwordCopyResetTimerRef = useRef<number | null>(null);
   const [extractorQuantityInput, setExtractorQuantityInput] = useState(() => String(extractorRunDraft.quantity));
   const [extractorMaxWaitInput, setExtractorMaxWaitInput] = useState(() => String(extractorRunDraft.maxWaitSec));
+  const extractorActionTimerRef = useRef<number | null>(null);
+  const [extractorActionCooldown, setExtractorActionCooldown] = useState<"start" | "cancel" | null>(null);
+  const [extractorActionPending, setExtractorActionPending] = useState<"start" | "cancel" | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -434,9 +443,10 @@ export function AccountsView({
   const extractorSseBadge = extractorSseStateCopy(extractorSseState);
   const extractorSummarySources =
     extractorRuntime.enabledSources.length > 0 ? extractorRuntime.enabledSources : extractorRunDraft.sources;
+  const extractorIsRunning = extractorRuntime.status === "running" || extractorRuntime.status === "stopping";
   const extractorCanStart =
     graphSettingsConfigured
-    && extractorRuntime.status !== "running"
+    && !extractorIsRunning
     && extractorRunDraft.sources.length > 0
     && extractorRunDraft.quantity > 0
     && extractorRunDraft.maxWaitSec > 0;
@@ -444,6 +454,9 @@ export function AccountsView({
     return () => {
       if (passwordCopyResetTimerRef.current != null) {
         window.clearTimeout(passwordCopyResetTimerRef.current);
+      }
+      if (extractorActionTimerRef.current != null) {
+        window.clearTimeout(extractorActionTimerRef.current);
       }
     };
   }, []);
@@ -628,6 +641,50 @@ export function AccountsView({
     }
   };
 
+  const beginExtractorActionCooldown = (action: "start" | "cancel") => {
+    if (extractorActionTimerRef.current != null) {
+      window.clearTimeout(extractorActionTimerRef.current);
+    }
+    setExtractorActionCooldown(action);
+    extractorActionTimerRef.current = window.setTimeout(() => {
+      setExtractorActionCooldown((current) => (current === action ? null : current));
+      extractorActionTimerRef.current = null;
+    }, 1000);
+  };
+
+  const handleRunExtractorClick = async () => {
+    beginExtractorActionCooldown("start");
+    setExtractorActionPending("start");
+    try {
+      await onRunExtractor();
+    } finally {
+      setExtractorActionPending((current) => (current === "start" ? null : current));
+    }
+  };
+
+  const handleStopExtractorClick = async () => {
+    beginExtractorActionCooldown("cancel");
+    setExtractorActionPending("cancel");
+    try {
+      await onStopExtractor();
+    } finally {
+      setExtractorActionPending((current) => (current === "cancel" ? null : current));
+    }
+  };
+
+  const showExtractorCancelButton = extractorIsRunning && extractorActionCooldown !== "start";
+  const extractorPrimaryBusy = extractorRunBusy || extractorActionPending != null;
+  const extractorPrimaryDisabled = showExtractorCancelButton
+    ? extractorPrimaryBusy || extractorActionCooldown === "cancel"
+    : !extractorCanStart || extractorPrimaryBusy || extractorActionCooldown === "start";
+  const extractorPrimaryLabel = showExtractorCancelButton
+    ? extractorActionPending === "cancel" || extractorRuntime.status === "stopping"
+      ? "取消中…"
+      : "取消提号"
+    : extractorActionPending === "start" || extractorActionCooldown === "start" || extractorRunBusy
+      ? "提号中…"
+      : "开始提号 + 自动 Bootstrap";
+
   return (
     <>
       <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]">
@@ -662,7 +719,7 @@ export function AccountsView({
                     >
                       <Checkbox
                         checked={checked}
-                        disabled={!available || extractorRuntime.status === "running"}
+                        disabled={!available || extractorIsRunning}
                         onCheckedChange={(next) => {
                           const enabled = next === true;
                           onExtractorRunDraftChange({
@@ -690,7 +747,7 @@ export function AccountsView({
                     min={1}
                     step={1}
                     value={extractorQuantityInput}
-                    disabled={extractorRuntime.status === "running"}
+                    disabled={extractorIsRunning}
                     onChange={(event) => setExtractorQuantityInput(event.target.value)}
                     onBlur={commitExtractorQuantityInput}
                   />
@@ -702,7 +759,7 @@ export function AccountsView({
                     min={1}
                     step={1}
                     value={extractorMaxWaitInput}
-                    disabled={extractorRuntime.status === "running"}
+                    disabled={extractorIsRunning}
                     onChange={(event) => setExtractorMaxWaitInput(event.target.value)}
                     onBlur={commitExtractorMaxWaitInput}
                   />
@@ -716,7 +773,7 @@ export function AccountsView({
                 </div>
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
                   <div>目标接受：{extractorRuntime.acceptedCount} / {extractorRuntime.requestedUsableCount || extractorRunDraft.quantity}</div>
-                  <div>原始请求：{extractorRuntime.rawAttemptCount} / {extractorRuntime.attemptBudget || "—"}</div>
+                  <div>原始请求：{formatRawAttemptProgress(extractorRuntime.rawAttemptCount, extractorRuntime.attemptBudget)}</div>
                   <div>在途请求：{extractorRuntime.inFlightCount}</div>
                   <div>剩余等待：{extractorRuntime.remainingWaitSec}s / {extractorRuntime.maxWaitSec || extractorRunDraft.maxWaitSec}s</div>
                   <div>最近来源：{extractorRuntime.lastProvider ? extractorProviderLabel(extractorRuntime.lastProvider) : "—"}</div>
@@ -739,12 +796,13 @@ export function AccountsView({
               <div className="flex flex-col gap-3 sm:flex-row">
                 <Button
                   onClick={() => {
-                    void onRunExtractor();
+                    void (showExtractorCancelButton ? handleStopExtractorClick() : handleRunExtractorClick());
                   }}
-                  disabled={!extractorCanStart || extractorRunBusy}
+                  disabled={extractorPrimaryDisabled}
+                  variant={showExtractorCancelButton ? "danger" : "default"}
                   className="sm:flex-1"
                 >
-                  {extractorRuntime.status === "running" || extractorRunBusy ? "提号中…" : "开始提号 + 自动 Bootstrap"}
+                  {extractorPrimaryLabel}
                 </Button>
                 <Button
                   variant="outline"

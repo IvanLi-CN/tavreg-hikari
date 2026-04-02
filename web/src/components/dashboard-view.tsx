@@ -31,6 +31,7 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "shankeyun", label: "闪客云" },
   { provider: "hotmail666", label: "Hotmail666" },
 ] as const satisfies Array<{ provider: AccountExtractorProvider; label: string }>;
+const AUTO_EXTRACT_WORKERS_PER_PROVIDER = 3;
 
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
@@ -49,6 +50,14 @@ function autoExtractPhaseLabel(phase: JobSnapshot["autoExtractState"] extends in
   if (phase === "extracting") return "提取中";
   if (phase === "waiting") return "等待中";
   return "空闲";
+}
+
+function formatRawAttemptProgress(rawAttemptCount: number, attemptBudget: number): string {
+  return attemptBudget > 0 ? `${rawAttemptCount}/${attemptBudget}` : String(rawAttemptCount);
+}
+
+function formatAutoExtractConcurrency(inFlightCount: number, sourceCount: number): string {
+  return `${inFlightCount}/${Math.max(0, sourceCount) * AUTO_EXTRACT_WORKERS_PER_PROVIDER}`;
 }
 
 export function DashboardView({
@@ -108,9 +117,9 @@ export function DashboardView({
   };
 
   const autoExtractHint = job.autoExtractState
-    ? `${autoExtractPhaseLabel(job.autoExtractState.phase)} · 可用补号 ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · 原始请求 ${job.autoExtractState.rawAttemptCount}/${job.autoExtractState.attemptBudget} · 并发 ${job.autoExtractState.inFlightCount}/4 · 剩余 ${job.autoExtractState.remainingWaitSec}s`
+    ? `${autoExtractPhaseLabel(job.autoExtractState.phase)} · 可用补号 ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · 原始请求 ${formatRawAttemptProgress(job.autoExtractState.rawAttemptCount, job.autoExtractState.attemptBudget)} · 并发 ${formatAutoExtractConcurrency(job.autoExtractState.inFlightCount, job.autoExtractState.enabledSources.length)} · 剩余 ${job.autoExtractState.remainingWaitSec}s`
     : jobDraft.autoExtractSources.length > 0
-      ? `已启用 · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 500ms/次 · 最多 4 并发`
+      ? `已启用 · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 3 worker · 500ms/次`
       : "未启用自动提取";
   const currentStatus = job.job?.status ?? null;
   const primaryAction = resolvePrimaryJobAction(currentStatus);
@@ -175,7 +184,7 @@ export function DashboardView({
                 <div className="min-w-0">
                   <div className="text-sm font-medium text-white">自动提取微软账号</div>
                   <div className="mt-1 text-sm text-slate-400">
-                    缺号时每个号源按 500ms 派发 1 个请求，每次只提取 1 个账号；单请求 5 秒超时，最多 4 个请求同时进行，补够或超时就停，极端情况下最多多提取 3 个。
+                    缺号时每个号源最多保持 3 个 worker 在途；同源按 500ms 节奏补位发起请求，每次只提取 1 个账号；单请求 5 秒超时，补够或超时就停。
                   </div>
                 </div>
                 <Badge

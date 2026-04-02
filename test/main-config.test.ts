@@ -143,6 +143,13 @@ test("mailbox bootstrap keeps proxy geo lookup best-effort", async () => {
   expect(source).toContain("const locale = deriveLocale(proxyGeo.country);");
 });
 
+test("mailbox oauth worker opens the Microsoft authorize URL directly", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
+  expect(source).toContain("await page.goto(args.authUrl, {");
+  expect(source).not.toContain("loginAndReachHome(");
+  expect(source).not.toContain("new CaptchaSolver()");
+});
+
 test("chrome native CDP automation stays enabled on macOS when configured", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   const start = source.indexOf("function shouldUseNativeChromeAutomation");

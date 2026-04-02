@@ -1396,7 +1396,7 @@ describe("scheduler helpers", () => {
     appDb.close();
   });
 
-  test("dispatches auto extract requests every 500ms per provider with up to 4 concurrent in flight", async () => {
+  test("dispatches auto extract requests every 500ms per provider with up to 3 workers per source", async () => {
     const { appDb, dbPath } = await createTempDb();
     let fakeNow = 0;
     Date.now = () => fakeNow;
@@ -1470,7 +1470,7 @@ describe("scheduler helpers", () => {
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
       rawAttemptCount: 4,
       inFlightCount: 4,
-      attemptBudget: 9,
+      attemptBudget: 0,
     });
 
     decision = await scheduler["maybeAutoExtract"](job);
@@ -1490,22 +1490,38 @@ describe("scheduler helpers", () => {
     fakeNow = 500;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 4,
-      inFlightCount: 4,
+      rawAttemptCount: 8,
+      inFlightCount: 8,
     });
-    expect(pending).toHaveLength(4);
+    expect(pending).toHaveLength(8);
+
+    fakeNow = 1000;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 12,
+      inFlightCount: 12,
+    });
+    expect(pending).toHaveLength(12);
+
+    fakeNow = 1500;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 12,
+      inFlightCount: 12,
+    });
+    expect(pending).toHaveLength(12);
 
     pending[0].resolve(buildResponseForUrl(pending[0].href));
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    fakeNow = 600;
+    fakeNow = 1501;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 5,
-      inFlightCount: 4,
+      rawAttemptCount: 13,
+      inFlightCount: 12,
     });
-    expect(pending).toHaveLength(5);
+    expect(pending).toHaveLength(13);
 
     await scheduler.shutdown();
     appDb.close();

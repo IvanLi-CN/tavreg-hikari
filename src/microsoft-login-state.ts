@@ -28,6 +28,12 @@ export interface MicrosoftUnknownRecoveryEmailInput {
   hasPasswordFallback: boolean;
 }
 
+export interface MicrosoftKeepSignedInPromptInput {
+  url?: string;
+  title?: string;
+  bodyText?: string;
+}
+
 function normalizeText(value: string | undefined | null): string {
   return String(value || "")
     .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
@@ -109,6 +115,17 @@ export function classifyMicrosoftFlowInterrupt(input: {
       message: combined,
     };
   }
+  if (
+    /account\.live\.com\/identity\/confirm/i.test(url) &&
+    /help us protect your account|お客様のアカウント保護にご協力ください|今回のサインインには、通常と異なる点があるようです|this sign-in looks different/i.test(
+      combined,
+    )
+  ) {
+    return {
+      code: "microsoft_account_locked",
+      message: combined,
+    };
+  }
   return null;
 }
 
@@ -149,10 +166,13 @@ export function shouldClassifyMicrosoftUnknownRecoveryEmail(
   if (input.configuredMailboxMatchesChallenge === true) {
     return false;
   }
+  if (input.hasPasswordFallback) {
+    return false;
+  }
   if (input.surfaceKind === "identity_confirm") {
     return true;
   }
-  return input.configuredMailboxMatchesChallenge === false && !input.hasPasswordFallback;
+  return input.configuredMailboxMatchesChallenge === false;
 }
 
 export function isMicrosoftAuthorizeShellUnready(input: {
@@ -163,8 +183,39 @@ export function isMicrosoftAuthorizeShellUnready(input: {
   if (!/login\.live\.com\/oauth20_authorize\.srf/i.test(input.url)) {
     return false;
   }
-  if (!/sign in to your microsoft account/i.test(normalizeText(input.title))) {
+  const title = normalizeText(input.title);
+  const bodyText = normalizeText(input.bodyText);
+  const hasVisibleFlowCopy =
+    /verify your email|we'll send a code|enter your password|keep me signed in|use your password|sign in with password|security code|protect your account|验证码|驗證碼|密碼|密码|保護|保护|コード|確認|パスワード/i.test(
+      bodyText,
+    );
+  if (hasVisibleFlowCopy) {
     return false;
   }
-  return normalizeText(input.bodyText).length <= 16;
+  if (
+    title &&
+    !/sign in to your microsoft account|登入您的 microsoft 帳戶|登录你的 microsoft 帐户|登录到你的 microsoft 帐户|microsoft アカウントにサインイン/i.test(
+      title,
+    )
+  ) {
+    return false;
+  }
+  return bodyText.length <= 16;
+}
+
+export function isMicrosoftKeepSignedInPrompt(input: MicrosoftKeepSignedInPromptInput): boolean {
+  const url = normalizeText(input.url);
+  if (url && !/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(url)) {
+    return false;
+  }
+  const combined = [input.title, input.bodyText]
+    .map((value) => normalizeText(value))
+    .filter((part) => part.length > 0)
+    .join(" | ");
+  if (!combined) {
+    return false;
+  }
+  return /stay signed in|keep me signed in|keep signed in|skip having to sign in every time|保持登录状态|保持登入状态|要保持登录吗|要保持登入嗎|不要每次都要重新登录|不要每次都要重新登入|サインインしたままにする/i.test(
+    combined,
+  );
 }

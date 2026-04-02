@@ -16,12 +16,11 @@ import type {
 } from "../storage/app-db.js";
 
 const REQUEST_INTERVAL_MS = 500;
-const MAX_CONCURRENT_REQUESTS = 4;
-const OVERFETCH_ALLOWANCE = MAX_CONCURRENT_REQUESTS - 1;
+const REQUEST_WORKERS_PER_PROVIDER = 3;
 const REQUEST_TIMEOUT_MS = 5000;
 const SNAPSHOT_HEARTBEAT_MS = 1000;
 
-export type AccountExtractorRuntimeStatus = "idle" | "running" | "succeeded" | "failed";
+export type AccountExtractorRuntimeStatus = "idle" | "running" | "stopping" | "stopped" | "succeeded" | "failed";
 
 export interface AccountExtractorRuntimeSnapshot {
   status: AccountExtractorRuntimeStatus;
@@ -76,6 +75,7 @@ interface RuntimeState {
   lastBatchId: number | null;
   nextProviderIndex: number;
   providerNextAttemptAtMs: Record<AccountExtractorProvider, number>;
+  providerInFlightCount: Record<AccountExtractorProvider, number>;
   lastBudgetTickMs: number;
   lastPublishedAtMs: number;
   requestControllers: Map<string, AbortController>;
@@ -127,6 +127,19 @@ function isAbortError(error: unknown): boolean {
   return name === "AbortError" || /abort/i.test(message);
 }
 
+function isManualStopReason(reason: unknown): boolean {
+  const message = reason instanceof Error ? reason.message : String(reason ?? "");
+  return /manual_stop/i.test(message);
+}
+
+function formatManualStopMessage(acceptedCount: number): string {
+  return acceptedCount > 0 ? `提号已取消，本轮已接受 ${acceptedCount} 个账号` : "提号已取消";
+}
+
+function formatManualStopDrainMessage(inFlightCount: number): string {
+  return `提号取消中，等待 ${inFlightCount} 个在途请求收尾`;
+}
+
 function providerLabel(provider: AccountExtractorProvider): string {
   return getAccountExtractorProviderLabel(provider);
 }
@@ -148,6 +161,15 @@ function mapFailureCodeToBatchStatus(code: AccountExtractorFailureCode | "manual
 }
 
 function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
+  return {
+    zhanghaoya: 0,
+    shanyouxiang: 0,
+    shankeyun: 0,
+    hotmail666: 0,
+  };
+}
+
+function createProviderInFlightCounter(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
     shanyouxiang: 0,
@@ -244,7 +266,7 @@ export class AccountExtractorRuntime {
   }
 
   async start(input: AccountExtractorRunInput): Promise<AccountExtractorRuntimeSnapshot> {
-    if (this.state?.status === "running") {
+    if (this.state?.status === "running" || this.state?.status === "stopping") {
       throw new Error("提号器正在运行，请等待当前轮次结束");
     }
     const settings = this.readSettings();
@@ -285,7 +307,7 @@ export class AccountExtractorRuntime {
       requestedUsableCount: quantity,
       acceptedCount: 0,
       rawAttemptCount: 0,
-      attemptBudget: quantity + OVERFETCH_ALLOWANCE,
+      attemptBudget: 0,
       inFlightCount: 0,
       remainingWaitMs: maxWaitSec * 1000,
       maxWaitMs: maxWaitSec * 1000,
@@ -297,6 +319,7 @@ export class AccountExtractorRuntime {
       lastBatchId: null,
       nextProviderIndex: 0,
       providerNextAttemptAtMs: createProviderAttemptClock(),
+      providerInFlightCount: createProviderInFlightCounter(),
       lastBudgetTickMs: nowMs,
       lastPublishedAtMs: 0,
       requestControllers: new Map<string, AbortController>(),
@@ -311,6 +334,32 @@ export class AccountExtractorRuntime {
       timestamp: nowIso(),
     });
     void this.runCurrentRound(this.state.runId);
+    return this.getSnapshot();
+  }
+
+  async stop(): Promise<AccountExtractorRuntimeSnapshot> {
+    const state = this.state;
+    if (!state) {
+      throw new Error("提号器当前未在运行");
+    }
+    if (state.status === "stopped") {
+      return this.getSnapshot();
+    }
+    if (state.status !== "running" && state.status !== "stopping") {
+      throw new Error("提号器当前未在运行");
+    }
+    if (state.status === "running") {
+      for (const controller of state.requestControllers.values()) {
+        controller.abort(new Error("manual_stop"));
+      }
+      state.status = state.inFlightCount > 0 ? "stopping" : "stopped";
+      state.errorMessage = null;
+      state.lastMessage =
+        state.inFlightCount > 0 ? formatManualStopDrainMessage(state.inFlightCount) : formatManualStopMessage(state.acceptedCount);
+      state.updatedAt = nowIso();
+      this.publishRunOutcome("warning", "提号器已收到取消指令");
+      this.publishSnapshot();
+    }
     return this.getSnapshot();
   }
 
@@ -347,7 +396,10 @@ export class AccountExtractorRuntime {
       const index = (state.nextProviderIndex + offset) % state.enabledSources.length;
       const provider = state.enabledSources[index];
       if (!provider) continue;
-      if (state.providerNextAttemptAtMs[provider] <= nowMs) {
+      if (
+        state.providerNextAttemptAtMs[provider] <= nowMs
+        && state.providerInFlightCount[provider] < REQUEST_WORKERS_PER_PROVIDER
+      ) {
         state.nextProviderIndex = (index + 1) % state.enabledSources.length;
         return provider;
       }
@@ -356,14 +408,31 @@ export class AccountExtractorRuntime {
   }
 
   private async runCurrentRound(runId: number): Promise<void> {
-    while (this.state && this.state.runId === runId && this.state.status === "running") {
+    while (this.state && this.state.runId === runId && (this.state.status === "running" || this.state.status === "stopping")) {
       const state = this.state;
+      if (state.status === "stopping") {
+        if (state.inFlightCount === 0) {
+          state.status = "stopped";
+          state.errorMessage = null;
+          state.lastMessage = formatManualStopMessage(state.acceptedCount);
+          state.updatedAt = nowIso();
+          this.publishSnapshot();
+          return;
+        }
+        if (Date.now() - state.lastPublishedAtMs >= SNAPSHOT_HEARTBEAT_MS) {
+          state.lastMessage = formatManualStopDrainMessage(state.inFlightCount);
+          state.updatedAt = nowIso();
+          this.publishSnapshot();
+        }
+        await delay(100);
+        continue;
+      }
       this.updateBudget(state);
       this.maybeDispatchRequests(state);
 
       const targetReached = state.acceptedCount >= state.requestedUsableCount;
       const waitExhausted = state.remainingWaitMs <= 0;
-      const rawBudgetExhausted = state.rawAttemptCount >= state.attemptBudget;
+      const rawBudgetExhausted = state.attemptBudget > 0 && state.rawAttemptCount >= state.attemptBudget;
 
       if (state.inFlightCount === 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
         if (targetReached || state.acceptedCount > 0) {
@@ -376,9 +445,7 @@ export class AccountExtractorRuntime {
           this.publishRunOutcome("success", state.lastMessage);
         } else {
           state.status = "failed";
-          state.errorMessage = waitExhausted
-            ? `提号等待超时（${Math.ceil(state.maxWaitMs / 1000)} 秒）`
-            : `提号预算耗尽（${state.attemptBudget} 次请求）`;
+          state.errorMessage = `提号等待超时（${Math.ceil(state.maxWaitMs / 1000)} 秒）`;
           state.lastMessage = state.errorMessage;
           state.updatedAt = nowIso();
           this.publishRunOutcome("warning", state.errorMessage);
@@ -390,9 +457,9 @@ export class AccountExtractorRuntime {
       if (state.inFlightCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
         state.lastMessage = targetReached
           ? `目标达成，等待 ${state.inFlightCount} 个在途请求收尾`
-          : waitExhausted
-            ? `等待预算耗尽，等待 ${state.inFlightCount} 个在途请求收尾`
-            : `原始请求预算耗尽，等待 ${state.inFlightCount} 个在途请求收尾`;
+          : waitExhausted || rawBudgetExhausted
+            ? `等待时间已到，等待 ${state.inFlightCount} 个在途请求收尾`
+            : `等待 ${state.inFlightCount} 个在途请求收尾`;
         state.updatedAt = nowIso();
         this.publishSnapshot();
       } else if (Date.now() - state.lastPublishedAtMs >= SNAPSHOT_HEARTBEAT_MS) {
@@ -408,8 +475,7 @@ export class AccountExtractorRuntime {
       state.status === "running"
       && state.remainingWaitMs > 0
       && state.acceptedCount < state.requestedUsableCount
-      && state.rawAttemptCount < state.attemptBudget
-      && state.inFlightCount < MAX_CONCURRENT_REQUESTS
+      && (state.attemptBudget <= 0 || state.rawAttemptCount < state.attemptBudget)
     ) {
       const nowMs = Date.now();
       const provider = this.pickDueProvider(state, nowMs);
@@ -420,6 +486,7 @@ export class AccountExtractorRuntime {
       const requestId = `${state.runId}:${provider}:${state.rawAttemptCount + 1}:${nowMs}`;
       state.rawAttemptCount += 1;
       state.inFlightCount += 1;
+      state.providerInFlightCount[provider] += 1;
       state.lastProvider = provider;
       state.lastMessage = `${providerLabel(provider)} 请求已发出`;
       state.providerNextAttemptAtMs[provider] = nowMs + REQUEST_INTERVAL_MS;
@@ -467,6 +534,18 @@ export class AccountExtractorRuntime {
         failureCode: result.failureCode,
       });
     } catch (error) {
+      const failureCode =
+        controller.signal.aborted && isManualStopReason(controller.signal.reason) ? "manual_stop" : "upstream_error";
+      const errorMessage =
+        controller.signal.aborted && isManualStopReason(controller.signal.reason)
+          ? "提号已取消"
+          : controller.signal.aborted || isAbortError(error)
+            ? controller.signal.reason instanceof Error
+              ? controller.signal.reason.message
+              : String(controller.signal.reason || "request aborted")
+            : error instanceof Error
+              ? error.message
+              : String(error);
       this.finishRequest({
         runId,
         provider,
@@ -475,13 +554,8 @@ export class AccountExtractorRuntime {
         result: null,
         rawResponse: null,
         maskedKey: maskConfiguredKey(getConfiguredExtractorKey(provider, runtimeConfig)),
-        errorMessage:
-          controller.signal.aborted || isAbortError(error)
-            ? "request aborted"
-            : error instanceof Error
-              ? error.message
-              : String(error),
-        failureCode: "upstream_error",
+        errorMessage,
+        failureCode,
       });
     }
   }
@@ -495,7 +569,7 @@ export class AccountExtractorRuntime {
     rawResponse: string | null;
     maskedKey: string | null;
     errorMessage: string | null;
-    failureCode: AccountExtractorFailureCode | null;
+    failureCode: AccountExtractorFailureCode | "manual_stop" | null;
   }): void {
     const state = this.state;
     if (!state || state.runId !== input.runId) {
@@ -503,6 +577,7 @@ export class AccountExtractorRuntime {
     }
     state.requestControllers.delete(input.requestId);
     state.inFlightCount = Math.max(0, state.inFlightCount - 1);
+    state.providerInFlightCount[input.provider] = Math.max(0, state.providerInFlightCount[input.provider] - 1);
 
     let acceptedInBatch = 0;
     let batchStatus: ExtractBatchStatus = input.result ? "rejected" : mapFailureCodeToBatchStatus(input.failureCode);
@@ -677,6 +752,17 @@ export class AccountExtractorRuntime {
 
     state.acceptedCount += acceptedInBatch;
     state.lastProvider = input.provider;
+    if (state.status === "stopping" || state.status === "stopped") {
+      const stopSettled = state.inFlightCount === 0;
+      state.status = stopSettled ? "stopped" : "stopping";
+      state.lastMessage = stopSettled
+        ? formatManualStopMessage(state.acceptedCount)
+        : formatManualStopDrainMessage(state.inFlightCount);
+      state.errorMessage = null;
+      state.updatedAt = nowIso();
+      this.publishSnapshot();
+      return;
+    }
     state.lastMessage =
       acceptedInBatch > 0
         ? `${providerLabel(input.provider)} 接受了 ${acceptedInBatch} 个账号`

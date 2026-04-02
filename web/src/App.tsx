@@ -132,7 +132,7 @@ function createIdleExtractorRuntime(): AccountExtractorRuntime {
 }
 
 function isExtractorRuntimeTerminal(runtime: AccountExtractorRuntime): boolean {
-  return runtime.status === "idle" || runtime.status === "succeeded" || runtime.status === "failed";
+  return runtime.status === "idle" || runtime.status === "stopped" || runtime.status === "succeeded" || runtime.status === "failed";
 }
 
 export function App() {
@@ -766,6 +766,22 @@ export function App() {
     }
   };
 
+  const handleStopExtractor = async () => {
+    try {
+      setExtractorRunBusy(true);
+      setError(null);
+      const payload = await api<AccountExtractorRuntimePayload>("/api/account-extractors/stop", {
+        method: "POST",
+      });
+      setExtractorRuntime(payload.runtime);
+      await refreshExtractorHistory(extractorHistoryQueryRef.current);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExtractorRunBusy(false);
+    }
+  };
+
   const handleSaveProxySettings = async (settingsOverride?: ProxySettings) => {
     if (!proxies && !settingsOverride) return;
     try {
@@ -1245,6 +1261,7 @@ export function App() {
             }));
           }}
           onRunExtractor={handleRunExtractor}
+          onStopExtractor={handleStopExtractor}
           onExtractorHistoryQueryChange={setExtractorHistoryQuery}
           onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
           onOpenMailbox={handleOpenMailbox}

@@ -156,6 +156,7 @@ const baseArgs = {
   onSaveExtractorSettings: fn(async () => undefined),
   onExtractorRunDraftChange: fn(),
   onRunExtractor: fn(async () => undefined),
+  onStopExtractor: fn(async () => undefined),
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
@@ -251,6 +252,8 @@ type AccountsStorySurfaceProps = {
   onConnectSelectedAccounts?: () => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
+  onRunExtractor?: () => Promise<void>;
+  onStopExtractor?: () => Promise<void>;
 };
 
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
@@ -329,7 +332,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
         onExtractorRunDraftChange={(patch) => setExtractorRunDraft((current) => ({ ...current, ...patch }))}
-        onRunExtractor={async () => undefined}
+        onRunExtractor={props.onRunExtractor ?? (async () => undefined)}
+        onStopExtractor={props.onStopExtractor ?? (async () => undefined)}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
@@ -653,9 +657,83 @@ export const ExtractorRuntimeRunning: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("SSE 已连接")).toBeInTheDocument();
     await expect(canvas.getByText("目标接受：1 / 2")).toBeInTheDocument();
-    await expect(canvas.getByText("原始请求：3 / 5")).toBeInTheDocument();
+    await expect(canvas.getByText("原始请求：3")).toBeInTheDocument();
     await expect(canvas.getByText("剩余等待：27s / 45s")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "取消提号" })).toBeInTheDocument();
+  },
+};
+
+export const ExtractorStartCancelCooldownPlay: Story = {
+  args: baseArgs,
+  render: () => {
+    function InteractiveSurface() {
+      const [runtime, setRuntime] = useState<AccountExtractorRuntime>(sampleExtractorRuntimeIdle);
+      const [busy, setBusy] = useState(false);
+      const draft: AccountExtractorRunDraft = {
+        sources: ["zhanghaoya", "hotmail666"],
+        quantity: 2,
+        maxWaitSec: 60,
+        accountType: "outlook",
+      };
+      return (
+        <AccountsStorySurface
+          extractorRuntime={runtime}
+          extractorRunDraft={draft}
+          extractorRunBusy={busy}
+          onRunExtractor={async () => {
+            setBusy(true);
+            await new Promise((resolve) => window.setTimeout(resolve, 80));
+            setRuntime({
+              ...sampleExtractorRuntimeRunning,
+              enabledSources: draft.sources,
+              requestedUsableCount: draft.quantity,
+              maxWaitSec: draft.maxWaitSec,
+              remainingWaitSec: 58,
+            });
+            setBusy(false);
+          }}
+          onStopExtractor={async () => {
+            setBusy(true);
+            setRuntime((current) => ({
+              ...current,
+              status: "stopping",
+              lastMessage: "提号取消中，等待 2 个在途请求收尾",
+            }));
+            await new Promise((resolve) => window.setTimeout(resolve, 80));
+            setRuntime({
+              ...sampleExtractorRuntimeIdle,
+              status: "stopped",
+              enabledSources: draft.sources,
+              requestedUsableCount: draft.quantity,
+              lastMessage: "提号已取消",
+              updatedAt: "2026-04-03T03:20:00.000Z",
+            });
+            setBusy(false);
+          }}
+        />
+      );
+    }
+    return <InteractiveSurface />;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "验证开始提号后按钮先禁用 1 秒，再切到红色取消按钮；取消后同样禁用 1 秒再恢复开始态。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const startButton = canvas.getByRole("button", { name: "开始提号 + 自动 Bootstrap" });
+    await userEvent.click(startButton);
     await expect(canvas.getByRole("button", { name: "提号中…" })).toBeDisabled();
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+    const cancelButton = canvas.getByRole("button", { name: "取消提号" });
+    await expect(cancelButton).toBeEnabled();
+    await userEvent.click(cancelButton);
+    await expect(canvas.getByRole("button", { name: "取消中…" })).toBeDisabled();
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+    await expect(canvas.getByRole("button", { name: "开始提号 + 自动 Bootstrap" })).toBeEnabled();
   },
 };
 
@@ -708,7 +786,7 @@ export const ExtractorRuntimeOutcomeStates: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("已接受 2 / 2 个账号")).toBeInTheDocument();
-    await expect(canvas.getByText("提号预算耗尽（4 次请求）")).toBeInTheDocument();
+    await expect(canvas.getByText("提号等待超时（30 秒）")).toBeInTheDocument();
     await expect(canvas.getByText("SSE 异常")).toBeInTheDocument();
   },
 };

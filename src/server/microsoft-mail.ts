@@ -93,6 +93,39 @@ export function isMicrosoftOauthCompletionUrl(finalUrl: string | null | undefine
   }
 }
 
+export function isMicrosoftOauthCallbackUrl(finalUrl: string | null | undefined, redirectUri: string): boolean {
+  const normalizedFinalUrl = String(finalUrl || "").trim();
+  const normalizedRedirectUri = String(redirectUri || "").trim();
+  if (!normalizedFinalUrl || !normalizedRedirectUri) return false;
+  try {
+    const current = new URL(normalizedFinalUrl);
+    const redirect = new URL(normalizedRedirectUri);
+    return current.origin === redirect.origin && current.pathname === redirect.pathname;
+  } catch {
+    return false;
+  }
+}
+
+export function getMicrosoftOauthBrowserOutcome(
+  finalUrl: string | null | undefined,
+  redirectUri: string,
+): "success" | "error" | null {
+  const normalizedFinalUrl = String(finalUrl || "").trim();
+  const normalizedRedirectUri = String(redirectUri || "").trim();
+  if (!normalizedFinalUrl || !normalizedRedirectUri) return null;
+  try {
+    const current = new URL(normalizedFinalUrl);
+    const redirect = new URL(normalizedRedirectUri);
+    if (current.origin !== redirect.origin || current.pathname !== "/mailboxes") {
+      return null;
+    }
+    const oauth = String(current.searchParams.get("oauth") || "").trim().toLowerCase();
+    return oauth === "success" || oauth === "error" ? oauth : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeAuthority(authority: string): string {
   const normalized = authority.trim().replace(/^\/+|\/+$/g, "");
   return normalized || "common";

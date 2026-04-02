@@ -365,7 +365,7 @@ export type EventRecord = {
   payload: Record<string, unknown>;
 };
 
-export type AccountExtractorRuntimeStatus = "idle" | "running" | "succeeded" | "failed";
+export type AccountExtractorRuntimeStatus = "idle" | "running" | "stopping" | "stopped" | "succeeded" | "failed";
 
 export type AccountExtractorRuntime = {
   status: AccountExtractorRuntimeStatus;
