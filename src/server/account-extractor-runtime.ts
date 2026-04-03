@@ -10,6 +10,7 @@ import type { ServerEvent } from "./scheduler.js";
 import type {
   AccountExtractorAccountType,
   AccountExtractorProvider,
+  AccountExtractItemRecord,
   AppDatabase,
   AppSettings,
   MicrosoftAccountRecord,
@@ -79,6 +80,14 @@ interface RuntimeState {
   lastBudgetTickMs: number;
   lastPublishedAtMs: number;
   requestControllers: Map<string, AbortController>;
+  pendingBootstrapCandidates: Map<number, PendingBootstrapCandidate>;
+}
+
+interface PendingBootstrapCandidate {
+  accountId: number;
+  batchId: number;
+  itemId: number;
+  provider: AccountExtractorProvider;
 }
 
 export function createIdleAccountExtractorRuntimeSnapshot(): AccountExtractorRuntimeSnapshot {
@@ -240,6 +249,97 @@ export class AccountExtractorRuntime {
     return "bootstrap_queue_rejected";
   }
 
+  private countReservedUsableAccounts(state: RuntimeState): number {
+    return state.acceptedCount + state.pendingBootstrapCandidates.size;
+  }
+
+  private resolvePendingBootstrapRejectReason(account: RuntimeAccountRecord | null): string | null {
+    if (!account) return "import_missing";
+    if (account.disabledAt) return "disabled";
+    if (account.hasApiKey || account.skipReason === "has_api_key") return "has_api_key";
+    if (isLockedAccountRecord(account)) return "microsoft_account_locked";
+    if (account.leaseJobId != null) return "leased";
+    if (account.browserSession?.status === "ready") return null;
+    if (account.browserSession?.status === "failed" || account.browserSession?.status === "blocked") {
+      return (
+        account.browserSession.lastErrorCode?.trim()
+        || account.lastErrorCode?.trim()
+        || (account.browserSession.status === "blocked" ? "session_blocked" : "session_bootstrap_failed")
+      );
+    }
+    return "session_not_ready";
+  }
+
+  private trackPendingBootstrapCandidate(
+    state: RuntimeState,
+    input: { accountId: number; batchId: number; item: AccountExtractItemRecord; provider: AccountExtractorProvider },
+  ): void {
+    state.pendingBootstrapCandidates.set(input.accountId, {
+      accountId: input.accountId,
+      batchId: input.batchId,
+      itemId: input.item.id,
+      provider: input.provider,
+    });
+  }
+
+  private reconcilePendingBootstrapCandidates(state: RuntimeState): void {
+    if (state.pendingBootstrapCandidates.size === 0) {
+      return;
+    }
+    let acceptedNow = 0;
+    let failedNow = 0;
+    for (const [accountId, pending] of state.pendingBootstrapCandidates.entries()) {
+      const latestAccount = this.db.getAccount(accountId);
+      const rejectReason = this.resolvePendingBootstrapRejectReason(latestAccount);
+      if (rejectReason === "session_not_ready") {
+        continue;
+      }
+      state.pendingBootstrapCandidates.delete(accountId);
+      if (!rejectReason) {
+        acceptedNow += 1;
+        this.db.updateAccountExtractItem(pending.itemId, {
+          acceptStatus: "accepted",
+          rejectReason: null,
+          importedAccountId: latestAccount?.id ?? accountId,
+        });
+        this.db.updateAccountExtractBatch(pending.batchId, {
+          acceptedCount: 1,
+          status: "accepted",
+          errorMessage: null,
+          completedAt: nowIso(),
+        });
+        continue;
+      }
+      failedNow += 1;
+      this.db.updateAccountExtractItem(pending.itemId, {
+        acceptStatus: "rejected",
+        rejectReason,
+        importedAccountId: latestAccount?.id ?? accountId,
+      });
+      this.db.updateAccountExtractBatch(pending.batchId, {
+        acceptedCount: 0,
+        status: "rejected",
+        errorMessage: rejectReason,
+        completedAt: nowIso(),
+      });
+    }
+    if (acceptedNow > 0) {
+      state.acceptedCount += acceptedNow;
+      state.lastMessage = `Bootstrap 完成，新增 ${acceptedNow} 个可用账号`;
+      state.errorMessage = null;
+      state.updatedAt = nowIso();
+      this.publishRunOutcome("success", state.lastMessage);
+      this.publishSnapshot();
+      return;
+    }
+    if (failedNow > 0) {
+      state.lastMessage = `有 ${failedNow} 个账号 Bootstrap 失败，继续提号`;
+      state.errorMessage = null;
+      state.updatedAt = nowIso();
+      this.publishSnapshot();
+    }
+  }
+
   getSnapshot(): AccountExtractorRuntimeSnapshot {
     const state = this.state;
     if (!state) {
@@ -323,6 +423,7 @@ export class AccountExtractorRuntime {
       lastBudgetTickMs: nowMs,
       lastPublishedAtMs: 0,
       requestControllers: new Map<string, AbortController>(),
+      pendingBootstrapCandidates: new Map<number, PendingBootstrapCandidate>(),
     };
     this.publishSnapshot();
     this.publish({
@@ -428,6 +529,7 @@ export class AccountExtractorRuntime {
         continue;
       }
       this.updateBudget(state);
+      this.reconcilePendingBootstrapCandidates(state);
       this.maybeDispatchRequests(state);
 
       const targetReached = state.acceptedCount >= state.requestedUsableCount;
@@ -462,6 +564,10 @@ export class AccountExtractorRuntime {
             : `等待 ${state.inFlightCount} 个在途请求收尾`;
         state.updatedAt = nowIso();
         this.publishSnapshot();
+      } else if (state.pendingBootstrapCandidates.size > 0 && Date.now() - state.lastPublishedAtMs >= SNAPSHOT_HEARTBEAT_MS) {
+        state.lastMessage = `等待 ${state.pendingBootstrapCandidates.size} 个 Bootstrap 结果`;
+        state.updatedAt = nowIso();
+        this.publishSnapshot();
       } else if (Date.now() - state.lastPublishedAtMs >= SNAPSHOT_HEARTBEAT_MS) {
         this.publishSnapshot();
       }
@@ -474,7 +580,7 @@ export class AccountExtractorRuntime {
     while (
       state.status === "running"
       && state.remainingWaitMs > 0
-      && state.acceptedCount < state.requestedUsableCount
+      && this.countReservedUsableAccounts(state) < state.requestedUsableCount
       && (state.attemptBudget <= 0 || state.rawAttemptCount < state.attemptBudget)
     ) {
       const nowMs = Date.now();
@@ -600,6 +706,7 @@ export class AccountExtractorRuntime {
 
     if (input.result) {
       let acceptedRequestCandidate = false;
+      let reservedInBatch = 0;
       for (const candidate of input.result.candidates) {
         if (candidate.parseStatus !== "parsed" || !candidate.email || !candidate.password) {
           this.db.createAccountExtractItem({
@@ -629,7 +736,7 @@ export class AccountExtractorRuntime {
           batchErrorMessage = batchErrorMessage || "单次请求返回了多个账号";
           continue;
         }
-        if (state.acceptedCount + acceptedInBatch >= state.requestedUsableCount) {
+        if (this.countReservedUsableAccounts(state) + reservedInBatch >= state.requestedUsableCount) {
           this.db.createAccountExtractItem({
             batchId: batch.id,
             provider: input.provider,
@@ -717,18 +824,40 @@ export class AccountExtractorRuntime {
         }
 
         acceptedRequestCandidate = true;
-        acceptedInBatch = 1;
-        this.db.createAccountExtractItem({
-          batchId: batch.id,
-          provider: input.provider,
-          rawPayload: candidate.rawPayload,
-          email: candidate.email,
-          password: candidate.password,
-          parseStatus: "parsed",
-          acceptStatus: "accepted",
-          rejectReason: null,
-          importedAccountId: latestImportedAccount.id,
-        });
+        reservedInBatch = 1;
+        if (latestImportedAccount.browserSession?.status === "ready") {
+          acceptedInBatch = 1;
+          this.db.createAccountExtractItem({
+            batchId: batch.id,
+            provider: input.provider,
+            rawPayload: candidate.rawPayload,
+            email: candidate.email,
+            password: candidate.password,
+            parseStatus: "parsed",
+            acceptStatus: "accepted",
+            rejectReason: null,
+            importedAccountId: latestImportedAccount.id,
+          });
+        } else {
+          const item = this.db.createAccountExtractItem({
+            batchId: batch.id,
+            provider: input.provider,
+            rawPayload: candidate.rawPayload,
+            email: candidate.email,
+            password: candidate.password,
+            parseStatus: "parsed",
+            acceptStatus: "rejected",
+            rejectReason: "session_not_ready",
+            importedAccountId: latestImportedAccount.id,
+          });
+          this.trackPendingBootstrapCandidate(state, {
+            accountId: latestImportedAccount.id,
+            batchId: batch.id,
+            item,
+            provider: input.provider,
+          });
+          batchErrorMessage = batchErrorMessage || "session_not_ready";
+        }
         this.publish({
           type: "account.updated",
           payload: { affectedIds: [latestImportedAccount.id], action: "extractor_import" },
@@ -766,6 +895,8 @@ export class AccountExtractorRuntime {
     state.lastMessage =
       acceptedInBatch > 0
         ? `${providerLabel(input.provider)} 接受了 ${acceptedInBatch} 个账号`
+        : state.pendingBootstrapCandidates.size > 0 && batchErrorMessage === "session_not_ready"
+          ? `${providerLabel(input.provider)} 已导入账号，等待 Bootstrap 完成`
         : batchErrorMessage || `${providerLabel(input.provider)} 没有可接受账号`;
     state.errorMessage = acceptedInBatch > 0 ? null : batchErrorMessage;
     state.updatedAt = nowIso();

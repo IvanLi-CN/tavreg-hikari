@@ -24,6 +24,7 @@ import {
   classifyMicrosoftFlowInterrupt,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftPasswordError,
+  getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
   isMicrosoftKeepSignedInPrompt,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
@@ -5772,9 +5773,8 @@ async function handleMicrosoftProofVerifyPrompt(
         return true;
       }
       if (challengeState.matchesConfiguredMailbox === false) {
-        throw new Error(
-          `microsoft_password_fallback_unavailable:${challengeState.hintedMaskedEmail || verifyState.hintedMaskedEmail || "challenge_mismatch"}`,
-        );
+        const terminalCode = getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind);
+        throw new Error(`${terminalCode}:${challengeState.hintedMaskedEmail || verifyState.hintedMaskedEmail || "challenge_mismatch"}`);
       }
     }
     if (await clickMicrosoftRecoveryAlternateAction(page)) {
@@ -5794,13 +5794,12 @@ async function handleMicrosoftProofVerifyPrompt(
         hasPasswordFallback: challengeState.hasPasswordFallback,
       })
     ) {
+      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind);
       throw new Error(
-        `microsoft_unknown_recovery_email:${challengeState.hintedMaskedEmail || verifyState.hintedMaskedEmail || "unknown_recovery_email"}`,
+        `${terminalCode}:${challengeState.hintedMaskedEmail || verifyState.hintedMaskedEmail || "unknown_recovery_email"}`,
       );
     }
-    throw new Error(
-      `microsoft_unknown_recovery_email:${verifyState.hintedMaskedEmail || "unknown_recovery_email"}`,
-    );
+    throw new Error(`${getMicrosoftRecoveryTerminalErrorCode("unknown")}:${verifyState.hintedMaskedEmail || "unknown_recovery_email"}`);
   }
   const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl));
   proofState.mailbox = proofMailbox;
@@ -5929,9 +5928,8 @@ async function handleMicrosoftProofEmailPrompt(
       return true;
     }
     if (challengeState.matchesConfiguredMailbox === false) {
-      throw new Error(
-        `microsoft_password_fallback_unavailable:${challengeState.hintedMaskedEmail || "challenge_mismatch"}`,
-      );
+      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind);
+      throw new Error(`${terminalCode}:${challengeState.hintedMaskedEmail || "challenge_mismatch"}`);
     }
   }
   if (
@@ -5949,7 +5947,9 @@ async function handleMicrosoftProofEmailPrompt(
       );
       return true;
     }
-    throw new Error(`microsoft_unknown_recovery_email:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`);
+    throw new Error(
+      `${getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind)}:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`,
+    );
   }
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
@@ -6110,9 +6110,8 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       return true;
     }
     if (confirmationState.matchesConfiguredMailbox === false) {
-      throw new Error(
-        `microsoft_password_fallback_unavailable:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`,
-      );
+      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
+      throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
     }
   }
   if (
@@ -6130,7 +6129,9 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       );
       return true;
     }
-    throw new Error(`microsoft_unknown_recovery_email:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`);
+    throw new Error(
+      `${getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind)}:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`,
+    );
   }
   const selector =
     (await firstVisibleSelector(page, confirmationSelectors)) ||

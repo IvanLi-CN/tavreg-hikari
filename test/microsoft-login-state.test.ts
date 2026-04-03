@@ -3,6 +3,7 @@ import {
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftPasswordError,
+  getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
   isMicrosoftKeepSignedInPrompt,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
@@ -61,7 +62,7 @@ describe("Microsoft login state", () => {
     });
   });
 
-  test("classifies Microsoft identity-confirm secondary verification gate as lockworthy", () => {
+  test("does not generic-hard-fail identity-confirm before recovery handling", () => {
     const classification = classifyMicrosoftFlowInterrupt({
       url: "https://account.live.com/identity/confirm?mkt=JA-JP",
       title: "お客様のアカウント保護にご協力ください",
@@ -69,11 +70,7 @@ describe("Microsoft login state", () => {
         "今回のサインインには、通常と異なる点があるようです。たとえば、お客様が新しい場所、新しいデバイス、新しいアプリからサインインしている可能性があります。",
     });
 
-    expect(classification).toEqual({
-      code: "microsoft_account_locked",
-      message:
-        "お客様のアカウント保護にご協力ください | 今回のサインインには、通常と異なる点があるようです。たとえば、お客様が新しい場所、新しいデバイス、新しいアプリからサインインしている可能性があります。".toLowerCase(),
-    });
+    expect(classification).toBeNull();
   });
 
   test("normalizes password surface keys across query churn and inline errors", () => {
@@ -167,6 +164,12 @@ describe("Microsoft login state", () => {
         hasPasswordFallback: true,
       }),
     ).toBe(false);
+  });
+
+  test("maps unresolved identity-confirm recovery to microsoft_account_locked", () => {
+    expect(getMicrosoftRecoveryTerminalErrorCode("identity_confirm")).toBe("microsoft_account_locked");
+    expect(getMicrosoftRecoveryTerminalErrorCode("verify_email")).toBe("microsoft_unknown_recovery_email");
+    expect(getMicrosoftRecoveryTerminalErrorCode("unknown")).toBe("microsoft_unknown_recovery_email");
   });
 
   test("keeps verify-email surfaces on password fallback when available", () => {

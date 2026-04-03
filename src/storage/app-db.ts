@@ -3026,6 +3026,30 @@ export class AppDatabase {
     return mapAccountExtractItemRow(row);
   }
 
+  updateAccountExtractItem(
+    itemId: number,
+    patch: Partial<Pick<AccountExtractItemRecord, "acceptStatus" | "rejectReason" | "importedAccountId">>,
+  ): AccountExtractItemRecord {
+    const current = this.db.query("SELECT * FROM account_extract_items WHERE id = ?").get(itemId) as Record<string, unknown> | null;
+    if (!current) {
+      throw new Error(`account extract item not found: ${itemId}`);
+    }
+    const next = {
+      ...mapAccountExtractItemRow(current),
+      ...patch,
+    };
+    this.db
+      .query(`
+        UPDATE account_extract_items
+        SET accept_status = ?,
+            reject_reason = ?,
+            imported_account_id = ?
+        WHERE id = ?
+      `)
+      .run(next.acceptStatus, next.rejectReason, next.importedAccountId, itemId);
+    return mapAccountExtractItemRow(this.db.query("SELECT * FROM account_extract_items WHERE id = ?").get(itemId) as Record<string, unknown>);
+  }
+
   listAccountExtractHistory(filters: {
     provider?: AccountExtractorProvider;
     status?: string;

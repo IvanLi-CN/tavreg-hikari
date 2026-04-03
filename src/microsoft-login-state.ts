@@ -115,17 +115,6 @@ export function classifyMicrosoftFlowInterrupt(input: {
       message: combined,
     };
   }
-  if (
-    /account\.live\.com\/identity\/confirm/i.test(url) &&
-    /help us protect your account|お客様のアカウント保護にご協力ください|今回のサインインには、通常と異なる点があるようです|this sign-in looks different/i.test(
-      combined,
-    )
-  ) {
-    return {
-      code: "microsoft_account_locked",
-      message: combined,
-    };
-  }
   return null;
 }
 
@@ -173,6 +162,12 @@ export function shouldClassifyMicrosoftUnknownRecoveryEmail(
     return true;
   }
   return input.configuredMailboxMatchesChallenge === false;
+}
+
+export function getMicrosoftRecoveryTerminalErrorCode(
+  surfaceKind: MicrosoftRecoverySurfaceKind,
+): "microsoft_account_locked" | "microsoft_unknown_recovery_email" {
+  return surfaceKind === "identity_confirm" ? "microsoft_account_locked" : "microsoft_unknown_recovery_email";
 }
 
 export function isMicrosoftAuthorizeShellUnready(input: {

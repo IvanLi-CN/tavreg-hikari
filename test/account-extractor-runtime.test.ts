@@ -216,6 +216,7 @@ describe("account extractor runtime helpers", () => {
       lastBudgetTickMs: Date.now(),
       lastPublishedAtMs: 0,
       requestControllers: new Map([["req-1", controller]]),
+      pendingBootstrapCandidates: new Map(),
     };
 
     const stopping = await runtime.stop();
@@ -239,6 +240,111 @@ describe("account extractor runtime helpers", () => {
     expect(stopped.status).toBe("stopped");
     expect(stopped.inFlightCount).toBe(0);
     expect(stopped.lastMessage).toBe("提号已取消");
+    appDb.close();
+  });
+
+  test("only counts extractor accounts after bootstrap becomes ready", async () => {
+    const { appDb } = await createTempDb();
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      () => undefined,
+      (accountId) => {
+        appDb.queueBrowserSessionBootstrap(accountId);
+        return true;
+      },
+    );
+    const now = "2026-04-03T03:30:00.000Z";
+    runtime["state"] = {
+      runId: 9,
+      status: "running",
+      enabledSources: ["zhanghaoya"],
+      accountType: "outlook",
+      requestedUsableCount: 1,
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      attemptBudget: 0,
+      inFlightCount: 1,
+      remainingWaitMs: 60_000,
+      maxWaitMs: 60_000,
+      startedAt: now,
+      lastProvider: "zhanghaoya",
+      lastMessage: "账号鸭 请求已发出",
+      updatedAt: now,
+      errorMessage: null,
+      lastBatchId: null,
+      nextProviderIndex: 0,
+      providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerInFlightCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      lastBudgetTickMs: Date.now(),
+      lastPublishedAtMs: 0,
+      requestControllers: new Map(),
+      pendingBootstrapCandidates: new Map(),
+    };
+
+    runtime["finishRequest"]({
+      runId: 9,
+      provider: "zhanghaoya",
+      requestId: "req-1",
+      dispatchStartedAt: now,
+      result: {
+        provider: "zhanghaoya",
+        accountType: "outlook",
+        rawResponse: "{\"Code\":200}",
+        candidates: [
+          {
+            provider: "zhanghaoya",
+            rawPayload: "pending-a@outlook.com:pass-a",
+            email: "pending-a@outlook.com",
+            password: "pass-a",
+            parseStatus: "parsed",
+          },
+        ],
+        ok: true,
+        failureCode: null,
+        message: null,
+        maskedKey: "zhya****0001",
+      },
+      rawResponse: "{\"Code\":200}",
+      maskedKey: "zhya****0001",
+      errorMessage: null,
+      failureCode: null,
+    });
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      acceptedCount: 0,
+      inFlightCount: 0,
+    });
+    expect(runtime["state"]?.pendingBootstrapCandidates.size).toBe(1);
+
+    const [account] = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(account?.browserSession?.status).toBe("pending");
+
+    appDb.markBrowserSessionReady(account!.id, { browserEngine: "chrome", proxyNode: "Tokyo-01" });
+    runtime["reconcilePendingBootstrapCandidates"](runtime["state"]);
+
+    expect(runtime.getSnapshot().acceptedCount).toBe(1);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.rows[0]).toMatchObject({
+      status: "accepted",
+      acceptedCount: 1,
+    });
+    expect(history.rows[0]?.items[0]).toMatchObject({
+      email: "pending-a@outlook.com",
+      acceptStatus: "accepted",
+      rejectReason: null,
+    });
+
     appDb.close();
   });
 });
