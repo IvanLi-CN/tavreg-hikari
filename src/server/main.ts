@@ -4,11 +4,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import {
-  normalizeMoeMailBaseUrl,
-  provisionMoeMailMailbox,
-  resolveMoeMailMailboxId,
-  type MoeMailHttpJson,
-} from "../moemail-openapi.js";
+  ensureCfMailMailbox,
+  normalizeCfMailBaseUrl,
+  provisionCfMailMailbox,
+  resolveCfMailMailbox,
+  type CfMailHttpJson,
+} from "../cfmail-api.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import {
@@ -99,7 +100,7 @@ function parseBody(text: string): unknown {
   }
 }
 
-const serverHttpJson: MoeMailHttpJson = async (method, url, options) => {
+const serverHttpJson: CfMailHttpJson = async (method, url, options) => {
   const headers: Record<string, string> = { ...(options?.headers || {}) };
   let body: string | undefined;
   if (typeof options?.body === "string") {
@@ -135,7 +136,7 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
 
 function canFallbackToHintedProofMailboxId(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /moemail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
+  return /cfmail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
     message,
   );
 }
@@ -143,34 +144,36 @@ function canFallbackToHintedProofMailboxId(error: unknown): boolean {
 async function ensureSavedProofMailbox(input: {
   address: string;
   mailboxId?: string | null;
-}): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
+}): Promise<{ provider: "cfmail"; address: string; mailboxId: string }> {
   const address = input.address.trim().toLowerCase();
   const hintedMailboxId = String(input.mailboxId || "").trim();
-  const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
+  const apiKey = (process.env.CFMAIL_API_KEY || "").trim();
   if (!apiKey) {
     if (hintedMailboxId) {
       return {
-        provider: "moemail",
+        provider: "cfmail",
         address,
         mailboxId: hintedMailboxId,
       };
     }
-    throw new Error("moemail_api_key_missing");
+    throw new Error("cfmail_api_key_missing");
   }
-  const baseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
   let mailboxId = "";
   try {
     mailboxId =
-      (await resolveMoeMailMailboxId({
-        baseUrl,
-        apiKey,
-        address,
-        httpJson: serverHttpJson,
-      })) || "";
+      (
+        await resolveCfMailMailbox({
+          baseUrl,
+          apiKey,
+          address,
+          httpJson: serverHttpJson,
+        })
+      )?.id || "";
   } catch (error) {
     if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
       return {
-        provider: "moemail",
+        provider: "cfmail",
         address,
         mailboxId: hintedMailboxId,
       };
@@ -178,24 +181,18 @@ async function ensureSavedProofMailbox(input: {
     throw error;
   }
   if (!mailboxId) {
-    const parts = splitEmailAddress(address);
-    if (!parts) {
-      throw new Error("invalid proof mailbox address");
-    }
     let provisioned;
     try {
-      provisioned = await provisionMoeMailMailbox({
+      provisioned = await ensureCfMailMailbox({
         baseUrl,
         apiKey,
         httpJson: serverHttpJson,
-        name: parts.local,
-        domain: parts.domain,
-        expiryTime: 0,
+        address,
       });
     } catch (error) {
       if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
         return {
-          provider: "moemail",
+          provider: "cfmail",
           address,
           mailboxId: hintedMailboxId,
         };
@@ -203,12 +200,12 @@ async function ensureSavedProofMailbox(input: {
       throw error;
     }
     if (provisioned.address.trim().toLowerCase() !== address) {
-      throw new Error(`moemail_mailbox_not_found:${address}`);
+      throw new Error(`cfmail_mailbox_not_found:${address}`);
     }
     mailboxId = provisioned.id;
   }
   return {
-    provider: "moemail",
+    provider: "cfmail",
     address,
     mailboxId,
   };
@@ -1332,7 +1329,7 @@ async function main(): Promise<void> {
         const rawProvider = !hasProofMailboxProvider ? undefined : body?.proofMailboxProvider == null ? null : String(body.proofMailboxProvider).trim().toLowerCase() || null;
         const disabled = body?.disabled == null ? undefined : Boolean(body.disabled);
         const disabledReason = body?.disabledReason == null ? undefined : String(body.disabledReason).trim() || null;
-        if (rawProvider != null && rawProvider !== "moemail") {
+        if (rawProvider != null && rawProvider !== "cfmail") {
           return badRequest("unsupported proof mailbox provider");
         }
         if (proofMailboxAddress && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(proofMailboxAddress)) {
@@ -1355,19 +1352,19 @@ async function main(): Promise<void> {
               currentAccount.proofMailboxAddress?.trim().toLowerCase() === requestedProofMailboxAddress &&
               currentAccount.proofMailboxId === requestedProofMailboxId;
             const nextProofMailbox: {
-              provider?: "moemail" | null;
+              provider?: "cfmail" | null;
               address?: string | null;
               mailboxId?: string | null;
             } =
               proofMailboxAddress == null
                 ? {
-                    provider: rawProvider === "moemail" ? "moemail" : rawProvider === null ? null : undefined,
+                    provider: rawProvider === "cfmail" ? "cfmail" : rawProvider === null ? null : undefined,
                     address: proofMailboxAddress,
                     mailboxId: proofMailboxId,
                   }
                 : unchangedSavedProofMailbox
                   ? {
-                      provider: currentAccount.proofMailboxProvider || "moemail",
+                      provider: currentAccount.proofMailboxProvider || "cfmail",
                       address: currentAccount.proofMailboxAddress,
                       mailboxId: currentAccount.proofMailboxId,
                     }

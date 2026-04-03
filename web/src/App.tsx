@@ -974,7 +974,7 @@ export function App() {
       await api<AccountUpdatePayload>(`/api/accounts/${accountId}`, {
         method: "PATCH",
         body: JSON.stringify({
-          proofMailboxProvider: proofMailboxAddress ? "moemail" : null,
+          proofMailboxProvider: proofMailboxAddress ? "cfmail" : null,
           proofMailboxAddress,
           proofMailboxId: proofMailboxAddress ? (proofMailboxId ?? null) : null,
         }),

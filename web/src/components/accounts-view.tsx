@@ -499,7 +499,7 @@ export function AccountsView({
     }
     queuePasswordCopyFeedbackReset();
   };
-  const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "moemail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
+  const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "cfmail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
 
   const openProofDialog = (account: AccountRecord) => {
     setEditingAccount(account);
@@ -1540,7 +1540,7 @@ export function AccountsView({
           <DialogHeader>
             <DialogTitle>设置 Microsoft Proof 邮箱</DialogTitle>
             <DialogDescription>
-              把备用邮箱映射记录到数据库。运行时若微软弹出绑定或验证码页面，会优先用 MoeMail OpenAPI 自动恢复。
+              把备用邮箱映射记录到数据库。运行时若微软弹出绑定或验证码页面，会优先通过 CF Mail 自动恢复。
             </DialogDescription>
           </DialogHeader>
 

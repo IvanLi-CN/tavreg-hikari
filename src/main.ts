@@ -14,12 +14,15 @@ import process from "node:process";
 import readline from "node:readline/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  buildMoeMailAuthHeaders,
-  extractFreshMicrosoftProofCodeFromMoeMailResponse,
-  normalizeMoeMailBaseUrl,
-  provisionMoeMailMailbox,
-  resolveMoeMailMailboxId as resolveMoeMailMailboxIdViaOpenApi,
-} from "./moemail-openapi.js";
+  buildCfMailAuthHeaders,
+  ensureCfMailMailbox,
+  extractMicrosoftProofCodeFromPayload,
+  getCfMailMessage,
+  listCfMailMessages,
+  normalizeCfMailBaseUrl,
+  provisionCfMailMailbox,
+  resolveCfMailMailbox,
+} from "./cfmail-api.js";
 import {
   classifyMicrosoftFlowInterrupt,
   buildMicrosoftPasswordSurfaceKey,
@@ -42,7 +45,7 @@ type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
 type BrowserEngine = "chrome";
 type MailProvider = "duckmail" | "gptmail" | "vmail";
-type MailboxSessionProvider = MailProvider | "moemail";
+type MailboxSessionProvider = MailProvider | "cfmail";
 type AuthLoginProvider = "password" | "microsoft";
 
 interface GptmailAuthPayload {
@@ -86,8 +89,8 @@ export interface AppConfig {
   vmailBaseUrl: string;
   vmailApiKey?: string;
   vmailDomain?: string;
-  moemailBaseUrl: string;
-  moemailApiKey?: string;
+  cfmailBaseUrl: string;
+  cfmailApiKey?: string;
   duckmailBaseUrl: string;
   duckmailApiKey?: string;
   duckmailDomain?: string;
@@ -98,7 +101,7 @@ export interface AppConfig {
   existingPassword?: string;
   microsoftAccountEmail?: string;
   microsoftAccountPassword?: string;
-  microsoftProofMailboxProvider?: "moemail";
+  microsoftProofMailboxProvider?: "cfmail";
   microsoftProofMailboxAddress?: string;
   microsoftProofMailboxId?: string;
   microsoftKeepSignedIn: boolean;
@@ -1515,8 +1518,8 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
     return "proxy_ip_rate_limit_block";
   }
   if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
-  if (/moemail_api_key_missing/i.test(message)) return "moemail_api_key_missing";
-  if (/moemail_mailbox_not_found/i.test(message)) return "moemail_mailbox_not_found";
+  if (/cfmail_api_key_missing/i.test(message)) return "cfmail_api_key_missing";
+  if (/cfmail_mailbox_not_found/i.test(message)) return "cfmail_mailbox_not_found";
   if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_password_fallback_unavailable/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_account_locked/i.test(message)) return "microsoft_account_locked";
@@ -2733,14 +2736,15 @@ async function createMailboxSession(cfg: AppConfig, blockedDomains: ReadonlySet<
   throw new Error(`mailbox_domain_blocked:${lastBlockedDomain || "unknown"}`);
 }
 
-async function resolveMoeMailMailboxId(cfg: AppConfig, address: string, proxyUrl?: string): Promise<string | null> {
-  return await resolveMoeMailMailboxIdViaOpenApi({
-    baseUrl: cfg.moemailBaseUrl,
-    apiKey: cfg.moemailApiKey || "",
+async function resolveCfMailMailboxId(cfg: AppConfig, address: string, proxyUrl?: string): Promise<string | null> {
+  const mailbox = await resolveCfMailMailbox({
+    baseUrl: cfg.cfmailBaseUrl,
+    apiKey: cfg.cfmailApiKey || "",
     address,
     httpJson,
     proxyUrl,
   });
+  return mailbox?.id || null;
 }
 
 async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: string, mailboxId: string): Promise<void> {
@@ -2753,7 +2757,7 @@ async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: str
   const db = new AppDatabase(dbPath);
   try {
     db.updateAccountProofMailbox(envAccountId, {
-      provider: "moemail",
+      provider: "cfmail",
       address,
       mailboxId,
     });
@@ -2794,17 +2798,16 @@ async function syncLinkedMicrosoftAccountOutcome(
 }
 
 async function provisionMicrosoftProofMailbox(cfg: AppConfig, proxyUrl?: string): Promise<{ address: string; mailboxId: string }> {
-  if (!cfg.moemailApiKey) {
-    throw new Error("moemail_api_key_missing");
+  if (!cfg.cfmailApiKey) {
+    throw new Error("cfmail_api_key_missing");
   }
-  const mailbox = await provisionMoeMailMailbox({
-    baseUrl: cfg.moemailBaseUrl,
-    apiKey: cfg.moemailApiKey,
+  const mailbox = await provisionCfMailMailbox({
+    baseUrl: cfg.cfmailBaseUrl,
+    apiKey: cfg.cfmailApiKey,
     httpJson,
     proxyUrl,
-    expiryTime: 0,
   });
-  cfg.microsoftProofMailboxProvider = "moemail";
+  cfg.microsoftProofMailboxProvider = "cfmail";
   cfg.microsoftProofMailboxAddress = mailbox.address;
   cfg.microsoftProofMailboxId = mailbox.id;
   try {
@@ -2824,12 +2827,12 @@ async function resolveMicrosoftProofMailboxSession(
   proxyUrl?: string,
   options?: { allowProvision?: boolean },
 ): Promise<MailboxSession> {
-  const provider = cfg.microsoftProofMailboxProvider || "moemail";
-  if (provider !== "moemail") {
+  const provider = cfg.microsoftProofMailboxProvider || "cfmail";
+  if (provider !== "cfmail") {
     throw new Error(`unsupported_microsoft_proof_mailbox_provider:${provider}`);
   }
-  if (!cfg.moemailApiKey) {
-    throw new Error("moemail_api_key_missing");
+  if (!cfg.cfmailApiKey) {
+    throw new Error("cfmail_api_key_missing");
   }
   let address = cfg.microsoftProofMailboxAddress?.trim() || "";
   if (!address) {
@@ -2847,12 +2850,30 @@ async function resolveMicrosoftProofMailboxSession(
   }
   let mailboxId = cfg.microsoftProofMailboxId?.trim() || "";
   if (!mailboxId) {
-    mailboxId = (await resolveMoeMailMailboxId(cfg, address, proxyUrl)) || "";
+    const resolved = await resolveCfMailMailbox({
+      baseUrl: cfg.cfmailBaseUrl,
+      apiKey: cfg.cfmailApiKey,
+      address,
+      httpJson,
+      proxyUrl,
+    });
+    const ensured =
+      resolved ||
+      (await ensureCfMailMailbox({
+        baseUrl: cfg.cfmailBaseUrl,
+        apiKey: cfg.cfmailApiKey,
+        address,
+        httpJson,
+        proxyUrl,
+      }));
+    mailboxId = ensured.id;
+    address = ensured.address;
     if (!mailboxId) {
-      throw new Error(`moemail_mailbox_not_found:${address}`);
+      throw new Error(`cfmail_mailbox_not_found:${address}`);
     }
     cfg.microsoftProofMailboxId = mailboxId;
-    cfg.microsoftProofMailboxProvider = "moemail";
+    cfg.microsoftProofMailboxProvider = "cfmail";
+    cfg.microsoftProofMailboxAddress = address;
     try {
       await persistResolvedMicrosoftProofMailbox(cfg, address, mailboxId);
     } catch (error) {
@@ -2860,11 +2881,11 @@ async function resolveMicrosoftProofMailboxSession(
     }
   }
   return {
-    provider: "moemail",
-    baseUrl: normalizeMoeMailBaseUrl(cfg.moemailBaseUrl),
+    provider: "cfmail",
+    baseUrl: normalizeCfMailBaseUrl(cfg.cfmailBaseUrl),
     address,
     accountId: mailboxId,
-    headers: buildMoeMailAuthHeaders(cfg.moemailApiKey),
+    headers: buildCfMailAuthHeaders(cfg.cfmailApiKey),
   };
 }
 
@@ -2882,12 +2903,29 @@ async function waitForMicrosoftProofCode(
 
   while (Date.now() < deadline) {
     try {
-      const response = await httpJson<JsonRecord>("GET", `${mailbox.baseUrl}/api/emails/${encodeURIComponent(mailbox.accountId)}`, {
-        headers: mailbox.headers,
+      const authHeader = mailbox.headers.Authorization || mailbox.headers.authorization || "";
+      const apiKey = authHeader.replace(/^Bearer\s+/i, "").trim();
+      const summaries = await listCfMailMessages({
+        baseUrl: mailbox.baseUrl,
+        apiKey,
+        address: mailbox.address,
+        httpJson,
         proxyUrl: activeProxyUrl,
+        after: new Date(notBeforeMs).toISOString(),
       });
-      const freshCode = extractFreshMicrosoftProofCodeFromMoeMailResponse(response, notBeforeMs);
-      if (freshCode) return freshCode;
+      for (const summary of summaries) {
+        const summaryCode = extractMicrosoftProofCodeFromPayload(summary);
+        if (summaryCode) return summaryCode;
+        const detail = await getCfMailMessage({
+          baseUrl: mailbox.baseUrl,
+          apiKey,
+          messageId: summary.id,
+          httpJson,
+          proxyUrl: activeProxyUrl,
+        });
+        const detailCode = extractMicrosoftProofCodeFromPayload(detail);
+        if (detailCode) return detailCode;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (isMailboxRateLimitError(message)) {
@@ -9474,7 +9512,7 @@ export function loadConfig(): AppConfig {
   }
   const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
-  const moemailBaseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
+  const cfmailBaseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
   const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
   if (envMailProvider === "vmail" && !vmailBaseUrl) {
     throw new Error("Missing env: VMAIL_BASE_URL (required when MAIL_PROVIDER=vmail)");
@@ -9495,8 +9533,8 @@ export function loadConfig(): AppConfig {
   const microsoftAccountPassword = (process.env.MICROSOFT_ACCOUNT_PASSWORD || "").trim() || undefined;
   const rawMicrosoftProofMailboxProvider = (process.env.MICROSOFT_PROOF_MAILBOX_PROVIDER || "").trim().toLowerCase();
   const microsoftProofMailboxProvider = rawMicrosoftProofMailboxProvider
-    ? rawMicrosoftProofMailboxProvider === "moemail"
-      ? "moemail"
+    ? rawMicrosoftProofMailboxProvider === "cfmail"
+      ? "cfmail"
       : null
     : undefined;
   const microsoftProofMailboxAddress = (process.env.MICROSOFT_PROOF_MAILBOX_ADDRESS || "").trim() || undefined;
@@ -9548,8 +9586,8 @@ export function loadConfig(): AppConfig {
     vmailBaseUrl,
     vmailApiKey: (process.env.VMAIL_API_KEY || "").trim() || undefined,
     vmailDomain: (process.env.VMAIL_DOMAIN || "").trim() || undefined,
-    moemailBaseUrl,
-    moemailApiKey: (process.env.MOEMAIL_API_KEY || "").trim() || undefined,
+    cfmailBaseUrl,
+    cfmailApiKey: (process.env.CFMAIL_API_KEY || "").trim() || undefined,
     duckmailBaseUrl,
     duckmailApiKey: (process.env.DUCKMAIL_API_KEY || "").trim() || undefined,
     duckmailDomain: (process.env.DUCKMAIL_DOMAIN || "").trim() || undefined,
@@ -9560,7 +9598,7 @@ export function loadConfig(): AppConfig {
     existingPassword,
     microsoftAccountEmail,
     microsoftAccountPassword,
-    microsoftProofMailboxProvider: microsoftProofMailboxAddress ? (microsoftProofMailboxProvider || "moemail") : undefined,
+    microsoftProofMailboxProvider: microsoftProofMailboxAddress ? (microsoftProofMailboxProvider || "cfmail") : undefined,
     microsoftProofMailboxAddress,
     microsoftProofMailboxId,
     microsoftKeepSignedIn: toBool(process.env.MICROSOFT_KEEP_SIGNED_IN, true),
@@ -9637,7 +9675,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|moemail_api_key_missing|moemail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
+  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|cfmail_api_key_missing|cfmail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
     message,
   );
 }

@@ -260,7 +260,7 @@ describe("AppDatabase account import", () => {
     appDb.importAccounts([{ email: "solo@outlook.com", password: "solo-pass" }], { groupName: "solo-group" });
     const proofAccount = appDb.listAccounts({ q: "search-a", page: 1, pageSize: 10 }).rows[0];
     appDb.updateAccountProofMailbox(proofAccount.id, {
-      provider: "moemail",
+      provider: "cfmail",
       address: "search-a-proof@mail-us.707079.xyz",
       mailboxId: "proof-search-a",
     });
@@ -474,12 +474,12 @@ describe("AppDatabase account import", () => {
     const accountId = imported.affectedIds[0];
 
     let account = appDb.updateAccountProofMailbox(accountId, {
-      provider: "moemail",
+      provider: "cfmail",
       address: "proof-a@mail-us.707079.xyz",
       mailboxId: "moe-proof-a",
     });
     expect(account).toMatchObject({
-      proofMailboxProvider: "moemail",
+      proofMailboxProvider: "cfmail",
       proofMailboxAddress: "proof-a@mail-us.707079.xyz",
       proofMailboxId: "moe-proof-a",
     });
@@ -488,7 +488,7 @@ describe("AppDatabase account import", () => {
       address: "proof-b@mail-us.707079.xyz",
     });
     expect(account).toMatchObject({
-      proofMailboxProvider: "moemail",
+      proofMailboxProvider: "cfmail",
       proofMailboxAddress: "proof-b@mail-us.707079.xyz",
       proofMailboxId: null,
     });
@@ -704,7 +704,7 @@ describe("AppDatabase account import", () => {
     });
 
     account = appDb.updateAccountProofMailbox(accountId, {
-      provider: "moemail",
+      provider: "cfmail",
       address: "proof@mail.test",
       mailboxId: "proof-box-001",
     });
@@ -831,7 +831,7 @@ describe("AppDatabase account import", () => {
       errorCode: "microsoft_unknown_recovery_email:pr*****@mail.test",
     });
     appDb.updateAccountProofMailbox(accountId, {
-      provider: "moemail",
+      provider: "cfmail",
       address: "proof-same-job@mail.test",
       mailboxId: "proof-same-job",
     });
@@ -937,7 +937,7 @@ describe("AppDatabase account import", () => {
     )?.id;
     expect(proofAccountId).toBeDefined();
     appDb.updateAccountProofMailbox(proofAccountId, {
-      provider: "moemail",
+      provider: "cfmail",
       address: "proof-b@mail-us.707079.xyz",
       mailboxId: "proof-b-id",
     });
@@ -2737,7 +2737,7 @@ describe("scheduler runtime spec", () => {
         id: 21,
         microsoftEmail: "worker@outlook.com",
         passwordPlaintext: "worker-pass",
-        proofMailboxProvider: "moemail",
+        proofMailboxProvider: "cfmail",
         proofMailboxAddress: "worker-proof@mail-us.707079.xyz",
         proofMailboxId: "worker-proof-001",
       },
@@ -2789,7 +2789,7 @@ describe("scheduler runtime spec", () => {
       PROXY_LATENCY_MAX_MS: "987",
       MICROSOFT_ACCOUNT_EMAIL: "worker@outlook.com",
       MICROSOFT_ACCOUNT_PASSWORD: "worker-pass",
-      MICROSOFT_PROOF_MAILBOX_PROVIDER: "moemail",
+      MICROSOFT_PROOF_MAILBOX_PROVIDER: "cfmail",
       MICROSOFT_PROOF_MAILBOX_ADDRESS: "worker-proof@mail-us.707079.xyz",
       MICROSOFT_PROOF_MAILBOX_ID: "worker-proof-001",
       TASK_LEDGER_JOB_ID: "8",
@@ -2801,7 +2801,7 @@ describe("scheduler runtime spec", () => {
     });
     expect(runtime.env.EXISTING_EMAIL).toBeUndefined();
     expect(runtime.env.EXISTING_PASSWORD).toBeUndefined();
-    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_PROVIDER).toBe("moemail");
+    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_PROVIDER).toBe("cfmail");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();

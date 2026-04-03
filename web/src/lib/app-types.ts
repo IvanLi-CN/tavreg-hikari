@@ -35,7 +35,7 @@ export type AccountRecord = {
   microsoftEmail: string;
   passwordPlaintext?: string | null;
   passwordMasked: string;
-  proofMailboxProvider: "moemail" | null;
+  proofMailboxProvider: "cfmail" | null;
   proofMailboxAddress: string | null;
   proofMailboxId: string | null;
   hasApiKey: boolean;

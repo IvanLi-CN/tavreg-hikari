@@ -66,7 +66,7 @@ export type AccountStatus =
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
 export type AttemptStatus = "running" | "succeeded" | "failed" | "stopped";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
-export type ProofMailboxProvider = "moemail";
+export type ProofMailboxProvider = "cfmail";
 export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountImportSource = "manual" | "extractor";
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
@@ -1654,10 +1654,10 @@ export class AppDatabase {
       normalizedMailboxId = null;
     } else {
       if (!normalizedProvider) {
-        normalizedProvider = "moemail";
+        normalizedProvider = "cfmail";
       }
-      if (normalizedProvider !== "moemail") {
-        throw new Error("only moemail proof mailbox provider is supported");
+      if (normalizedProvider !== "cfmail") {
+        throw new Error("only cfmail proof mailbox provider is supported");
       }
       if (addressChanged && normalizedAddress !== current.proofMailboxAddress && input.mailboxId === undefined) {
         normalizedMailboxId = null;
