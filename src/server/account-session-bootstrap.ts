@@ -37,3 +37,11 @@ export function shouldQueueImportedAccountBootstrap(account: BootstrapQueueAccou
   }
   return account.browserSession?.status !== "ready";
 }
+
+export function shouldForceImportedAccountBootstrap(
+  account: Pick<MicrosoftAccountRecord, "passwordPlaintext"> | null | undefined,
+  nextPassword: string,
+): boolean {
+  if (!account) return false;
+  return String(account.passwordPlaintext || "").trim() !== String(nextPassword || "").trim();
+}

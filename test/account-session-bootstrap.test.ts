@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   getAccountSessionBootstrapBlockMessage,
   isLockedAccountRecord,
+  shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "../src/server/account-session-bootstrap.ts";
 
@@ -41,6 +42,26 @@ describe("account session bootstrap helpers", () => {
         },
       } as never),
     ).toBe(true);
+  });
+
+  test("forces bootstrap when an import changes the stored password", () => {
+    expect(
+      shouldForceImportedAccountBootstrap(
+        {
+          passwordPlaintext: "old-pass",
+        } as never,
+        "new-pass",
+      ),
+    ).toBe(true);
+    expect(
+      shouldForceImportedAccountBootstrap(
+        {
+          passwordPlaintext: "same-pass",
+        } as never,
+        "same-pass",
+      ),
+    ).toBe(false);
+    expect(shouldForceImportedAccountBootstrap(null, "fresh-pass")).toBe(false);
   });
 
   test("blocks rebootstrap for leased, disabled, or locked accounts", () => {

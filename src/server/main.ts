@@ -23,6 +23,7 @@ import {
 import {
   getAccountSessionBootstrapBlockMessage,
   isLockedAccountRecord,
+  shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "./account-session-bootstrap.js";
 import { resolveTaskLedgerDbPath } from "../storage/db-paths.js";
@@ -31,7 +32,7 @@ import { buildImportPreview, parseImportContent, type InvalidImportRow, type Par
 import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
-import { JobScheduler, type ServerEvent } from "./scheduler.js";
+import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
@@ -778,11 +779,13 @@ async function runMailboxOauthWorker(input: {
         listenersReleased = true;
         await Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]).catch(() => {});
       };
+      const workerRuntime = resolveWorkerRuntime(env);
+      const workerArgs = [...workerRuntime.bootstrapArgs];
+      workerArgs[workerArgs.length - 1] = "src/server/microsoft-oauth-worker.ts";
       const child = spawn(
-        process.execPath,
+        workerRuntime.command,
         [
-          "run",
-          "src/server/microsoft-oauth-worker.ts",
+          ...workerArgs,
           `--auth-url=${input.authUrl}`,
           `--mailbox-id=${input.mailboxId}`,
           `--redirect-uri=${input.redirectUri}`,
@@ -1206,10 +1209,25 @@ async function main(): Promise<void> {
               password: String(entry?.password || ""),
             }))
           : parseImportContent(content).entries.map((entry) => ({ email: entry.email, password: entry.password }));
-        const effectiveEntries = parsedEntries.filter((entry) => entry.email && entry.password);
+        const effectiveEntries = Array.from(
+          new Map(
+            parsedEntries
+              .filter((entry) => entry.email && entry.password)
+              .map((entry) => [entry.email.trim().toLowerCase(), entry.password]),
+          ).entries(),
+        ).map(([email, password]) => ({ email, password }));
         if (effectiveEntries.length === 0) {
           return badRequest("no valid account entries to import");
         }
+        const previousAccountsByEmail = new Map(
+          db.getAccountsByEmails(effectiveEntries.map((entry) => entry.email)).map((account) => [account.microsoftEmail, account]),
+        );
+        const forceBootstrapByEmail = new Map(
+          effectiveEntries.map((entry) => [
+            entry.email,
+            shouldForceImportedAccountBootstrap(previousAccountsByEmail.get(entry.email) || null, entry.password),
+          ]),
+        );
         const summary = db.importAccounts(effectiveEntries, {
           source: "manual",
           groupName: body?.groupName ?? null,
@@ -1220,7 +1238,9 @@ async function main(): Promise<void> {
           timestamp: nowIso(),
         });
         for (const accountId of summary.affectedIds) {
-          queueAccountSessionBootstrap(accountId);
+          const account = db.getAccount(accountId);
+          const forceBootstrap = account ? forceBootstrapByEmail.get(account.microsoftEmail) === true : false;
+          queueAccountSessionBootstrap(accountId, forceBootstrap ? { force: true } : undefined);
         }
         return json({
           ok: true,

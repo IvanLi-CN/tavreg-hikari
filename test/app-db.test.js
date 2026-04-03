@@ -1338,6 +1338,8 @@ describe("scheduler helpers", () => {
 
   test("caps auto extracted usable accounts to the current job need", async () => {
     const { appDb, dbPath } = await createTempDb();
+    const seeded = appDb.importAccounts([{ email: "cap-a@outlook.com", password: "pass-a" }]);
+    markImportedAccountsReady(appDb, seeded.affectedIds);
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
@@ -1374,10 +1376,7 @@ describe("scheduler helpers", () => {
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(accounts.map((account) => account.microsoftEmail)).toEqual(["cap-a@outlook.com"]);
-    expect(accounts[0]?.browserSession?.status).toBe("pending");
-    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
-
-    markBrowserSessionReady(appDb, accounts[0].id);
+    expect(accounts[0]?.browserSession?.status).toBe("ready");
     expect(appDb.countEligibleAccounts(job.id)).toBe(1);
 
     const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
@@ -1391,6 +1390,106 @@ describe("scheduler helpers", () => {
       acceptStatus: "rejected",
       rejectReason: "request_returned_multiple_accounts",
     });
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("does not count pending bootstrap imports as usable auto extracted accounts", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    let fakeNow = 0;
+    Date.now = () => fakeNow;
+    const pending = [];
+    globalThis.fetch = (url) =>
+      new Promise((resolve) => {
+        pending.push({ href: String(url), resolve });
+      });
+
+    const queuedImports = [];
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+      () => undefined,
+      {
+        onImportedAccounts: (accountIds) => {
+          queuedImports.push(accountIds);
+        },
+      },
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 3,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    let decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      inFlightCount: 1,
+    });
+
+    pending[0].resolve(
+      new Response(
+        JSON.stringify({
+          Code: 200,
+          Message: "Success",
+          Data: "pending-a@outlook.com:pass-a",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["pending-a@outlook.com"]);
+    expect(accounts[0]?.browserSession?.status).toBe("pending");
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(queuedImports).toEqual([[accounts[0].id]]);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.rows[0]).toMatchObject({
+      status: "rejected",
+      acceptedCount: 0,
+    });
+    expect(history.rows[0]?.items[0]).toMatchObject({
+      email: "pending-a@outlook.com",
+      acceptStatus: "rejected",
+      rejectReason: "session_not_ready",
+    });
+
+    fakeNow = 501;
+    decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      acceptedCount: 0,
+      rawAttemptCount: 2,
+      inFlightCount: 1,
+    });
+    expect(pending).toHaveLength(2);
+
+    pending[1].resolve(
+      new Response(
+        JSON.stringify({
+          Code: 200,
+          Message: "Success",
+          Data: "pending-b@outlook.com:pass-b",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     await scheduler.shutdown();
     appDb.close();
@@ -1529,6 +1628,13 @@ describe("scheduler helpers", () => {
 
   test("rejects later in-flight extractor successes after the round target is already met", async () => {
     const { appDb, dbPath } = await createTempDb();
+    const seeded = appDb.importAccounts([
+      { email: "target-zh@outlook.com", password: "pass-zh" },
+      { email: "target-sy@outlook.com", password: "pass-sy" },
+      { email: "target-sk@outlook.com", password: "pass-sk" },
+      { email: "target-hm@outlook.com", password: "pass-hm" },
+    ]);
+    markImportedAccountsReady(appDb, seeded.affectedIds);
     const buildResponseForUrl = (href) => {
       if (href.includes("zhanghaoya")) {
         return new Response(
@@ -1609,12 +1715,13 @@ describe("scheduler helpers", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
-    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["target-zh@outlook.com"]);
-    expect(accounts[0]?.browserSession?.status).toBe("pending");
-    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
-
-    markBrowserSessionReady(appDb, accounts[0].id);
-    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+    expect(accounts.map((account) => account.microsoftEmail).sort()).toEqual([
+      "target-hm@outlook.com",
+      "target-sk@outlook.com",
+      "target-sy@outlook.com",
+      "target-zh@outlook.com",
+    ]);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(4);
 
     const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
     expect(history.total).toBe(4);

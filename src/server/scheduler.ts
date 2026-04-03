@@ -1657,8 +1657,7 @@ export class JobScheduler {
           }
           const importedAccount = this.db.getAccountsByEmails([candidate.email])[0] || null;
           const rejectReason = this.describeExtractRejectReason(context.jobId, importedAccount);
-          const acceptBootstrapPending = rejectReason === "session_not_ready";
-          if (rejectReason !== "unknown" && !acceptBootstrapPending) {
+          if (rejectReason !== "unknown") {
             rejectReasons.add(rejectReason);
             this.db.createAccountExtractItem({
               batchId: batch.id,
@@ -1721,9 +1720,7 @@ export class JobScheduler {
 
       if (affectedIds.size > 0) {
         this.emit("account.updated", { affectedIds: Array.from(affectedIds), action: "extractor_import" });
-        if (acceptedInBatch > 0) {
-          void this.hooks?.onImportedAccounts?.(Array.from(affectedIds));
-        }
+        void this.hooks?.onImportedAccounts?.(Array.from(affectedIds));
       }
       if (acceptedInBatch > 0) {
         this.emit("toast", {
