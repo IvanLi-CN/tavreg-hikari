@@ -3,8 +3,8 @@ node_modules
 
 # output
 out
-dist
-storybook-static
+/dist
+/storybook-static
 *.tgz
 output
 downloads
