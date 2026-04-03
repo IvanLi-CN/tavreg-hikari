@@ -104,7 +104,9 @@ test("manual imports force rebootstrap when the stored password changes", async 
   expect(bootstrapSource).toContain("export function shouldForceImportedAccountBootstrap");
   expect(serverSource).toContain("const forceBootstrapByEmail = new Map(");
   expect(serverSource).toContain("shouldForceImportedAccountBootstrap(previousAccountsByEmail.get(entry.email) || null, entry.password)");
-  expect(serverSource).toContain("queueAccountSessionBootstrap(accountId, forceBootstrap ? { force: true } : undefined);");
+  expect(serverSource).toContain("queueAccountSessionBootstrap(accountId, {");
+  expect(serverSource).toContain("force: forceBootstrap,");
+  expect(serverSource).toContain('reason: "auto",');
 });
 
 test("last-attempt headed failures honor the resolved keep-browser flag without rechecking env", async () => {

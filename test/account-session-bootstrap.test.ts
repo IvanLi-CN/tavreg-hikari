@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   getAccountSessionBootstrapBlockMessage,
+  hasConfiguredMicrosoftGraphBootstrap,
   isLockedAccountRecord,
+  resolveBootstrapQueueDisposition,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "../src/server/account-session-bootstrap.ts";
@@ -62,6 +64,29 @@ describe("account session bootstrap helpers", () => {
       ),
     ).toBe(false);
     expect(shouldForceImportedAccountBootstrap(null, "fresh-pass")).toBe(false);
+  });
+
+  test("auto-bootstrap waits until the Graph callback settings are complete", () => {
+    expect(
+      hasConfiguredMicrosoftGraphBootstrap({
+        clientId: "client-id",
+        clientSecret: "client-secret",
+        redirectUri: "https://example.com/callback",
+      }),
+    ).toBe(true);
+    expect(
+      hasConfiguredMicrosoftGraphBootstrap({
+        clientId: "client-id",
+        clientSecret: "",
+        redirectUri: "https://example.com/callback",
+      }),
+    ).toBe(false);
+  });
+
+  test("force rebootstrap requests are deferred instead of dropped while a bootstrap is already queued", () => {
+    expect(resolveBootstrapQueueDisposition({ alreadyQueued: false, force: false })).toBe("queue");
+    expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: false })).toBe("skip");
+    expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: true })).toBe("defer_force");
   });
 
   test("blocks rebootstrap for leased, disabled, or locked accounts", () => {

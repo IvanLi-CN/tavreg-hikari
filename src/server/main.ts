@@ -22,7 +22,9 @@ import {
 } from "../storage/app-db.js";
 import {
   getAccountSessionBootstrapBlockMessage,
+  hasConfiguredMicrosoftGraphBootstrap,
   isLockedAccountRecord,
+  resolveBootstrapQueueDisposition,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "./account-session-bootstrap.js";
@@ -1015,6 +1017,7 @@ async function main(): Promise<void> {
   const runExclusiveProxyOp = createExclusiveRunner();
   const runExclusiveMailboxOauth = createExclusiveRunner();
   const sessionBootstrapQueuedIds = new Set<number>();
+  const sessionBootstrapPendingForceIds = new Set<number>();
   const broadcast = (event: ServerEvent) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
@@ -1024,16 +1027,30 @@ async function main(): Promise<void> {
       subscriber(event);
     }
   };
-  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean }): boolean => {
+  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean; reason?: "auto" | "manual" }): boolean => {
     const account = db.getAccount(accountId);
     if (!account || getAccountConnectBlockMessage(account)) {
+      return false;
+    }
+    if (
+      options?.reason !== "manual"
+      && !hasConfiguredMicrosoftGraphBootstrap(readMicrosoftGraphSettings(readSettings()))
+    ) {
       return false;
     }
     if (!options?.force && !shouldQueueImportedAccountBootstrap(account)) {
       return false;
     }
-    if (sessionBootstrapQueuedIds.has(accountId)) {
+    const queueDisposition = resolveBootstrapQueueDisposition({
+      alreadyQueued: sessionBootstrapQueuedIds.has(accountId),
+      force: options?.force,
+    });
+    if (queueDisposition === "skip") {
       return false;
+    }
+    if (queueDisposition === "defer_force") {
+      sessionBootstrapPendingForceIds.add(accountId);
+      return true;
     }
     db.queueBrowserSessionBootstrap(accountId);
     sessionBootstrapQueuedIds.add(accountId);
@@ -1053,6 +1070,9 @@ async function main(): Promise<void> {
         // mailbox/session state is updated inside the bootstrap flow
       } finally {
         sessionBootstrapQueuedIds.delete(accountId);
+        if (sessionBootstrapPendingForceIds.delete(accountId)) {
+          queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+        }
       }
     });
     return true;
@@ -1061,7 +1081,7 @@ async function main(): Promise<void> {
   const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
     onImportedAccounts: (accountIds) => {
       for (const accountId of accountIds) {
-        queueAccountSessionBootstrap(accountId);
+        queueAccountSessionBootstrap(accountId, { reason: "auto" });
       }
     },
   });
@@ -1069,7 +1089,7 @@ async function main(): Promise<void> {
   await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
-    queueAccountSessionBootstrap(accountId);
+    queueAccountSessionBootstrap(accountId, { reason: "auto" });
   }
 
   const server = Bun.serve({
@@ -1240,7 +1260,10 @@ async function main(): Promise<void> {
         for (const accountId of summary.affectedIds) {
           const account = db.getAccount(accountId);
           const forceBootstrap = account ? forceBootstrapByEmail.get(account.microsoftEmail) === true : false;
-          queueAccountSessionBootstrap(accountId, forceBootstrap ? { force: true } : undefined);
+          queueAccountSessionBootstrap(accountId, {
+            force: forceBootstrap,
+            reason: "auto",
+          });
         }
         return json({
           ok: true,
@@ -1396,7 +1419,7 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true });
+        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
         return json({
           ok: true,
           queued,
@@ -1621,7 +1644,7 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true });
+        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
         return json({
           ok: true,
           queued,

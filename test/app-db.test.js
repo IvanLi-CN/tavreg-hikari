@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
@@ -314,7 +314,9 @@ describe("AppDatabase account import", () => {
     const { dbPath, appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
 
+    await rm(profilePath, { recursive: true, force: true });
     appDb.db.exec("DROP TABLE account_browser_sessions;");
     appDb.close();
 
@@ -329,13 +331,16 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
-  test("reopen keeps previously used legacy accounts ready when session rows are backfilled", async () => {
+  test("reopen keeps legacy accounts ready only when a reusable browser profile already exists", async () => {
     const { dbPath, appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "legacy-used@outlook.com", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
-    const usedAt = "2026-04-03T01:23:45.000Z";
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
 
-    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'ready' WHERE id = ?").run(usedAt, accountId);
+    await mkdir(path.join(profilePath, "Default"), { recursive: true });
+    await writeFile(path.join(profilePath, "Local State"), "{}");
+    await writeFile(path.join(profilePath, "Default", "Preferences"), "{}");
+    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'ready' WHERE id = ?").run("2026-04-03T01:23:45.000Z", accountId);
     appDb.db.exec("DROP TABLE account_browser_sessions;");
     appDb.close();
 
@@ -346,6 +351,28 @@ describe("AppDatabase account import", () => {
       profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
     });
     expect(reopened.countEligibleAccounts(job.id)).toBe(1);
+
+    reopened.close();
+  });
+
+  test("reopen keeps attempted legacy accounts pending when no reusable browser profile exists", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-attempted@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
+
+    await rm(profilePath, { recursive: true, force: true });
+    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'running' WHERE id = ?").run("2026-04-03T01:23:45.000Z", accountId);
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(0);
 
     reopened.close();
   });

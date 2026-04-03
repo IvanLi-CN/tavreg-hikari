@@ -41,6 +41,30 @@ export function shouldQueueImportedAccountBootstrap(account: BootstrapQueueAccou
   return account.browserSession?.status !== "ready";
 }
 
+export function hasConfiguredMicrosoftGraphBootstrap(
+  settings:
+    | {
+        clientId?: string | null;
+        clientSecret?: string | null;
+        redirectUri?: string | null;
+      }
+    | null
+    | undefined,
+): boolean {
+  return Boolean(
+    String(settings?.clientId || "").trim()
+      && String(settings?.clientSecret || "").trim()
+      && String(settings?.redirectUri || "").trim(),
+  );
+}
+
+export function resolveBootstrapQueueDisposition(input: { alreadyQueued: boolean; force?: boolean | null }): "queue" | "skip" | "defer_force" {
+  if (!input.alreadyQueued) {
+    return "queue";
+  }
+  return input.force ? "defer_force" : "skip";
+}
+
 export function shouldForceImportedAccountBootstrap(
   account: Pick<MicrosoftAccountRecord, "passwordPlaintext"> | null | undefined,
   nextPassword: string,

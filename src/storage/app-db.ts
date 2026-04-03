@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -356,6 +357,12 @@ function fileExists(filePath: string): Promise<boolean> {
     .catch(() => false);
 }
 
+function hasReusableLegacyBrowserProfile(profilePath: string): boolean {
+  const normalized = String(profilePath || "").trim();
+  if (!normalized) return false;
+  return existsSync(path.join(normalized, "Local State")) || existsSync(path.join(normalized, "Default", "Preferences"));
+}
+
 function isHardAccountSkipReason(reason: string | null | undefined): reason is Exclude<AccountSkipReason, "has_api_key"> {
   return HARD_ACCOUNT_SKIP_REASONS.has(String(reason || "").trim() as Exclude<AccountSkipReason, "has_api_key">);
 }
@@ -396,7 +403,7 @@ function resolveFailureResultStatus(input: { disabledAt: string | null; skipReas
 function resolveMigratedBrowserSessionStatus(input: {
   disabledAt: string | null;
   lastResultStatus: AccountStatus;
-  lastUsedAt: string | null;
+  profilePath: string;
   skipReason: string | null;
 }): AccountBrowserSessionStatus {
   if (input.disabledAt != null || isHardAccountSkipReason(input.skipReason)) {
@@ -405,7 +412,7 @@ function resolveMigratedBrowserSessionStatus(input: {
   if (input.lastResultStatus === "failed") {
     return "failed";
   }
-  if (input.lastUsedAt != null || input.lastResultStatus === "succeeded" || input.lastResultStatus === "running" || input.lastResultStatus === "leased") {
+  if (hasReusableLegacyBrowserProfile(input.profilePath)) {
     return "ready";
   }
   return "pending";
@@ -1228,7 +1235,7 @@ export class AppDatabase {
       WHERE id NOT IN (SELECT account_id FROM microsoft_mailboxes)
     `);
     const accountRows = this.db
-      .query("SELECT id, disabled_at, last_result_status, last_used_at, skip_reason FROM microsoft_accounts ORDER BY id ASC")
+      .query("SELECT id, disabled_at, last_result_status, skip_reason FROM microsoft_accounts ORDER BY id ASC")
       .all() as Array<Record<string, unknown>>;
     const ensureBrowserSessionStmt = this.db.query(`
       INSERT INTO account_browser_sessions (account_id, status, profile_path, browser_engine, last_error_code, last_error_message, updated_at)
@@ -1241,13 +1248,14 @@ export class AppDatabase {
     const now = nowIso();
     for (const row of accountRows) {
       const accountId = Number(row.id);
+      const profilePath = this.accountBrowserProfilePath(accountId);
       const sessionStatus = resolveMigratedBrowserSessionStatus({
         disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
         lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
-        lastUsedAt: row.last_used_at == null ? null : String(row.last_used_at),
+        profilePath,
         skipReason: row.skip_reason == null ? null : String(row.skip_reason),
       });
-      ensureBrowserSessionStmt.run(accountId, sessionStatus, this.accountBrowserProfilePath(accountId), now);
+      ensureBrowserSessionStmt.run(accountId, sessionStatus, profilePath, now);
     }
   }
 
