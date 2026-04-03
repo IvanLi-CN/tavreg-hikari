@@ -310,7 +310,7 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
-  test("reopen seeds missing browser sessions as pending for legacy usable accounts", async () => {
+  test("reopen seeds missing browser sessions as pending for untouched legacy imports", async () => {
     const { dbPath, appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -325,6 +325,27 @@ describe("AppDatabase account import", () => {
       profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
     });
     expect(reopened.countEligibleAccounts(job.id)).toBe(0);
+
+    reopened.close();
+  });
+
+  test("reopen keeps previously used legacy accounts ready when session rows are backfilled", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-used@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const usedAt = "2026-04-03T01:23:45.000Z";
+
+    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'ready' WHERE id = ?").run(usedAt, accountId);
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "ready",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(1);
 
     reopened.close();
   });
