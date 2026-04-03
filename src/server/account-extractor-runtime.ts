@@ -567,8 +567,10 @@ export class AccountExtractorRuntime {
       const targetReached = state.acceptedCount >= state.requestedUsableCount;
       const waitExhausted = state.remainingWaitMs <= 0;
       const rawBudgetExhausted = state.attemptBudget > 0 && state.rawAttemptCount >= state.attemptBudget;
+      const settled = this.isManualStopSettled(state);
+      const bootstrapPendingCount = state.pendingBootstrapCandidates.size;
 
-      if (state.inFlightCount === 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
+      if (settled && (targetReached || waitExhausted || rawBudgetExhausted)) {
         if (targetReached || state.acceptedCount > 0) {
           state.status = "succeeded";
           state.errorMessage = null;
@@ -588,7 +590,15 @@ export class AccountExtractorRuntime {
         return;
       }
 
-      if (state.inFlightCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
+      if (state.inFlightCount === 0 && bootstrapPendingCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
+        state.lastMessage = targetReached
+          ? `目标达成，等待 ${bootstrapPendingCount} 个 Bootstrap 结果`
+          : waitExhausted || rawBudgetExhausted
+            ? `等待时间已到，等待 ${bootstrapPendingCount} 个 Bootstrap 结果`
+            : `等待 ${bootstrapPendingCount} 个 Bootstrap 结果`;
+        state.updatedAt = nowIso();
+        this.publishSnapshot();
+      } else if (state.inFlightCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
         state.lastMessage = targetReached
           ? `目标达成，等待 ${state.inFlightCount} 个在途请求收尾`
           : waitExhausted || rawBudgetExhausted

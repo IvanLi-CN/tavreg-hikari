@@ -392,6 +392,20 @@ function resolveFailureResultStatus(input: { disabledAt: string | null; skipReas
   return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
 }
 
+function resolveMigratedBrowserSessionStatus(input: {
+  disabledAt: string | null;
+  lastResultStatus: AccountStatus;
+  skipReason: string | null;
+}): AccountBrowserSessionStatus {
+  if (input.disabledAt != null || isHardAccountSkipReason(input.skipReason)) {
+    return "blocked";
+  }
+  if (input.lastResultStatus === "failed") {
+    return "failed";
+  }
+  return "ready";
+}
+
 function resolveReleasedLeaseAccountStatus(input: {
   disabledAt: string | null;
   hasApiKey: boolean;
@@ -1192,21 +1206,26 @@ export class AppDatabase {
       FROM microsoft_accounts
       WHERE id NOT IN (SELECT account_id FROM microsoft_mailboxes)
     `);
-    const accountIds = this.db
-      .query("SELECT id FROM microsoft_accounts ORDER BY id ASC")
+    const accountRows = this.db
+      .query("SELECT id, disabled_at, last_result_status, skip_reason FROM microsoft_accounts ORDER BY id ASC")
       .all() as Array<Record<string, unknown>>;
     const ensureBrowserSessionStmt = this.db.query(`
       INSERT INTO account_browser_sessions (account_id, status, profile_path, browser_engine, last_error_code, last_error_message, updated_at)
-      VALUES (?, 'pending', ?, 'chrome', NULL, NULL, ?)
+      VALUES (?, ?, ?, 'chrome', NULL, NULL, ?)
       ON CONFLICT(account_id) DO UPDATE SET
         profile_path = excluded.profile_path,
         browser_engine = COALESCE(account_browser_sessions.browser_engine, excluded.browser_engine),
         updated_at = excluded.updated_at
     `);
     const now = nowIso();
-    for (const row of accountIds) {
+    for (const row of accountRows) {
       const accountId = Number(row.id);
-      ensureBrowserSessionStmt.run(accountId, this.accountBrowserProfilePath(accountId), now);
+      const sessionStatus = resolveMigratedBrowserSessionStatus({
+        disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
+        lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
+        skipReason: row.skip_reason == null ? null : String(row.skip_reason),
+      });
+      ensureBrowserSessionStmt.run(accountId, sessionStatus, this.accountBrowserProfilePath(accountId), now);
     }
   }
 

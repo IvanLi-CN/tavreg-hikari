@@ -309,6 +309,25 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
+  test("reopen seeds missing browser sessions as ready for legacy usable accounts", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "ready",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(1);
+
+    reopened.close();
+  });
+
   test("returns account summary counts across the full filtered result set, not just one page", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([

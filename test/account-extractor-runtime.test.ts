@@ -448,4 +448,105 @@ describe("account extractor runtime helpers", () => {
 
     appDb.close();
   });
+
+  test("run stays alive until pending bootstrap candidates settle", async () => {
+    const { appDb } = await createTempDb();
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      () => undefined,
+      () => false,
+    );
+    const imported = appDb.importAccounts([{ email: "late-ready@outlook.com", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0]!;
+    appDb.queueBrowserSessionBootstrap(accountId);
+    const batch = appDb.createAccountExtractBatch({
+      jobId: null,
+      provider: "zhanghaoya",
+      requestedUsableCount: 1,
+      attemptBudget: 0,
+      acceptedCount: 0,
+      status: "rejected",
+      errorMessage: "session_not_ready",
+    });
+    const item = appDb.createAccountExtractItem({
+      batchId: batch.id,
+      provider: "zhanghaoya",
+      rawPayload: "late-ready@outlook.com:pass-a",
+      email: "late-ready@outlook.com",
+      password: "pass-a",
+      parseStatus: "parsed",
+      acceptStatus: "rejected",
+      rejectReason: "session_not_ready",
+      importedAccountId: accountId,
+    });
+    const now = "2026-04-03T04:00:00.000Z";
+    runtime["state"] = {
+      runId: 13,
+      status: "running",
+      enabledSources: ["zhanghaoya"],
+      accountType: "outlook",
+      requestedUsableCount: 1,
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      attemptBudget: 0,
+      inFlightCount: 0,
+      remainingWaitMs: 0,
+      maxWaitMs: 60_000,
+      startedAt: now,
+      lastProvider: "zhanghaoya",
+      lastMessage: "等待时间已到，等待 1 个 Bootstrap 结果",
+      updatedAt: now,
+      errorMessage: null,
+      lastBatchId: batch.id,
+      nextProviderIndex: 0,
+      providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerInFlightCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      lastBudgetTickMs: Date.now(),
+      lastPublishedAtMs: 0,
+      requestControllers: new Map(),
+      pendingBootstrapCandidates: new Map([[accountId, { accountId, batchId: batch.id, itemId: item.id, provider: "zhanghaoya" }]]),
+    };
+
+    const runPromise = runtime["runCurrentRound"](13);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runtime.getSnapshot()).toMatchObject({
+      status: "running",
+      acceptedCount: 0,
+      lastMessage: "等待时间已到，等待 1 个 Bootstrap 结果",
+    });
+
+    appDb.markBrowserSessionReady(accountId, { browserEngine: "chrome", proxyNode: "Tokyo-01" });
+    await runPromise;
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      status: "succeeded",
+      acceptedCount: 1,
+      lastMessage: "已接受 1 / 1 个账号",
+    });
+    expect(runtime["state"]?.pendingBootstrapCandidates.size).toBe(0);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.rows[0]).toMatchObject({
+      status: "accepted",
+      acceptedCount: 1,
+    });
+    expect(history.rows[0]?.items[0]).toMatchObject({
+      email: "late-ready@outlook.com",
+      acceptStatus: "accepted",
+      rejectReason: null,
+      importedAccountId: accountId,
+    });
+
+    appDb.close();
+  });
 });
