@@ -609,6 +609,39 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("saveMailboxOauthStart clears stale authorization before a forced reconnect", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "oauth-reconnect@outlook.com", password: "oauth-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const mailbox = appDb.ensureMailboxForAccount(accountId);
+
+    appDb.completeMailboxOAuth(mailbox.id, {
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: "2026-03-30T08:00:00.000Z",
+      authority: "common",
+      graphDisplayName: "Reconnect",
+    });
+
+    const restarted = appDb.saveMailboxOauthStart(mailbox.id, {
+      oauthState: "state-reconnect",
+      oauthCodeVerifier: "verifier-reconnect",
+      authority: "organizations",
+    });
+
+    expect(restarted).toMatchObject({
+      status: "preparing",
+      refreshToken: null,
+      accessToken: null,
+      oauthConnectedAt: null,
+      oauthState: "state-reconnect",
+      oauthCodeVerifier: "verifier-reconnect",
+      authority: "organizations",
+    });
+
+    appDb.close();
+  });
+
   test("clears the unknown recovery block after a proof mailbox is saved", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);

@@ -2578,10 +2578,14 @@ export class AppDatabase {
         UPDATE microsoft_mailboxes
         SET status = 'preparing',
             sync_enabled = 1,
+            refresh_token = NULL,
+            access_token = NULL,
+            access_token_expires_at = NULL,
             authority = ?,
             oauth_state = ?,
             oauth_code_verifier = ?,
             oauth_started_at = ?,
+            oauth_connected_at = NULL,
             last_error_code = NULL,
             last_error_message = NULL,
             updated_at = ?
