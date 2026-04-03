@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -78,6 +79,7 @@ export type AccountSkipReason =
 export type AccountExtractBatchStatus =
   | "accepted"
   | "rejected"
+  | "pending_bootstrap"
   | "invalid_key"
   | "insufficient_stock"
   | "parse_failed"
@@ -85,6 +87,7 @@ export type AccountExtractBatchStatus =
 export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
+export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -143,6 +146,7 @@ export interface MicrosoftAccountRecord {
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
   mailboxUnreadCount: number;
+  browserSession: AccountBrowserSessionRecord | null;
 }
 
 export interface ImportAccountsResult {
@@ -242,11 +246,33 @@ export interface ProxyNodeRecord {
   lastLatencyMs: number | null;
   lastEgressIp: string | null;
   lastCountry: string | null;
+  lastRegion: string | null;
   lastCity: string | null;
   lastOrg: string | null;
   lastCheckedAt: string | null;
   lastSelectedAt: string | null;
+  lastLeasedAt: string | null;
   success24h: number;
+}
+
+export interface AccountBrowserSessionRecord {
+  id: number;
+  accountId: number;
+  status: AccountBrowserSessionStatus;
+  profilePath: string;
+  browserEngine: string | null;
+  proxyNode: string | null;
+  proxyIp: string | null;
+  proxyCountry: string | null;
+  proxyRegion: string | null;
+  proxyCity: string | null;
+  proxyTimezone: string | null;
+  lastBootstrappedAt: string | null;
+  lastUsedAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface MicrosoftMailboxRecord {
@@ -331,6 +357,12 @@ function fileExists(filePath: string): Promise<boolean> {
     .catch(() => false);
 }
 
+function hasReusableLegacyBrowserProfile(profilePath: string): boolean {
+  const normalized = String(profilePath || "").trim();
+  if (!normalized) return false;
+  return existsSync(path.join(normalized, "Local State")) || existsSync(path.join(normalized, "Default", "Preferences"));
+}
+
 function isHardAccountSkipReason(reason: string | null | undefined): reason is Exclude<AccountSkipReason, "has_api_key"> {
   return HARD_ACCOUNT_SKIP_REASONS.has(String(reason || "").trim() as Exclude<AccountSkipReason, "has_api_key">);
 }
@@ -366,6 +398,24 @@ function resolveAccountStatus(input: {
 
 function resolveFailureResultStatus(input: { disabledAt: string | null; skipReason: string | null }): AccountStatus {
   return input.disabledAt != null || isHardAccountSkipReason(input.skipReason) ? "disabled" : "failed";
+}
+
+function resolveMigratedBrowserSessionStatus(input: {
+  disabledAt: string | null;
+  lastResultStatus: AccountStatus;
+  profilePath: string;
+  skipReason: string | null;
+}): AccountBrowserSessionStatus {
+  if (input.disabledAt != null || isHardAccountSkipReason(input.skipReason)) {
+    return "blocked";
+  }
+  if (input.lastResultStatus === "failed") {
+    return "failed";
+  }
+  if (hasReusableLegacyBrowserProfile(input.profilePath)) {
+    return "ready";
+  }
+  return "pending";
 }
 
 function resolveReleasedLeaseAccountStatus(input: {
@@ -407,6 +457,49 @@ function resolveFailureSkipReason(input: {
   return isHardAccountSkipReason(input.currentSkipReason) ? (input.currentSkipReason as AccountSkipReason) : null;
 }
 
+function isReadyBrowserSession(
+  session: Pick<AccountBrowserSessionRecord, "status"> | null | undefined,
+): boolean {
+  return session?.status === "ready";
+}
+
+function nonRetryableAttemptWhereSql(alias: string): string {
+  return `
+    (
+      ${alias}.status IN ('running', 'succeeded')
+      OR (
+        ${alias}.status = 'failed'
+        AND (
+          LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_password_incorrect%'
+          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_account_locked%'
+          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_unknown_recovery_email%'
+        )
+      )
+    )
+  `;
+}
+
+function isHealthyProxyNodeStatus(status: string | null | undefined): boolean {
+  const normalized = String(status || "").trim().toLowerCase();
+  return !normalized || normalized === "ok" || normalized === "succeeded";
+}
+
+function shouldMarkProxyLeaseFailedForAttemptError(errorCode: string | null | undefined): boolean {
+  const normalized = String(errorCode || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(browser_)?proxy_/.test(normalized) || /^mihomo_/.test(normalized);
+}
+
+function proxyNodeLruOrderSql(alias = "p"): string {
+  return `
+    CASE WHEN ${alias}.last_leased_at IS NULL THEN 0 ELSE 1 END,
+    ${alias}.last_leased_at ASC,
+    CASE WHEN ${alias}.last_checked_at IS NULL THEN 1 ELSE 0 END,
+    ${alias}.last_checked_at DESC,
+    ${alias}.node_name COLLATE NOCASE ASC
+  `;
+}
+
 function accountSelectSql(whereClause = "", orderClause = ""): string {
   return `
     SELECT
@@ -414,12 +507,54 @@ function accountSelectSql(whereClause = "", orderClause = ""): string {
       COALESCE(m.status, 'preparing') AS mailbox_status,
       m.last_synced_at AS mailbox_last_synced_at,
       m.last_error_code AS mailbox_last_error_code,
-      COALESCE(m.unread_count, 0) AS mailbox_unread_count
+      COALESCE(m.unread_count, 0) AS mailbox_unread_count,
+      s.id AS browser_session_id,
+      s.status AS browser_session_status,
+      s.profile_path AS browser_session_profile_path,
+      s.browser_engine AS browser_session_browser_engine,
+      s.proxy_node AS browser_session_proxy_node,
+      s.proxy_ip AS browser_session_proxy_ip,
+      s.proxy_country AS browser_session_proxy_country,
+      s.proxy_region AS browser_session_proxy_region,
+      s.proxy_city AS browser_session_proxy_city,
+      s.proxy_timezone AS browser_session_proxy_timezone,
+      s.last_bootstrapped_at AS browser_session_last_bootstrapped_at,
+      s.last_used_at AS browser_session_last_used_at,
+      s.last_error_code AS browser_session_last_error_code,
+      s.last_error_message AS browser_session_last_error_message,
+      s.created_at AS browser_session_created_at,
+      s.updated_at AS browser_session_updated_at
     FROM microsoft_accounts a
     LEFT JOIN microsoft_mailboxes m ON m.account_id = a.id
+    LEFT JOIN account_browser_sessions s ON s.account_id = a.id
     ${whereClause}
     ${orderClause}
   `;
+}
+
+function mapAccountBrowserSessionRow(row: Record<string, unknown>): AccountBrowserSessionRecord | null {
+  if (row.browser_session_id == null) return null;
+  return {
+    id: Number(row.browser_session_id),
+    accountId: Number(row.id),
+    status: String(row.browser_session_status || "pending") as AccountBrowserSessionStatus,
+    profilePath: String(row.browser_session_profile_path || ""),
+    browserEngine: row.browser_session_browser_engine == null ? null : String(row.browser_session_browser_engine),
+    proxyNode: row.browser_session_proxy_node == null ? null : String(row.browser_session_proxy_node),
+    proxyIp: row.browser_session_proxy_ip == null ? null : String(row.browser_session_proxy_ip),
+    proxyCountry: row.browser_session_proxy_country == null ? null : String(row.browser_session_proxy_country),
+    proxyRegion: row.browser_session_proxy_region == null ? null : String(row.browser_session_proxy_region),
+    proxyCity: row.browser_session_proxy_city == null ? null : String(row.browser_session_proxy_city),
+    proxyTimezone: row.browser_session_proxy_timezone == null ? null : String(row.browser_session_proxy_timezone),
+    lastBootstrappedAt:
+      row.browser_session_last_bootstrapped_at == null ? null : String(row.browser_session_last_bootstrapped_at),
+    lastUsedAt: row.browser_session_last_used_at == null ? null : String(row.browser_session_last_used_at),
+    lastErrorCode: row.browser_session_last_error_code == null ? null : String(row.browser_session_last_error_code),
+    lastErrorMessage:
+      row.browser_session_last_error_message == null ? null : String(row.browser_session_last_error_message),
+    createdAt: String(row.browser_session_created_at || ""),
+    updatedAt: String(row.browser_session_updated_at || ""),
+  };
 }
 
 function resolveAccountListOrderClause(sortBy?: string, sortDir?: string): string {
@@ -465,6 +600,7 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     mailboxLastSyncedAt: row.mailbox_last_synced_at == null ? null : String(row.mailbox_last_synced_at),
     mailboxLastErrorCode: row.mailbox_last_error_code == null ? null : String(row.mailbox_last_error_code),
     mailboxUnreadCount: Number(row.mailbox_unread_count || 0),
+    browserSession: mapAccountBrowserSessionRow(row),
   };
 }
 
@@ -615,6 +751,47 @@ function mapAttemptRow(row: Record<string, unknown>): JobAttemptRecord {
   };
 }
 
+function mapProxyNodeRow(row: Record<string, unknown>): ProxyNodeRecord {
+  return {
+    id: Number(row.id),
+    nodeName: String(row.node_name),
+    isSelected: asBoolean(row.is_selected),
+    lastStatus: row.last_status == null ? null : String(row.last_status),
+    lastLatencyMs: row.last_latency_ms == null ? null : Number(row.last_latency_ms),
+    lastEgressIp: row.last_egress_ip == null ? null : String(row.last_egress_ip),
+    lastCountry: row.last_country == null ? null : String(row.last_country),
+    lastRegion: row.last_region == null ? null : String(row.last_region),
+    lastCity: row.last_city == null ? null : String(row.last_city),
+    lastOrg: row.last_org == null ? null : String(row.last_org),
+    lastCheckedAt: row.last_checked_at == null ? null : String(row.last_checked_at),
+    lastSelectedAt: row.last_selected_at == null ? null : String(row.last_selected_at),
+    lastLeasedAt: row.last_leased_at == null ? null : String(row.last_leased_at),
+    success24h: Number(row.success24h || 0),
+  };
+}
+
+function mapAccountBrowserSessionTableRow(row: Record<string, unknown>): AccountBrowserSessionRecord {
+  return {
+    id: Number(row.id),
+    accountId: Number(row.account_id),
+    status: String(row.status || "pending") as AccountBrowserSessionStatus,
+    profilePath: String(row.profile_path || ""),
+    browserEngine: row.browser_engine == null ? null : String(row.browser_engine),
+    proxyNode: row.proxy_node == null ? null : String(row.proxy_node),
+    proxyIp: row.proxy_ip == null ? null : String(row.proxy_ip),
+    proxyCountry: row.proxy_country == null ? null : String(row.proxy_country),
+    proxyRegion: row.proxy_region == null ? null : String(row.proxy_region),
+    proxyCity: row.proxy_city == null ? null : String(row.proxy_city),
+    proxyTimezone: row.proxy_timezone == null ? null : String(row.proxy_timezone),
+    lastBootstrappedAt: row.last_bootstrapped_at == null ? null : String(row.last_bootstrapped_at),
+    lastUsedAt: row.last_used_at == null ? null : String(row.last_used_at),
+    lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
+    lastErrorMessage: row.last_error_message == null ? null : String(row.last_error_message),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+  };
+}
+
 export function computeLaunchCapacity(
   job: Pick<JobRecord, "status" | "parallel" | "need" | "successCount" | "maxAttempts" | "launchedCount">,
   activeCount: number,
@@ -670,6 +847,11 @@ export class AppDatabase {
 
   close(): void {
     this.db.close();
+  }
+
+  accountBrowserProfilePath(accountId: number): string {
+    const outputRoot = path.dirname(path.dirname(this.dbPath));
+    return path.resolve(path.join(outputRoot, "browser-profiles", "accounts", String(accountId), "chrome"));
   }
 
   private hasSignupTasksTable(): boolean {
@@ -775,10 +957,12 @@ export class AppDatabase {
         last_latency_ms INTEGER,
         last_egress_ip TEXT,
         last_country TEXT,
+        last_region TEXT,
         last_city TEXT,
         last_org TEXT,
         last_checked_at TEXT,
-        last_selected_at TEXT
+        last_selected_at TEXT,
+        last_leased_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS proxy_checks (
@@ -788,10 +972,31 @@ export class AppDatabase {
         latency_ms INTEGER,
         egress_ip TEXT,
         country TEXT,
+        region TEXT,
         city TEXT,
         org TEXT,
         error TEXT,
         checked_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS account_browser_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL UNIQUE REFERENCES microsoft_accounts(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        profile_path TEXT NOT NULL,
+        browser_engine TEXT,
+        proxy_node TEXT,
+        proxy_ip TEXT,
+        proxy_country TEXT,
+        proxy_region TEXT,
+        proxy_city TEXT,
+        proxy_timezone TEXT,
+        last_bootstrapped_at TEXT,
+        last_used_at TEXT,
+        last_error_code TEXT,
+        last_error_message TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
 
       CREATE TABLE IF NOT EXISTS account_extract_batches (
@@ -948,6 +1153,56 @@ export class AppDatabase {
     if (!mailboxColumns.has("last_error_message")) {
       this.db.exec("ALTER TABLE microsoft_mailboxes ADD COLUMN last_error_message TEXT;");
     }
+    const proxyNodeTableInfo = this.db.query("PRAGMA table_info(proxy_nodes);").all() as Array<Record<string, unknown>>;
+    const proxyNodeColumns = new Set(proxyNodeTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!proxyNodeColumns.has("last_region")) {
+      this.db.exec("ALTER TABLE proxy_nodes ADD COLUMN last_region TEXT;");
+    }
+    if (!proxyNodeColumns.has("last_leased_at")) {
+      this.db.exec("ALTER TABLE proxy_nodes ADD COLUMN last_leased_at TEXT;");
+    }
+    const proxyChecksTableInfo = this.db.query("PRAGMA table_info(proxy_checks);").all() as Array<Record<string, unknown>>;
+    const proxyChecksColumns = new Set(proxyChecksTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!proxyChecksColumns.has("region")) {
+      this.db.exec("ALTER TABLE proxy_checks ADD COLUMN region TEXT;");
+    }
+    const browserSessionTableInfo = this.db
+      .query("PRAGMA table_info(account_browser_sessions);")
+      .all() as Array<Record<string, unknown>>;
+    const browserSessionColumns = new Set(browserSessionTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!browserSessionColumns.has("browser_engine")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN browser_engine TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_node")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_node TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_ip")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_ip TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_country")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_country TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_region")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_region TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_city")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_city TEXT;");
+    }
+    if (!browserSessionColumns.has("proxy_timezone")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN proxy_timezone TEXT;");
+    }
+    if (!browserSessionColumns.has("last_bootstrapped_at")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN last_bootstrapped_at TEXT;");
+    }
+    if (!browserSessionColumns.has("last_used_at")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN last_used_at TEXT;");
+    }
+    if (!browserSessionColumns.has("last_error_code")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN last_error_code TEXT;");
+    }
+    if (!browserSessionColumns.has("last_error_message")) {
+      this.db.exec("ALTER TABLE account_browser_sessions ADD COLUMN last_error_message TEXT;");
+    }
 
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_result ON microsoft_accounts(last_result_status, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_skip_reason ON microsoft_accounts(skip_reason, updated_at DESC);");
@@ -966,6 +1221,9 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mailboxes_sync_updated ON microsoft_mailboxes(sync_enabled, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mail_messages_mailbox_received ON microsoft_mail_messages(mailbox_id, received_at DESC, id DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mail_messages_mailbox_unread ON microsoft_mail_messages(mailbox_id, is_read, received_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_browser_sessions_status_updated ON account_browser_sessions(status, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_browser_sessions_proxy_ip_updated ON account_browser_sessions(proxy_ip, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_nodes_status_region_lease ON proxy_nodes(last_status, last_region, last_leased_at, node_name);");
     if (signupTaskTableExists) {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_job_account ON signup_tasks(job_id, account_id, started_at DESC);");
     }
@@ -976,6 +1234,29 @@ export class AppDatabase {
       FROM microsoft_accounts
       WHERE id NOT IN (SELECT account_id FROM microsoft_mailboxes)
     `);
+    const accountRows = this.db
+      .query("SELECT id, disabled_at, last_result_status, skip_reason FROM microsoft_accounts ORDER BY id ASC")
+      .all() as Array<Record<string, unknown>>;
+    const ensureBrowserSessionStmt = this.db.query(`
+      INSERT INTO account_browser_sessions (account_id, status, profile_path, browser_engine, last_error_code, last_error_message, updated_at)
+      VALUES (?, ?, ?, 'chrome', NULL, NULL, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        profile_path = excluded.profile_path,
+        browser_engine = COALESCE(account_browser_sessions.browser_engine, excluded.browser_engine),
+        updated_at = excluded.updated_at
+    `);
+    const now = nowIso();
+    for (const row of accountRows) {
+      const accountId = Number(row.id);
+      const profilePath = this.accountBrowserProfilePath(accountId);
+      const sessionStatus = resolveMigratedBrowserSessionStatus({
+        disabledAt: row.disabled_at == null ? null : String(row.disabled_at),
+        lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
+        profilePath,
+        skipReason: row.skip_reason == null ? null : String(row.skip_reason),
+      });
+      ensureBrowserSessionStmt.run(accountId, sessionStatus, profilePath, now);
+    }
   }
 
   recoverStaleState(): void {
@@ -1058,18 +1339,20 @@ export class AppDatabase {
       const stmt = this.db.query(`
         INSERT INTO proxy_nodes (
           node_name, is_selected, last_status, last_latency_ms, last_egress_ip,
-          last_country, last_city, last_org, last_checked_at, last_selected_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_country, last_region, last_city, last_org, last_checked_at, last_selected_at, last_leased_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_name) DO UPDATE SET
           is_selected = excluded.is_selected,
           last_status = excluded.last_status,
           last_latency_ms = excluded.last_latency_ms,
           last_egress_ip = excluded.last_egress_ip,
           last_country = excluded.last_country,
+          last_region = excluded.last_region,
           last_city = excluded.last_city,
           last_org = excluded.last_org,
           last_checked_at = excluded.last_checked_at,
-          last_selected_at = excluded.last_selected_at
+          last_selected_at = excluded.last_selected_at,
+          last_leased_at = excluded.last_leased_at
       `);
       for (const [name, payload] of Object.entries(nodes)) {
         const geo = payload.lastGeo as Record<string, unknown> | undefined;
@@ -1080,9 +1363,11 @@ export class AppDatabase {
           payload.lastLatencyMs == null ? null : Number(payload.lastLatencyMs),
           payload.lastIp ? String(payload.lastIp) : geo?.ip ? String(geo.ip) : null,
           geo?.country ? String(geo.country) : null,
+          geo?.region ? String(geo.region) : null,
           geo?.city ? String(geo.city) : null,
           geo?.org ? String(geo.org) : null,
           payload.lastCheckedAt ? String(payload.lastCheckedAt) : null,
+          payload.lastUsedAt ? String(payload.lastUsedAt) : null,
           payload.lastUsedAt ? String(payload.lastUsedAt) : null,
         );
         imported += 1;
@@ -1188,6 +1473,13 @@ export class AppDatabase {
         sync_enabled = 1,
         updated_at = excluded.updated_at
     `);
+    const ensureBrowserSessionStmt = this.db.query(`
+      INSERT INTO account_browser_sessions (account_id, status, profile_path, updated_at)
+      VALUES (?, 'pending', ?, ?)
+      ON CONFLICT(account_id) DO UPDATE SET
+        profile_path = COALESCE(NULLIF(account_browser_sessions.profile_path, ''), excluded.profile_path),
+        updated_at = excluded.updated_at
+    `);
 
     this.db.exec("BEGIN IMMEDIATE;");
     try {
@@ -1201,6 +1493,7 @@ export class AppDatabase {
             const accountId = Number(inserted.id);
             affectedIds.push(accountId);
             ensureMailboxStmt.run(accountId, now);
+            ensureBrowserSessionStmt.run(accountId, this.accountBrowserProfilePath(accountId), now);
           }
           created += 1;
           continue;
@@ -1236,6 +1529,7 @@ export class AppDatabase {
         );
         affectedIds.push(Number(existing.id));
         ensureMailboxStmt.run(Number(existing.id), now);
+        ensureBrowserSessionStmt.run(Number(existing.id), this.accountBrowserProfilePath(Number(existing.id)), now);
         updated += 1;
       }
       this.db.exec("COMMIT;");
@@ -1289,12 +1583,11 @@ export class AppDatabase {
       .query(`
         SELECT
           COUNT(*) AS total,
-          SUM(CASE WHEN last_result_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
+          SUM(CASE WHEN last_result_status = 'ready' AND browser_session_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
           SUM(CASE WHEN has_api_key = 1 THEN 1 ELSE 0 END) AS linked_count,
           SUM(CASE WHEN last_result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
           SUM(CASE WHEN last_result_status = 'disabled' THEN 1 ELSE 0 END) AS disabled_count
-        FROM microsoft_accounts
-        ${whereSql}
+        FROM (${accountSelectSql(whereSql)}) filtered_accounts
       `)
       .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number; disabled_count?: number } | null;
     const total = Number(summaryRow?.total || 0);
@@ -1760,23 +2053,25 @@ export class AppDatabase {
     try {
       const row = this.db
         .query(`
-          SELECT *
-          FROM microsoft_accounts
-          WHERE disabled_at IS NULL
-            AND has_api_key = 0
-            AND COALESCE(skip_reason, '') = ''
-            AND lease_job_id IS NULL
+          SELECT a.*
+          FROM microsoft_accounts a
+          JOIN account_browser_sessions s ON s.account_id = a.id
+          WHERE a.disabled_at IS NULL
+            AND a.has_api_key = 0
+            AND COALESCE(a.skip_reason, '') = ''
+            AND a.lease_job_id IS NULL
+            AND s.status = 'ready'
             AND NOT EXISTS (
               SELECT 1
               FROM job_attempts attempts
               WHERE attempts.job_id = ?
-                AND attempts.account_id = microsoft_accounts.id
-                AND attempts.status IN ('running', 'succeeded')
+                AND attempts.account_id = a.id
+                AND ${nonRetryableAttemptWhereSql("attempts")}
             )
           ORDER BY
-            CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END,
-            last_used_at ASC,
-            imported_at ASC
+            CASE WHEN a.last_used_at IS NULL THEN 0 ELSE 1 END,
+            a.last_used_at ASC,
+            a.imported_at ASC
           LIMIT 1
         `)
         .get(jobId) as Record<string, unknown> | null;
@@ -1804,17 +2099,19 @@ export class AppDatabase {
     const row = this.db
       .query(`
         SELECT COUNT(*) AS count
-        FROM microsoft_accounts
-        WHERE disabled_at IS NULL
-          AND has_api_key = 0
-          AND COALESCE(skip_reason, '') = ''
-          AND lease_job_id IS NULL
+        FROM microsoft_accounts a
+        JOIN account_browser_sessions s ON s.account_id = a.id
+        WHERE a.disabled_at IS NULL
+          AND a.has_api_key = 0
+          AND COALESCE(a.skip_reason, '') = ''
+          AND a.lease_job_id IS NULL
+          AND s.status = 'ready'
           AND NOT EXISTS (
             SELECT 1
             FROM job_attempts attempts
             WHERE attempts.job_id = ?
-              AND attempts.account_id = microsoft_accounts.id
-              AND attempts.status IN ('running', 'succeeded')
+              AND attempts.account_id = a.id
+              AND ${nonRetryableAttemptWhereSql("attempts")}
           )
       `)
       .get(jobId) as { count?: number } | null;
@@ -1824,6 +2121,374 @@ export class AppDatabase {
   getAccount(accountId: number): MicrosoftAccountRecord | null {
     const row = this.db.query(accountSelectSql("WHERE a.id = ?")).get(accountId) as Record<string, unknown> | null;
     return row ? mapAccountRow(row) : null;
+  }
+
+  getBrowserSessionByAccountId(accountId: number): AccountBrowserSessionRecord | null {
+    const row = this.db
+      .query("SELECT * FROM account_browser_sessions WHERE account_id = ?")
+      .get(accountId) as Record<string, unknown> | null;
+    return row ? mapAccountBrowserSessionTableRow(row) : null;
+  }
+
+  ensureBrowserSessionForAccount(accountId: number): AccountBrowserSessionRecord {
+    const now = nowIso();
+    this.db
+      .query(`
+        INSERT INTO account_browser_sessions (account_id, status, profile_path, browser_engine, updated_at)
+        VALUES (?, 'pending', ?, 'chrome', ?)
+        ON CONFLICT(account_id) DO UPDATE SET
+          profile_path = excluded.profile_path,
+          browser_engine = COALESCE(account_browser_sessions.browser_engine, excluded.browser_engine),
+          updated_at = excluded.updated_at
+      `)
+      .run(accountId, this.accountBrowserProfilePath(accountId), now);
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  queueBrowserSessionBootstrap(accountId: number): AccountBrowserSessionRecord {
+    this.ensureBrowserSessionForAccount(accountId);
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE account_browser_sessions
+        SET status = 'pending',
+            browser_engine = COALESCE(browser_engine, 'chrome'),
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ?
+        WHERE account_id = ?
+      `)
+      .run(now, accountId);
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  markBrowserSessionBootstrapping(
+    accountId: number,
+    input?: {
+      browserEngine?: string | null;
+      proxyNode?: string | null;
+    },
+  ): AccountBrowserSessionRecord {
+    this.ensureBrowserSessionForAccount(accountId);
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE account_browser_sessions
+        SET status = 'bootstrapping',
+            browser_engine = COALESCE(?, browser_engine, 'chrome'),
+            proxy_node = COALESCE(?, proxy_node),
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ?
+        WHERE account_id = ?
+      `)
+      .run(input?.browserEngine ?? null, input?.proxyNode ?? null, now, accountId);
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  markBrowserSessionReady(
+    accountId: number,
+    input: {
+      browserEngine?: string | null;
+      proxyNode?: string | null;
+      proxyIp?: string | null;
+      proxyCountry?: string | null;
+      proxyRegion?: string | null;
+      proxyCity?: string | null;
+      proxyTimezone?: string | null;
+      lastBootstrappedAt?: string | null;
+      lastUsedAt?: string | null;
+    },
+  ): AccountBrowserSessionRecord {
+    this.ensureBrowserSessionForAccount(accountId);
+    const now = nowIso();
+    const lastBootstrappedAt = input.lastBootstrappedAt ?? now;
+    const lastUsedAt = input.lastUsedAt ?? lastBootstrappedAt;
+    this.db
+      .query(`
+        UPDATE account_browser_sessions
+        SET status = 'ready',
+            browser_engine = COALESCE(?, browser_engine, 'chrome'),
+            proxy_node = ?,
+            proxy_ip = ?,
+            proxy_country = ?,
+            proxy_region = ?,
+            proxy_city = ?,
+            proxy_timezone = ?,
+            last_bootstrapped_at = ?,
+            last_used_at = ?,
+            last_error_code = NULL,
+            last_error_message = NULL,
+            updated_at = ?
+        WHERE account_id = ?
+      `)
+      .run(
+        input.browserEngine ?? null,
+        input.proxyNode ?? null,
+        input.proxyIp ?? null,
+        input.proxyCountry ?? null,
+        input.proxyRegion ?? null,
+        input.proxyCity ?? null,
+        input.proxyTimezone ?? null,
+        lastBootstrappedAt,
+        lastUsedAt,
+        now,
+        accountId,
+      );
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  markBrowserSessionFailure(
+    accountId: number,
+    input: {
+      status: Extract<AccountBrowserSessionStatus, "failed" | "blocked">;
+      browserEngine?: string | null;
+      proxyNode?: string | null;
+      proxyIp?: string | null;
+      proxyCountry?: string | null;
+      proxyRegion?: string | null;
+      proxyCity?: string | null;
+      proxyTimezone?: string | null;
+      errorCode?: string | null;
+      errorMessage?: string | null;
+    },
+  ): AccountBrowserSessionRecord {
+    this.ensureBrowserSessionForAccount(accountId);
+    const now = nowIso();
+    const hasProxyNodeSnapshot = input.proxyNode !== undefined;
+    const hasProxyIpSnapshot = input.proxyIp !== undefined;
+    const hasProxyCountrySnapshot = input.proxyCountry !== undefined;
+    const hasProxyRegionSnapshot = input.proxyRegion !== undefined;
+    const hasProxyCitySnapshot = input.proxyCity !== undefined;
+    const hasProxyTimezoneSnapshot = input.proxyTimezone !== undefined;
+    this.db
+      .query(`
+        UPDATE account_browser_sessions
+        SET status = ?,
+            browser_engine = COALESCE(?, browser_engine, 'chrome'),
+            proxy_node = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_node) END,
+            proxy_ip = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_ip) END,
+            proxy_country = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_country) END,
+            proxy_region = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_region) END,
+            proxy_city = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_city) END,
+            proxy_timezone = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_timezone) END,
+            last_error_code = ?,
+            last_error_message = ?,
+            updated_at = ?
+        WHERE account_id = ?
+      `)
+      .run(
+        input.status,
+        input.browserEngine ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
+        input.proxyNode ?? null,
+        input.proxyNode ?? null,
+        hasProxyIpSnapshot ? 1 : 0,
+        input.proxyIp ?? null,
+        input.proxyIp ?? null,
+        hasProxyCountrySnapshot ? 1 : 0,
+        input.proxyCountry ?? null,
+        input.proxyCountry ?? null,
+        hasProxyRegionSnapshot ? 1 : 0,
+        input.proxyRegion ?? null,
+        input.proxyRegion ?? null,
+        hasProxyCitySnapshot ? 1 : 0,
+        input.proxyCity ?? null,
+        input.proxyCity ?? null,
+        hasProxyTimezoneSnapshot ? 1 : 0,
+        input.proxyTimezone ?? null,
+        input.proxyTimezone ?? null,
+        input.errorCode ?? null,
+        input.errorMessage ?? null,
+        now,
+        accountId,
+      );
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  touchBrowserSessionUsage(
+    accountId: number,
+    input?: {
+      proxyNode?: string | null;
+      proxyIp?: string | null;
+      proxyCountry?: string | null;
+      proxyRegion?: string | null;
+      proxyCity?: string | null;
+      proxyTimezone?: string | null;
+      lastUsedAt?: string | null;
+    },
+  ): AccountBrowserSessionRecord {
+    this.ensureBrowserSessionForAccount(accountId);
+    const now = nowIso();
+    const lastUsedAt = input?.lastUsedAt ?? now;
+    this.db
+      .query(`
+        UPDATE account_browser_sessions
+        SET proxy_node = COALESCE(?, proxy_node),
+            proxy_ip = COALESCE(?, proxy_ip),
+            proxy_country = COALESCE(?, proxy_country),
+            proxy_region = COALESCE(?, proxy_region),
+            proxy_city = COALESCE(?, proxy_city),
+            proxy_timezone = COALESCE(?, proxy_timezone),
+            last_used_at = ?,
+            updated_at = ?
+        WHERE account_id = ?
+      `)
+      .run(
+        input?.proxyNode ?? null,
+        input?.proxyIp ?? null,
+        input?.proxyCountry ?? null,
+        input?.proxyRegion ?? null,
+        input?.proxyCity ?? null,
+        input?.proxyTimezone ?? null,
+        lastUsedAt,
+        now,
+        accountId,
+      );
+    return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  countPendingBrowserSessions(jobId: number): number {
+    const row = this.db
+      .query(`
+        SELECT COUNT(*) AS count
+        FROM microsoft_accounts a
+        JOIN account_browser_sessions s ON s.account_id = a.id
+        WHERE a.disabled_at IS NULL
+          AND a.has_api_key = 0
+          AND COALESCE(a.skip_reason, '') = ''
+          AND a.lease_job_id IS NULL
+          AND s.status IN ('pending', 'bootstrapping')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM job_attempts attempts
+            WHERE attempts.job_id = ?
+              AND attempts.account_id = a.id
+              AND ${nonRetryableAttemptWhereSql("attempts")}
+          )
+      `)
+      .get(jobId) as { count?: number } | null;
+    return Number(row?.count || 0);
+  }
+
+  listPendingBrowserSessionAccountIds(): number[] {
+    const rows = this.db
+      .query(`
+        SELECT a.id
+        FROM microsoft_accounts a
+        JOIN account_browser_sessions s ON s.account_id = a.id
+        WHERE a.disabled_at IS NULL
+          AND a.has_api_key = 0
+          AND COALESCE(a.skip_reason, '') = ''
+          AND s.status IN ('pending', 'bootstrapping')
+        ORDER BY a.id ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => Number(row.id)).filter((value) => Number.isInteger(value) && value > 0);
+  }
+
+  getProxyNode(nodeName: string): ProxyNodeRecord | null {
+    const normalized = nodeName.trim();
+    if (!normalized) return null;
+    const row = this.db
+      .query("SELECT *, 0 AS success24h FROM proxy_nodes WHERE node_name = ? LIMIT 1")
+      .get(normalized) as Record<string, unknown> | null;
+    return row ? mapProxyNodeRow(row) : null;
+  }
+
+  selectReusableProxyNodeForAccount(accountId: number): ProxyNodeRecord | null {
+    const session = this.getBrowserSessionByAccountId(accountId);
+    const selectByWhere = (healthWhere: string, whereClause: string, ...params: string[]): ProxyNodeRecord | null => {
+      const row = this.db
+        .query(`
+          SELECT p.*, 0 AS success24h
+          FROM proxy_nodes p
+          WHERE ${healthWhere}
+            AND ${whereClause}
+          ORDER BY ${proxyNodeLruOrderSql("p")}
+          LIMIT 1
+        `)
+        .get(...params) as Record<string, unknown> | null;
+      return row ? mapProxyNodeRow(row) : null;
+    };
+    const selectByHealth = (healthWhere: string): ProxyNodeRecord | null => {
+      if (session?.proxyIp?.trim()) {
+        const exactIp = selectByWhere(healthWhere, "p.last_egress_ip = ?", session.proxyIp.trim());
+        if (exactIp) return exactIp;
+      }
+      if (session?.proxyRegion?.trim()) {
+        const sameRegion = selectByWhere(healthWhere, "p.last_region = ?", session.proxyRegion.trim());
+        if (sameRegion) return sameRegion;
+      }
+      const fallback = this.db
+        .query(`
+          SELECT p.*, 0 AS success24h
+          FROM proxy_nodes p
+          WHERE ${healthWhere}
+          ORDER BY ${proxyNodeLruOrderSql("p")}
+          LIMIT 1
+        `)
+        .get() as Record<string, unknown> | null;
+      return fallback ? mapProxyNodeRow(fallback) : null;
+    };
+    const verifiedHealthyWhere = "LOWER(TRIM(COALESCE(p.last_status, ''))) IN ('ok', 'succeeded')";
+    const verified = selectByHealth(verifiedHealthyWhere);
+    if (verified) return verified;
+
+    const untestedWhere = "TRIM(COALESCE(p.last_status, '')) = ''";
+    return selectByHealth(untestedWhere);
+  }
+
+  touchProxyLease(
+    nodeName: string,
+    input?: {
+      status?: string | null;
+      egressIp?: string | null;
+      country?: string | null;
+      region?: string | null;
+      city?: string | null;
+      org?: string | null;
+      leasedAt?: string | null;
+    },
+  ): ProxyNodeRecord | null {
+    const normalized = nodeName.trim();
+    if (!normalized) return null;
+    const leasedAt = input?.leasedAt ?? nowIso();
+    this.db
+      .query(`
+        UPDATE proxy_nodes
+        SET last_status = COALESCE(?, last_status),
+            last_egress_ip = COALESCE(?, last_egress_ip),
+            last_country = COALESCE(?, last_country),
+            last_region = COALESCE(?, last_region),
+            last_city = COALESCE(?, last_city),
+            last_org = COALESCE(?, last_org),
+            last_leased_at = ?,
+            last_checked_at = CASE
+              WHEN ? IS NOT NULL OR ? IS NOT NULL OR ? IS NOT NULL OR ? IS NOT NULL OR ? IS NOT NULL OR ? IS NOT NULL
+                THEN ?
+              ELSE last_checked_at
+            END
+        WHERE node_name = ?
+      `)
+      .run(
+        input?.status ?? null,
+        input?.egressIp ?? null,
+        input?.country ?? null,
+        input?.region ?? null,
+        input?.city ?? null,
+        input?.org ?? null,
+        leasedAt,
+        input?.status ?? null,
+        input?.egressIp ?? null,
+        input?.country ?? null,
+        input?.region ?? null,
+        input?.city ?? null,
+        input?.org ?? null,
+        leasedAt,
+        normalized,
+      );
+    return this.getProxyNode(normalized);
   }
 
   ensureMailboxForAccount(accountId: number): MicrosoftMailboxRecord {
@@ -1926,10 +2591,14 @@ export class AppDatabase {
         UPDATE microsoft_mailboxes
         SET status = 'preparing',
             sync_enabled = 1,
+            refresh_token = NULL,
+            access_token = NULL,
+            access_token_expires_at = NULL,
             authority = ?,
             oauth_state = ?,
             oauth_code_verifier = ?,
             oauth_started_at = ?,
+            oauth_connected_at = NULL,
             last_error_code = NULL,
             last_error_message = NULL,
             updated_at = ?
@@ -2234,7 +2903,7 @@ export class AppDatabase {
         FROM job_attempts
         WHERE job_id = ?
           AND account_id = ?
-          AND status IN ('running', 'succeeded')
+          AND ${nonRetryableAttemptWhereSql("job_attempts")}
         LIMIT 1
       `)
       .get(jobId, accountId) as { blocked?: number } | null;
@@ -2248,6 +2917,7 @@ export class AppDatabase {
     if (account.hasApiKey) return false;
     if (isBlockingAccountSkipReason(account.skipReason)) return false;
     if (account.leaseJobId != null) return false;
+    if (!isReadyBrowserSession(account.browserSession)) return false;
     return !this.hasNonRetryableAttemptForJob(jobId, accountId);
   }
 
@@ -2273,6 +2943,7 @@ export class AppDatabase {
         WHERE id = ?
       `)
       .run(now, now, accountId);
+    this.touchBrowserSessionUsage(accountId, { lastUsedAt: now });
     return mapAttemptRow(row);
   }
 
@@ -2412,6 +3083,30 @@ export class AppDatabase {
         input.createdAt || nowIso(),
       ) as Record<string, unknown>;
     return mapAccountExtractItemRow(row);
+  }
+
+  updateAccountExtractItem(
+    itemId: number,
+    patch: Partial<Pick<AccountExtractItemRecord, "acceptStatus" | "rejectReason" | "importedAccountId">>,
+  ): AccountExtractItemRecord {
+    const current = this.db.query("SELECT * FROM account_extract_items WHERE id = ?").get(itemId) as Record<string, unknown> | null;
+    if (!current) {
+      throw new Error(`account extract item not found: ${itemId}`);
+    }
+    const next = {
+      ...mapAccountExtractItemRow(current),
+      ...patch,
+    };
+    this.db
+      .query(`
+        UPDATE account_extract_items
+        SET accept_status = ?,
+            reject_reason = ?,
+            imported_account_id = ?
+        WHERE id = ?
+      `)
+      .run(next.acceptStatus, next.rejectReason, next.importedAccountId, itemId);
+    return mapAccountExtractItemRow(this.db.query("SELECT * FROM account_extract_items WHERE id = ?").get(itemId) as Record<string, unknown>);
   }
 
   listAccountExtractHistory(filters: {
@@ -2605,6 +3300,25 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
+    this.touchBrowserSessionUsage(accountId, {
+      proxyNode: attempt.proxyNode,
+      proxyIp: attempt.proxyIp,
+      proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+      proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+      proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
+      lastUsedAt: now,
+    });
+    if (attempt.proxyNode) {
+      this.touchProxyLease(attempt.proxyNode, {
+        status: "ok",
+        egressIp: attempt.proxyIp,
+        country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+        city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+        leasedAt: now,
+      });
+    }
     this.db
       .query(`
         UPDATE microsoft_accounts
@@ -2706,6 +3420,25 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
+    this.touchBrowserSessionUsage(accountId, {
+      proxyNode: attempt.proxyNode,
+      proxyIp: attempt.proxyIp,
+      proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+      proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+      proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
+      lastUsedAt: now,
+    });
+    if (attempt.proxyNode) {
+      this.touchProxyLease(attempt.proxyNode, {
+        status: shouldMarkProxyLeaseFailedForAttemptError(errorCode) ? "failed" : null,
+        egressIp: attempt.proxyIp,
+        country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+        city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+        leasedAt: now,
+      });
+    }
     const nextSkipReason = resolveFailureSkipReason({
       hasApiKey: currentAccount?.hasApiKey ?? false,
       currentSkipReason: currentAccount?.skipReason ?? null,
@@ -2817,6 +3550,24 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
+    this.touchBrowserSessionUsage(accountId, {
+      proxyNode: attempt.proxyNode,
+      proxyIp: attempt.proxyIp,
+      proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+      proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+      proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
+      lastUsedAt: now,
+    });
+    if (attempt.proxyNode) {
+      this.touchProxyLease(attempt.proxyNode, {
+        egressIp: attempt.proxyIp,
+        country: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        region: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+        city: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+        leasedAt: now,
+      });
+    }
     this.db
       .query(`
         UPDATE microsoft_accounts
@@ -2865,20 +3616,7 @@ export class AppDatabase {
             ORDER BY p.is_selected DESC, p.node_name ASC
           `)
           .all() as Record<string, unknown>[]);
-    return rows.map((row) => ({
-      id: Number(row.id),
-      nodeName: String(row.node_name),
-      isSelected: asBoolean(row.is_selected),
-      lastStatus: row.last_status == null ? null : String(row.last_status),
-      lastLatencyMs: row.last_latency_ms == null ? null : Number(row.last_latency_ms),
-      lastEgressIp: row.last_egress_ip == null ? null : String(row.last_egress_ip),
-      lastCountry: row.last_country == null ? null : String(row.last_country),
-      lastCity: row.last_city == null ? null : String(row.last_city),
-      lastOrg: row.last_org == null ? null : String(row.last_org),
-      lastCheckedAt: row.last_checked_at == null ? null : String(row.last_checked_at),
-      lastSelectedAt: row.last_selected_at == null ? null : String(row.last_selected_at),
-      success24h: Number(row.success24h || 0),
-    }));
+    return rows.map(mapProxyNodeRow);
   }
 
   upsertProxyInventory(nodes: string[], selectedName?: string | null): void {
@@ -2965,6 +3703,7 @@ export class AppDatabase {
     latencyMs?: number | null;
     egressIp?: string | null;
     country?: string | null;
+    region?: string | null;
     city?: string | null;
     org?: string | null;
     error?: string | null;
@@ -2974,25 +3713,47 @@ export class AppDatabase {
     try {
       this.db
         .query(`
-          INSERT INTO proxy_checks (node_name, status, latency_ms, egress_ip, country, city, org, error, checked_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          INSERT INTO proxy_checks (node_name, status, latency_ms, egress_ip, country, region, city, org, error, checked_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
-        .run(input.nodeName, input.status, input.latencyMs ?? null, input.egressIp ?? null, input.country ?? null, input.city ?? null, input.org ?? null, input.error ?? null, now);
+        .run(
+          input.nodeName,
+          input.status,
+          input.latencyMs ?? null,
+          input.egressIp ?? null,
+          input.country ?? null,
+          input.region ?? null,
+          input.city ?? null,
+          input.org ?? null,
+          input.error ?? null,
+          now,
+        );
       this.db
         .query(`
           INSERT INTO proxy_nodes (
-            node_name, is_selected, last_status, last_latency_ms, last_egress_ip, last_country, last_city, last_org, last_checked_at, last_selected_at
-          ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, NULL)
+            node_name, is_selected, last_status, last_latency_ms, last_egress_ip, last_country, last_region, last_city, last_org, last_checked_at, last_selected_at
+          ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
           ON CONFLICT(node_name) DO UPDATE SET
             last_status = excluded.last_status,
             last_latency_ms = excluded.last_latency_ms,
             last_egress_ip = excluded.last_egress_ip,
             last_country = excluded.last_country,
+            last_region = excluded.last_region,
             last_city = excluded.last_city,
             last_org = excluded.last_org,
             last_checked_at = excluded.last_checked_at
         `)
-        .run(input.nodeName, input.status, input.latencyMs ?? null, input.egressIp ?? null, input.country ?? null, input.city ?? null, input.org ?? null, now);
+        .run(
+          input.nodeName,
+          input.status,
+          input.latencyMs ?? null,
+          input.egressIp ?? null,
+          input.country ?? null,
+          input.region ?? null,
+          input.city ?? null,
+          input.org ?? null,
+          now,
+        );
       this.db.exec("COMMIT;");
     } catch (error) {
       this.db.exec("ROLLBACK;");

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
@@ -6,10 +6,13 @@ import { buildImportCommitEntries } from "@/lib/account-import";
 import type {
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
+  AccountExtractorRunDraft,
+  AccountExtractorRuntime,
   AccountExtractorSettings,
   AccountImportPreviewPayload,
   AccountQuery,
   AccountsPayload,
+  ExtractorSseState,
 } from "@/lib/app-types";
 import {
   sampleAccounts,
@@ -17,6 +20,10 @@ import {
   sampleExtractorHistoryDense,
   sampleExtractorHistoryEmpty,
   sampleExtractorHistoryFailureMatrix,
+  sampleExtractorRuntimeFailed,
+  sampleExtractorRuntimeIdle,
+  sampleExtractorRuntimeRunning,
+  sampleExtractorRuntimeSucceeded,
   sampleExtractorSettings,
 } from "@/stories/fixtures";
 
@@ -115,6 +122,15 @@ const baseArgs = {
   connectProgress: null,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
+  extractorRuntime: sampleExtractorRuntimeIdle,
+  extractorRunDraft: {
+    sources: ["zhanghaoya"],
+    quantity: 1,
+    maxWaitSec: 60,
+    accountType: "outlook",
+  } satisfies AccountExtractorRunDraft,
+  extractorRunBusy: false,
+  extractorSseState: "open" as ExtractorSseState,
   extractorHistory: sampleExtractorHistory,
   extractorHistoryQuery: createDefaultExtractorHistoryQuery(),
   extractorHistoryBusy: false,
@@ -138,6 +154,9 @@ const baseArgs = {
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
   onSaveExtractorSettings: fn(async () => undefined),
+  onExtractorRunDraftChange: fn(),
+  onRunExtractor: fn(async () => undefined),
+  onStopExtractor: fn(async () => undefined),
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
@@ -218,6 +237,10 @@ type AccountsStorySurfaceProps = {
   batchBusy?: boolean;
   connectBusy?: boolean;
   extractorSettings?: AccountExtractorSettings | null;
+  extractorRuntime?: AccountExtractorRuntime;
+  extractorRunDraft?: AccountExtractorRunDraft;
+  extractorRunBusy?: boolean;
+  extractorSseState?: ExtractorSseState;
   extractorHistory?: AccountExtractorHistoryPayload;
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
@@ -229,6 +252,8 @@ type AccountsStorySurfaceProps = {
   onConnectSelectedAccounts?: () => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
+  onRunExtractor?: () => Promise<void>;
+  onStopExtractor?: () => Promise<void>;
 };
 
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
@@ -241,10 +266,23 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const [query, setQuery] = useState<AccountQuery>(createDefaultQuery());
   const [selectedIds, setSelectedIds] = useState<number[]>(props.initialSelectedIds ?? [2]);
   const [previewOpen, setPreviewOpen] = useState(Boolean(props.previewOpen));
+  const [extractorRunDraft, setExtractorRunDraft] = useState<AccountExtractorRunDraft>(
+    props.extractorRunDraft ?? {
+      sources: ["zhanghaoya"],
+      quantity: 1,
+      maxWaitSec: 60,
+      accountType: "outlook" as const,
+    },
+  );
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
   const visibleAccounts = applyStoryAccountQuery(accounts, query);
+
+  useEffect(() => {
+    if (!props.extractorRunDraft) return;
+    setExtractorRunDraft(props.extractorRunDraft);
+  }, [props.extractorRunDraft]);
 
   return (
     <div className={props.frameClassName}>
@@ -266,6 +304,10 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         connectProgress={props.connectBusy ? { current: 1, total: Math.max(1, selectedIds.length) } : null}
         extractorSettings={extractorSettings}
         extractorSettingsBusy={false}
+        extractorRuntime={props.extractorRuntime ?? sampleExtractorRuntimeIdle}
+        extractorRunDraft={extractorRunDraft}
+        extractorRunBusy={Boolean(props.extractorRunBusy)}
+        extractorSseState={props.extractorSseState ?? "open"}
         extractorHistory={extractorHistory}
         extractorHistoryQuery={extractorHistoryQuery}
         extractorHistoryBusy={Boolean(props.extractorHistoryBusy)}
@@ -289,6 +331,9 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={async () => undefined}
+        onExtractorRunDraftChange={(patch) => setExtractorRunDraft((current) => ({ ...current, ...patch }))}
+        onRunExtractor={props.onRunExtractor ?? (async () => undefined)}
+        onStopExtractor={props.onStopExtractor ?? (async () => undefined)}
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
@@ -309,6 +354,20 @@ const failureReuseAccounts: AccountsPayload = {
   },
   groups: ["failed-pool", "manual-hold", "retry-pool"],
   rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),
+};
+
+const sessionBootstrapAccounts: AccountsPayload = {
+  total: 3,
+  page: 1,
+  pageSize: 20,
+  summary: {
+    ready: 1,
+    linked: 1,
+    failed: 0,
+    disabled: 1,
+  },
+  groups: ["default", "linked", "failed-pool"],
+  rows: sampleAccounts.rows.filter((row) => ["alpha@outlook.com", "beta@outlook.com", "gamma@outlook.com"].includes(row.microsoftEmail)),
 };
 
 const sortingDemoAccounts: AccountsPayload = {
@@ -332,7 +391,7 @@ const sortingDemoAccounts: AccountsPayload = {
 
 async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<HTMLElement> {
   const canvas = within(canvasElement);
-  await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+  await userEvent.click(canvas.getByTestId("open-extractor-settings"));
   await waitFor(() => {
     expect(within(document.body).getByRole("dialog", { name: "微软账号提取器设置" })).toBeInTheDocument();
   });
@@ -373,7 +432,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含前端预解析弹窗、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
+          "微软账号导入与查询页，包含提号器实时面板、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
       },
     },
   },
@@ -401,7 +460,7 @@ export const DesktopActionButtonsNoWrap: Story = {
     const canvas = within(canvasElement);
     const table = canvas.getByRole("table");
     const tableScroller = table.parentElement as HTMLDivElement | null;
-    const connectButton = canvas.getAllByRole("button", { name: "连接" })[0]!;
+    const connectButton = canvas.getAllByRole("button", { name: /Bootstrap/ })[0]!;
     const proofButton = canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!;
     const availabilityButton = canvas.getAllByRole("button", { name: "标记不可用" })[0]!;
     const mailboxButton = canvas.getAllByRole("button", { name: "收件箱" })[0]!;
@@ -570,11 +629,165 @@ export const ExtractorSettingsCompact: Story = {
   render: () => <AccountsStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "打开提取器设置" }));
+    await userEvent.click(canvas.getByTestId("open-extractor-settings"));
     const dialog = within(document.body).getByRole("dialog", { name: "微软账号提取器设置" });
     await expect(dialog).toBeInTheDocument();
     await expect(within(dialog).getByText("闪客云 KEY")).toBeInTheDocument();
     await expect(within(dialog).getByText("Hotmail666 KEY")).toBeInTheDocument();
+  },
+};
+
+export const ExtractorRuntimeRunning: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      extractorRuntime={sampleExtractorRuntimeRunning}
+      extractorRunDraft={{ sources: ["zhanghaoya", "shanyouxiang"], quantity: 2, maxWaitSec: 45, accountType: "outlook" }}
+      extractorSseState="open"
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "提号器运行中场景，展示实时 accepted/raw/in-flight/remaining wait 指标，以及 SSE 已连接状态。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("SSE 已连接")).toBeInTheDocument();
+    await expect(canvas.getByText("目标接受：1 / 2")).toBeInTheDocument();
+    await expect(canvas.getByText("原始请求：3")).toBeInTheDocument();
+    await expect(canvas.getByText("剩余等待：27s / 45s")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "取消提号" })).toBeInTheDocument();
+  },
+};
+
+export const ExtractorStartCancelCooldownPlay: Story = {
+  args: baseArgs,
+  render: () => {
+    function InteractiveSurface() {
+      const [runtime, setRuntime] = useState<AccountExtractorRuntime>(sampleExtractorRuntimeIdle);
+      const [busy, setBusy] = useState(false);
+      const draft: AccountExtractorRunDraft = {
+        sources: ["zhanghaoya", "hotmail666"],
+        quantity: 2,
+        maxWaitSec: 60,
+        accountType: "outlook",
+      };
+      return (
+        <AccountsStorySurface
+          extractorRuntime={runtime}
+          extractorRunDraft={draft}
+          extractorRunBusy={busy}
+          onRunExtractor={async () => {
+            setBusy(true);
+            await new Promise((resolve) => window.setTimeout(resolve, 80));
+            setRuntime({
+              ...sampleExtractorRuntimeRunning,
+              enabledSources: draft.sources,
+              requestedUsableCount: draft.quantity,
+              maxWaitSec: draft.maxWaitSec,
+              remainingWaitSec: 58,
+            });
+            setBusy(false);
+          }}
+          onStopExtractor={async () => {
+            setBusy(true);
+            setRuntime((current) => ({
+              ...current,
+              status: "stopping",
+              lastMessage: "提号取消中，等待 2 个在途请求收尾",
+            }));
+            await new Promise((resolve) => window.setTimeout(resolve, 80));
+            setRuntime({
+              ...sampleExtractorRuntimeIdle,
+              status: "stopped",
+              enabledSources: draft.sources,
+              requestedUsableCount: draft.quantity,
+              lastMessage: "提号已取消",
+              updatedAt: "2026-04-03T03:20:00.000Z",
+            });
+            setBusy(false);
+          }}
+        />
+      );
+    }
+    return <InteractiveSurface />;
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "验证开始提号后按钮先禁用 1 秒，再切到红色取消按钮；取消后同样禁用 1 秒再恢复开始态。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const startButton = canvas.getByRole("button", { name: "开始提号 + 自动 Bootstrap" });
+    await userEvent.click(startButton);
+    await expect(canvas.getByRole("button", { name: "提号中…" })).toBeDisabled();
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+    const cancelButton = canvas.getByRole("button", { name: "取消提号" });
+    await expect(cancelButton).toBeEnabled();
+    await userEvent.click(cancelButton);
+    await expect(canvas.getByRole("button", { name: "取消中…" })).toBeDisabled();
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+    await expect(canvas.getByRole("button", { name: "开始提号 + 自动 Bootstrap" })).toBeEnabled();
+  },
+};
+
+export const ExtractorRunInputsBlurCorrectionPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证提号数量与最长等待输入框允许先清空再重输，只在失焦后做数值订正，避免边删边被立即改写。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const quantityInput = canvas.getByRole("spinbutton", { name: "提号数量" }) as HTMLInputElement;
+    const maxWaitInput = canvas.getByRole("spinbutton", { name: "最长等待（秒）" }) as HTMLInputElement;
+
+    await userEvent.clear(quantityInput);
+    expect(quantityInput.value).toBe("");
+    await userEvent.type(quantityInput, "12");
+    expect(quantityInput.value).toBe("12");
+    await userEvent.tab();
+    await expect(quantityInput).toHaveValue(12);
+
+    await userEvent.clear(maxWaitInput);
+    expect(maxWaitInput.value).toBe("");
+    await userEvent.type(maxWaitInput, "300");
+    expect(maxWaitInput.value).toBe("300");
+    await userEvent.tab();
+    await expect(maxWaitInput).toHaveValue(300);
+  },
+};
+
+export const ExtractorRuntimeOutcomeStates: Story = {
+  args: baseArgs,
+  render: () => (
+    <div className="space-y-6">
+      <AccountsStorySurface extractorRuntime={sampleExtractorRuntimeSucceeded} extractorRunDraft={{ sources: ["zhanghaoya", "shankeyun"], quantity: 2, maxWaitSec: 45, accountType: "outlook" }} />
+      <AccountsStorySurface extractorRuntime={sampleExtractorRuntimeFailed} extractorRunDraft={{ sources: ["zhanghaoya"], quantity: 1, maxWaitSec: 30, accountType: "outlook" }} extractorSseState="error" />
+    </div>
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "提号器收敛态矩阵，覆盖成功与失败两类结果，便于核对重试前的最终摘要和错误文案。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("已接受 2 / 2 个账号")).toBeInTheDocument();
+    await expect(canvas.getByText("提号等待超时（30 秒）")).toBeInTheDocument();
+    await expect(canvas.getByText("SSE 异常")).toBeInTheDocument();
   },
 };
 
@@ -655,11 +868,59 @@ export const RestoreBlockedAccountPlay: Story = {
   },
 };
 
+export const SessionBootstrapStates: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "账号级持久浏览器会话状态矩阵，固定展示 bootstrap 中、ready 复用、blocked 重试三态，以及对应代理/IP 与 profile 路径摘要。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("BOOTSTRAPPING")).toBeInTheDocument();
+    await expect(canvas.getAllByText("READY").length).toBeGreaterThan(0);
+    await expect(canvas.getByText("BLOCKED")).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Bootstrap 中" })).toBeDisabled();
+    await expect(canvas.getAllByRole("button", { name: "重试 Bootstrap" }).length).toBeGreaterThanOrEqual(2);
+    await expect(canvas.getByText("34.91.22.10 · Tokyo-01")).toBeInTheDocument();
+    await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/2/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
+  },
+};
+
+export const SessionBootstrapCompactCards: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "375px 卡片态回归，确保最小账号页在移动宽度下仍能直接看到 session、proxy 与 profile 摘要。",
+      },
+    },
+  },
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getAllByText("Session").length).toBeGreaterThan(0);
+    await expect(canvas.getByText("Session Proxy")).toBeInTheDocument();
+    await expect(canvas.getByText("Profile")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
+    await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
+  },
+};
+
 const batchConnectSpy = fn(async () => undefined);
 
 export const BatchConnectSelectionPlay: Story = {
   args: baseArgs,
-  render: () => <AccountsStorySurface initialSelectedIds={[1, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
+  render: () => <AccountsStorySurface initialSelectedIds={[2, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
   parameters: {
     docs: {
       description: {

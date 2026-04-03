@@ -9,6 +9,26 @@ export type JobControlOptions = {
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountExtractorAccountType = "outlook";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
+export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+
+export type AccountBrowserSession = {
+  id: number;
+  status: AccountBrowserSessionStatus;
+  profilePath: string;
+  browserEngine: string | null;
+  proxyNode: string | null;
+  proxyIp: string | null;
+  proxyCountry: string | null;
+  proxyRegion: string | null;
+  proxyCity: string | null;
+  proxyTimezone: string | null;
+  lastBootstrappedAt: string | null;
+  lastUsedAt: string | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type AccountRecord = {
   id: number;
@@ -36,6 +56,7 @@ export type AccountRecord = {
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
   mailboxUnreadCount: number;
+  browserSession: AccountBrowserSession | null;
 };
 
 export type MicrosoftGraphSettings = {
@@ -123,10 +144,8 @@ export type MailboxMessageDetailPayload = {
 
 export type MailboxOauthStartPayload = {
   ok: true;
-  mailbox: MailboxRecord;
-  automation: {
-    finalUrl: string | null;
-  };
+  queued: boolean;
+  account: AccountRecord;
 };
 
 export type MailboxSyncPayload = {
@@ -178,6 +197,7 @@ export type AccountImportPreviewPayload = {
 };
 
 export type AccountImportPayload = {
+  ok: true;
   summary: {
     created: number;
     updated: number;
@@ -189,6 +209,8 @@ export type AccountImportPayload = {
     microsoftEmail: string;
     passwordPlaintext: string;
     passwordMasked: string;
+    mailboxStatus?: MailboxStatus | null;
+    browserSession?: AccountBrowserSession | null;
   }>;
 };
 
@@ -199,6 +221,7 @@ export type AccountProofMailboxUpdatePayload = {
 
 export type AccountUpdatePayload = {
   ok: true;
+  queued?: boolean;
   account: AccountRecord;
 };
 
@@ -320,10 +343,12 @@ export type ProxyNode = {
   lastLatencyMs: number | null;
   lastEgressIp: string | null;
   lastCountry: string | null;
+  lastRegion: string | null;
   lastCity: string | null;
   lastOrg: string | null;
   lastCheckedAt: string | null;
   lastSelectedAt: string | null;
+  lastLeasedAt: string | null;
   success24h: number;
 };
 
@@ -339,6 +364,41 @@ export type EventRecord = {
   timestamp: string;
   payload: Record<string, unknown>;
 };
+
+export type AccountExtractorRuntimeStatus = "idle" | "running" | "stopping" | "stopped" | "succeeded" | "failed";
+
+export type AccountExtractorRuntime = {
+  status: AccountExtractorRuntimeStatus;
+  enabledSources: AccountExtractorProvider[];
+  accountType: AccountExtractorAccountType;
+  requestedUsableCount: number;
+  acceptedCount: number;
+  rawAttemptCount: number;
+  attemptBudget: number;
+  inFlightCount: number;
+  remainingWaitSec: number;
+  maxWaitSec: number;
+  startedAt: string | null;
+  lastProvider: AccountExtractorProvider | null;
+  lastMessage: string | null;
+  updatedAt: string | null;
+  errorMessage: string | null;
+  lastBatchId: number | null;
+};
+
+export type AccountExtractorRuntimePayload = {
+  ok: true;
+  runtime: AccountExtractorRuntime;
+};
+
+export type AccountExtractorRunDraft = {
+  sources: AccountExtractorProvider[];
+  quantity: number;
+  maxWaitSec: number;
+  accountType: AccountExtractorAccountType;
+};
+
+export type ExtractorSseState = "connecting" | "open" | "error" | "closed";
 
 export type JobDraft = {
   runMode: "headed" | "headless";
@@ -395,7 +455,7 @@ export type AccountExtractHistoryBatch = {
   requestedUsableCount: number;
   attemptBudget: number;
   acceptedCount: number;
-  status: "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
+  status: "accepted" | "rejected" | "pending_bootstrap" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
   errorMessage: string | null;
   rawResponse: string | null;
   maskedKey: string | null;

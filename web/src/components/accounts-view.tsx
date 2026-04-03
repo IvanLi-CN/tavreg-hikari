@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,11 +23,14 @@ import type {
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
   AccountExtractorProvider,
+  AccountExtractorRunDraft,
+  AccountExtractorRuntime,
   AccountExtractorSettings,
   AccountImportPreviewPayload,
   AccountQuery,
   AccountRecord,
   AccountsPayload,
+  ExtractorSseState,
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -41,6 +44,10 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
+}
+
+function formatRawAttemptProgress(rawAttemptCount: number, attemptBudget: number): string {
+  return attemptBudget > 0 ? `${rawAttemptCount} / ${attemptBudget}` : String(rawAttemptCount);
 }
 
 function isRestorableAccountBlock(reason: string | null | undefined): boolean {
@@ -65,13 +72,16 @@ function isConnectBlockedAccount(account: Pick<AccountRecord, "disabledAt" | "sk
 }
 
 function getConnectActionLabel(
-  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus">,
+  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus" | "browserSession">,
   connecting: boolean,
 ): string {
   if (connecting) return "连接中…";
   if (isLockedAccountBlock(account)) return "已锁定";
   if (account.disabledAt) return "已禁用";
-  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重连" : "连接";
+  if (account.browserSession?.status === "bootstrapping") return "Bootstrap 中";
+  if (account.browserSession?.status === "failed" || account.browserSession?.status === "blocked") return "重试 Bootstrap";
+  if (account.browserSession?.status === "ready") return "重试 Bootstrap";
+  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重试 Bootstrap" : "启动 Bootstrap";
 }
 
 function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
@@ -87,6 +97,54 @@ function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "l
     return "未知辅助邮箱";
   }
   return account.skipReason;
+}
+
+function formatBrowserSessionProxy(account: Pick<AccountRecord, "browserSession">): string {
+  const session = account.browserSession;
+  if (!session) return "—";
+  const ip = session.proxyIp?.trim();
+  const node = session.proxyNode?.trim();
+  const region = session.proxyRegion?.trim();
+  const country = session.proxyCountry?.trim();
+  if (ip && node) {
+    return `${ip} · ${node}`;
+  }
+  if (ip && region) {
+    return `${ip} · ${region}`;
+  }
+  if (ip) return ip;
+  if (node && region) return `${node} · ${region}`;
+  if (node && country) return `${node} · ${country}`;
+  return node || region || country || "—";
+}
+
+function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">): string {
+  const profilePath = account.browserSession?.profilePath?.trim();
+  if (!profilePath) return "—";
+  const normalized = profilePath.replace(/\\/g, "/");
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length <= 4) return normalized;
+  return `…/${parts.slice(-4).join("/")}`;
+}
+
+function formatExtractorSourceSummary(sources: AccountExtractorProvider[]): string {
+  if (sources.length === 0) return "未选择号源";
+  return sources.map(extractorProviderLabel).join("、");
+}
+
+function extractorSseStateCopy(state: ExtractorSseState): { label: string; variant: "neutral" | "success" | "warning" | "danger" | "info" } {
+  if (state === "open") return { label: "SSE 已连接", variant: "success" };
+  if (state === "connecting") return { label: "SSE 连接中", variant: "info" };
+  if (state === "error") return { label: "SSE 异常", variant: "danger" };
+  return { label: "SSE 已关闭", variant: "warning" };
+}
+
+function normalizeExtractorNumericInput(rawValue: string, committedValue: number): number {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return committedValue;
+  const parsed = Math.trunc(Number(trimmed));
+  if (!Number.isFinite(parsed)) return committedValue;
+  return Math.max(1, parsed);
 }
 
 function FilterField(props: { label: string; children: ReactNode }) {
@@ -156,6 +214,7 @@ function ImportDecisionBadge({ decision }: { decision: string }) {
 function ExtractHistoryStatusBadge({ status }: { status: string }) {
   if (status === "accepted") return <Badge variant="success">accepted</Badge>;
   if (status === "rejected") return <Badge variant="warning">rejected</Badge>;
+  if (status === "pending_bootstrap") return <Badge variant="info">pending_bootstrap</Badge>;
   if (status === "invalid_key") return <Badge variant="danger">invalid_key</Badge>;
   if (status === "insufficient_stock") return <Badge variant="warning">insufficient_stock</Badge>;
   if (status === "parse_failed") return <Badge variant="danger">parse_failed</Badge>;
@@ -254,6 +313,10 @@ export function AccountsView({
   connectProgress,
   extractorSettings,
   extractorSettingsBusy,
+  extractorRuntime,
+  extractorRunDraft,
+  extractorRunBusy,
+  extractorSseState,
   extractorHistory,
   extractorHistoryQuery,
   extractorHistoryBusy,
@@ -277,6 +340,9 @@ export function AccountsView({
   onSaveProofMailbox,
   onSaveAvailability,
   onSaveExtractorSettings,
+  onExtractorRunDraftChange,
+  onRunExtractor,
+  onStopExtractor,
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
   onOpenMailbox,
@@ -298,6 +364,10 @@ export function AccountsView({
   connectProgress: { current: number; total: number } | null;
   extractorSettings: AccountExtractorSettings | null;
   extractorSettingsBusy: boolean;
+  extractorRuntime: AccountExtractorRuntime;
+  extractorRunDraft: AccountExtractorRunDraft;
+  extractorRunBusy: boolean;
+  extractorSseState: ExtractorSseState;
   extractorHistory: AccountExtractorHistoryPayload;
   extractorHistoryQuery: AccountExtractorHistoryQuery;
   extractorHistoryBusy: boolean;
@@ -321,6 +391,9 @@ export function AccountsView({
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
+  onExtractorRunDraftChange: (patch: Partial<AccountExtractorRunDraft>) => void;
+  onRunExtractor: () => Promise<void>;
+  onStopExtractor: () => Promise<void>;
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
@@ -349,6 +422,11 @@ export function AccountsView({
     status: "idle" | "copied" | "failed";
   }>({ accountId: null, status: "idle" });
   const passwordCopyResetTimerRef = useRef<number | null>(null);
+  const [extractorQuantityInput, setExtractorQuantityInput] = useState(() => String(extractorRunDraft.quantity));
+  const [extractorMaxWaitInput, setExtractorMaxWaitInput] = useState(() => String(extractorRunDraft.maxWaitSec));
+  const extractorActionTimerRef = useRef<number | null>(null);
+  const [extractorActionCooldown, setExtractorActionCooldown] = useState<"start" | "cancel" | null>(null);
+  const [extractorActionPending, setExtractorActionPending] = useState<"start" | "cancel" | null>(null);
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -356,20 +434,41 @@ export function AccountsView({
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
   const selectedConnectCount = selectedIds.filter((accountId) => {
     const row = accounts.rows.find((item) => item.id === accountId);
-    return !row || !isConnectBlockedAccount(row);
+    return !row || (!isConnectBlockedAccount(row) && row.browserSession?.status !== "bootstrapping");
   }).length;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const extractHistoryPageCount = Math.max(
     1,
     Math.ceil(Math.max(1, extractorHistory.total) / Math.max(1, extractorHistory.pageSize)),
   );
+  const extractorSseBadge = extractorSseStateCopy(extractorSseState);
+  const extractorSummarySources =
+    extractorRuntime.enabledSources.length > 0 ? extractorRuntime.enabledSources : extractorRunDraft.sources;
+  const extractorIsRunning = extractorRuntime.status === "running" || extractorRuntime.status === "stopping";
+  const extractorCanStart =
+    graphSettingsConfigured
+    && !extractorIsRunning
+    && extractorRunDraft.sources.length > 0
+    && extractorRunDraft.quantity > 0
+    && extractorRunDraft.maxWaitSec > 0;
   useEffect(() => {
     return () => {
       if (passwordCopyResetTimerRef.current != null) {
         window.clearTimeout(passwordCopyResetTimerRef.current);
       }
+      if (extractorActionTimerRef.current != null) {
+        window.clearTimeout(extractorActionTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    setExtractorQuantityInput(String(extractorRunDraft.quantity));
+  }, [extractorRunDraft.quantity]);
+
+  useEffect(() => {
+    setExtractorMaxWaitInput(String(extractorRunDraft.maxWaitSec));
+  }, [extractorRunDraft.maxWaitSec]);
 
   const queuePasswordCopyFeedbackReset = () => {
     if (passwordCopyResetTimerRef.current != null) {
@@ -527,10 +626,201 @@ export function AccountsView({
     }
   };
 
+  const commitExtractorQuantityInput = () => {
+    const normalized = normalizeExtractorNumericInput(extractorQuantityInput, extractorRunDraft.quantity);
+    setExtractorQuantityInput(String(normalized));
+    if (normalized !== extractorRunDraft.quantity) {
+      onExtractorRunDraftChange({ quantity: normalized });
+    }
+  };
+
+  const commitExtractorMaxWaitInput = () => {
+    const normalized = normalizeExtractorNumericInput(extractorMaxWaitInput, extractorRunDraft.maxWaitSec);
+    setExtractorMaxWaitInput(String(normalized));
+    if (normalized !== extractorRunDraft.maxWaitSec) {
+      onExtractorRunDraftChange({ maxWaitSec: normalized });
+    }
+  };
+
+  const beginExtractorActionCooldown = (action: "start" | "cancel") => {
+    if (extractorActionTimerRef.current != null) {
+      window.clearTimeout(extractorActionTimerRef.current);
+    }
+    setExtractorActionCooldown(action);
+    extractorActionTimerRef.current = window.setTimeout(() => {
+      setExtractorActionCooldown((current) => (current === action ? null : current));
+      extractorActionTimerRef.current = null;
+    }, 1000);
+  };
+
+  const handleRunExtractorClick = async () => {
+    beginExtractorActionCooldown("start");
+    setExtractorActionPending("start");
+    try {
+      await onRunExtractor();
+    } finally {
+      setExtractorActionPending((current) => (current === "start" ? null : current));
+    }
+  };
+
+  const handleStopExtractorClick = async () => {
+    beginExtractorActionCooldown("cancel");
+    setExtractorActionPending("cancel");
+    try {
+      await onStopExtractor();
+    } finally {
+      setExtractorActionPending((current) => (current === "cancel" ? null : current));
+    }
+  };
+
+  const showExtractorCancelButton = extractorIsRunning && extractorActionCooldown !== "start";
+  const extractorPrimaryBusy = extractorRunBusy || extractorActionPending != null;
+  const extractorPrimaryDisabled = showExtractorCancelButton
+    ? extractorPrimaryBusy || extractorActionCooldown === "cancel"
+    : !extractorCanStart || extractorPrimaryBusy || extractorActionCooldown === "start";
+  const extractorPrimaryLabel = showExtractorCancelButton
+    ? extractorActionPending === "cancel" || extractorRuntime.status === "stopping"
+      ? "取消中…"
+      : "取消提号"
+    : extractorActionPending === "start" || extractorActionCooldown === "start" || extractorRunBusy
+      ? "提号中…"
+      : "开始提号 + 自动 Bootstrap";
+
   return (
     <>
       <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]">
         <div className="space-y-4">
+          <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
+            <CardHeader>
+              <CardTitle>提号器</CardTitle>
+              <CardDescription>
+                这里会直接提号、自动登录 Microsoft、保存持久 Profile，并自动连接邮箱。提号状态和账号列表通过 SSE 实时刷新。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <StatusBadge status={extractorRuntime.status} />
+                <Badge variant={extractorSseBadge.variant}>{extractorSseBadge.label}</Badge>
+                <Badge variant={graphSettingsConfigured ? "success" : "warning"}>
+                  {graphSettingsConfigured ? "Graph 已配置" : "Graph 未配置"}
+                </Badge>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => {
+                  const available = Boolean(extractorSettings?.availability[provider]);
+                  const checked = extractorRunDraft.sources.includes(provider);
+                  return (
+                    <label
+                      key={provider}
+                      className={cn(
+                        "flex items-start gap-3 rounded-2xl border border-white/8 bg-white/[0.03] p-4 transition",
+                        available ? "cursor-pointer hover:border-cyan-300/24" : "opacity-60",
+                      )}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        disabled={!available || extractorIsRunning}
+                        onCheckedChange={(next) => {
+                          const enabled = next === true;
+                          onExtractorRunDraftChange({
+                            sources: enabled
+                              ? Array.from(new Set([...extractorRunDraft.sources, provider]))
+                              : extractorRunDraft.sources.filter((item) => item !== provider),
+                          });
+                        }}
+                        aria-label={`toggle-${provider}`}
+                      />
+                      <div className="min-w-0">
+                        <div className="text-sm font-medium text-white">{label}</div>
+                        <div className="mt-1 text-sm text-slate-400">{available ? "KEY 已配置" : "KEY 未配置"}</div>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">提号数量</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={extractorQuantityInput}
+                    disabled={extractorIsRunning}
+                    onChange={(event) => setExtractorQuantityInput(event.target.value)}
+                    onBlur={commitExtractorQuantityInput}
+                  />
+                </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">最长等待（秒）</span>
+                  <Input
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={extractorMaxWaitInput}
+                    disabled={extractorIsRunning}
+                    onChange={(event) => setExtractorMaxWaitInput(event.target.value)}
+                    onBlur={commitExtractorMaxWaitInput}
+                  />
+                </label>
+              </div>
+
+              <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-300">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-white">当前号源：</span>
+                  <span>{formatExtractorSourceSummary(extractorSummarySources)}</span>
+                </div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <div>目标接受：{extractorRuntime.acceptedCount} / {extractorRuntime.requestedUsableCount || extractorRunDraft.quantity}</div>
+                  <div>原始请求：{formatRawAttemptProgress(extractorRuntime.rawAttemptCount, extractorRuntime.attemptBudget)}</div>
+                  <div>在途请求：{extractorRuntime.inFlightCount}</div>
+                  <div>剩余等待：{extractorRuntime.remainingWaitSec}s / {extractorRuntime.maxWaitSec || extractorRunDraft.maxWaitSec}s</div>
+                  <div>最近来源：{extractorRuntime.lastProvider ? extractorProviderLabel(extractorRuntime.lastProvider) : "—"}</div>
+                  <div>最近批次：{extractorRuntime.lastBatchId || "—"}</div>
+                </div>
+                <div className="mt-3 rounded-2xl border border-white/8 bg-[#030712]/60 px-4 py-3 text-sm text-slate-300">
+                  {extractorRuntime.errorMessage || extractorRuntime.lastMessage || "等待启动提号器。"}
+                </div>
+                <div className="mt-2 text-xs text-slate-500">
+                  最近更新：{formatDate(extractorRuntime.updatedAt)} · 本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
+                </div>
+              </div>
+
+              {!graphSettingsConfigured ? (
+                <div className="rounded-2xl border border-amber-300/18 bg-amber-400/8 px-4 py-3 text-sm text-amber-100">
+                  请先配置 Microsoft Graph 回调，再启动提号器；否则账号无法自动连邮箱。
+                </div>
+              ) : null}
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <Button
+                  onClick={() => {
+                    void (showExtractorCancelButton ? handleStopExtractorClick() : handleRunExtractorClick());
+                  }}
+                  disabled={extractorPrimaryDisabled}
+                  variant={showExtractorCancelButton ? "danger" : "default"}
+                  className="sm:flex-1"
+                >
+                  {extractorPrimaryLabel}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={openExtractorDialog}
+                  className="shrink-0 rounded-2xl"
+                  data-testid="open-extractor-settings"
+                  aria-label="打开提号器 KEY 与历史"
+                  title="打开提号器 KEY 与历史"
+                >
+                  <SlidersHorizontal className="size-4" />
+                  <span className="sr-only">KEY / 历史</span>
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
           <Card>
             <CardHeader>
               <CardTitle>导入微软账号</CardTitle>
@@ -561,33 +851,6 @@ export function AccountsView({
                   {previewBusy ? "解析中…" : "导入预览"}
                 </Button>
               </div>
-            </CardContent>
-          </Card>
-
-          <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
-            <CardHeader>
-              <CardTitle>提取器设置</CardTitle>
-              <CardDescription>
-                配置四个号源的 KEY，并查询本地提取历史。这里只读取 SQLite 本地记录，不直连远端历史接口。
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
-                  <div key={provider} className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
-                    <div className="text-sm font-medium text-white">{label}</div>
-                    <div className="mt-1 text-sm text-slate-400">
-                      {extractorSettings?.availability[provider] ? "KEY 已配置" : "KEY 未配置"}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-400">
-                本地历史 {extractorHistory.total} 条，最近分页 {extractorHistory.page}/{extractHistoryPageCount}。
-              </div>
-              <Button variant="outline" onClick={openExtractorDialog} className="w-full sm:w-auto" data-testid="open-extractor-settings">
-                打开提取器设置
-              </Button>
             </CardContent>
           </Card>
         </div>
@@ -738,7 +1001,14 @@ export function AccountsView({
                                     variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
                                     className="h-8 px-3 text-xs"
                                     onClick={() => void onConnectAccount(row.id)}
-                                    disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                                    disabled={
+                                      !graphSettingsConfigured
+                                      || batchBusy
+                                      || connectBusy
+                                      || isConnectBlockedAccount(row)
+                                      || connectingAccountIds.includes(row.id)
+                                      || row.browserSession?.status === "bootstrapping"
+                                    }
                                   >
                                     {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
                                   </Button>
@@ -768,6 +1038,18 @@ export function AccountsView({
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">Proof 邮箱</dt>
                               <dd className="break-all text-right">{row.proofMailboxAddress || "—"}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Session</dt>
+                              <dd><StatusBadge status={row.browserSession?.status || "pending"} /></dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Session Proxy</dt>
+                              <dd className="max-w-[18rem] text-right">{formatBrowserSessionProxy(row)}</dd>
+                            </div>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-slate-500">Profile</dt>
+                              <dd className="max-w-[18rem] text-right font-mono text-xs">{formatBrowserSessionPath(row)}</dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">最近状态</dt>
@@ -819,6 +1101,9 @@ export function AccountsView({
                         <TableHead>分组</TableHead>
                         <TableHead>Proof 邮箱</TableHead>
                         <TableHead>Has Key</TableHead>
+                        <TableHead>Session</TableHead>
+                        <TableHead>Session Proxy</TableHead>
+                        <TableHead>Profile</TableHead>
                         <TableHead>最近状态</TableHead>
                         <TableHead>收信状态</TableHead>
                         <SortableTimeTableHead label="导入时间" column="importedAt" query={query} onQueryChange={onQueryChange} />
@@ -850,6 +1135,9 @@ export function AccountsView({
                           <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
+                          <TableCell className="whitespace-nowrap"><StatusBadge status={row.browserSession?.status || "pending"} /></TableCell>
+                          <TableCell className="min-w-[12rem]">{formatBrowserSessionProxy(row)}</TableCell>
+                          <TableCell className="min-w-[14rem] font-mono text-xs text-slate-300">{formatBrowserSessionPath(row)}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
                           <TableCell className="whitespace-nowrap">
                             <div className="flex items-center gap-2">
@@ -867,7 +1155,14 @@ export function AccountsView({
                                 variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
                                 className="h-8 shrink-0 px-3 text-xs"
                                 onClick={() => void onConnectAccount(row.id)}
-                                disabled={!graphSettingsConfigured || batchBusy || connectBusy || isConnectBlockedAccount(row) || connectingAccountIds.includes(row.id)}
+                                disabled={
+                                  !graphSettingsConfigured
+                                  || batchBusy
+                                  || connectBusy
+                                  || isConnectBlockedAccount(row)
+                                  || connectingAccountIds.includes(row.id)
+                                  || row.browserSession?.status === "bootstrapping"
+                                }
                               >
                                 {getConnectActionLabel(row, connectingAccountIds.includes(row.id))}
                               </Button>
@@ -1075,6 +1370,7 @@ export function AccountsView({
                       <SelectItem value="__all__">全部状态</SelectItem>
                       <SelectItem value="accepted">accepted</SelectItem>
                       <SelectItem value="rejected">rejected</SelectItem>
+                      <SelectItem value="pending_bootstrap">pending_bootstrap</SelectItem>
                       <SelectItem value="invalid_key">invalid_key</SelectItem>
                       <SelectItem value="insufficient_stock">insufficient_stock</SelectItem>
                       <SelectItem value="parse_failed">parse_failed</SelectItem>

@@ -98,6 +98,17 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(accountsViewSource).toContain("disabled · {disabledCount}");
 });
 
+test("manual imports force rebootstrap when the stored password changes", async () => {
+  const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const bootstrapSource = await readFile(path.join(repoRoot, "src/server/account-session-bootstrap.ts"), "utf8");
+  expect(bootstrapSource).toContain("export function shouldForceImportedAccountBootstrap");
+  expect(serverSource).toContain("const forceBootstrapByEmail = new Map(");
+  expect(serverSource).toContain("shouldForceImportedAccountBootstrap(previousAccountsByEmail.get(entry.email) || null, entry.password)");
+  expect(serverSource).toContain("queueAccountSessionBootstrap(accountId, {");
+  expect(serverSource).toContain("force: forceBootstrap,");
+  expect(serverSource).toContain('reason: "auto",');
+});
+
 test("last-attempt headed failures honor the resolved keep-browser flag without rechecking env", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;");
@@ -124,6 +135,32 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).toContain("const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);");
   expect(source).toContain("const readSettings = () => db.getSettings(settingsDefaults);");
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
+});
+
+test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusing admin ports", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain('const portLeases = await reserveMihomoPortLeases();');
+  expect(source).toContain("const workerRuntime = resolveWorkerRuntime(env);");
+  expect(source).toContain('workerArgs[workerArgs.length - 1] = "src/server/microsoft-oauth-worker.ts";');
+  expect(source).toContain('MIHOMO_API_PORT: String(portLeases.apiPort.port)');
+  expect(source).toContain('MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port)');
+  expect(source).toContain('await Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]).catch(() => {});');
+  expect(source).toContain('child.once("spawn", () => {');
+  expect(source).toContain('await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});');
+});
+
+test("mailbox bootstrap keeps proxy geo lookup best-effort", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
+  expect(source).toContain('proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({');
+  expect(source).toContain('ip: "",');
+  expect(source).toContain("const locale = deriveLocale(proxyGeo.country);");
+});
+
+test("mailbox oauth worker opens the Microsoft authorize URL directly", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
+  expect(source).toContain("await page.goto(args.authUrl, {");
+  expect(source).not.toContain("loginAndReachHome(");
+  expect(source).not.toContain("new CaptchaSolver()");
 });
 
 test("chrome native CDP automation stays enabled on macOS when configured", async () => {

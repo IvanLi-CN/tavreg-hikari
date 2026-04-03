@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
 import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
 import {
   JobScheduler,
+  PENDING_BROWSER_SESSION_WAIT_MS,
   buildAttemptRuntimeSpec,
   buildAttemptSpawnOptions,
   pickWorkerRuntime,
+  resolvePendingBrowserSessionWait,
   resolveAttemptProxyNode,
+  resolveReusableAttemptProxyNode,
   resolveWorkerRuntime,
 } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
@@ -55,6 +58,26 @@ async function createTempDb() {
   const dbPath = path.join(tempDir, "app.sqlite");
   const appDb = await AppDatabase.open(dbPath);
   return { dbPath, appDb };
+}
+
+function markBrowserSessionReady(appDb, accountId, overrides = {}) {
+  return appDb.markBrowserSessionReady(accountId, {
+    browserEngine: "chrome",
+    proxyNode: "Tokyo-01",
+    proxyIp: "1.1.1.1",
+    proxyCountry: "JP",
+    proxyRegion: "Tokyo",
+    proxyCity: "Tokyo",
+    proxyTimezone: "Asia/Tokyo",
+    ...overrides,
+  });
+}
+
+function markImportedAccountsReady(appDb, accountIds, overrides) {
+  accountIds.forEach((accountId, index) => {
+    const nextOverrides = typeof overrides === "function" ? overrides(accountId, index) : overrides;
+    markBrowserSessionReady(appDb, accountId, nextOverrides);
+  });
 }
 
 afterEach(async () => {
@@ -120,6 +143,25 @@ describe("AppDatabase account import", () => {
     expect(deleted.deleted).toBe(1);
     expect(deleted.blockedIds).toEqual([]);
     expect(appDb.listAccounts({ page: 1, pageSize: 10 }).total).toBe(1);
+
+    appDb.close();
+  });
+
+  test("listAccounts summary only counts browser-ready accounts as ready", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "ready-count-a@outlook.com", password: "pass-a" },
+      { email: "ready-count-b@outlook.com", password: "pass-b" },
+    ]);
+
+    appDb.markBrowserSessionReady(imported.affectedIds[0], {
+      browserEngine: "chrome",
+      proxyNode: "Tokyo-01",
+    });
+
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 });
+    expect(accounts.total).toBe(2);
+    expect(accounts.summary.ready).toBe(1);
 
     appDb.close();
   });
@@ -231,6 +273,110 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("keeps newly imported accounts pending until browser bootstrap succeeds", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "pending-session@outlook.com", password: "pending-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(appDb.leaseNextAccount(job.id)).toBeNull();
+
+    markBrowserSessionReady(appDb, accountId, { proxyIp: "7.7.7.7" });
+
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+
+    appDb.close();
+  });
+
+  test("preserves existing ready browser sessions across restart", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "restart-ready@outlook.com", password: "restart-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId, { proxyIp: "9.9.9.9" });
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "ready",
+      proxyIp: "9.9.9.9",
+    });
+
+    reopened.close();
+  });
+
+  test("reopen seeds missing browser sessions as pending for untouched legacy imports", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
+
+    await rm(profilePath, { recursive: true, force: true });
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(0);
+
+    reopened.close();
+  });
+
+  test("reopen keeps legacy accounts ready only when a reusable browser profile already exists", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-used@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
+
+    await mkdir(path.join(profilePath, "Default"), { recursive: true });
+    await writeFile(path.join(profilePath, "Local State"), "{}");
+    await writeFile(path.join(profilePath, "Default", "Preferences"), "{}");
+    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'ready' WHERE id = ?").run("2026-04-03T01:23:45.000Z", accountId);
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "ready",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(1);
+
+    reopened.close();
+  });
+
+  test("reopen keeps attempted legacy accounts pending when no reusable browser profile exists", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "legacy-attempted@outlook.com", password: "legacy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const profilePath = appDb.accountBrowserProfilePath(accountId);
+
+    await rm(profilePath, { recursive: true, force: true });
+    appDb.db.query("UPDATE microsoft_accounts SET last_used_at = ?, last_result_status = 'running' WHERE id = ?").run("2026-04-03T01:23:45.000Z", accountId);
+    appDb.db.exec("DROP TABLE account_browser_sessions;");
+    appDb.close();
+
+    const reopened = await AppDatabase.open(dbPath);
+    const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
+    });
+    expect(reopened.countEligibleAccounts(job.id)).toBe(0);
+
+    reopened.close();
+  });
+
   test("returns account summary counts across the full filtered result set, not just one page", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
@@ -238,6 +384,7 @@ describe("AppDatabase account import", () => {
       { email: "ready-b@outlook.com", password: "pass-b" },
       { email: "failed-c@outlook.com", password: "pass-c" },
     ]);
+    markImportedAccountsReady(appDb, imported.affectedIds);
     appDb.recordApiKey(imported.affectedIds[0], "tvly-summary-0001");
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -398,6 +545,7 @@ describe("AppDatabase account import", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(job.id);
 
@@ -416,6 +564,7 @@ describe("AppDatabase account import", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(job.id);
 
@@ -508,6 +657,39 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("saveMailboxOauthStart clears stale authorization before a forced reconnect", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "oauth-reconnect@outlook.com", password: "oauth-pass" }]);
+    const accountId = imported.affectedIds[0];
+    const mailbox = appDb.ensureMailboxForAccount(accountId);
+
+    appDb.completeMailboxOAuth(mailbox.id, {
+      refreshToken: "refresh-token",
+      accessToken: "access-token",
+      accessTokenExpiresAt: "2026-03-30T08:00:00.000Z",
+      authority: "common",
+      graphDisplayName: "Reconnect",
+    });
+
+    const restarted = appDb.saveMailboxOauthStart(mailbox.id, {
+      oauthState: "state-reconnect",
+      oauthCodeVerifier: "verifier-reconnect",
+      authority: "organizations",
+    });
+
+    expect(restarted).toMatchObject({
+      status: "preparing",
+      refreshToken: null,
+      accessToken: null,
+      oauthConnectedAt: null,
+      oauthState: "state-reconnect",
+      oauthCodeVerifier: "verifier-reconnect",
+      authority: "organizations",
+    });
+
+    appDb.close();
+  });
+
   test("clears the unknown recovery block after a proof mailbox is saved", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);
@@ -567,6 +749,7 @@ describe("AppDatabase account import", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "retryable@outlook.com", password: "retry-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
     const leased = appDb.leaseNextAccount(firstJob.id);
     const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "retryable-attempt"));
@@ -591,6 +774,7 @@ describe("AppDatabase account import", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "hard-blocked@outlook.com", password: "hard-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(firstJob.id);
     const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "hard-blocked-attempt"));
@@ -610,10 +794,65 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("startup bootstrap recovery skips accounts that are already hard-blocked", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "pending-hard-blocked@outlook.com", password: "hard-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "pending-hard-blocked-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, { errorCode: "microsoft_password_incorrect" });
+    expect(appDb.getAccount(accountId)?.skipReason).toBe("microsoft_password_incorrect");
+
+    appDb.queueBrowserSessionBootstrap(accountId);
+
+    expect(appDb.getAccount(accountId)?.browserSession?.status).toBe("pending");
+    expect(appDb.listPendingBrowserSessionAccountIds()).not.toContain(accountId);
+
+    appDb.close();
+  });
+
+  test("hard-failed accounts do not re-enter pending-session waits in the same job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proof-same-job@outlook.com", password: "proof-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "proof-same-job-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, {
+      errorCode: "microsoft_unknown_recovery_email:pr*****@mail.test",
+    });
+    appDb.updateAccountProofMailbox(accountId, {
+      provider: "moemail",
+      address: "proof-same-job@mail.test",
+      mailboxId: "proof-same-job",
+    });
+    appDb.queueBrowserSessionBootstrap(accountId);
+
+    expect(appDb.getAccount(accountId)).toMatchObject({
+      skipReason: null,
+      browserSession: { status: "pending" },
+    });
+    expect(appDb.isAccountSchedulableForJob(job.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(appDb.countPendingBrowserSessions(job.id)).toBe(0);
+
+    appDb.close();
+  });
+
   test("does not reschedule succeeded accounts within the same job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "same-job-success@outlook.com", password: "success-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
     const leased = appDb.leaseNextAccount(job.id);
     const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "same-job-success-attempt"));
@@ -685,23 +924,31 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
-  test("ignores proof mailbox mappings when leasing the next account", async () => {
+  test("proof mailbox mappings do not make an account ineligible for leasing", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
       { email: "plain-a@outlook.com", password: "pass-a" },
       { email: "proof-b@outlook.com", password: "pass-b" },
       { email: "plain-c@outlook.com", password: "pass-c" },
     ]);
-    appDb.updateAccountProofMailbox(imported.affectedIds[1], {
+    markImportedAccountsReady(appDb, imported.affectedIds);
+    const proofAccountId = appDb.listAccounts({ page: 1, pageSize: 10 }).rows.find(
+      (row) => row.microsoftEmail === "proof-b@outlook.com",
+    )?.id;
+    expect(proofAccountId).toBeDefined();
+    appDb.updateAccountProofMailbox(proofAccountId, {
       provider: "moemail",
       address: "proof-b@mail-us.707079.xyz",
       mailboxId: "proof-b-id",
     });
+    for (const accountId of imported.affectedIds.filter((accountId) => accountId !== proofAccountId)) {
+      appDb.recordApiKey(accountId, `tvly-proof-skip-${accountId}`);
+    }
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(job.id);
 
-    expect(leased?.microsoftEmail).toBe("plain-a@outlook.com");
+    expect(leased?.microsoftEmail).toBe("proof-b@outlook.com");
 
     appDb.close();
   });
@@ -851,6 +1098,55 @@ describe("AppDatabase account import", () => {
 });
 
 describe("scheduler helpers", () => {
+  test("pending browser session wait defaults to a multi-minute bootstrap window", () => {
+    expect(PENDING_BROWSER_SESSION_WAIT_MS).toBeGreaterThanOrEqual(5 * 60_000);
+  });
+
+  test("pending browser session wait only blocks for a bounded window per pending-count change", () => {
+    const first = resolvePendingBrowserSessionWait({
+      state: null,
+      pendingCount: 1,
+      nowMs: 1_000,
+      maxWaitMs: 5_000,
+    });
+    expect(first.wait).toBe(true);
+    expect(first.state).toMatchObject({ count: 1, startedAtMs: 1_000, exhausted: false });
+
+    const second = resolvePendingBrowserSessionWait({
+      state: first.state,
+      pendingCount: 1,
+      nowMs: 4_000,
+      maxWaitMs: 5_000,
+    });
+    expect(second.wait).toBe(true);
+
+    const exhausted = resolvePendingBrowserSessionWait({
+      state: second.state,
+      pendingCount: 1,
+      nowMs: 6_500,
+      maxWaitMs: 5_000,
+    });
+    expect(exhausted.wait).toBe(false);
+    expect(exhausted.state).toMatchObject({ count: 1, startedAtMs: 1_000, exhausted: true });
+
+    const sameCountAfterExhausted = resolvePendingBrowserSessionWait({
+      state: exhausted.state,
+      pendingCount: 1,
+      nowMs: 9_000,
+      maxWaitMs: 5_000,
+    });
+    expect(sameCountAfterExhausted.wait).toBe(false);
+
+    const changedCount = resolvePendingBrowserSessionWait({
+      state: exhausted.state,
+      pendingCount: 2,
+      nowMs: 9_500,
+      maxWaitMs: 5_000,
+    });
+    expect(changedCount.wait).toBe(true);
+    expect(changedCount.state).toMatchObject({ count: 2, startedAtMs: 9_500, exhausted: false });
+  });
+
   test("normalizes extractor upstream responses", async () => {
     const hotmailBodies = [];
     const hotmailUrls = [];
@@ -1194,6 +1490,8 @@ describe("scheduler helpers", () => {
 
   test("caps auto extracted usable accounts to the current job need", async () => {
     const { appDb, dbPath } = await createTempDb();
+    const seeded = appDb.importAccounts([{ email: "cap-a@outlook.com", password: "pass-a" }]);
+    markImportedAccountsReady(appDb, seeded.affectedIds);
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
@@ -1227,10 +1525,11 @@ describe("scheduler helpers", () => {
     expect(decision).toEqual({ status: "waiting" });
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(accounts.map((account) => account.microsoftEmail)).toEqual(["cap-a@outlook.com"]);
+    expect(accounts[0]?.browserSession?.status).toBe("ready");
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
 
     const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
     expect(history.rows[0]).toMatchObject({
@@ -1248,7 +1547,113 @@ describe("scheduler helpers", () => {
     appDb.close();
   });
 
-  test("dispatches auto extract requests every 500ms per provider with up to 4 concurrent in flight", async () => {
+  test("does not count pending bootstrap imports as usable auto extracted accounts", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    let fakeNow = 0;
+    Date.now = () => fakeNow;
+    const pending = [];
+    globalThis.fetch = (url) =>
+      new Promise((resolve) => {
+        pending.push({ href: String(url), resolve });
+      });
+
+    const queuedImports = [];
+    const scheduler = new JobScheduler(
+      appDb,
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+      () => undefined,
+      {
+        onImportedAccounts: (accountIds) => {
+          queuedImports.push(accountIds);
+        },
+      },
+    );
+    const job = appDb.createJob({
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 3,
+      autoExtractSources: ["zhanghaoya"],
+      autoExtractQuantity: 1,
+      autoExtractMaxWaitSec: 30,
+      autoExtractAccountType: "outlook",
+    });
+    scheduler["syncAutoExtractState"](job);
+
+    let decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      inFlightCount: 1,
+    });
+
+    pending[0].resolve(
+      new Response(
+        JSON.stringify({
+          Code: 200,
+          Message: "Success",
+          Data: "pending-a@outlook.com:pass-a",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["pending-a@outlook.com"]);
+    expect(accounts[0]?.browserSession?.status).toBe("pending");
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(queuedImports).toEqual([[accounts[0].id]]);
+
+    const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(history.rows[0]).toMatchObject({
+      status: "pending_bootstrap",
+      acceptedCount: 0,
+      completedAt: null,
+    });
+    expect(history.rows[0]?.items).toHaveLength(0);
+
+    fakeNow = 501;
+    decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "waiting" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      acceptedCount: 0,
+      rawAttemptCount: 1,
+      inFlightCount: 0,
+    });
+    expect(pending).toHaveLength(1);
+
+    markBrowserSessionReady(appDb, accounts[0].id);
+    fakeNow = 601;
+    decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "ready", reason: "accepted 1 usable account(s)" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      phase: "idle",
+      acceptedCount: 0,
+      rawAttemptCount: 0,
+      inFlightCount: 0,
+    });
+
+    const reconciledHistory = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(reconciledHistory.rows[0]).toMatchObject({
+      status: "accepted",
+      acceptedCount: 1,
+    });
+    expect(reconciledHistory.rows[0]?.items[0]).toMatchObject({
+      email: "pending-a@outlook.com",
+      acceptStatus: "accepted",
+      rejectReason: null,
+    });
+
+    await scheduler.shutdown();
+    appDb.close();
+  });
+
+  test("dispatches auto extract requests every 500ms per provider with up to 3 workers per source", async () => {
     const { appDb, dbPath } = await createTempDb();
     let fakeNow = 0;
     Date.now = () => fakeNow;
@@ -1322,7 +1727,7 @@ describe("scheduler helpers", () => {
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
       rawAttemptCount: 4,
       inFlightCount: 4,
-      attemptBudget: 9,
+      attemptBudget: 0,
     });
 
     decision = await scheduler["maybeAutoExtract"](job);
@@ -1342,22 +1747,38 @@ describe("scheduler helpers", () => {
     fakeNow = 500;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 4,
-      inFlightCount: 4,
+      rawAttemptCount: 8,
+      inFlightCount: 8,
     });
-    expect(pending).toHaveLength(4);
+    expect(pending).toHaveLength(8);
+
+    fakeNow = 1000;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 12,
+      inFlightCount: 12,
+    });
+    expect(pending).toHaveLength(12);
+
+    fakeNow = 1500;
+    await scheduler["maybeAutoExtract"](job);
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      rawAttemptCount: 12,
+      inFlightCount: 12,
+    });
+    expect(pending).toHaveLength(12);
 
     pending[0].resolve(buildResponseForUrl(pending[0].href));
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    fakeNow = 600;
+    fakeNow = 1501;
     await scheduler["maybeAutoExtract"](job);
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
-      rawAttemptCount: 5,
-      inFlightCount: 4,
+      rawAttemptCount: 13,
+      inFlightCount: 12,
     });
-    expect(pending).toHaveLength(5);
+    expect(pending).toHaveLength(13);
 
     await scheduler.shutdown();
     appDb.close();
@@ -1365,6 +1786,13 @@ describe("scheduler helpers", () => {
 
   test("rejects later in-flight extractor successes after the round target is already met", async () => {
     const { appDb, dbPath } = await createTempDb();
+    const seeded = appDb.importAccounts([
+      { email: "target-zh@outlook.com", password: "pass-zh" },
+      { email: "target-sy@outlook.com", password: "pass-sy" },
+      { email: "target-sk@outlook.com", password: "pass-sk" },
+      { email: "target-hm@outlook.com", password: "pass-hm" },
+    ]);
+    markImportedAccountsReady(appDb, seeded.affectedIds);
     const buildResponseForUrl = (href) => {
       if (href.includes("zhanghaoya")) {
         return new Response(
@@ -1444,10 +1872,14 @@ describe("scheduler helpers", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
-    expect(appDb.listAccounts({ page: 1, pageSize: 10 }).rows.map((account) => account.microsoftEmail)).toEqual([
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
+    expect(accounts.map((account) => account.microsoftEmail).sort()).toEqual([
+      "target-hm@outlook.com",
+      "target-sk@outlook.com",
+      "target-sy@outlook.com",
       "target-zh@outlook.com",
     ]);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(4);
 
     const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
     expect(history.total).toBe(4);
@@ -1509,6 +1941,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "broken@outlook.com", password: "broken-pass" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const events = [];
     const scheduler = new JobScheduler(
       appDb,
@@ -1645,6 +2078,7 @@ describe("scheduler helpers", () => {
     );
     const imported = appDb.importAccounts([{ email: "alpha@outlook.com", password: "pw123456" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const account = appDb.getAccount(accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-attempt"));
@@ -1726,6 +2160,7 @@ describe("scheduler helpers", () => {
     );
     const imported = appDb.importAccounts([{ email: "retry-sync@outlook.com", password: "pw123456" }]);
     const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
     const account = appDb.getAccount(accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 2 });
     const ledger = await TaskLedger.open({
@@ -1904,6 +2339,178 @@ describe("proxy aggregation", () => {
 
     expect(appDb.listProxyNodes()).toEqual([]);
     expect(appDb.getSelectedProxyName()).toBeNull();
+
+    appDb.close();
+  });
+
+  test("reuses the same ip first, then same-region lru, then global lru", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-reuse@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02", "Seoul-01"], "Tokyo-01");
+    appDb.touchProxyLease("Seoul-01", {
+      status: "ok",
+      egressIp: "2.2.2.2",
+      region: "Seoul",
+      leasedAt: "2026-03-01T00:00:00.000Z",
+    });
+    appDb.touchProxyLease("Tokyo-01", {
+      status: "ok",
+      egressIp: "3.3.3.3",
+      region: "Tokyo",
+      leasedAt: "2026-03-02T00:00:00.000Z",
+    });
+    appDb.touchProxyLease("Tokyo-02", {
+      status: "ok",
+      egressIp: "4.4.4.4",
+      region: "Tokyo",
+      leasedAt: "2026-03-03T00:00:00.000Z",
+    });
+
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Old-Seoul",
+      proxyIp: "2.2.2.2",
+      proxyRegion: "Tokyo",
+    });
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Seoul-01");
+
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Old-Tokyo",
+      proxyIp: "9.9.9.9",
+      proxyRegion: "Tokyo",
+    });
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-01");
+
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Old-Nowhere",
+      proxyIp: "8.8.8.8",
+      proxyRegion: "Osaka",
+    });
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Seoul-01");
+
+    appDb.close();
+  });
+
+  test("falls back to untested proxy nodes only when no verified healthy node exists", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-unverified@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-01");
+    markBrowserSessionReady(appDb, accountId, {
+      proxyIp: "3.3.3.3",
+      proxyRegion: "Tokyo",
+    });
+
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-01");
+
+    appDb.touchProxyLease("Tokyo-02", {
+      status: "ok",
+      egressIp: "4.4.4.4",
+      region: "Tokyo",
+      leasedAt: "2026-03-04T00:00:00.000Z",
+    });
+
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-02");
+
+    appDb.close();
+  });
+
+  test("attempt completion refreshes stored proxy region for later reuse", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-region@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Osaka-01"], "Osaka-01");
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "3.3.3.3",
+      proxyRegion: "Tokyo",
+    });
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/proxy-region-attempt");
+    appDb.completeAttemptSuccess(job.id, attempt.id, accountId, "tvly-proxy-region-001", {
+      proxy_node: "Osaka-01",
+      proxy_ip: "5.5.5.5",
+      proxy_country: "JP",
+      proxy_region: "Osaka",
+      proxy_city: "Osaka",
+      proxy_timezone: "Asia/Tokyo",
+      status: "succeeded",
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      proxyNode: "Osaka-01",
+      proxyIp: "5.5.5.5",
+      proxyRegion: "Osaka",
+    });
+    expect(appDb.getProxyNode("Osaka-01")).toMatchObject({
+      lastEgressIp: "5.5.5.5",
+      lastRegion: "Osaka",
+    });
+
+    appDb.close();
+  });
+
+  test("account-level failures do not blacklist an otherwise healthy proxy node", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-health@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Tokyo-01"], "Tokyo-01");
+    appDb.touchProxyLease("Tokyo-01", {
+      status: "ok",
+      egressIp: "1.1.1.1",
+      country: "JP",
+      region: "Tokyo",
+      city: "Tokyo",
+    });
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/proxy-health-attempt");
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, { errorCode: "microsoft_account_locked" }, {
+      proxy_node: "Tokyo-01",
+      proxy_ip: "1.1.1.1",
+      proxy_country: "JP",
+      proxy_region: "Tokyo",
+      proxy_city: "Tokyo",
+      proxy_timezone: "Asia/Tokyo",
+      status: "failed",
+    });
+
+    expect(appDb.getProxyNode("Tokyo-01")?.lastStatus).toBe("ok");
+    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
+
+    appDb.close();
+  });
+
+  test("failed rebootstrap preserves the last known proxy geo when capture never starts", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-failed-bootstrap@outlook.com", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "1.1.1.1",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
+    });
+
+    appDb.markBrowserSessionBootstrapping(accountId, { proxyNode: "Osaka-01" });
+    appDb.markBrowserSessionFailure(accountId, {
+      status: "failed",
+      proxyNode: "Osaka-01",
+      errorCode: "session_bootstrap_failed",
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "failed",
+      proxyNode: "Osaka-01",
+      proxyIp: "1.1.1.1",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
+    });
 
     appDb.close();
   });
@@ -2234,6 +2841,41 @@ describe("scheduler runtime spec", () => {
     });
   });
 
+  test("reuses exact persistent account profiles when a browser session already exists", () => {
+    const runtime = buildAttemptRuntimeSpec({
+      job: { id: 9, runMode: "headed" },
+      account: {
+        id: 22,
+        microsoftEmail: "persistent@outlook.com",
+        passwordPlaintext: "worker-pass",
+        proofMailboxProvider: null,
+        proofMailboxAddress: null,
+        proofMailboxId: null,
+        browserSession: {
+          profilePath: "output/browser-profiles/accounts/22/chrome",
+        },
+      },
+      outputDir: "/tmp/tavreg/job-9/attempt-22",
+      sharedLedgerPath: "/tmp/tavreg/app.sqlite",
+      settings: {
+        subscriptionUrl: "https://example.com/sub.yaml",
+        groupName: "WEB_AUTO",
+        routeGroupName: "WEB_ROUTE",
+        checkUrl: "https://example.com/trace",
+        timeoutMs: 4321,
+        maxLatencyMs: 987,
+      },
+      reservedPorts: {
+        apiPort: 40123,
+        mixedPort: 40124,
+      },
+    });
+
+    expect(runtime.env.CHROME_PROFILE_DIR).toBe(path.resolve("output/browser-profiles/accounts/22/chrome"));
+    expect(runtime.env.CHROME_PROFILE_STRATEGY).toBe("exact");
+    expect(runtime.env.INSPECT_CHROME_PROFILE_DIR).toBe("/tmp/tavreg/job-9/attempt-22/chrome-inspect-profile");
+  });
+
   test("only forwards pinned proxy nodes that still exist in inventory", async () => {
     const { appDb } = await createTempDb();
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
@@ -2273,6 +2915,25 @@ describe("scheduler runtime spec", () => {
     expect(resolveAttemptProxyNode(appDb)).toBeNull();
 
     appDb.close();
+  });
+
+  test("launch proxy reuse only follows account-level reusable selection", () => {
+    expect(
+      resolveReusableAttemptProxyNode(
+        {
+          selectReusableProxyNodeForAccount: () => null,
+        },
+        21,
+      ),
+    ).toBeNull();
+    expect(
+      resolveReusableAttemptProxyNode(
+        {
+          selectReusableProxyNodeForAccount: () => ({ nodeName: "Tokyo-01" }),
+        },
+        21,
+      ),
+    ).toBe("Tokyo-01");
   });
 
   test("does not force a selected proxy node while it is still in a non-healthy running state", async () => {

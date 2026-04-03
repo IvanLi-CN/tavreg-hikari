@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  getMicrosoftOauthBrowserOutcome,
   MicrosoftGraphError,
   getMailboxErrorCode,
   getMailboxErrorMessage,
+  isMicrosoftOauthCallbackUrl,
   isMicrosoftOauthCompletionUrl,
   toMailboxFailureStatus,
 } from "../src/server/microsoft-mail";
@@ -58,5 +60,34 @@ describe("Microsoft mail failure helpers", () => {
         "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
       ),
     ).toBe(false);
+  });
+
+  test("distinguishes callback transit from final browser oauth outcome", () => {
+    const redirectUri = "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback";
+
+    expect(
+      isMicrosoftOauthCallbackUrl(
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        redirectUri,
+      ),
+    ).toBe(true);
+    expect(
+      getMicrosoftOauthBrowserOutcome(
+        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        redirectUri,
+      ),
+    ).toBeNull();
+    expect(
+      getMicrosoftOauthBrowserOutcome(
+        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=success",
+        redirectUri,
+      ),
+    ).toBe("success");
+    expect(
+      getMicrosoftOauthBrowserOutcome(
+        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=error",
+        redirectUri,
+      ),
+    ).toBe("error");
   });
 });

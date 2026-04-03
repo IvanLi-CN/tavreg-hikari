@@ -119,7 +119,7 @@
 - 默认账号类型固定为 `outlook`。
 - 主流程支持同时启用一个或多个号源。
 - `账号提取数量` 的语义是“当前缺口基础上的提取上限”，实际可用目标为 `min(当前缺口, 配置提取数量, 当前剩余 need)`。
-- 单轮原始提取尝试预算为 `可用目标 + 3`，每个到期号源按 `500ms` 派发 1 个请求，全局最多 `4` 个并发请求。
+- 每个号源最多维持 `3` 个在途 worker；同源 worker 按 `500ms` 节奏补位发起请求，单请求 `5s` 超时。单轮提取仅按“补够目标”或“等待超时”收敛，不再设置额外的原始请求次数上限。
 - 调度器使用单个 job 级别的总等待预算；暂停/恢复不会重置已消耗等待时间。
 
 ### 可用补货判定
@@ -135,6 +135,8 @@
 - 设置弹窗分别维护四个站点的 KEY，并提供本地历史分页筛选。
 - 历史查询只读取本地 SQLite 的批次/明细记录，不依赖远端历史接口。
 - 历史列表需要同时展示成功、失败、库存不足、KEY 无效、解析失败、重复/不可接纳等状态。
+- 手动提号开始后，主按钮需要先禁用 `1s`，随后切换为红色“取消提号”按钮；取消后同样禁用 `1s` 再恢复开始态。
+- 手动取消提号时，服务端立即停止继续派发新请求，并等待已有在途请求收尾后把 runtime 收敛为 `stopped`。
 
 ### 主流程页
 
@@ -151,9 +153,10 @@
 - Given 旧库只有当前 Web 控制台 schema，When 服务端启动，Then 新列与新表自动迁移完成且旧数据仍可读。
 - Given 四个号源返回混杂文本、额外 token/client_id 字段、重复账号或解析失败内容，When 服务端处理，Then 原始响应与逐项原始数据都被落库，失败项不丢失。
 - Given 自动提取关闭，When 当前账号池不足，Then 调度器不发起任何提取请求并保持现有失败语义。
-- Given 自动提取开启且至少一个已配置 KEY 的号源可用，When 当前 job 缺号，Then 调度器按单源 `500ms/次` 轮询补号，且全局并发不超过 `4`。
+- Given 自动提取开启且至少一个已配置 KEY 的号源可用，When 当前 job 缺号，Then 调度器按“每源最多 `3` 个 worker、同源 `500ms/次` 补位、单请求 `5s` 超时”的口径轮询补号。
 - Given 站点返回了一部分不可用账号，When 本轮补号完成，Then 这些账号不会让当前任务新增的可调度账号数超过剩余 `need`。
-- Given 本轮有效补货目标为 `N`，When 执行自动提取，Then 原始请求次数最多为 `N + 3`。
+- Given 本轮有效补货目标为 `N`，When 执行自动提取，Then 原始请求次数不再有人为上限，只受等待超时与每源 `3` 个在途 worker 约束。
+- Given 用户在手动提号运行中点击取消，When 取消请求发出，Then UI 先禁用 `1s` 并展示红色取消态，服务端停止继续派发并最终把 runtime 标记为 `stopped`。
 - Given 用户打开提取器设置弹窗，When 查询历史，Then 结果全部来自本地 SQLite 历史表。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
@@ -168,7 +171,7 @@
 - submission_gate: pending-owner-approval
 - story_id_or_title: Views/DashboardView/FourSourceCompact
 - state: auto extract enabled
-- evidence_note: 验证主流程控制区支持四个号源多选、数量与等待时长配置，以及单源 500ms/次与最多 4 并发的运行提示。
+- evidence_note: 验证主流程控制区支持四个号源多选、数量与等待时长配置，以及“每源 3 worker、500ms/次、单请求 5s 超时”的运行提示。
 
 ![微软账号提取器设置弹窗](./assets/accounts-extractor-dialog.png)
 
@@ -203,6 +206,17 @@
 - state: password copied feedback
 - evidence_note: 验证微软账号列表中的密码列支持直接点击复制，并在按钮内回显“已复制”反馈，不再出现竖排溢出。
 
+![微软账号提号运行态取消按钮](./assets/accounts-extractor-cancel-button.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: element
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/Extractor Runtime Running
+- state: running with cancel action visible
+- evidence_note: 验证手动提号进入运行态后，主按钮会切换为红色“取消提号”按钮，便于直接中止当前轮次。
+
 ## 里程碑
 
 - [x] M1: 建立 spec 并冻结接口与数据模型
@@ -222,3 +236,5 @@
 - 2026-03-25: 初始化微软账号自动提取与本地历史接入规格，冻结两个号源接口、有效补货判定与主流程补号上限约束。
 - 2026-03-26: 完成号源适配、自动补号调度、账号页提取器设置、本地历史查询、Storybook 证据与校验。
 - 2026-03-27: 扩展至四个号源，收敛为 provider descriptor 实现，并把调度口径统一为单源 500ms/次、最多 4 并发。
+- 2026-04-02: 自动提取与手动提号统一调整为“每源 3 worker、500ms/次补位、单请求 5s 超时”，并移除人为原始请求上限。
+- 2026-04-03: 为手动提号补充取消能力，UI 增加“开始后 1 秒切换为取消、取消后 1 秒恢复”的按钮节流，并把服务端 runtime 收敛到 `stopped`。
