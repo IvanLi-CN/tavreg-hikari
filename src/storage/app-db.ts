@@ -1534,12 +1534,11 @@ export class AppDatabase {
       .query(`
         SELECT
           COUNT(*) AS total,
-          SUM(CASE WHEN last_result_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
+          SUM(CASE WHEN last_result_status = 'ready' AND browser_session_status = 'ready' THEN 1 ELSE 0 END) AS ready_count,
           SUM(CASE WHEN has_api_key = 1 THEN 1 ELSE 0 END) AS linked_count,
           SUM(CASE WHEN last_result_status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
           SUM(CASE WHEN last_result_status = 'disabled' THEN 1 ELSE 0 END) AS disabled_count
-        FROM microsoft_accounts
-        ${whereSql}
+        FROM (${accountSelectSql(whereSql)}) filtered_accounts
       `)
       .get(...(params as any[])) as { total?: number; ready_count?: number; linked_count?: number; failed_count?: number; disabled_count?: number } | null;
     const total = Number(summaryRow?.total || 0);

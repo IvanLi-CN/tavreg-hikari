@@ -146,6 +146,25 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("listAccounts summary only counts browser-ready accounts as ready", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "ready-count-a@outlook.com", password: "pass-a" },
+      { email: "ready-count-b@outlook.com", password: "pass-b" },
+    ]);
+
+    appDb.markBrowserSessionReady(imported.affectedIds[0], {
+      browserEngine: "chrome",
+      proxyNode: "Tokyo-01",
+    });
+
+    const accounts = appDb.listAccounts({ page: 1, pageSize: 10 });
+    expect(accounts.total).toBe(2);
+    expect(accounts.summary.ready).toBe(1);
+
+    appDb.close();
+  });
+
   test("blocks deleting accounts that already own extracted api keys", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "linked@outlook.com", password: "linked-pass" }]);

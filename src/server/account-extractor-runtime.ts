@@ -149,6 +149,19 @@ function formatManualStopDrainMessage(inFlightCount: number): string {
   return `提号取消中，等待 ${inFlightCount} 个在途请求收尾`;
 }
 
+function formatManualStopWaitMessage(input: { inFlightCount: number; pendingBootstrapCount: number }): string {
+  if (input.inFlightCount > 0 && input.pendingBootstrapCount > 0) {
+    return `提号取消中，等待 ${input.inFlightCount} 个在途请求收尾，并等待 ${input.pendingBootstrapCount} 个 Bootstrap 结果`;
+  }
+  if (input.inFlightCount > 0) {
+    return formatManualStopDrainMessage(input.inFlightCount);
+  }
+  if (input.pendingBootstrapCount > 0) {
+    return `提号取消中，等待 ${input.pendingBootstrapCount} 个 Bootstrap 结果`;
+  }
+  return "提号取消中";
+}
+
 function providerLabel(provider: AccountExtractorProvider): string {
   return getAccountExtractorProviderLabel(provider);
 }
@@ -282,6 +295,23 @@ export class AccountExtractorRuntime {
     });
   }
 
+  private isManualStopSettled(state: RuntimeState): boolean {
+    return state.inFlightCount === 0 && state.pendingBootstrapCandidates.size === 0;
+  }
+
+  private syncManualStopState(state: RuntimeState): void {
+    const settled = this.isManualStopSettled(state);
+    state.status = settled ? "stopped" : "stopping";
+    state.lastMessage = settled
+      ? formatManualStopMessage(state.acceptedCount)
+      : formatManualStopWaitMessage({
+          inFlightCount: state.inFlightCount,
+          pendingBootstrapCount: state.pendingBootstrapCandidates.size,
+        });
+    state.errorMessage = null;
+    state.updatedAt = nowIso();
+  }
+
   private reconcilePendingBootstrapCandidates(state: RuntimeState): void {
     if (state.pendingBootstrapCandidates.size === 0) {
       return;
@@ -324,18 +354,27 @@ export class AccountExtractorRuntime {
       });
     }
     if (acceptedNow > 0) {
+      const bootstrapSuccessMessage = `Bootstrap 完成，新增 ${acceptedNow} 个可用账号`;
       state.acceptedCount += acceptedNow;
-      state.lastMessage = `Bootstrap 完成，新增 ${acceptedNow} 个可用账号`;
-      state.errorMessage = null;
-      state.updatedAt = nowIso();
-      this.publishRunOutcome("success", state.lastMessage);
+      if (state.status === "stopping" || state.status === "stopped") {
+        this.syncManualStopState(state);
+      } else {
+        state.lastMessage = bootstrapSuccessMessage;
+        state.errorMessage = null;
+        state.updatedAt = nowIso();
+      }
+      this.publishRunOutcome("success", bootstrapSuccessMessage);
       this.publishSnapshot();
       return;
     }
     if (failedNow > 0) {
-      state.lastMessage = `有 ${failedNow} 个账号 Bootstrap 失败，继续提号`;
-      state.errorMessage = null;
-      state.updatedAt = nowIso();
+      if (state.status === "stopping" || state.status === "stopped") {
+        this.syncManualStopState(state);
+      } else {
+        state.lastMessage = `有 ${failedNow} 个账号 Bootstrap 失败，继续提号`;
+        state.errorMessage = null;
+        state.updatedAt = nowIso();
+      }
       this.publishSnapshot();
     }
   }
@@ -453,11 +492,7 @@ export class AccountExtractorRuntime {
       for (const controller of state.requestControllers.values()) {
         controller.abort(new Error("manual_stop"));
       }
-      state.status = state.inFlightCount > 0 ? "stopping" : "stopped";
-      state.errorMessage = null;
-      state.lastMessage =
-        state.inFlightCount > 0 ? formatManualStopDrainMessage(state.inFlightCount) : formatManualStopMessage(state.acceptedCount);
-      state.updatedAt = nowIso();
+      this.syncManualStopState(state);
       this.publishRunOutcome("warning", "提号器已收到取消指令");
       this.publishSnapshot();
     }
@@ -512,17 +547,14 @@ export class AccountExtractorRuntime {
     while (this.state && this.state.runId === runId && (this.state.status === "running" || this.state.status === "stopping")) {
       const state = this.state;
       if (state.status === "stopping") {
-        if (state.inFlightCount === 0) {
-          state.status = "stopped";
-          state.errorMessage = null;
-          state.lastMessage = formatManualStopMessage(state.acceptedCount);
-          state.updatedAt = nowIso();
+        this.reconcilePendingBootstrapCandidates(state);
+        if (this.isManualStopSettled(state)) {
+          this.syncManualStopState(state);
           this.publishSnapshot();
           return;
         }
         if (Date.now() - state.lastPublishedAtMs >= SNAPSHOT_HEARTBEAT_MS) {
-          state.lastMessage = formatManualStopDrainMessage(state.inFlightCount);
-          state.updatedAt = nowIso();
+          this.syncManualStopState(state);
           this.publishSnapshot();
         }
         await delay(100);
@@ -882,13 +914,7 @@ export class AccountExtractorRuntime {
     state.acceptedCount += acceptedInBatch;
     state.lastProvider = input.provider;
     if (state.status === "stopping" || state.status === "stopped") {
-      const stopSettled = state.inFlightCount === 0;
-      state.status = stopSettled ? "stopped" : "stopping";
-      state.lastMessage = stopSettled
-        ? formatManualStopMessage(state.acceptedCount)
-        : formatManualStopDrainMessage(state.inFlightCount);
-      state.errorMessage = null;
-      state.updatedAt = nowIso();
+      this.syncManualStopState(state);
       this.publishSnapshot();
       return;
     }

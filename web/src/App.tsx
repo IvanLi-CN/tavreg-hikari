@@ -97,6 +97,17 @@ function mergeIds(current: number[], next: number[]): number[] {
   return Array.from(new Set([...current, ...next]));
 }
 
+function mergeAccountIntoAccountsPayload(current: AccountsPayload, account: AccountRecord): AccountsPayload {
+  const rowIndex = current.rows.findIndex((row) => row.id === account.id);
+  if (rowIndex < 0) return current;
+  const nextRows = [...current.rows];
+  nextRows[rowIndex] = account;
+  return {
+    ...current,
+    rows: nextRows,
+  };
+}
+
 function isLockedBatchConnectAccount(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): boolean {
   return (
     String(account.skipReason || "").trim() === "microsoft_account_locked"
@@ -1029,7 +1040,8 @@ export function App() {
     const payload = await api<AccountUpdatePayload>(`/api/accounts/${accountId}/session/rebootstrap`, {
       method: "POST",
     });
-    await refreshMailboxAccountState();
+    setAccounts((current) => mergeAccountIntoAccountsPayload(current, payload.account));
+    await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
     return payload;
   };
 
