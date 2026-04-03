@@ -310,7 +310,7 @@ describe("AppDatabase account import", () => {
     reopened.close();
   });
 
-  test("reopen seeds missing browser sessions as ready for legacy usable accounts", async () => {
+  test("reopen seeds missing browser sessions as pending for legacy usable accounts", async () => {
     const { dbPath, appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -321,10 +321,10 @@ describe("AppDatabase account import", () => {
     const reopened = await AppDatabase.open(dbPath);
     const job = reopened.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     expect(reopened.getAccount(accountId)?.browserSession).toMatchObject({
-      status: "ready",
+      status: "pending",
       profilePath: expect.stringContaining(`/accounts/${accountId}/chrome`),
     });
-    expect(reopened.countEligibleAccounts(job.id)).toBe(1);
+    expect(reopened.countEligibleAccounts(job.id)).toBe(0);
 
     reopened.close();
   });
@@ -731,6 +731,38 @@ describe("AppDatabase account import", () => {
 
     expect(appDb.getAccount(accountId)?.browserSession?.status).toBe("pending");
     expect(appDb.listPendingBrowserSessionAccountIds()).not.toContain(accountId);
+
+    appDb.close();
+  });
+
+  test("hard-failed accounts do not re-enter pending-session waits in the same job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proof-same-job@outlook.com", password: "proof-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseNextAccount(job.id);
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "proof-same-job-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, {
+      errorCode: "microsoft_unknown_recovery_email:pr*****@mail.test",
+    });
+    appDb.updateAccountProofMailbox(accountId, {
+      provider: "moemail",
+      address: "proof-same-job@mail.test",
+      mailboxId: "proof-same-job",
+    });
+    appDb.queueBrowserSessionBootstrap(accountId);
+
+    expect(appDb.getAccount(accountId)).toMatchObject({
+      skipReason: null,
+      browserSession: { status: "pending" },
+    });
+    expect(appDb.isAccountSchedulableForJob(job.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+    expect(appDb.countPendingBrowserSessions(job.id)).toBe(0);
 
     appDb.close();
   });
@@ -2372,7 +2404,7 @@ describe("proxy aggregation", () => {
     appDb.close();
   });
 
-  test("failed rebootstrap clears stale proxy identity when switching to a new node", async () => {
+  test("failed rebootstrap preserves the last known proxy geo when capture never starts", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-failed-bootstrap@outlook.com", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -2394,9 +2426,9 @@ describe("proxy aggregation", () => {
     expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
       status: "failed",
       proxyNode: "Osaka-01",
-      proxyIp: null,
-      proxyRegion: null,
-      proxyCity: null,
+      proxyIp: "1.1.1.1",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
     });
 
     appDb.close();

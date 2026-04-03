@@ -404,7 +404,7 @@ function resolveMigratedBrowserSessionStatus(input: {
   if (input.lastResultStatus === "failed") {
     return "failed";
   }
-  return "ready";
+  return "pending";
 }
 
 function resolveReleasedLeaseAccountStatus(input: {
@@ -450,6 +450,22 @@ function isReadyBrowserSession(
   session: Pick<AccountBrowserSessionRecord, "status"> | null | undefined,
 ): boolean {
   return session?.status === "ready";
+}
+
+function nonRetryableAttemptWhereSql(alias: string): string {
+  return `
+    (
+      ${alias}.status IN ('running', 'succeeded')
+      OR (
+        ${alias}.status = 'failed'
+        AND (
+          LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_password_incorrect%'
+          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_account_locked%'
+          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_unknown_recovery_email%'
+        )
+      )
+    )
+  `;
 }
 
 function isHealthyProxyNodeStatus(status: string | null | undefined): boolean {
@@ -2037,7 +2053,7 @@ export class AppDatabase {
               FROM job_attempts attempts
               WHERE attempts.job_id = ?
                 AND attempts.account_id = a.id
-                AND attempts.status IN ('running', 'succeeded')
+                AND ${nonRetryableAttemptWhereSql("attempts")}
             )
           ORDER BY
             CASE WHEN a.last_used_at IS NULL THEN 0 ELSE 1 END,
@@ -2082,7 +2098,7 @@ export class AppDatabase {
             FROM job_attempts attempts
             WHERE attempts.job_id = ?
               AND attempts.account_id = a.id
-              AND attempts.status IN ('running', 'succeeded')
+              AND ${nonRetryableAttemptWhereSql("attempts")}
           )
       `)
       .get(jobId) as { count?: number } | null;
@@ -2227,12 +2243,17 @@ export class AppDatabase {
     this.ensureBrowserSessionForAccount(accountId);
     const now = nowIso();
     const hasProxyNodeSnapshot = input.proxyNode !== undefined;
+    const hasProxyIpSnapshot = input.proxyIp !== undefined;
+    const hasProxyCountrySnapshot = input.proxyCountry !== undefined;
+    const hasProxyRegionSnapshot = input.proxyRegion !== undefined;
+    const hasProxyCitySnapshot = input.proxyCity !== undefined;
+    const hasProxyTimezoneSnapshot = input.proxyTimezone !== undefined;
     this.db
       .query(`
         UPDATE account_browser_sessions
         SET status = ?,
             browser_engine = COALESCE(?, browser_engine, 'chrome'),
-            proxy_node = COALESCE(?, proxy_node),
+            proxy_node = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_node) END,
             proxy_ip = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_ip) END,
             proxy_country = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_country) END,
             proxy_region = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_region) END,
@@ -2246,20 +2267,22 @@ export class AppDatabase {
       .run(
         input.status,
         input.browserEngine ?? null,
+        hasProxyNodeSnapshot ? 1 : 0,
         input.proxyNode ?? null,
-        hasProxyNodeSnapshot ? 1 : 0,
+        input.proxyNode ?? null,
+        hasProxyIpSnapshot ? 1 : 0,
         input.proxyIp ?? null,
         input.proxyIp ?? null,
-        hasProxyNodeSnapshot ? 1 : 0,
+        hasProxyCountrySnapshot ? 1 : 0,
         input.proxyCountry ?? null,
         input.proxyCountry ?? null,
-        hasProxyNodeSnapshot ? 1 : 0,
+        hasProxyRegionSnapshot ? 1 : 0,
         input.proxyRegion ?? null,
         input.proxyRegion ?? null,
-        hasProxyNodeSnapshot ? 1 : 0,
+        hasProxyCitySnapshot ? 1 : 0,
         input.proxyCity ?? null,
         input.proxyCity ?? null,
-        hasProxyNodeSnapshot ? 1 : 0,
+        hasProxyTimezoneSnapshot ? 1 : 0,
         input.proxyTimezone ?? null,
         input.proxyTimezone ?? null,
         input.errorCode ?? null,
@@ -2328,7 +2351,7 @@ export class AppDatabase {
             FROM job_attempts attempts
             WHERE attempts.job_id = ?
               AND attempts.account_id = a.id
-              AND attempts.status IN ('running', 'succeeded')
+              AND ${nonRetryableAttemptWhereSql("attempts")}
           )
       `)
       .get(jobId) as { count?: number } | null;
@@ -2863,7 +2886,7 @@ export class AppDatabase {
         FROM job_attempts
         WHERE job_id = ?
           AND account_id = ?
-          AND status IN ('running', 'succeeded')
+          AND ${nonRetryableAttemptWhereSql("job_attempts")}
         LIMIT 1
       `)
       .get(jobId, accountId) as { blocked?: number } | null;
