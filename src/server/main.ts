@@ -516,7 +516,7 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
 }
 
 function getAccountConnectBlockMessage(
-  account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "browserSession">,
+  account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "hasApiKey" | "browserSession">,
 ): string | null {
   return getAccountSessionBootstrapBlockMessage(account);
 }

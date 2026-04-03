@@ -329,6 +329,13 @@ describe("account extractor runtime helpers", () => {
     const [account] = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(account?.browserSession?.status).toBe("pending");
 
+    const pendingHistory = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(pendingHistory.rows[0]).toMatchObject({
+      status: "pending_bootstrap",
+      acceptedCount: 0,
+      completedAt: null,
+    });
+
     appDb.markBrowserSessionReady(account!.id, { browserEngine: "chrome", proxyNode: "Tokyo-01" });
     runtime["reconcilePendingBootstrapCandidates"](runtime["state"]);
 

@@ -77,9 +77,20 @@ describe("account session bootstrap helpers", () => {
     expect(
       getAccountSessionBootstrapBlockMessage({
         leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        browserSession: { status: "ready" },
+      } as never),
+    ).toContain("API key");
+    expect(
+      getAccountSessionBootstrapBlockMessage({
+        leaseJobId: null,
         disabledAt: "2026-03-31T00:00:00.000Z",
         skipReason: null,
         lastErrorCode: null,
+        hasApiKey: false,
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已被禁用");
@@ -89,6 +100,7 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: "microsoft_account_locked",
         lastErrorCode: null,
+        hasApiKey: false,
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已锁定");

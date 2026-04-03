@@ -49,7 +49,7 @@ export interface AccountExtractorRunInput {
   accountType?: AccountExtractorAccountType;
 }
 
-type ExtractBatchStatus = "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
+type ExtractBatchStatus = "accepted" | "rejected" | "pending_bootstrap" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
 
 type RuntimeAccountRecord = Pick<
   MicrosoftAccountRecord,
@@ -749,6 +749,7 @@ export class AccountExtractorRuntime {
     if (input.result) {
       let acceptedRequestCandidate = false;
       let reservedInBatch = 0;
+      let pendingBootstrapTrackedInBatch = false;
       for (const candidate of input.result.candidates) {
         if (candidate.parseStatus !== "parsed" || !candidate.email || !candidate.password) {
           this.db.createAccountExtractItem({
@@ -898,6 +899,7 @@ export class AccountExtractorRuntime {
             item,
             provider: input.provider,
           });
+          pendingBootstrapTrackedInBatch = true;
           batchErrorMessage = batchErrorMessage || "session_not_ready";
         }
         this.publish({
@@ -908,7 +910,13 @@ export class AccountExtractorRuntime {
       }
 
       batchStatus =
-        acceptedInBatch > 0 ? "accepted" : input.result.ok ? "rejected" : mapFailureCodeToBatchStatus(input.result.failureCode);
+        acceptedInBatch > 0
+          ? "accepted"
+          : pendingBootstrapTrackedInBatch
+            ? "pending_bootstrap"
+            : input.result.ok
+              ? "rejected"
+              : mapFailureCodeToBatchStatus(input.result.failureCode);
       batchErrorMessage = acceptedInBatch > 0 ? null : batchErrorMessage || input.result.message || "当前批次没有导入可用账号";
     }
 
@@ -918,7 +926,7 @@ export class AccountExtractorRuntime {
       errorMessage: batchErrorMessage,
       rawResponse: input.rawResponse,
       maskedKey: input.maskedKey,
-      completedAt: nowIso(),
+      completedAt: batchStatus === "pending_bootstrap" ? null : nowIso(),
     });
 
     state.acceptedCount += acceptedInBatch;
@@ -931,10 +939,10 @@ export class AccountExtractorRuntime {
     state.lastMessage =
       acceptedInBatch > 0
         ? `${providerLabel(input.provider)} 接受了 ${acceptedInBatch} 个账号`
-        : state.pendingBootstrapCandidates.size > 0 && batchErrorMessage === "session_not_ready"
+        : batchStatus === "pending_bootstrap"
           ? `${providerLabel(input.provider)} 已导入账号，等待 Bootstrap 完成`
         : batchErrorMessage || `${providerLabel(input.provider)} 没有可接受账号`;
-    state.errorMessage = acceptedInBatch > 0 ? null : batchErrorMessage;
+    state.errorMessage = acceptedInBatch > 0 || batchStatus === "pending_bootstrap" ? null : batchErrorMessage;
     state.updatedAt = nowIso();
     if (acceptedInBatch > 0) {
       this.publishRunOutcome("success", state.lastMessage);

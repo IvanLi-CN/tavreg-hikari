@@ -2,7 +2,7 @@ import type { MicrosoftAccountRecord } from "../storage/app-db.js";
 
 type BootstrapQueueAccount = Pick<
   MicrosoftAccountRecord,
-  "leaseJobId" | "disabledAt" | "skipReason" | "lastErrorCode" | "browserSession"
+  "leaseJobId" | "disabledAt" | "skipReason" | "lastErrorCode" | "hasApiKey" | "browserSession"
 >;
 
 export function isLockedAccountRecord(
@@ -20,6 +20,9 @@ export function getAccountSessionBootstrapBlockMessage(account: BootstrapQueueAc
   }
   if (isLockedAccountRecord(account)) {
     return "Microsoft 账户已锁定，请先恢复可用后再连接";
+  }
+  if (account.hasApiKey) {
+    return "账号已有关联 API key，无需重新 Bootstrap";
   }
   if (account.disabledAt) {
     return "账号已被禁用，请先恢复可用后再连接";
