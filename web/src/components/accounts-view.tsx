@@ -214,6 +214,7 @@ function ImportDecisionBadge({ decision }: { decision: string }) {
 function ExtractHistoryStatusBadge({ status }: { status: string }) {
   if (status === "accepted") return <Badge variant="success">accepted</Badge>;
   if (status === "rejected") return <Badge variant="warning">rejected</Badge>;
+  if (status === "pending_bootstrap") return <Badge variant="info">pending_bootstrap</Badge>;
   if (status === "invalid_key") return <Badge variant="danger">invalid_key</Badge>;
   if (status === "insufficient_stock") return <Badge variant="warning">insufficient_stock</Badge>;
   if (status === "parse_failed") return <Badge variant="danger">parse_failed</Badge>;
@@ -1369,6 +1370,7 @@ export function AccountsView({
                       <SelectItem value="__all__">全部状态</SelectItem>
                       <SelectItem value="accepted">accepted</SelectItem>
                       <SelectItem value="rejected">rejected</SelectItem>
+                      <SelectItem value="pending_bootstrap">pending_bootstrap</SelectItem>
                       <SelectItem value="invalid_key">invalid_key</SelectItem>
                       <SelectItem value="insufficient_stock">insufficient_stock</SelectItem>
                       <SelectItem value="parse_failed">parse_failed</SelectItem>

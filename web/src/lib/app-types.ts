@@ -455,7 +455,7 @@ export type AccountExtractHistoryBatch = {
   requestedUsableCount: number;
   attemptBudget: number;
   acceptedCount: number;
-  status: "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
+  status: "accepted" | "rejected" | "pending_bootstrap" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error";
   errorMessage: string | null;
   rawResponse: string | null;
   maskedKey: string | null;

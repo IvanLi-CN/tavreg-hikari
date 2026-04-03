@@ -12,6 +12,7 @@ import {
   pickWorkerRuntime,
   resolvePendingBrowserSessionWait,
   resolveAttemptProxyNode,
+  resolveReusableAttemptProxyNode,
   resolveWorkerRuntime,
 } from "../src/server/scheduler.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
@@ -1497,37 +1498,43 @@ describe("scheduler helpers", () => {
 
     const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
     expect(history.rows[0]).toMatchObject({
-      status: "rejected",
+      status: "pending_bootstrap",
       acceptedCount: 0,
+      completedAt: null,
     });
-    expect(history.rows[0]?.items[0]).toMatchObject({
-      email: "pending-a@outlook.com",
-      acceptStatus: "rejected",
-      rejectReason: "session_not_ready",
-    });
+    expect(history.rows[0]?.items).toHaveLength(0);
 
     fakeNow = 501;
     decision = await scheduler["maybeAutoExtract"](job);
     expect(decision).toEqual({ status: "waiting" });
     expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
       acceptedCount: 0,
-      rawAttemptCount: 2,
-      inFlightCount: 1,
+      rawAttemptCount: 1,
+      inFlightCount: 0,
     });
-    expect(pending).toHaveLength(2);
+    expect(pending).toHaveLength(1);
 
-    pending[1].resolve(
-      new Response(
-        JSON.stringify({
-          Code: 200,
-          Message: "Success",
-          Data: "pending-b@outlook.com:pass-b",
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    markBrowserSessionReady(appDb, accounts[0].id);
+    fakeNow = 601;
+    decision = await scheduler["maybeAutoExtract"](job);
+    expect(decision).toEqual({ status: "ready", reason: "accepted 1 usable account(s)" });
+    expect(scheduler.getAutoExtractSnapshot(job.id)).toMatchObject({
+      phase: "idle",
+      acceptedCount: 0,
+      rawAttemptCount: 0,
+      inFlightCount: 0,
+    });
+
+    const reconciledHistory = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+    expect(reconciledHistory.rows[0]).toMatchObject({
+      status: "accepted",
+      acceptedCount: 1,
+    });
+    expect(reconciledHistory.rows[0]?.items[0]).toMatchObject({
+      email: "pending-a@outlook.com",
+      acceptStatus: "accepted",
+      rejectReason: null,
+    });
 
     await scheduler.shutdown();
     appDb.close();
@@ -2795,6 +2802,25 @@ describe("scheduler runtime spec", () => {
     expect(resolveAttemptProxyNode(appDb)).toBeNull();
 
     appDb.close();
+  });
+
+  test("launch proxy reuse only follows account-level reusable selection", () => {
+    expect(
+      resolveReusableAttemptProxyNode(
+        {
+          selectReusableProxyNodeForAccount: () => null,
+        },
+        21,
+      ),
+    ).toBeNull();
+    expect(
+      resolveReusableAttemptProxyNode(
+        {
+          selectReusableProxyNodeForAccount: () => ({ nodeName: "Tokyo-01" }),
+        },
+        21,
+      ),
+    ).toBe("Tokyo-01");
   });
 
   test("does not force a selected proxy node while it is still in a non-healthy running state", async () => {

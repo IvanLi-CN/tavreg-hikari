@@ -78,6 +78,7 @@ export type AccountSkipReason =
 export type AccountExtractBatchStatus =
   | "accepted"
   | "rejected"
+  | "pending_bootstrap"
   | "invalid_key"
   | "insufficient_stock"
   | "parse_failed"

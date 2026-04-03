@@ -829,6 +829,7 @@ export const sampleExtractorHistory: AccountExtractorHistoryPayload = {
 
 const extractorStatusCycle = [
   "insufficient_stock",
+  "pending_bootstrap",
   "rejected",
   "accepted",
   "invalid_key",
@@ -852,6 +853,9 @@ function buildExtractorErrorMessage(status: AccountExtractHistoryBatch["status"]
   }
   if (status === "rejected") {
     return `存在重复、已尝试或不符合当前 job 约束的账号。${repeatSegment("reject", batchId, 7)}`;
+  }
+  if (status === "pending_bootstrap") {
+    return `已导入账号，正在等待 Bootstrap 完成。${repeatSegment("bootstrap", batchId, 6)}`;
   }
   if (status === "invalid_key") {
     return `站点 KEY 校验失败，请重新保存后再尝试。${repeatSegment("key", batchId, 6)}`;
@@ -881,6 +885,16 @@ function buildExtractorRawResponse(status: AccountExtractHistoryBatch["status"],
         })),
       },
       trace: repeatSegment("accepted-trace", batchId, 14),
+    });
+  }
+  if (status === "pending_bootstrap") {
+    return JSON.stringify({
+      status: 0,
+      msg: "session_not_ready",
+      data: {
+        mails: [`batch${batchId}-pending@outlook.com:Bootstrap-${batchId}`],
+      },
+      trace: repeatSegment("bootstrap-pending", batchId, 10),
     });
   }
   return JSON.stringify({
@@ -913,7 +927,7 @@ export function createSampleExtractorHistory(options?: {
       const provider: AccountExtractorProvider = index % 2 === 0 ? "shanyouxiang" : "zhanghaoya";
       const status = statuses[index % statuses.length] as AccountExtractHistoryBatch["status"];
       const requestedUsableCount = (index % 4) + 1;
-      const itemCount = status === "invalid_key" || status === "insufficient_stock" ? 0 : (index % 7) || 6;
+      const itemCount = status === "invalid_key" || status === "insufficient_stock" || status === "pending_bootstrap" ? 0 : (index % 7) || 6;
       const acceptedCount = status === "accepted" ? Math.max(1, Math.min(requestedUsableCount, Math.max(1, itemCount - 1))) : 0;
 
       return {
@@ -929,7 +943,7 @@ export function createSampleExtractorHistory(options?: {
         rawResponse: buildExtractorRawResponse(status, batchId),
         maskedKey: buildExtractorMaskedKey(provider, batchId),
         startedAt: `2026-03-27T19:${String(10 + index).padStart(2, "0")}:54.000Z`,
-        completedAt: `2026-03-27T19:${String(11 + index).padStart(2, "0")}:12.000Z`,
+        completedAt: status === "pending_bootstrap" ? null : `2026-03-27T19:${String(11 + index).padStart(2, "0")}:12.000Z`,
         items: Array.from({ length: itemCount }, (_, itemIndex) => {
           const parseStatus = status === "parse_failed" && itemIndex >= Math.max(1, itemCount - 2) ? "invalid" : "parsed";
           const acceptStatus = parseStatus === "parsed" && itemIndex < acceptedCount ? "accepted" : "rejected";
@@ -974,7 +988,7 @@ export const sampleExtractorHistoryDense = createSampleExtractorHistory();
 export const sampleExtractorHistoryFailureMatrix = createSampleExtractorHistory({
   total: 126,
   rowCount: 6,
-  statuses: ["insufficient_stock", "rejected", "invalid_key", "parse_failed", "error"],
+  statuses: ["insufficient_stock", "pending_bootstrap", "rejected", "invalid_key", "parse_failed", "error"],
 });
 
 export const sampleExtractorHistoryEmpty: AccountExtractorHistoryPayload = {

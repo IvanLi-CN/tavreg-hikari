@@ -18,6 +18,7 @@ import {
   getConfiguredExtractorKey,
   keyConfiguredForProvider,
 } from "./account-extractor.js";
+import { isLockedAccountRecord } from "./account-session-bootstrap.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
@@ -45,6 +46,15 @@ interface PendingAttemptLaunch {
 
 type AutoExtractPhase = "idle" | "waiting" | "extracting";
 
+interface PendingAutoExtractCandidate {
+  accountId: number;
+  batchId: number;
+  provider: AccountExtractorProvider;
+  rawPayload: string;
+  email: string;
+  password: string;
+}
+
 interface AutoExtractState {
   jobId: number;
   enabledSources: AccountExtractorProvider[];
@@ -66,6 +76,7 @@ interface AutoExtractState {
   updatedAt: string;
   lastBudgetTickMs: number | null;
   requestControllers: Map<string, AbortController>;
+  pendingBootstrapCandidates: Map<number, PendingAutoExtractCandidate>;
 }
 
 interface AutoExtractRequestContext {
@@ -94,6 +105,13 @@ export interface AutoExtractSnapshot {
   lastProvider: AccountExtractorProvider | null;
   lastMessage: string | null;
   updatedAt: string | null;
+}
+
+export function resolveReusableAttemptProxyNode(
+  db: Pick<AppDatabase, "selectReusableProxyNodeForAccount">,
+  accountId: number,
+): string | null {
+  return db.selectReusableProxyNodeForAccount(accountId)?.nodeName || null;
 }
 
 type AutoExtractDecision =
@@ -834,6 +852,10 @@ export class JobScheduler {
       }
       const job = this.db.getJob(jobId);
       if (!job) return;
+      const autoExtractState = this.autoExtractStates.get(jobId);
+      if (autoExtractState && this.reconcileAutoExtractPendingCandidates(job, autoExtractState)) {
+        this.emit("job.updated", { job: this.db.getJob(jobId), autoExtractState: this.getAutoExtractSnapshot(jobId) });
+      }
 
       const activeCount = this.activeAttempts.size;
 
@@ -998,7 +1020,7 @@ export class JobScheduler {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
-      const selectedProxyNode = this.db.selectReusableProxyNodeForAccount(account.id)?.nodeName || resolveAttemptProxyNode(this.db);
+      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
       if (selectedProxyNode) {
         this.db.touchProxyLease(selectedProxyNode);
       }
@@ -1339,16 +1361,19 @@ export class JobScheduler {
       updatedAt: now,
       lastBudgetTickMs: null,
       requestControllers: new Map<string, AbortController>(),
+      pendingBootstrapCandidates: new Map<number, PendingAutoExtractCandidate>(),
     };
   }
 
   private syncAutoExtractState(job: JobRecord): void {
     const current = this.autoExtractStates.get(job.id);
     if (job.autoExtractSources.length === 0) {
-      if (current?.inFlightCount) {
+      if (current?.inFlightCount || current?.pendingBootstrapCandidates.size) {
         current.enabledSources = [];
         current.phase = current.inFlightCount > 0 ? "waiting" : "idle";
-        current.lastMessage = "auto extract disabled, waiting for in-flight requests to finish";
+        current.lastMessage = current.inFlightCount > 0
+          ? "auto extract disabled, waiting for in-flight requests to finish"
+          : `auto extract disabled, waiting for ${current.pendingBootstrapCandidates.size} pending bootstrap result(s)`;
         current.updatedAt = nowIso();
       } else {
         this.autoExtractStates.delete(job.id);
@@ -1378,6 +1403,7 @@ export class JobScheduler {
       current.providerNextAttemptAtMs = createProviderAttemptClock();
       current.providerInFlightCount = createProviderInFlightCounter();
       current.requestControllers.clear();
+      current.pendingBootstrapCandidates.clear();
     }
   }
 
@@ -1409,6 +1435,7 @@ export class JobScheduler {
     state.lastMessage = message;
     state.updatedAt = nowIso();
     state.requestControllers.clear();
+    state.pendingBootstrapCandidates.clear();
   }
 
   private startAutoExtractRound(job: JobRecord, state: AutoExtractState): string | null {
@@ -1443,15 +1470,128 @@ export class JobScheduler {
     if (!account) return "import_missing";
     if (account.disabledAt != null) return "disabled";
     if (account.hasApiKey || account.skipReason === "has_api_key") return "has_api_key";
+    if (isLockedAccountRecord(account)) return "microsoft_account_locked";
     if (account.skipReason) return account.skipReason;
     if (account.leaseJobId != null) return "leased";
     if (account.browserSession && account.browserSession.status !== "ready") return "session_not_ready";
     return this.db.isAccountSchedulableForJob(jobId, account.id) ? "unknown" : "already_attempted";
   }
 
+  private countReservedAutoExtractAccounts(state: AutoExtractState): number {
+    return state.acceptedCount + state.pendingBootstrapCandidates.size;
+  }
+
+  private resolvePendingAutoExtractRejectReason(jobId: number, account: MicrosoftAccountRecord | null): string | null {
+    if (!account) return "import_missing";
+    if (account.disabledAt != null) return "disabled";
+    if (account.hasApiKey || account.skipReason === "has_api_key") return "has_api_key";
+    if (isLockedAccountRecord(account)) return "microsoft_account_locked";
+    if (account.skipReason) return account.skipReason;
+    if (account.leaseJobId != null) return "leased";
+    if (account.browserSession?.status === "ready") {
+      return this.db.isAccountSchedulableForJob(jobId, account.id) ? null : "already_attempted";
+    }
+    if (account.browserSession?.status === "failed" || account.browserSession?.status === "blocked") {
+      return (
+        account.browserSession.lastErrorCode?.trim()
+        || account.lastErrorCode?.trim()
+        || (account.browserSession.status === "blocked" ? "session_blocked" : "session_bootstrap_failed")
+      );
+    }
+    return "session_not_ready";
+  }
+
+  private trackPendingAutoExtractCandidate(
+    state: AutoExtractState,
+    input: {
+      accountId: number;
+      batchId: number;
+      provider: AccountExtractorProvider;
+      rawPayload: string;
+      email: string;
+      password: string;
+    },
+  ): void {
+    state.pendingBootstrapCandidates.set(input.accountId, {
+      accountId: input.accountId,
+      batchId: input.batchId,
+      provider: input.provider,
+      rawPayload: input.rawPayload,
+      email: input.email,
+      password: input.password,
+    });
+  }
+
+  private reconcileAutoExtractPendingCandidates(job: JobRecord, state: AutoExtractState): boolean {
+    if (state.pendingBootstrapCandidates.size === 0) {
+      return false;
+    }
+    const completedAt = nowIso();
+    let acceptedNow = 0;
+    let failedNow = 0;
+    for (const [accountId, pending] of state.pendingBootstrapCandidates.entries()) {
+      const latestAccount = this.db.getAccount(accountId);
+      const rejectReason = this.resolvePendingAutoExtractRejectReason(job.id, latestAccount);
+      if (rejectReason === "session_not_ready") {
+        continue;
+      }
+      state.pendingBootstrapCandidates.delete(accountId);
+      if (!rejectReason) {
+        acceptedNow += 1;
+        this.db.createAccountExtractItem({
+          batchId: pending.batchId,
+          provider: pending.provider,
+          rawPayload: pending.rawPayload,
+          email: pending.email,
+          password: pending.password,
+          parseStatus: "parsed",
+          acceptStatus: "accepted",
+          rejectReason: null,
+          importedAccountId: latestAccount?.id ?? accountId,
+          createdAt: completedAt,
+        });
+        this.db.updateAccountExtractBatch(pending.batchId, {
+          acceptedCount: 1,
+          status: "accepted",
+          errorMessage: null,
+          completedAt,
+        });
+        continue;
+      }
+      failedNow += 1;
+      this.db.createAccountExtractItem({
+        batchId: pending.batchId,
+        provider: pending.provider,
+        rawPayload: pending.rawPayload,
+        email: pending.email,
+        password: pending.password,
+        parseStatus: "parsed",
+        acceptStatus: "rejected",
+        rejectReason,
+        importedAccountId: latestAccount?.id ?? accountId,
+        createdAt: completedAt,
+      });
+      this.db.updateAccountExtractBatch(pending.batchId, {
+        acceptedCount: 0,
+        status: "rejected",
+        errorMessage: rejectReason,
+        completedAt,
+      });
+    }
+    if (acceptedNow > 0) {
+      state.acceptedCount += acceptedNow;
+      state.lastMessage = `bootstrap completed for ${acceptedNow} extracted account(s)`;
+      state.updatedAt = completedAt;
+    } else if (failedNow > 0) {
+      state.lastMessage = `bootstrap failed for ${failedNow} extracted account(s), continuing auto extract`;
+      state.updatedAt = completedAt;
+    }
+    return acceptedNow > 0 || failedNow > 0;
+  }
+
   private deleteAutoExtractStateIfIdle(jobId: number): void {
     const state = this.autoExtractStates.get(jobId);
-    if (!state || state.inFlightCount === 0) {
+    if (!state || (state.inFlightCount === 0 && state.pendingBootstrapCandidates.size === 0)) {
       this.autoExtractStates.delete(jobId);
     }
   }
@@ -1466,9 +1606,11 @@ export class JobScheduler {
   }
 
   private evaluateAutoExtractState(job: JobRecord, state: AutoExtractState): AutoExtractDecision | null {
-    const targetReached = state.currentRoundTarget > 0 && state.acceptedCount >= state.currentRoundTarget;
+    const reservedCount = this.countReservedAutoExtractAccounts(state);
+    const targetReached = state.currentRoundTarget > 0 && reservedCount >= state.currentRoundTarget;
     const waitExhausted = state.remainingWaitMs <= 0;
     const rawBudgetExhausted = state.rawAttemptCount >= state.attemptBudget && state.attemptBudget > 0;
+    const pendingBootstrapCount = state.pendingBootstrapCandidates.size;
     if (state.inFlightCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
       state.phase = "waiting";
       state.lastMessage = targetReached
@@ -1476,6 +1618,16 @@ export class JobScheduler {
         : waitExhausted || rawBudgetExhausted
           ? `wait budget exhausted, waiting for ${state.inFlightCount} in-flight request(s)`
           : `waiting for ${state.inFlightCount} in-flight request(s)`;
+      state.updatedAt = nowIso();
+      return { status: "waiting" };
+    }
+    if (pendingBootstrapCount > 0 && (targetReached || waitExhausted || rawBudgetExhausted)) {
+      state.phase = "waiting";
+      state.lastMessage = targetReached
+        ? `target reached, waiting for ${pendingBootstrapCount} bootstrap result(s)`
+        : waitExhausted || rawBudgetExhausted
+          ? `wait budget exhausted, waiting for ${pendingBootstrapCount} bootstrap result(s)`
+          : `waiting for ${pendingBootstrapCount} bootstrap result(s)`;
       state.updatedAt = nowIso();
       return { status: "waiting" };
     }
@@ -1557,7 +1709,7 @@ export class JobScheduler {
       const affectedIds = new Set<number>();
       const rejectReasons = new Set<string>();
 
-      let batchStatus: "accepted" | "rejected" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error" =
+      let batchStatus: "accepted" | "rejected" | "pending_bootstrap" | "invalid_key" | "insufficient_stock" | "parse_failed" | "error" =
         input.ok && input.result ? "rejected" : mapFailureCodeToBatchStatus(input.failureCode ?? null);
       let batchErrorMessage = input.errorMessage ?? null;
       const batch = this.db.createAccountExtractBatch({
@@ -1577,6 +1729,7 @@ export class JobScheduler {
 
       if (input.ok && input.result) {
         let acceptedRequestCandidate = false;
+        let pendingBootstrapTrackedInBatch = false;
         for (const candidate of input.result.candidates) {
           if (candidate.parseStatus !== "parsed" || !candidate.email || !candidate.password) {
             rejectReasons.add("parse_failed");
@@ -1611,7 +1764,7 @@ export class JobScheduler {
           const roundTargetReached =
             state != null
             && state.startedAt === context.roundStartedAt
-            && state.acceptedCount + acceptedInBatch >= state.currentRoundTarget;
+            && this.countReservedAutoExtractAccounts(state) + acceptedInBatch >= state.currentRoundTarget;
           if (roundTargetReached) {
             rejectReasons.add("round_target_reached");
             this.db.createAccountExtractItem({
@@ -1656,8 +1809,8 @@ export class JobScheduler {
             affectedIds.add(accountId);
           }
           const importedAccount = this.db.getAccountsByEmails([candidate.email])[0] || null;
-          const rejectReason = this.describeExtractRejectReason(context.jobId, importedAccount);
-          if (rejectReason !== "unknown") {
+          const rejectReason = this.resolvePendingAutoExtractRejectReason(context.jobId, importedAccount);
+          if (rejectReason && rejectReason !== "session_not_ready") {
             rejectReasons.add(rejectReason);
             this.db.createAccountExtractItem({
               batchId: batch.id,
@@ -1672,27 +1825,74 @@ export class JobScheduler {
             });
             continue;
           }
+          if (!importedAccount) {
+            const missingReason = this.describeExtractRejectReason(context.jobId, importedAccount);
+            rejectReasons.add(missingReason);
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "rejected",
+              rejectReason: missingReason,
+              importedAccountId: null,
+            });
+            continue;
+          }
 
           acceptedRequestCandidate = true;
-          acceptedInBatch = 1;
-          if (importedAccount) {
-            affectedIds.add(importedAccount.id);
+          affectedIds.add(importedAccount.id);
+          if (!rejectReason) {
+            acceptedInBatch = 1;
+            this.db.createAccountExtractItem({
+              batchId: batch.id,
+              provider: context.provider,
+              rawPayload: candidate.rawPayload,
+              email: candidate.email,
+              password: candidate.password,
+              parseStatus: "parsed",
+              acceptStatus: "accepted",
+              rejectReason: null,
+              importedAccountId: importedAccount.id,
+            });
+          } else {
+            rejectReasons.add("session_not_ready");
+            if (state) {
+              pendingBootstrapTrackedInBatch = true;
+              this.trackPendingAutoExtractCandidate(state, {
+                accountId: importedAccount.id,
+                batchId: batch.id,
+                provider: context.provider,
+                rawPayload: candidate.rawPayload,
+                email: candidate.email,
+                password: candidate.password,
+              });
+            } else {
+              this.db.createAccountExtractItem({
+                batchId: batch.id,
+                provider: context.provider,
+                rawPayload: candidate.rawPayload,
+                email: candidate.email,
+                password: candidate.password,
+                parseStatus: "parsed",
+                acceptStatus: "rejected",
+                rejectReason: "session_not_ready",
+                importedAccountId: importedAccount.id,
+              });
+            }
           }
-          this.db.createAccountExtractItem({
-            batchId: batch.id,
-            provider: context.provider,
-            rawPayload: candidate.rawPayload,
-            email: candidate.email,
-            password: candidate.password,
-            parseStatus: "parsed",
-            acceptStatus: "accepted",
-            rejectReason: null,
-            importedAccountId: importedAccount?.id ?? null,
-          });
         }
 
         batchStatus =
-          acceptedInBatch > 0 ? "accepted" : input.result.ok ? "rejected" : mapFailureCodeToBatchStatus(input.result.failureCode);
+          acceptedInBatch > 0
+            ? "accepted"
+            : pendingBootstrapTrackedInBatch
+              ? "pending_bootstrap"
+              : input.result.ok
+                ? "rejected"
+                : mapFailureCodeToBatchStatus(input.result.failureCode);
         batchErrorMessage = acceptedInBatch > 0 ? null : input.result.message || Array.from(rejectReasons).join(", ") || null;
       }
 
@@ -1702,7 +1902,7 @@ export class JobScheduler {
         errorMessage: batchErrorMessage,
         rawResponse: input.rawResponse ?? null,
         maskedKey: input.maskedKey ?? null,
-        completedAt,
+        completedAt: batchStatus === "pending_bootstrap" ? null : completedAt,
       });
 
       if (state && state.startedAt === context.roundStartedAt) {
@@ -1710,10 +1910,16 @@ export class JobScheduler {
         state.providerInFlightCount[context.provider] = Math.max(0, state.providerInFlightCount[context.provider] - 1);
         state.lastProvider = context.provider;
         state.acceptedCount += acceptedInBatch;
-        state.phase = state.inFlightCount > 0 ? "waiting" : state.acceptedCount >= state.currentRoundTarget ? "waiting" : "extracting";
+        state.phase = state.inFlightCount > 0
+          ? "waiting"
+          : this.countReservedAutoExtractAccounts(state) >= state.currentRoundTarget
+            ? "waiting"
+            : "extracting";
         state.lastMessage =
           acceptedInBatch > 0
             ? `${providerLabel(context.provider)} accepted ${acceptedInBatch} usable account`
+            : batchStatus === "pending_bootstrap"
+              ? `${providerLabel(context.provider)} imported account, waiting for bootstrap`
             : batchErrorMessage || "no usable account accepted";
         state.updatedAt = completedAt;
       }
@@ -1793,7 +1999,10 @@ export class JobScheduler {
 
   private async maybeAutoExtract(job: JobRecord): Promise<AutoExtractDecision> {
     const existingState = this.autoExtractStates.get(job.id);
-    if (job.autoExtractSources.length === 0 && (!existingState || existingState.inFlightCount === 0)) {
+    if (
+      job.autoExtractSources.length === 0
+      && (!existingState || (existingState.inFlightCount === 0 && existingState.pendingBootstrapCandidates.size === 0))
+    ) {
       return { status: "unavailable", reason: "eligible accounts exhausted or max attempts reached" };
     }
     let state = existingState;
@@ -1804,6 +2013,7 @@ export class JobScheduler {
       this.syncAutoExtractState(job);
       state = this.autoExtractStates.get(job.id) || state;
     }
+    this.reconcileAutoExtractPendingCandidates(job, state);
 
     if (state.phase === "idle") {
       const startError = this.startAutoExtractRound(job, state);
@@ -1821,7 +2031,7 @@ export class JobScheduler {
     while (
       state.enabledSources.length > 0
       && state.remainingWaitMs > 0
-      && state.acceptedCount < state.currentRoundTarget
+      && this.countReservedAutoExtractAccounts(state) < state.currentRoundTarget
       && (state.attemptBudget <= 0 || state.rawAttemptCount < state.attemptBudget)
     ) {
       const nowMs = Date.now();
