@@ -252,13 +252,14 @@ type AccountsStorySurfaceProps = {
   onConnectSelectedAccounts?: () => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
+  onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onRunExtractor?: () => Promise<void>;
   onStopExtractor?: () => Promise<void>;
 };
 
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const accounts = props.accounts || sampleAccounts;
-  const extractorSettings = props.extractorSettings ?? sampleExtractorSettings;
+  const [extractorSettings, setExtractorSettings] = useState<AccountExtractorSettings>(props.extractorSettings ?? sampleExtractorSettings);
   const extractorHistory = props.extractorHistory || sampleExtractorHistory;
   const [content, setContent] = useState("");
   const [importGroupName, setImportGroupName] = useState("");
@@ -283,6 +284,11 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
     if (!props.extractorRunDraft) return;
     setExtractorRunDraft(props.extractorRunDraft);
   }, [props.extractorRunDraft]);
+
+  useEffect(() => {
+    if (!props.extractorSettings) return;
+    setExtractorSettings(props.extractorSettings);
+  }, [props.extractorSettings]);
 
   return (
     <div className={props.frameClassName}>
@@ -330,7 +336,12 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onConnectSelectedAccounts={props.onConnectSelectedAccounts ?? (async () => undefined)}
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
-        onSaveExtractorSettings={async () => undefined}
+        onSaveExtractorSettings={
+          props.onSaveExtractorSettings
+            ?? (async (patch) => {
+              setExtractorSettings((current) => ({ ...current, ...patch }));
+            })
+        }
         onExtractorRunDraftChange={(patch) => setExtractorRunDraft((current) => ({ ...current, ...patch }))}
         onRunExtractor={props.onRunExtractor ?? (async () => undefined)}
         onStopExtractor={props.onStopExtractor ?? (async () => undefined)}
@@ -661,15 +672,15 @@ export const ExtractorRuntimeRunning: Story = {
   args: baseArgs,
   render: () => (
     <AccountsStorySurface
-      extractorRuntime={sampleExtractorRuntimeRunning}
-      extractorRunDraft={{ sources: ["zhanghaoya", "shanyouxiang"], quantity: 2, maxWaitSec: 45, accountType: "outlook" }}
+      extractorRuntime={{ ...sampleExtractorRuntimeRunning, accountType: "hotmail" }}
+      extractorRunDraft={{ sources: ["zhanghaoya", "shanyouxiang"], quantity: 2, maxWaitSec: 45, accountType: "hotmail" }}
       extractorSseState="open"
     />
   ),
   parameters: {
     docs: {
       description: {
-        story: "提号器运行中场景，展示实时 accepted/raw/in-flight/remaining wait 指标，以及 SSE 已连接状态。",
+        story: "提号器运行中场景，展示实时 accepted/raw/in-flight/remaining wait 指标、当前邮箱类型，以及 SSE 已连接状态。",
       },
     },
   },
@@ -679,7 +690,65 @@ export const ExtractorRuntimeRunning: Story = {
     await expect(canvas.getByText("目标接受：1 / 2")).toBeInTheDocument();
     await expect(canvas.getByText("原始请求：3")).toBeInTheDocument();
     await expect(canvas.getByText("剩余等待：27s / 45s")).toBeInTheDocument();
+    await expect(canvas.getByText("邮箱类型：Hotmail")).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "取消提号" })).toBeInTheDocument();
+  },
+};
+
+export const ExtractorAccountTypePlay: Story = {
+  args: baseArgs,
+  render: () => {
+    return (
+      <AccountsStorySurface
+        extractorRuntime={{ ...sampleExtractorRuntimeIdle, accountType: "outlook" }}
+        extractorRunDraft={{
+          sources: ["zhanghaoya", "hotmail666"],
+          quantity: 2,
+          maxWaitSec: 45,
+          accountType: "outlook",
+        }}
+      />
+    );
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "验证账号页手动提号器可以在 Outlook 和 Hotmail 之间切换，并保持摘要状态同步。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("邮箱类型：Outlook")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox", { name: "邮箱类型" }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
+    await expect(canvas.getByText("邮箱类型：Hotmail")).toBeInTheDocument();
+  },
+};
+
+export const ExtractorSettingsDefaultAccountTypePlay: Story = {
+  args: {
+    ...baseArgs,
+    onSaveExtractorSettings: fn(async () => undefined),
+  },
+  render: (args) => <AccountsStorySurface onSaveExtractorSettings={args.onSaveExtractorSettings} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证提号器设置弹窗允许保存默认账号类型，并把选择值连同 KEY 一起提交。",
+      },
+    },
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByTestId("open-extractor-settings"));
+    const dialog = within(document.body).getByRole("dialog", { name: "微软账号提取器设置" });
+    await userEvent.click(within(dialog).getByRole("combobox", { name: "默认邮箱类型" }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+    await expect(args.onSaveExtractorSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultAutoExtractAccountType: "hotmail" }),
+    );
   },
 };
 

@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import {
   AppDatabase,
   computeLaunchCapacity,
+  normalizeAccountExtractorAccountType,
   normalizeJobMaxAttempts,
   type AccountExtractorAccountType,
   type AccountExtractorProvider,
@@ -1306,7 +1307,9 @@ export class JobScheduler {
         autoExtractSources: [],
         autoExtractQuantity: 0,
         autoExtractMaxWaitSec: 0,
-        autoExtractAccountType: "outlook",
+        autoExtractAccountType: normalizeAccountExtractorAccountType(
+          input.autoExtractAccountType ?? fallback?.autoExtractAccountType,
+        ),
       };
     }
     const autoExtractQuantity = Math.max(1, Math.trunc(input.autoExtractQuantity ?? fallback?.autoExtractQuantity ?? 0));
@@ -1331,7 +1334,9 @@ export class JobScheduler {
       autoExtractSources,
       autoExtractQuantity,
       autoExtractMaxWaitSec,
-      autoExtractAccountType: "outlook",
+      autoExtractAccountType: normalizeAccountExtractorAccountType(
+        input.autoExtractAccountType ?? fallback?.autoExtractAccountType,
+      ),
     };
   }
 

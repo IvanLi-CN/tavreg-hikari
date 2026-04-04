@@ -1,4 +1,4 @@
-import type { AppSettings } from "../storage/app-db.js";
+import { normalizeAccountExtractorAccountType, type AppSettings } from "../storage/app-db.js";
 
 export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSettings> {
   const next: Partial<AppSettings> = {};
@@ -37,7 +37,9 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   if (typeof input.defaultAutoExtractMaxWaitSec === "number" && Number.isFinite(input.defaultAutoExtractMaxWaitSec)) {
     next.defaultAutoExtractMaxWaitSec = Math.max(1, input.defaultAutoExtractMaxWaitSec);
   }
-  if (input.defaultAutoExtractAccountType === "outlook") next.defaultAutoExtractAccountType = input.defaultAutoExtractAccountType;
+  if (input.defaultAutoExtractAccountType !== undefined) {
+    next.defaultAutoExtractAccountType = normalizeAccountExtractorAccountType(input.defaultAutoExtractAccountType);
+  }
   if (typeof input.microsoftGraphClientId === "string") next.microsoftGraphClientId = input.microsoftGraphClientId.trim();
   if (typeof input.microsoftGraphClientSecret === "string") next.microsoftGraphClientSecret = input.microsoftGraphClientSecret.trim();
   if (typeof input.microsoftGraphRedirectUri === "string") next.microsoftGraphRedirectUri = input.microsoftGraphRedirectUri.trim();

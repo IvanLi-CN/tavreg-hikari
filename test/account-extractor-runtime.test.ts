@@ -10,6 +10,7 @@ import {
 import { AppDatabase } from "../src/storage/app-db.ts";
 
 const tempDirs: string[] = [];
+const originalFetch = globalThis.fetch;
 
 async function createTempDb() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-runtime-"));
@@ -19,6 +20,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -240,6 +242,48 @@ describe("account extractor runtime helpers", () => {
     expect(stopped.status).toBe("stopped");
     expect(stopped.inFlightCount).toBe(0);
     expect(stopped.lastMessage).toBe("提号已取消");
+    appDb.close();
+  });
+
+  test("start preserves the requested hotmail extractor account type", async () => {
+    const { appDb } = await createTempDb();
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      })) as typeof fetch;
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      (event) => published.push(event),
+      () => false,
+    );
+
+    const snapshot = await runtime.start({
+      sources: ["zhanghaoya"],
+      quantity: 1,
+      maxWaitSec: 60,
+      accountType: "hotmail",
+    });
+
+    expect(snapshot.accountType).toBe("hotmail");
+    expect(published.some((event) => event.type === "toast" && String(event.payload.message || "").includes("类型 hotmail"))).toBe(true);
+
+    await runtime.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     appDb.close();
   });
 

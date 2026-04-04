@@ -14,6 +14,7 @@ import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import {
   AppDatabase,
+  normalizeAccountExtractorAccountType,
   type AccountExtractorProvider,
   type AppSettings,
   type JobAttemptRecord,
@@ -246,6 +247,10 @@ function normalizeExtractorSources(value: unknown): AccountExtractorProvider[] {
       ),
     ),
   );
+}
+
+function normalizeExtractorAccountType(value: unknown, fallback?: AppSettings["defaultAutoExtractAccountType"]) {
+  return normalizeAccountExtractorAccountType(value, fallback);
 }
 
 function toOptionalPositiveInt(value: unknown): number | undefined {
@@ -1569,7 +1574,7 @@ async function main(): Promise<void> {
             sources: normalizeExtractorSources(body?.sources ?? settings.defaultAutoExtractSources),
             quantity: toOptionalPositiveInt(body?.quantity) ?? settings.defaultAutoExtractQuantity,
             maxWaitSec: toOptionalPositiveInt(body?.maxWaitSec) ?? settings.defaultAutoExtractMaxWaitSec,
-            accountType: body?.accountType === "outlook" ? "outlook" : settings.defaultAutoExtractAccountType,
+            accountType: normalizeExtractorAccountType(body?.accountType, settings.defaultAutoExtractAccountType),
           });
           return json({ ok: true, runtime });
         } catch (error) {
@@ -1608,8 +1613,8 @@ async function main(): Promise<void> {
               ? toOptionalPositiveInt(body.defaultAutoExtractMaxWaitSec)
               : undefined,
           defaultAutoExtractAccountType:
-            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractAccountType") && body.defaultAutoExtractAccountType === "outlook"
-              ? "outlook"
+            body && Object.prototype.hasOwnProperty.call(body, "defaultAutoExtractAccountType")
+              ? normalizeExtractorAccountType(body.defaultAutoExtractAccountType, current.defaultAutoExtractAccountType)
               : undefined,
         });
         db.setSettings(next);
@@ -1910,7 +1915,10 @@ async function main(): Promise<void> {
                 toOptionalPositiveInt(body?.autoExtractQuantity) ?? settings.defaultAutoExtractQuantity,
               autoExtractMaxWaitSec:
                 toOptionalPositiveInt(body?.autoExtractMaxWaitSec) ?? settings.defaultAutoExtractMaxWaitSec,
-              autoExtractAccountType: "outlook",
+              autoExtractAccountType: normalizeExtractorAccountType(
+                body?.autoExtractAccountType,
+                settings.defaultAutoExtractAccountType,
+              ),
             });
             return json({ ok: true, job });
           }
@@ -1947,8 +1955,12 @@ async function main(): Promise<void> {
                   ? toOptionalPositiveInt(body.autoExtractMaxWaitSec)
                   : undefined,
               autoExtractAccountType:
-                body && Object.prototype.hasOwnProperty.call(body, "autoExtractAccountType") && body.autoExtractAccountType === "outlook"
-                  ? "outlook"
+                body && Object.prototype.hasOwnProperty.call(body, "autoExtractAccountType")
+                  ? normalizeExtractorAccountType(
+                      body.autoExtractAccountType,
+                      scheduler.currentJob()?.autoExtractAccountType
+                        ?? readSettings().defaultAutoExtractAccountType,
+                    )
                   : undefined,
             });
             return json({ ok: true, job });

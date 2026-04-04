@@ -7,13 +7,14 @@ import {
 } from "./account-extractor.js";
 import { isLockedAccountRecord } from "./account-session-bootstrap.js";
 import type { ServerEvent } from "./scheduler.js";
-import type {
-  AccountExtractorAccountType,
-  AccountExtractorProvider,
-  AccountExtractItemRecord,
-  AppDatabase,
-  AppSettings,
-  MicrosoftAccountRecord,
+import {
+  normalizeAccountExtractorAccountType,
+  type AccountExtractorAccountType,
+  type AccountExtractorProvider,
+  type AccountExtractItemRecord,
+  type AppDatabase,
+  type AppSettings,
+  type MicrosoftAccountRecord,
 } from "../storage/app-db.js";
 
 const REQUEST_INTERVAL_MS = 500;
@@ -442,7 +443,7 @@ export class AccountExtractorRuntime {
       runId: this.nextRunId++,
       status: "running",
       enabledSources,
-      accountType: input.accountType || "outlook",
+      accountType: normalizeAccountExtractorAccountType(input.accountType),
       requestedUsableCount: quantity,
       acceptedCount: 0,
       rawAttemptCount: 0,
@@ -452,7 +453,7 @@ export class AccountExtractorRuntime {
       maxWaitMs: maxWaitSec * 1000,
       startedAt,
       lastProvider: null,
-      lastMessage: `准备提取 ${quantity} 个可用账号`,
+      lastMessage: `准备提取 ${quantity} 个可用 ${normalizeAccountExtractorAccountType(input.accountType)} 账号`,
       updatedAt: startedAt,
       errorMessage: null,
       lastBatchId: null,
@@ -469,7 +470,7 @@ export class AccountExtractorRuntime {
       type: "toast",
       payload: {
         level: "info",
-        message: `提号器已启动：${enabledSources.map(providerLabel).join("、")} · 目标 ${quantity}`,
+        message: `提号器已启动：${enabledSources.map(providerLabel).join("、")} · 类型 ${normalizeAccountExtractorAccountType(input.accountType)} · 目标 ${quantity}`,
       },
       timestamp: nowIso(),
     });

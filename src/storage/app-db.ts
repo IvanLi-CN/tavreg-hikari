@@ -70,7 +70,7 @@ export type ProofMailboxProvider = "cfmail";
 export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountImportSource = "manual" | "extractor";
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
-export type AccountExtractorAccountType = "outlook";
+export type AccountExtractorAccountType = "outlook" | "hotmail";
 export type AccountSkipReason =
   | "has_api_key"
   | "microsoft_password_incorrect"
@@ -88,6 +88,17 @@ export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+
+export function isAccountExtractorAccountType(value: unknown): value is AccountExtractorAccountType {
+  return value === "outlook" || value === "hotmail";
+}
+
+export function normalizeAccountExtractorAccountType(
+  value: unknown,
+  fallback: AccountExtractorAccountType = "outlook",
+): AccountExtractorAccountType {
+  return isAccountExtractorAccountType(value) ? value : fallback;
+}
 
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
@@ -689,7 +700,7 @@ function mapJobRow(row: Record<string, unknown>): JobRecord {
     ),
     autoExtractQuantity: Number(row.auto_extract_quantity || 0),
     autoExtractMaxWaitSec: Number(row.auto_extract_max_wait_sec || 0),
-    autoExtractAccountType: String(row.auto_extract_account_type || "outlook") as AccountExtractorAccountType,
+    autoExtractAccountType: normalizeAccountExtractorAccountType(row.auto_extract_account_type),
     startedAt: String(row.started_at),
     pausedAt: row.paused_at == null ? null : String(row.paused_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
@@ -703,7 +714,7 @@ function mapAccountExtractBatchRow(row: Record<string, unknown>): AccountExtract
     id: Number(row.id),
     jobId: row.job_id == null ? null : Number(row.job_id),
     provider: String(row.provider) as AccountExtractorProvider,
-    accountType: String(row.account_type || "outlook") as AccountExtractorAccountType,
+    accountType: normalizeAccountExtractorAccountType(row.account_type),
     requestedUsableCount: Number(row.requested_usable_count || 0),
     attemptBudget: Number(row.attempt_budget || 0),
     acceptedCount: Number(row.accepted_count || 0),
@@ -1965,7 +1976,7 @@ export class AppDatabase {
         JSON.stringify(input.autoExtractSources || []),
         Math.max(0, Number(input.autoExtractQuantity || 0)),
         Math.max(0, Number(input.autoExtractMaxWaitSec || 0)),
-        (input.autoExtractAccountType || "outlook") as AccountExtractorAccountType,
+        normalizeAccountExtractorAccountType(input.autoExtractAccountType),
         now,
         now,
       ) as Record<string, unknown>;
@@ -3010,7 +3021,7 @@ export class AppDatabase {
       .get(
         input.jobId ?? null,
         input.provider,
-        input.accountType || "outlook",
+        normalizeAccountExtractorAccountType(input.accountType),
         Math.max(0, input.requestedUsableCount),
         Math.max(0, input.attemptBudget),
         Math.max(0, input.acceptedCount || 0),

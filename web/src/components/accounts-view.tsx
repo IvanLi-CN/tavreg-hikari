@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { GroupCombobox } from "@/components/group-combobox";
 import { StatusBadge } from "@/components/status-badge";
 import type {
+  AccountExtractorAccountType,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
   AccountExtractorProvider,
@@ -41,9 +42,17 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "shankeyun", label: "闪客云" },
   { provider: "hotmail666", label: "Hotmail666" },
 ] as const satisfies Array<{ provider: AccountExtractorProvider; label: string }>;
+const EXTRACTOR_ACCOUNT_TYPE_OPTIONS = [
+  { value: "outlook", label: "Outlook" },
+  { value: "hotmail", label: "Hotmail" },
+] as const satisfies Array<{ value: AccountExtractorAccountType; label: string }>;
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
+}
+
+function extractorAccountTypeLabel(accountType: AccountExtractorAccountType): string {
+  return EXTRACTOR_ACCOUNT_TYPE_OPTIONS.find((item) => item.value === accountType)?.label || accountType;
 }
 
 function formatRawAttemptProgress(rawAttemptCount: number, attemptBudget: number): string {
@@ -416,6 +425,7 @@ export function AccountsView({
     shankeyun: "",
     hotmail666: "",
   });
+  const [extractorDefaultAccountTypeDraft, setExtractorDefaultAccountTypeDraft] = useState<AccountExtractorAccountType>("outlook");
   const [extractorSaveError, setExtractorSaveError] = useState<string | null>(null);
   const [passwordCopyFeedback, setPasswordCopyFeedback] = useState<{
     accountId: number | null;
@@ -445,6 +455,9 @@ export function AccountsView({
   const extractorSummarySources =
     extractorRuntime.enabledSources.length > 0 ? extractorRuntime.enabledSources : extractorRunDraft.sources;
   const extractorIsRunning = extractorRuntime.status === "running" || extractorRuntime.status === "stopping";
+  const extractorSummaryAccountType = extractorRuntime.status === "idle"
+    ? extractorRunDraft.accountType
+    : extractorRuntime.accountType;
   const extractorCanStart =
     graphSettingsConfigured
     && !extractorIsRunning
@@ -603,6 +616,7 @@ export function AccountsView({
       shankeyun: extractorSettings?.extractorShankeyunKey || "",
       hotmail666: extractorSettings?.extractorHotmail666Key || "",
     });
+    setExtractorDefaultAccountTypeDraft(extractorSettings?.defaultAutoExtractAccountType || "outlook");
     setExtractorSaveError(null);
     setExtractorDialogOpen(true);
   };
@@ -619,6 +633,7 @@ export function AccountsView({
         extractorShanyouxiangKey: extractorKeyDrafts.shanyouxiang,
         extractorShankeyunKey: extractorKeyDrafts.shankeyun,
         extractorHotmail666Key: extractorKeyDrafts.hotmail666,
+        defaultAutoExtractAccountType: extractorDefaultAccountTypeDraft,
       });
       setExtractorDialogOpen(false);
     } catch (error) {
@@ -740,7 +755,7 @@ export function AccountsView({
                 })}
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <label className="flex flex-col gap-2">
                   <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">提号数量</span>
                   <Input
@@ -765,6 +780,23 @@ export function AccountsView({
                     onBlur={commitExtractorMaxWaitInput}
                   />
                 </label>
+                <label className="flex flex-col gap-2">
+                  <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">邮箱类型</span>
+                  <Select
+                    value={extractorRunDraft.accountType}
+                    onValueChange={(value) => onExtractorRunDraftChange({ accountType: value as AccountExtractorAccountType })}
+                    disabled={extractorIsRunning}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="选择邮箱类型" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {EXTRACTOR_ACCOUNT_TYPE_OPTIONS.map((option) => (
+                        <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
               </div>
 
               <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-300">
@@ -777,6 +809,7 @@ export function AccountsView({
                   <div>原始请求：{formatRawAttemptProgress(extractorRuntime.rawAttemptCount, extractorRuntime.attemptBudget)}</div>
                   <div>在途请求：{extractorRuntime.inFlightCount}</div>
                   <div>剩余等待：{extractorRuntime.remainingWaitSec}s / {extractorRuntime.maxWaitSec || extractorRunDraft.maxWaitSec}s</div>
+                  <div>邮箱类型：{extractorAccountTypeLabel(extractorSummaryAccountType)}</div>
                   <div>最近来源：{extractorRuntime.lastProvider ? extractorProviderLabel(extractorRuntime.lastProvider) : "—"}</div>
                   <div>最近批次：{extractorRuntime.lastBatchId || "—"}</div>
                 </div>
@@ -1304,7 +1337,7 @@ export function AccountsView({
             <div className="shrink-0 space-y-4 xl:min-h-0 xl:overflow-auto xl:pr-1">
               <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
                 <div className="text-sm font-medium text-white">站点 KEY</div>
-                <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY。</div>
+                <div className="mt-1 text-sm text-slate-400">保存后会立即用于后续自动提取。历史只展示脱敏 KEY，默认类型会同步到自动补号和手动提号默认值。</div>
               </div>
               {EXTRACTOR_PROVIDER_OPTIONS.map(({ provider, label }) => (
                 <label key={provider} className="flex flex-col gap-2">
@@ -1323,6 +1356,22 @@ export function AccountsView({
                   </div>
                 ))}
               </div>
+              <label className="flex flex-col gap-2">
+                <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">默认邮箱类型</span>
+                <Select
+                  value={extractorDefaultAccountTypeDraft}
+                  onValueChange={(value) => setExtractorDefaultAccountTypeDraft(value as AccountExtractorAccountType)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="选择默认邮箱类型" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXTRACTOR_ACCOUNT_TYPE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </label>
               {extractorSaveError ? (
                 <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">{extractorSaveError}</div>
               ) : null}
@@ -1434,7 +1483,7 @@ export function AccountsView({
                         <div className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="min-w-0 flex-1">
                             <div className="text-sm font-medium text-white">
-                              #{batch.id} · {extractorProviderLabel(batch.provider)} · {batch.accountType}
+                              #{batch.id} · {extractorProviderLabel(batch.provider)} · {extractorAccountTypeLabel(batch.accountType)}
                             </div>
                             <div className="mt-1 text-xs text-slate-400">
                               job {batch.jobId || "—"} · requested {batch.requestedUsableCount} · accepted {batch.acceptedCount} ·

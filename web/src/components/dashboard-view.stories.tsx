@@ -272,7 +272,7 @@ export const FourSourceCompact: Story = {
       autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
       autoExtractQuantity: 2,
       autoExtractMaxWaitSec: 45,
-      autoExtractAccountType: "outlook",
+      autoExtractAccountType: "hotmail",
     },
     extractorAvailability: {
       zhanghaoya: true,
@@ -290,6 +290,61 @@ export const FourSourceCompact: Story = {
       </div>
     ),
   ],
+};
+
+export const AccountTypeSelectorPlay: Story = {
+  args: {
+    job: sampleJob,
+    events: sampleEvents,
+    jobDraft: {
+      ...defaultDraft,
+      autoExtractAccountType: "outlook",
+    },
+    extractorAvailability: {
+      zhanghaoya: true,
+      shanyouxiang: true,
+      shankeyun: true,
+      hotmail666: true,
+    },
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  render: (args) => {
+    const [draft, setDraft] = useState<JobDraft>(args.jobDraft);
+    return (
+      <>
+        <DashboardView
+          job={{
+            ...sampleJob,
+            autoExtractState: {
+              ...sampleJob.autoExtractState!,
+              accountType: draft.autoExtractAccountType,
+            },
+          }}
+          events={sampleEvents}
+          jobDraft={draft}
+          extractorAvailability={args.extractorAvailability}
+          onJobDraftChange={(patch) => {
+            setDraft((current) => normalizeJobDraft({ ...current, ...patch }));
+            args.onJobDraftChange(patch);
+          }}
+          onJobAction={args.onJobAction}
+        />
+        <pre data-testid="job-account-type-debug" className="sr-only">
+          {draft.autoExtractAccountType}
+        </pre>
+      </>
+    );
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("类型 Outlook")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox", { name: /account type/i }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
+    await expect(canvas.getByText("类型 Hotmail")).toBeInTheDocument();
+    await expect(canvas.getByTestId("job-account-type-debug")).toHaveTextContent("hotmail");
+    await expect(args.onJobDraftChange).toHaveBeenCalledWith({ autoExtractAccountType: "hotmail" });
+  },
 };
 
 export const ControlPlay: Story = {

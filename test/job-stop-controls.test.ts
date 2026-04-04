@@ -91,6 +91,42 @@ test("paused jobs can stop immediately into the stopped terminal state", async (
   appDb.close();
 });
 
+test("scheduler preserves hotmail auto extract account type across start and updates", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(
+    appDb,
+    process.cwd(),
+    dbPath,
+    () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+    () => undefined,
+  );
+
+  const started = await scheduler.startJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "hotmail",
+  });
+  expect(started.autoExtractAccountType).toBe("hotmail");
+  expect(scheduler.getAutoExtractSnapshot(started.id)?.accountType).toBe("hotmail");
+
+  const updated = scheduler.updateCurrentJobLimits({
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 2,
+    autoExtractMaxWaitSec: 90,
+    autoExtractAccountType: "outlook",
+  });
+  expect(updated.autoExtractAccountType).toBe("outlook");
+  expect(scheduler.getAutoExtractSnapshot(started.id)?.accountType).toBe("outlook");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("force stop requires explicit confirmation", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
