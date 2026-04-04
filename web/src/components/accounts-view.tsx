@@ -45,6 +45,7 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
 const EXTRACTOR_ACCOUNT_TYPE_OPTIONS = [
   { value: "outlook", label: "Outlook" },
   { value: "hotmail", label: "Hotmail" },
+  { value: "unlimited", label: "不限" },
 ] as const satisfies Array<{ value: AccountExtractorAccountType; label: string }>;
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
@@ -798,6 +799,11 @@ export function AccountsView({
                   </Select>
                 </label>
               </div>
+              {extractorRunDraft.accountType === "unlimited" ? (
+                <div className="rounded-2xl border border-cyan-300/16 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
+                  选择“不限”后会优先直传上游支持的不限值；当前未确认支持的号源会按各自请求序号在 Outlook / Hotmail 之间交替。
+                </div>
+              ) : null}
 
               <div className="rounded-2xl border border-white/8 bg-[#08111d]/80 p-4 text-sm text-slate-300">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1372,6 +1378,11 @@ export function AccountsView({
                   </SelectContent>
                 </Select>
               </label>
+              {extractorDefaultAccountTypeDraft === "unlimited" ? (
+                <div className="rounded-2xl border border-cyan-300/16 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
+                  作为默认值时，手动提号与自动补号都会继承“不限”；未确认支持不限字段的上游会自动在 Outlook / Hotmail 之间交替请求。
+                </div>
+              ) : null}
               {extractorSaveError ? (
                 <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">{extractorSaveError}</div>
               ) : null}

@@ -78,6 +78,7 @@ interface RuntimeState {
   nextProviderIndex: number;
   providerNextAttemptAtMs: Record<AccountExtractorProvider, number>;
   providerInFlightCount: Record<AccountExtractorProvider, number>;
+  providerAttemptCount: Record<AccountExtractorProvider, number>;
   lastBudgetTickMs: number;
   lastPublishedAtMs: number;
   requestControllers: Map<string, AbortController>;
@@ -163,6 +164,12 @@ function formatManualStopWaitMessage(input: { inFlightCount: number; pendingBoot
   return "提号取消中";
 }
 
+function accountTypeLabel(accountType: AccountExtractorAccountType): string {
+  if (accountType === "hotmail") return "Hotmail";
+  if (accountType === "unlimited") return "不限";
+  return "Outlook";
+}
+
 function providerLabel(provider: AccountExtractorProvider): string {
   return getAccountExtractorProviderLabel(provider);
 }
@@ -193,6 +200,15 @@ function createProviderAttemptClock(): Record<AccountExtractorProvider, number> 
 }
 
 function createProviderInFlightCounter(): Record<AccountExtractorProvider, number> {
+  return {
+    zhanghaoya: 0,
+    shanyouxiang: 0,
+    shankeyun: 0,
+    hotmail666: 0,
+  };
+}
+
+function createProviderAttemptCounter(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
     shanyouxiang: 0,
@@ -439,11 +455,12 @@ export class AccountExtractorRuntime {
 
     const startedAt = nowIso();
     const nowMs = Date.now();
+    const accountType = normalizeAccountExtractorAccountType(input.accountType);
     this.state = {
       runId: this.nextRunId++,
       status: "running",
       enabledSources,
-      accountType: normalizeAccountExtractorAccountType(input.accountType),
+      accountType,
       requestedUsableCount: quantity,
       acceptedCount: 0,
       rawAttemptCount: 0,
@@ -453,13 +470,14 @@ export class AccountExtractorRuntime {
       maxWaitMs: maxWaitSec * 1000,
       startedAt,
       lastProvider: null,
-      lastMessage: `准备提取 ${quantity} 个可用 ${normalizeAccountExtractorAccountType(input.accountType)} 账号`,
+      lastMessage: `准备提取 ${quantity} 个可用账号 · 类型 ${accountTypeLabel(accountType)}`,
       updatedAt: startedAt,
       errorMessage: null,
       lastBatchId: null,
       nextProviderIndex: 0,
       providerNextAttemptAtMs: createProviderAttemptClock(),
       providerInFlightCount: createProviderInFlightCounter(),
+      providerAttemptCount: createProviderAttemptCounter(),
       lastBudgetTickMs: nowMs,
       lastPublishedAtMs: 0,
       requestControllers: new Map<string, AbortController>(),
@@ -470,7 +488,7 @@ export class AccountExtractorRuntime {
       type: "toast",
       payload: {
         level: "info",
-        message: `提号器已启动：${enabledSources.map(providerLabel).join("、")} · 类型 ${normalizeAccountExtractorAccountType(input.accountType)} · 目标 ${quantity}`,
+        message: `提号器已启动：${enabledSources.map(providerLabel).join("、")} · 类型 ${accountTypeLabel(accountType)} · 目标 ${quantity}`,
       },
       timestamp: nowIso(),
     });
@@ -633,15 +651,17 @@ export class AccountExtractorRuntime {
       }
       const dispatchStartedAt = nowIso();
       const requestId = `${state.runId}:${provider}:${state.rawAttemptCount + 1}:${nowMs}`;
+      const alternationIndex = state.providerAttemptCount[provider];
       state.rawAttemptCount += 1;
       state.inFlightCount += 1;
       state.providerInFlightCount[provider] += 1;
+      state.providerAttemptCount[provider] += 1;
       state.lastProvider = provider;
       state.lastMessage = `${providerLabel(provider)} 请求已发出`;
       state.providerNextAttemptAtMs[provider] = nowMs + REQUEST_INTERVAL_MS;
       state.updatedAt = dispatchStartedAt;
       this.publishSnapshot();
-      void this.launchRequest(state.runId, provider, requestId, dispatchStartedAt);
+      void this.launchRequest(state.runId, provider, requestId, dispatchStartedAt, alternationIndex);
     }
   }
 
@@ -650,6 +670,7 @@ export class AccountExtractorRuntime {
     provider: AccountExtractorProvider,
     requestId: string,
     dispatchStartedAt: string,
+    alternationIndex: number,
   ): Promise<void> {
     const state = this.state;
     if (!state || state.runId !== runId) return;
@@ -668,6 +689,7 @@ export class AccountExtractorRuntime {
       const result = await fetchSingleExtractedAccount({
         provider,
         accountType: state.accountType,
+        alternationIndex,
         config: runtimeConfig,
         signal: controller.signal,
       });

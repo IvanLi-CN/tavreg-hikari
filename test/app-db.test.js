@@ -1030,6 +1030,7 @@ describe("AppDatabase account import", () => {
     const batch = appDb.createAccountExtractBatch({
       jobId: job.id,
       provider: "zhanghaoya",
+      accountType: "unlimited",
       requestedUsableCount: 1,
       attemptBudget: 4,
       acceptedCount: 1,
@@ -1053,6 +1054,7 @@ describe("AppDatabase account import", () => {
     expect(history.total).toBe(1);
     expect(history.rows[0]).toMatchObject({
       provider: "zhanghaoya",
+      accountType: "unlimited",
       acceptedCount: 1,
       status: "accepted",
     });
@@ -1297,6 +1299,82 @@ describe("scheduler helpers", () => {
       mailType: "hotmail",
       quantity: 1,
     });
+
+    await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    const shankeyunUnlimitedFirst = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    const hotmail666UnlimitedFirst = await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+
+    expect(shankeyunUnlimitedFirst.accountType).toBe("unlimited");
+    expect(hotmail666UnlimitedFirst.accountType).toBe("unlimited");
+    expect(zhanghaoyaUrls.slice(-2)).toEqual([
+      "https://www.zhanghaoya.com/store/ga/account?type=outlook&quantity=1&key=zhya-demo-key-001",
+      "https://www.zhanghaoya.com/store/ga/account?type=hotmail&quantity=1&key=zhya-demo-key-001",
+    ]);
+    expect(shanyouxiangUrls.slice(-2)).toEqual([
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=outlook&card=shan-demo-key-001",
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=hotmail&card=shan-demo-key-001",
+    ]);
+    expect(shankeyunUrls.slice(-2)).toEqual([
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=outlook&num=1",
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=hotmail&num=1",
+    ]);
+    expect(hotmailBodies.slice(-2)).toEqual([
+      {
+        cardKey: "hotmail666-demo-key-001",
+        mailType: "outlook",
+        quantity: 1,
+      },
+      {
+        cardKey: "hotmail666-demo-key-001",
+        mailType: "hotmail",
+        quantity: 1,
+      },
+    ]);
   });
 
   test("rejects dashed extractor rows when the password field is empty", async () => {

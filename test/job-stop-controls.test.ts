@@ -127,6 +127,123 @@ test("scheduler preserves hotmail auto extract account type across start and upd
   appDb.close();
 });
 
+test("scheduler preserves unlimited auto extract account type across start and updates", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(
+    appDb,
+    process.cwd(),
+    dbPath,
+    () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
+    () => undefined,
+  );
+
+  const started = await scheduler.startJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "unlimited",
+  });
+  expect(started.autoExtractAccountType).toBe("unlimited");
+  expect(scheduler.getAutoExtractSnapshot(started.id)?.accountType).toBe("unlimited");
+
+  const updated = scheduler.updateCurrentJobLimits({
+    autoExtractSources: ["zhanghaoya"],
+    autoExtractQuantity: 2,
+    autoExtractMaxWaitSec: 90,
+    autoExtractAccountType: "unlimited",
+  });
+  expect(updated.autoExtractAccountType).toBe("unlimited");
+  expect(scheduler.getAutoExtractSnapshot(started.id)?.accountType).toBe("unlimited");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("scheduler alternates unlimited requests independently for each provider", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(
+    appDb,
+    process.cwd(),
+    dbPath,
+    () =>
+      createSchedulerSettings({
+        extractorZhanghaoyaKey: "zhya-demo-key-001",
+        extractorShanyouxiangKey: "shan-demo-key-001",
+      }),
+    () => undefined,
+  );
+  const zhanghaoyaTypes: string[] = [];
+  const shanyouxiangTypes: string[] = [];
+  globalThis.fetch = (async (input: URL | RequestInfo) => {
+    const url = new URL(String(input));
+    if (url.hostname.includes("zhanghaoya")) {
+      zhanghaoyaTypes.push(url.searchParams.get("type") || "");
+      return new Response(JSON.stringify({ Code: 1, Message: "库存不足" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    shanyouxiangTypes.push(url.searchParams.get("leixing") || "");
+    return new Response(JSON.stringify({ status: -1, msg: "库存不足" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 4,
+    parallel: 1,
+    maxAttempts: 4,
+    autoExtractSources: ["zhanghaoya", "shanyouxiang"],
+    autoExtractQuantity: 4,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "unlimited",
+  });
+  const now = new Date().toISOString();
+  scheduler["autoExtractStates"].set(job.id, {
+    jobId: job.id,
+    enabledSources: ["zhanghaoya", "shanyouxiang"],
+    accountType: "unlimited",
+    maxWaitMs: 60_000,
+    remainingWaitMs: 60_000,
+    currentRoundTarget: 4,
+    attemptBudget: 4,
+    acceptedCount: 0,
+    rawAttemptCount: 0,
+    inFlightCount: 0,
+    nextProviderIndex: 0,
+    providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+    providerInFlightCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+    providerAttemptCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+    phase: "extracting",
+    startedAt: now,
+    lastProvider: null,
+    lastMessage: "dispatching",
+    updatedAt: now,
+    lastBudgetTickMs: Date.now(),
+    requestControllers: new Map(),
+    pendingBootstrapCandidates: new Map(),
+  });
+
+  await scheduler["maybeAutoExtract"](job);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const state = scheduler["autoExtractStates"].get(job.id)!;
+  state.providerNextAttemptAtMs = { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 };
+  await scheduler["maybeAutoExtract"](job);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(zhanghaoyaTypes).toEqual(["outlook", "hotmail"]);
+  expect(shanyouxiangTypes).toEqual(["outlook", "hotmail"]);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("force stop requires explicit confirmation", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
@@ -252,6 +369,7 @@ test("force stop records aborted auto extract requests as manual stops", async (
     jobId: job.id,
     provider: "zhanghaoya",
     accountType: "outlook",
+    alternationIndex: 0,
     requestedUsableCount: 1,
     attemptBudget: 1,
     dispatchStartedAt: roundStartedAt,
@@ -316,6 +434,7 @@ test("graceful stop keeps extractor aborts out of manual-stop history", async ()
     jobId: job.id,
     provider: "zhanghaoya",
     accountType: "outlook",
+    alternationIndex: 0,
     requestedUsableCount: 1,
     attemptBudget: 1,
     dispatchStartedAt: roundStartedAt,

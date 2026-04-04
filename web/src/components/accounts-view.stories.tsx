@@ -713,7 +713,7 @@ export const ExtractorAccountTypePlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "验证账号页手动提号器可以在 Outlook 和 Hotmail 之间切换，并保持摘要状态同步。",
+        story: "验证账号页手动提号器可以切换到“不限”，并保持摘要状态同步。",
       },
     },
   },
@@ -721,8 +721,8 @@ export const ExtractorAccountTypePlay: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("邮箱类型：Outlook")).toBeInTheDocument();
     await userEvent.click(canvas.getByRole("combobox", { name: "邮箱类型" }));
-    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
-    await expect(canvas.getByText("邮箱类型：Hotmail")).toBeInTheDocument();
+    await userEvent.click(within(document.body).getByRole("option", { name: "不限" }));
+    await expect(canvas.getByText("邮箱类型：不限")).toBeInTheDocument();
   },
 };
 
@@ -735,7 +735,7 @@ export const ExtractorSettingsDefaultAccountTypePlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "验证提号器设置弹窗允许保存默认账号类型，并把选择值连同 KEY 一起提交。",
+        story: "验证提号器设置弹窗允许保存默认账号类型为“不限”，并把选择值连同 KEY 一起提交。",
       },
     },
   },
@@ -744,10 +744,10 @@ export const ExtractorSettingsDefaultAccountTypePlay: Story = {
     await userEvent.click(canvas.getByTestId("open-extractor-settings"));
     const dialog = within(document.body).getByRole("dialog", { name: "微软账号提取器设置" });
     await userEvent.click(within(dialog).getByRole("combobox", { name: "默认邮箱类型" }));
-    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "不限" }));
     await userEvent.click(within(dialog).getByRole("button", { name: "保存" }));
     await expect(args.onSaveExtractorSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ defaultAutoExtractAccountType: "hotmail" }),
+      expect.objectContaining({ defaultAutoExtractAccountType: "unlimited" }),
     );
   },
 };

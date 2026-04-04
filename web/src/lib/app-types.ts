@@ -7,7 +7,7 @@ export type JobControlOptions = {
   confirmForceStop?: boolean;
 };
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
-export type AccountExtractorAccountType = "outlook" | "hotmail";
+export type AccountExtractorAccountType = "outlook" | "hotmail" | "unlimited";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
 

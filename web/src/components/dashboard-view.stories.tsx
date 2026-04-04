@@ -272,7 +272,7 @@ export const FourSourceCompact: Story = {
       autoExtractSources: ["zhanghaoya", "shanyouxiang", "shankeyun", "hotmail666"],
       autoExtractQuantity: 2,
       autoExtractMaxWaitSec: 45,
-      autoExtractAccountType: "hotmail",
+      autoExtractAccountType: "unlimited",
     },
     extractorAvailability: {
       zhanghaoya: true,
@@ -340,10 +340,10 @@ export const AccountTypeSelectorPlay: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("类型 Outlook")).toBeInTheDocument();
     await userEvent.click(canvas.getByRole("combobox", { name: /account type/i }));
-    await userEvent.click(within(document.body).getByRole("option", { name: "Hotmail" }));
-    await expect(canvas.getByText("类型 Hotmail")).toBeInTheDocument();
-    await expect(canvas.getByTestId("job-account-type-debug")).toHaveTextContent("hotmail");
-    await expect(args.onJobDraftChange).toHaveBeenCalledWith({ autoExtractAccountType: "hotmail" });
+    await userEvent.click(within(document.body).getByRole("option", { name: "不限" }));
+    await expect(canvas.getByText("类型 不限")).toBeInTheDocument();
+    await expect(canvas.getByTestId("job-account-type-debug")).toHaveTextContent("unlimited");
+    await expect(args.onJobDraftChange).toHaveBeenCalledWith({ autoExtractAccountType: "unlimited" });
   },
 };
 

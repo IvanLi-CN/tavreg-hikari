@@ -70,7 +70,7 @@ export type ProofMailboxProvider = "cfmail";
 export type AccountSource = "manual" | "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
 export type AccountImportSource = "manual" | "extractor";
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";
-export type AccountExtractorAccountType = "outlook" | "hotmail";
+export type AccountExtractorAccountType = "outlook" | "hotmail" | "unlimited";
 export type AccountSkipReason =
   | "has_api_key"
   | "microsoft_password_incorrect"
@@ -90,7 +90,7 @@ export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated"
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
 
 export function isAccountExtractorAccountType(value: unknown): value is AccountExtractorAccountType {
-  return value === "outlook" || value === "hotmail";
+  return value === "outlook" || value === "hotmail" || value === "unlimited";
 }
 
 export function normalizeAccountExtractorAccountType(

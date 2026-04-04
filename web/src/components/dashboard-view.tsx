@@ -33,6 +33,7 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
 const EXTRACTOR_ACCOUNT_TYPE_OPTIONS = [
   { value: "outlook", label: "Outlook" },
   { value: "hotmail", label: "Hotmail" },
+  { value: "unlimited", label: "不限" },
 ] as const;
 const AUTO_EXTRACT_WORKERS_PER_PROVIDER = 3;
 
@@ -292,6 +293,11 @@ export function DashboardView({
                       </Select>
                     </Field>
                   </div>
+                  {jobDraft.autoExtractAccountType === "unlimited" ? (
+                    <div className="mt-4 rounded-2xl border border-cyan-300/16 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
+                      选择“不限”后会优先直传上游支持的不限值；当前未确认支持的号源会按各自请求序号在 Outlook / Hotmail 之间交替请求。
+                    </div>
+                  ) : null}
                   <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
                     自动提取关闭时不会发起任何补号请求；开启后仅把新增进入当前 job 可调度池的账号计为有效补货。
                   </div>
