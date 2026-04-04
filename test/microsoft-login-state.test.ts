@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MICROSOFT_PASSWORD_SUBMIT_LIMIT,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftPasswordError,
   getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
   isMicrosoftKeepSignedInPrompt,
+  shouldBlockMicrosoftPasswordSubmission,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
@@ -30,6 +32,23 @@ describe("Microsoft login state", () => {
       code: "microsoft_password_incorrect",
       message: "Your account or password is incorrect.",
     });
+  });
+
+  test("classifies traditional Chinese repeated incorrect-attempt copy as rate-limited", () => {
+    const classification = classifyMicrosoftPasswordError(["您已多次使用不正確的帳戶或密碼進行登入。"]);
+
+    expect(classification).toEqual({
+      code: "microsoft_password_rate_limited",
+      message: "您已多次使用不正確的帳戶或密碼進行登入。",
+    });
+  });
+
+  test("blocks Microsoft password submission after three attempts", () => {
+    expect(MICROSOFT_PASSWORD_SUBMIT_LIMIT).toBe(3);
+    expect(shouldBlockMicrosoftPasswordSubmission(0)).toBe(false);
+    expect(shouldBlockMicrosoftPasswordSubmission(2)).toBe(false);
+    expect(shouldBlockMicrosoftPasswordSubmission(3)).toBe(true);
+    expect(shouldBlockMicrosoftPasswordSubmission(4)).toBe(true);
   });
 
   test("classifies microsoft try-again-later interrupt page", () => {

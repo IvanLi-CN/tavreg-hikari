@@ -141,6 +141,13 @@ function canFallbackToHintedProofMailboxId(error: unknown): boolean {
   );
 }
 
+function shouldRetryAccountBootstrapWithFreshProxy(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_TIMED_OUT|network_connection_closed|network_connection_reset|network_timeout|page\.goto:\s*net::ERR_CONNECTION_CLOSED|page\.goto:\s*net::ERR_CONNECTION_RESET|page\.goto:\s*net::ERR_TIMED_OUT|chromium_net_error:ERR_CONNECTION_CLOSED|chromium_net_error:ERR_CONNECTION_RESET|chromium_net_error:ERR_TIMED_OUT|proxy_node_unavailable/i.test(
+    message,
+  );
+}
+
 async function ensureSavedProofMailbox(input: {
   address: string;
   mailboxId?: string | null;
@@ -751,6 +758,8 @@ async function runMailboxOauthWorker(input: {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       OUTPUT_ROOT_DIR: outputDir,
+      TASK_LEDGER_DB_PATH: DEFAULT_DB_PATH,
+      TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
       CHROME_PROFILE_DIR: input.profilePath,
       CHROME_PROFILE_STRATEGY: "exact",
       INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
@@ -767,11 +776,16 @@ async function runMailboxOauthWorker(input: {
       PROXY_CHECK_URL: input.settings.checkUrl,
       PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
       PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
-      KEEP_BROWSER_OPEN_ON_FAILURE: "false",
-      KEEP_BROWSER_OPEN_MS: "0",
+      KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
+      KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
+      CHROME_AUTO_OPEN_DEVTOOLS: process.env.CHROME_AUTO_OPEN_DEVTOOLS || "false",
     };
 
     return await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
+      const keepBrowserOpenOnFailure = /^(1|true|yes|on)$/i.test(
+        String(env.KEEP_BROWSER_OPEN_ON_FAILURE || "").trim(),
+      );
+      const workerTimeoutMs = keepBrowserOpenOnFailure ? 30 * 60_000 : 5 * 60_000;
       let listenersReleased = false;
       const releasePortListeners = async () => {
         if (listenersReleased) return;
@@ -803,14 +817,19 @@ async function runMailboxOauthWorker(input: {
       });
       let stderr = "";
       let stdout = "";
+      const workerLogPath = path.join(outputDir, "worker.log");
       const timeout = setTimeout(() => {
         child.kill("SIGTERM");
-      }, 5 * 60_000);
+      }, workerTimeoutMs);
       child.stdout?.on("data", (chunk) => {
-        stdout += chunk.toString();
+        const text = chunk.toString();
+        stdout += text;
+        void writeFile(workerLogPath, [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"), "utf8").catch(() => {});
       });
       child.stderr?.on("data", (chunk) => {
-        stderr += chunk.toString();
+        const text = chunk.toString();
+        stderr += text;
+        void writeFile(workerLogPath, [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"), "utf8").catch(() => {});
       });
       child.once("error", (error) => {
         clearTimeout(timeout);
@@ -820,7 +839,7 @@ async function runMailboxOauthWorker(input: {
         clearTimeout(timeout);
         const combinedLog = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
         if (combinedLog) {
-          await writeFile(path.join(outputDir, "worker.log"), combinedLog, "utf8").catch(() => {});
+          await writeFile(workerLogPath, combinedLog, "utf8").catch(() => {});
         }
         try {
           const raw = await readFile(resultPath, "utf8");
@@ -984,6 +1003,24 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     const sessionStatus = currentMailbox.status === "locked" || currentMailbox.status === "invalidated" ? "blocked" : "failed";
     const errorCode = getMailboxErrorCode(error);
     const errorMessage = getMailboxErrorMessage(error);
+    if (shouldRetryAccountBootstrapWithFreshProxy(error)) {
+      input.db.recordProxyCheck({
+        nodeName: proxyNode,
+        status: "failed",
+        egressIp: workerResult?.proxy?.ip ?? null,
+        country: workerResult?.proxy?.country ?? null,
+        region: workerResult?.proxy?.region ?? null,
+        city: workerResult?.proxy?.city ?? null,
+        error: errorMessage || errorCode || "session_bootstrap_failed",
+      });
+      input.db.touchProxyLease(proxyNode, {
+        status: "failed",
+        egressIp: workerResult?.proxy?.ip ?? null,
+        country: workerResult?.proxy?.country ?? null,
+        region: workerResult?.proxy?.region ?? null,
+        city: workerResult?.proxy?.city ?? null,
+      });
+    }
     input.db.markBrowserSessionFailure(input.accountId, {
       status: sessionStatus,
       browserEngine: "chrome",
@@ -1057,12 +1094,33 @@ async function main(): Promise<void> {
         if (!latest || getAccountConnectBlockMessage(latest)) {
           return;
         }
-        await authorizeMailboxWithBrowserAutomation({
-          db,
-          accountId,
-          readSettings,
-          broadcast,
-        });
+        const maxAttempts = 2;
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            await authorizeMailboxWithBrowserAutomation({
+              db,
+              accountId,
+              readSettings,
+              broadcast,
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt >= maxAttempts || !shouldRetryAccountBootstrapWithFreshProxy(error)) {
+              break;
+            }
+            console.warn(
+              `[mailbox-bootstrap] account ${accountId} retrying with fresh proxy after attempt ${attempt}/${maxAttempts}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+        if (lastError) {
+          throw lastError;
+        }
       } catch {
         // mailbox/session state is updated inside the bootstrap flow
       } finally {

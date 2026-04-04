@@ -48,6 +48,21 @@ interface OauthRelayState {
   callbackUrl: string | null;
 }
 
+function envFlagEnabled(value: string | undefined | null): boolean {
+  return /^(1|true|yes|on)$/i.test(String(value || "").trim());
+}
+
+async function waitForManualBrowserClose(page: any, browser: any): Promise<void> {
+  while (true) {
+    const pageClosed = !page || (typeof page.isClosed === "function" ? page.isClosed() : false);
+    const browserClosed = !browser || (typeof browser.isConnected === "function" ? !browser.isConnected() : false);
+    if (pageClosed || browserClosed) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+}
+
 interface LocalMailboxApiRow {
   accountId: number;
   oauthConnectedAt: string | null;
@@ -309,6 +324,7 @@ async function main(): Promise<void> {
 
   let browser: Awaited<ReturnType<typeof launchChromePersistent>>["browser"] | null = null;
   let context: Awaited<ReturnType<typeof launchChromePersistent>>["context"] | null = null;
+  let page: any = null;
   let mihomoController: Awaited<ReturnType<typeof startMihomo>> | null = null;
   let proxyGeo: GeoInfo | null = null;
 
@@ -351,7 +367,7 @@ async function main(): Promise<void> {
       }),
     );
 
-    let page = context.pages()[0] || (await context.newPage());
+    page = context.pages()[0] || (await context.newPage());
     await page.goto(args.authUrl, {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
@@ -471,6 +487,15 @@ async function main(): Promise<void> {
     });
     process.exitCode = 1;
   } finally {
+    const preserveBrowserOnFailure =
+      Boolean(process.exitCode) &&
+      envFlagEnabled(process.env.KEEP_BROWSER_OPEN_ON_FAILURE) &&
+      cfg.runMode === "headed";
+    if (preserveBrowserOnFailure) {
+      const holdUrl = page ? String(page.url() || "") : "unknown";
+      console.error(`microsoft oauth worker: keeping browser open on failure at ${holdUrl}`);
+      await waitForManualBrowserClose(page, browser).catch(() => {});
+    }
     if (context) {
       await context.close().catch(() => {});
     }
