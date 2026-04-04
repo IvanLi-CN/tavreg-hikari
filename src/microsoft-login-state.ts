@@ -34,6 +34,8 @@ export interface MicrosoftKeepSignedInPromptInput {
   bodyText?: string;
 }
 
+export const MICROSOFT_PASSWORD_SUBMIT_LIMIT = 3;
+
 function normalizeText(value: string | undefined | null): string {
   return String(value || "")
     .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
@@ -68,7 +70,11 @@ export function classifyMicrosoftPasswordError(errors: string[]): MicrosoftPassw
     .join(" | ")
     .trim();
   if (!joined) return null;
-  if (/too many times|too many attempts|try again later|请稍后重试/i.test(joined)) {
+  if (
+    /too many times|too many attempts|try again later|请稍后重试|您已多次使用不正確的帳戶或密碼進行登入|您已多次使用不正确的帐户或密码进行登录|您已多次使用不正确的账户或密码进行登录/i.test(
+      joined,
+    )
+  ) {
     return { code: "microsoft_password_rate_limited", message: joined };
   }
   if (
@@ -79,6 +85,10 @@ export function classifyMicrosoftPasswordError(errors: string[]): MicrosoftPassw
     return { code: "microsoft_password_incorrect", message: joined };
   }
   return null;
+}
+
+export function shouldBlockMicrosoftPasswordSubmission(totalSubmittedCount: number): boolean {
+  return totalSubmittedCount >= MICROSOFT_PASSWORD_SUBMIT_LIMIT;
 }
 
 export function classifyMicrosoftFlowInterrupt(input: {
@@ -126,9 +136,8 @@ export function buildMicrosoftPasswordSurfaceKey(input: {
 }): string {
   const location = buildUrlSignature(input.url);
   const title = normalizeText(input.title).slice(0, 120);
-  const account = normalizeText(input.accountHint).replace(/\s+/g, "").slice(0, 160);
-  const bodyHint = derivePasswordBodyHint(input.bodyText || "");
-  return [location, title, account, bodyHint].filter((part) => part.length > 0).join("|");
+  const bodyHint = title ? "" : derivePasswordBodyHint(input.bodyText || "");
+  return [location, title || bodyHint || "password"].filter((part) => part.length > 0).join("|");
 }
 
 export function shouldAttemptMicrosoftProofPasswordFallback(

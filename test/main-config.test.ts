@@ -5,7 +5,7 @@ import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
 
-test("CLI rejects MAIL_PROVIDER=moemail because MoeMail is proof-only", () => {
+test("CLI rejects MAIL_PROVIDER=moemail because proof mailboxes are no longer normal mail providers", () => {
   const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
   const result = spawnSync(nodeBinary, ["--import", "tsx", "src/main.ts"], {
     cwd: repoRoot,
@@ -90,8 +90,10 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxAddress")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxId")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider")');
+  expect(serverSource).toContain('rawProvider != null && rawProvider !== "cfmail"');
   expect(accountsViewSource).toContain("async function copyTextToClipboard");
   expect(accountsViewSource).toContain("aria-label={`复制 ${props.accountEmail} 密码`}");
+  expect(accountsViewSource).toContain('proofMailboxProvider || "cfmail"');
   expect(accountsStoriesSource).toContain("export const PasswordCopyPlay");
   expect(accountsStoriesSource).toContain('await expect(writeText).toHaveBeenCalledWith("pass-456");');
   expect(accountsViewSource).toContain('<SelectItem value="disabled">disabled</SelectItem>');

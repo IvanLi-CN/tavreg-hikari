@@ -446,6 +446,26 @@ export const Default: Story = {
   render: () => <AccountsStorySurface />,
 };
 
+export const ProofMailboxDialogPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface frameClassName="mx-auto max-w-[1400px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "打开账号页 proof 邮箱绑定弹窗，确认当前展示与保存链路都围绕 `cfmail` provider。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!);
+    const dialog = await waitFor(() => within(document.body).getByRole("dialog", { name: "绑定备用邮箱" }));
+    expect(dialog).toBeInTheDocument();
+    expect(within(dialog).getByText(/cfmail/i)).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("alpha-proof@mail-us.707079.xyz")).toBeInTheDocument();
+  },
+};
+
 export const DesktopActionButtonsNoWrap: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface frameClassName="mx-auto max-w-[1400px]" />,

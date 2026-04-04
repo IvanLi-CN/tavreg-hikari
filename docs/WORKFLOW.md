@@ -38,7 +38,7 @@
 6. 邮箱验证：
    - 轮询邮箱服务获取验证链接。
    - 打开链接并确认验证成功信号。
-   - Microsoft OAuth 分支默认跳过本阶段；若 Microsoft 实际弹出 proof / 备用邮箱验证页面，则改为读取账号数据库中的 proof 邮箱映射，并通过 MoeMail OpenAPI 轮询 6 位安全码完成恢复。
+   - Microsoft OAuth 分支默认跳过本阶段；若 Microsoft 实际弹出 proof / 备用邮箱验证页面，则改为读取账号数据库中的 proof 邮箱映射，并通过 CF Mail 轮询 6 位安全码完成恢复。
 7. 登录并提取 API Key。
 8. 持久化输出：
    - `output/result.json`（批量模式下为最后一个成功结果）

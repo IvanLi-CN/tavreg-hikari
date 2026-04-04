@@ -4,11 +4,12 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import {
-  normalizeMoeMailBaseUrl,
-  provisionMoeMailMailbox,
-  resolveMoeMailMailboxId,
-  type MoeMailHttpJson,
-} from "../moemail-openapi.js";
+  ensureCfMailMailbox,
+  normalizeCfMailBaseUrl,
+  provisionCfMailMailbox,
+  resolveCfMailMailbox,
+  type CfMailHttpJson,
+} from "../cfmail-api.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import {
@@ -99,7 +100,7 @@ function parseBody(text: string): unknown {
   }
 }
 
-const serverHttpJson: MoeMailHttpJson = async (method, url, options) => {
+const serverHttpJson: CfMailHttpJson = async (method, url, options) => {
   const headers: Record<string, string> = { ...(options?.headers || {}) };
   let body: string | undefined;
   if (typeof options?.body === "string") {
@@ -135,7 +136,14 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
 
 function canFallbackToHintedProofMailboxId(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
-  return /moemail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
+  return /cfmail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
+    message,
+  );
+}
+
+function shouldRetryAccountBootstrapWithFreshProxy(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_TIMED_OUT|network_connection_closed|network_connection_reset|network_timeout|page\.goto:\s*net::ERR_CONNECTION_CLOSED|page\.goto:\s*net::ERR_CONNECTION_RESET|page\.goto:\s*net::ERR_TIMED_OUT|chromium_net_error:ERR_CONNECTION_CLOSED|chromium_net_error:ERR_CONNECTION_RESET|chromium_net_error:ERR_TIMED_OUT|proxy_node_unavailable/i.test(
     message,
   );
 }
@@ -143,34 +151,36 @@ function canFallbackToHintedProofMailboxId(error: unknown): boolean {
 async function ensureSavedProofMailbox(input: {
   address: string;
   mailboxId?: string | null;
-}): Promise<{ provider: "moemail"; address: string; mailboxId: string }> {
+}): Promise<{ provider: "cfmail"; address: string; mailboxId: string }> {
   const address = input.address.trim().toLowerCase();
   const hintedMailboxId = String(input.mailboxId || "").trim();
-  const apiKey = (process.env.MOEMAIL_API_KEY || "").trim();
+  const apiKey = (process.env.CFMAIL_API_KEY || "").trim();
   if (!apiKey) {
     if (hintedMailboxId) {
       return {
-        provider: "moemail",
+        provider: "cfmail",
         address,
         mailboxId: hintedMailboxId,
       };
     }
-    throw new Error("moemail_api_key_missing");
+    throw new Error("cfmail_api_key_missing");
   }
-  const baseUrl = normalizeMoeMailBaseUrl(process.env.MOEMAIL_BASE_URL || "https://moemail.707079.xyz");
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
   let mailboxId = "";
   try {
     mailboxId =
-      (await resolveMoeMailMailboxId({
-        baseUrl,
-        apiKey,
-        address,
-        httpJson: serverHttpJson,
-      })) || "";
+      (
+        await resolveCfMailMailbox({
+          baseUrl,
+          apiKey,
+          address,
+          httpJson: serverHttpJson,
+        })
+      )?.id || "";
   } catch (error) {
     if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
       return {
-        provider: "moemail",
+        provider: "cfmail",
         address,
         mailboxId: hintedMailboxId,
       };
@@ -178,24 +188,18 @@ async function ensureSavedProofMailbox(input: {
     throw error;
   }
   if (!mailboxId) {
-    const parts = splitEmailAddress(address);
-    if (!parts) {
-      throw new Error("invalid proof mailbox address");
-    }
     let provisioned;
     try {
-      provisioned = await provisionMoeMailMailbox({
+      provisioned = await ensureCfMailMailbox({
         baseUrl,
         apiKey,
         httpJson: serverHttpJson,
-        name: parts.local,
-        domain: parts.domain,
-        expiryTime: 0,
+        address,
       });
     } catch (error) {
       if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
         return {
-          provider: "moemail",
+          provider: "cfmail",
           address,
           mailboxId: hintedMailboxId,
         };
@@ -203,12 +207,12 @@ async function ensureSavedProofMailbox(input: {
       throw error;
     }
     if (provisioned.address.trim().toLowerCase() !== address) {
-      throw new Error(`moemail_mailbox_not_found:${address}`);
+      throw new Error(`cfmail_mailbox_not_found:${address}`);
     }
     mailboxId = provisioned.id;
   }
   return {
-    provider: "moemail",
+    provider: "cfmail",
     address,
     mailboxId,
   };
@@ -754,6 +758,8 @@ async function runMailboxOauthWorker(input: {
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       OUTPUT_ROOT_DIR: outputDir,
+      TASK_LEDGER_DB_PATH: DEFAULT_DB_PATH,
+      TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
       CHROME_PROFILE_DIR: input.profilePath,
       CHROME_PROFILE_STRATEGY: "exact",
       INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
@@ -770,11 +776,16 @@ async function runMailboxOauthWorker(input: {
       PROXY_CHECK_URL: input.settings.checkUrl,
       PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
       PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
-      KEEP_BROWSER_OPEN_ON_FAILURE: "false",
-      KEEP_BROWSER_OPEN_MS: "0",
+      KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
+      KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
+      CHROME_AUTO_OPEN_DEVTOOLS: process.env.CHROME_AUTO_OPEN_DEVTOOLS || "false",
     };
 
     return await new Promise<MailboxOauthWorkerResult>((resolve, reject) => {
+      const keepBrowserOpenOnFailure = /^(1|true|yes|on)$/i.test(
+        String(env.KEEP_BROWSER_OPEN_ON_FAILURE || "").trim(),
+      );
+      const workerTimeoutMs = keepBrowserOpenOnFailure ? 30 * 60_000 : 5 * 60_000;
       let listenersReleased = false;
       const releasePortListeners = async () => {
         if (listenersReleased) return;
@@ -806,14 +817,19 @@ async function runMailboxOauthWorker(input: {
       });
       let stderr = "";
       let stdout = "";
+      const workerLogPath = path.join(outputDir, "worker.log");
       const timeout = setTimeout(() => {
         child.kill("SIGTERM");
-      }, 5 * 60_000);
+      }, workerTimeoutMs);
       child.stdout?.on("data", (chunk) => {
-        stdout += chunk.toString();
+        const text = chunk.toString();
+        stdout += text;
+        void writeFile(workerLogPath, [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"), "utf8").catch(() => {});
       });
       child.stderr?.on("data", (chunk) => {
-        stderr += chunk.toString();
+        const text = chunk.toString();
+        stderr += text;
+        void writeFile(workerLogPath, [stdout.trim(), stderr.trim()].filter(Boolean).join("\n"), "utf8").catch(() => {});
       });
       child.once("error", (error) => {
         clearTimeout(timeout);
@@ -823,7 +839,7 @@ async function runMailboxOauthWorker(input: {
         clearTimeout(timeout);
         const combinedLog = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
         if (combinedLog) {
-          await writeFile(path.join(outputDir, "worker.log"), combinedLog, "utf8").catch(() => {});
+          await writeFile(workerLogPath, combinedLog, "utf8").catch(() => {});
         }
         try {
           const raw = await readFile(resultPath, "utf8");
@@ -987,6 +1003,24 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     const sessionStatus = currentMailbox.status === "locked" || currentMailbox.status === "invalidated" ? "blocked" : "failed";
     const errorCode = getMailboxErrorCode(error);
     const errorMessage = getMailboxErrorMessage(error);
+    if (shouldRetryAccountBootstrapWithFreshProxy(error)) {
+      input.db.recordProxyCheck({
+        nodeName: proxyNode,
+        status: "failed",
+        egressIp: workerResult?.proxy?.ip ?? null,
+        country: workerResult?.proxy?.country ?? null,
+        region: workerResult?.proxy?.region ?? null,
+        city: workerResult?.proxy?.city ?? null,
+        error: errorMessage || errorCode || "session_bootstrap_failed",
+      });
+      input.db.touchProxyLease(proxyNode, {
+        status: "failed",
+        egressIp: workerResult?.proxy?.ip ?? null,
+        country: workerResult?.proxy?.country ?? null,
+        region: workerResult?.proxy?.region ?? null,
+        city: workerResult?.proxy?.city ?? null,
+      });
+    }
     input.db.markBrowserSessionFailure(input.accountId, {
       status: sessionStatus,
       browserEngine: "chrome",
@@ -1060,12 +1094,33 @@ async function main(): Promise<void> {
         if (!latest || getAccountConnectBlockMessage(latest)) {
           return;
         }
-        await authorizeMailboxWithBrowserAutomation({
-          db,
-          accountId,
-          readSettings,
-          broadcast,
-        });
+        const maxAttempts = 2;
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            await authorizeMailboxWithBrowserAutomation({
+              db,
+              accountId,
+              readSettings,
+              broadcast,
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt >= maxAttempts || !shouldRetryAccountBootstrapWithFreshProxy(error)) {
+              break;
+            }
+            console.warn(
+              `[mailbox-bootstrap] account ${accountId} retrying with fresh proxy after attempt ${attempt}/${maxAttempts}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+        if (lastError) {
+          throw lastError;
+        }
       } catch {
         // mailbox/session state is updated inside the bootstrap flow
       } finally {
@@ -1332,7 +1387,7 @@ async function main(): Promise<void> {
         const rawProvider = !hasProofMailboxProvider ? undefined : body?.proofMailboxProvider == null ? null : String(body.proofMailboxProvider).trim().toLowerCase() || null;
         const disabled = body?.disabled == null ? undefined : Boolean(body.disabled);
         const disabledReason = body?.disabledReason == null ? undefined : String(body.disabledReason).trim() || null;
-        if (rawProvider != null && rawProvider !== "moemail") {
+        if (rawProvider != null && rawProvider !== "cfmail") {
           return badRequest("unsupported proof mailbox provider");
         }
         if (proofMailboxAddress && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(proofMailboxAddress)) {
@@ -1355,19 +1410,19 @@ async function main(): Promise<void> {
               currentAccount.proofMailboxAddress?.trim().toLowerCase() === requestedProofMailboxAddress &&
               currentAccount.proofMailboxId === requestedProofMailboxId;
             const nextProofMailbox: {
-              provider?: "moemail" | null;
+              provider?: "cfmail" | null;
               address?: string | null;
               mailboxId?: string | null;
             } =
               proofMailboxAddress == null
                 ? {
-                    provider: rawProvider === "moemail" ? "moemail" : rawProvider === null ? null : undefined,
+                    provider: rawProvider === "cfmail" ? "cfmail" : rawProvider === null ? null : undefined,
                     address: proofMailboxAddress,
                     mailboxId: proofMailboxId,
                   }
                 : unchangedSavedProofMailbox
                   ? {
-                      provider: currentAccount.proofMailboxProvider || "moemail",
+                      provider: currentAccount.proofMailboxProvider || "cfmail",
                       address: currentAccount.proofMailboxAddress,
                       mailboxId: currentAccount.proofMailboxId,
                     }
