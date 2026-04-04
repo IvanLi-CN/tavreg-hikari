@@ -88,7 +88,7 @@ afterEach(async () => {
 
 test("paused jobs can stop immediately into the stopped terminal state", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const job = appDb.createJob({
     runMode: "headed",
@@ -261,7 +261,7 @@ test("scheduler alternates unlimited requests independently for each provider", 
 
 test("force stop requires explicit confirmation", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   appDb.createJob({
     runMode: "headed",
@@ -280,6 +280,7 @@ test("force stop aborts tracked auto extract requests and terminates active atte
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -299,7 +300,11 @@ test("force stop aborts tracked auto extract requests and terminates active atte
     autoExtractMaxWaitSec: 60,
     autoExtractAccountType: "outlook",
   });
-  const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-force-stop-attempt"));
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(process.cwd(), "tmp-force-stop-attempt"),
+  });
   const signals: string[] = [];
   const activeAttempt = {
     child: {
@@ -345,6 +350,7 @@ test("force stop records aborted auto extract requests as manual stops", async (
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -413,6 +419,7 @@ test("graceful stop keeps extractor aborts out of manual-stop history", async ()
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -473,7 +480,7 @@ test("graceful stop keeps extractor aborts out of manual-stop history", async ()
 
 test("control actions stay idempotent under duplicate UI submissions", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   appDb.createJob({
     runMode: "headed",
@@ -496,7 +503,7 @@ test("control actions stay idempotent under duplicate UI submissions", async () 
 
 test("runLoop rechecks stop state before launching more attempts", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([
     { email: "loop-stop-1@outlook.com", password: "pw123456" },
@@ -532,7 +539,7 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
 
 test("force stop wins over a last-moment successful worker exit", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([{ email: "force-stop-success@outlook.com", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
@@ -547,7 +554,11 @@ test("force stop wins over a last-moment successful worker exit", async () => {
   const outputDir = path.join(path.dirname(dbPath), "force-stop-success-exit");
   await mkdir(outputDir, { recursive: true });
   await writeFile(path.join(outputDir, "result.json"), JSON.stringify({ apiKey: "tvly-force-stop-win-001" }));
-  const attempt = appDb.createAttempt(job.id, accountId, outputDir);
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
 
   await scheduler["handleAttemptExit"](
     job.id,
@@ -579,7 +590,7 @@ test("force stop wins over a last-moment successful worker exit", async () => {
 
 test("pending launches block stop finalization until setup drains", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([{ email: "pending-stop@outlook.com", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
@@ -590,7 +601,11 @@ test("pending launches block stop finalization until setup drains", async () => 
     parallel: 1,
     maxAttempts: 1,
   });
-  const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-pending-stop-attempt"));
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(process.cwd(), "tmp-pending-stop-attempt"),
+  });
   scheduler["pendingAttemptLaunches"].set(attempt.id, {
     jobId: job.id,
     attempt,
@@ -616,7 +631,7 @@ test("pending launches block stop finalization until setup drains", async () => 
 test("graceful stop rolls back pending launches before they start", async () => {
   const { appDb, dbPath } = await createTempDb();
   process.env.CHROME_EXECUTABLE_PATH = await createFakeFingerprintBrowser(path.dirname(dbPath));
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);
   markBrowserSessionReady(appDb, imported.affectedIds[0]!);
@@ -628,7 +643,11 @@ test("graceful stop rolls back pending launches before they start", async () => 
   });
   const leased = appDb.leaseNextAccount(job.id)!;
   const outputDir = path.join(path.dirname(dbPath), "pending-graceful-stop-attempt");
-  const attempt = appDb.createAttempt(job.id, leased.id, outputDir);
+  const attempt = appDb.createAttempt(job.id, {
+    accountId: leased.id,
+    accountEmail: leased.microsoftEmail,
+    outputDir,
+  });
   const pendingLaunch = {
     jobId: job.id,
     attempt,
@@ -653,7 +672,7 @@ test("graceful stop rolls back pending launches before they start", async () => 
 
 test("shutdown preserves stopped semantics while a manual stop is still draining", async () => {
   const { appDb, dbPath } = await createTempDb();
-  const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([{ email: "stop-shutdown@outlook.com", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
@@ -665,7 +684,11 @@ test("shutdown preserves stopped semantics while a manual stop is still draining
     maxAttempts: 1,
   });
   appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
-  const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "tmp-stop-shutdown-attempt"));
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(process.cwd(), "tmp-stop-shutdown-attempt"),
+  });
   const signals: string[] = [];
   const listeners = new Map<string, () => void>();
   const activeAttempt = {

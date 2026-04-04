@@ -17,7 +17,9 @@ import {
   normalizeAccountExtractorAccountType,
   type AccountExtractorProvider,
   type AppSettings,
+  type ChatGptCredentialRecord,
   type JobAttemptRecord,
+  type JobSite,
   type MicrosoftMailboxRecord,
   type MicrosoftAccountRecord,
   type MicrosoftMailMessageRecord,
@@ -48,6 +50,7 @@ import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
+import { ChatGptJobScheduler } from "./chatgpt-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
@@ -227,6 +230,51 @@ async function ensureSavedProofMailbox(input: {
     provider: "cfmail",
     address,
     mailboxId,
+  };
+}
+
+function normalizeBirthDate(value: unknown): string | null {
+  const raw = String(value || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
+  const time = Date.parse(`${raw}T00:00:00.000Z`);
+  if (!Number.isFinite(time)) return null;
+  if (raw < "1990-01-01" || raw > "2005-12-31") return null;
+  return raw;
+}
+
+async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  mailboxId: string;
+  generatedAt: string;
+}> {
+  const apiKey = (process.env.CFMAIL_API_KEY || "").trim();
+  if (!apiKey) {
+    throw new Error("cfmail_api_key_missing");
+  }
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
+  const normalizedEmail = String(requestedEmail || "").trim().toLowerCase();
+  const mailbox = normalizedEmail
+    ? await ensureCfMailMailbox({
+        baseUrl,
+        apiKey,
+        address: normalizedEmail,
+        httpJson: serverHttpJson,
+      })
+    : await provisionCfMailMailbox({
+        baseUrl,
+        apiKey,
+        httpJson: serverHttpJson,
+      });
+  return {
+    email: mailbox.address,
+    password: randomPassword(),
+    nickname: randomNickname(),
+    birthDate: randomBirthDate(),
+    mailboxId: mailbox.id,
+    generatedAt: nowIso(),
   };
 }
 
@@ -641,10 +689,20 @@ function broadcastAccountAction(
   });
 }
 
-function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
-  const job = db.getCurrentJob();
+function parseJobSite(value: string | null | undefined): JobSite {
+  return value === "chatgpt" ? "chatgpt" : "tavily";
+}
+
+type SiteScheduler = {
+  activeAttemptRows(): JobAttemptRecord[];
+  getAutoExtractSnapshot(jobId: number): unknown;
+};
+
+function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
+  const job = db.getCurrentJob(site);
   if (!job) {
     return {
+      site,
       job: null,
       activeAttempts: [],
       recentAttempts: [],
@@ -653,14 +711,81 @@ function serializeJobSnapshot(db: AppDatabase, scheduler: JobScheduler) {
     };
   }
   return {
+    site,
     job,
     activeAttempts: scheduler.activeAttemptRows().map((row) => serializeAttemptForApi(db, row)),
     recentAttempts: db
       .listAttempts(job.id, false)
       .slice(0, 20)
       .map((row) => serializeAttemptForApi(db, row)),
-    eligibleCount: db.countEligibleAccounts(job.id),
+    eligibleCount: site === "tavily" ? db.countEligibleAccounts(job.id) : 0,
     autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
+  };
+}
+
+function normalizeChatGptEmail(value: unknown): string | null {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return null;
+  const parts = splitEmailAddress(normalized);
+  if (!parts?.local || !parts.domain) return null;
+  return normalized;
+}
+
+function normalizeChatGptPassword(value: unknown): string | null {
+  const normalized = String(value || "");
+  return normalized.trim().length >= 8 ? normalized : null;
+}
+
+function normalizeChatGptNickname(value: unknown): string | null {
+  const normalized = String(value || "").trim();
+  if (!normalized) return null;
+  return normalized.slice(0, 64);
+}
+
+function randomPassword(length = 18): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=";
+  let output = "";
+  for (let index = 0; index < length; index += 1) {
+    output += alphabet[Math.floor(Math.random() * alphabet.length)] || "A";
+  }
+  return output;
+}
+
+function randomNickname(): string {
+  const prefixes = ["Nova", "Pixel", "Mochi", "Kumo", "Sora", "Mika", "Luna", "Rin"];
+  const suffix = Math.floor(100 + Math.random() * 900);
+  return `${prefixes[Math.floor(Math.random() * prefixes.length)] || "Nova"}${suffix}`;
+}
+
+function randomBirthDate(): string {
+  const start = Date.UTC(1990, 0, 1);
+  const end = Date.UTC(2005, 11, 31);
+  const picked = new Date(start + Math.floor(Math.random() * (end - start + 1)));
+  return picked.toISOString().slice(0, 10);
+}
+
+function serializeChatGptCredential(row: ChatGptCredentialRecord, includeSecrets = false) {
+  const mask = (value: string): string => maskSecret(value, 6);
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    attemptId: row.attemptId,
+    email: row.email,
+    accountId: row.accountId,
+    accessTokenMasked: mask(row.accessToken),
+    refreshTokenMasked: mask(row.refreshToken),
+    idTokenMasked: mask(row.idToken),
+    expiresAt: row.expiresAt,
+    createdAt: row.createdAt,
+    hasSecrets: true,
+    ...(includeSecrets
+      ? {
+          accessToken: row.accessToken,
+          refreshToken: row.refreshToken,
+          idToken: row.idToken,
+          credentialJson: row.credentialJson,
+        }
+      : {}),
   };
 }
 
@@ -1211,13 +1336,15 @@ async function main(): Promise<void> {
     return true;
   };
   const accountExtractorRuntime = new AccountExtractorRuntime(db, readSettings, broadcast, queueAccountSessionBootstrap);
-  const scheduler = new JobScheduler(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
+  const tavilyScheduler = new JobScheduler(db, "tavily", REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
     onImportedAccounts: (accountIds) => {
       for (const accountId of accountIds) {
         queueAccountSessionBootstrap(accountId, { reason: "auto" });
       }
     },
   });
+  const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast);
+  const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
 
   await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
@@ -1635,7 +1762,46 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/jobs/current" && req.method === "GET") {
-        return json(serializeJobSnapshot(db, scheduler));
+        const site = parseJobSite(url.searchParams.get("site"));
+        return json(serializeJobSnapshot(site, db, getSchedulerBySite(site)));
+      }
+
+      if (pathname === "/api/chatgpt/draft" && req.method === "GET") {
+        try {
+          const requestedEmail = url.searchParams.get("email");
+          const draft = await buildChatGptDraft(requestedEmail);
+          return json({
+            ok: true,
+            draft,
+          });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+      }
+
+      if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
+        const limit = Math.max(1, Math.min(100, toInt(url.searchParams.get("limit") || undefined, 20)));
+        return json({
+          ok: true,
+          rows: chatgptScheduler.getRecentCredentials(limit).map((row) => serializeChatGptCredential(row)),
+        });
+      }
+
+      const chatgptCredentialDetailMatch = pathname.match(/^\/api\/chatgpt\/credentials\/(\d+)$/);
+      if (chatgptCredentialDetailMatch && req.method === "GET") {
+        const credentialId = Number.parseInt(chatgptCredentialDetailMatch[1] || "", 10);
+        if (!Number.isInteger(credentialId) || credentialId < 1) {
+          return badRequest("invalid credential id");
+        }
+        const credential = db.getChatGptCredential(credentialId);
+        if (!credential) {
+          return badRequest(`credential not found: ${credentialId}`, 404);
+        }
+        const includeSecrets = parseBool(url.searchParams.get("includeSecrets")) === true;
+        return json({
+          ok: true,
+          credential: serializeChatGptCredential(credential, includeSecrets),
+        });
       }
 
       if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
@@ -1994,11 +2160,45 @@ async function main(): Promise<void> {
         if (pathname === "/api/jobs/current/control" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
         const action = String(body?.action || "");
+        const site = parseJobSite(
+          typeof body?.site === "string" ? body.site : url.searchParams.get("site"),
+        );
+        const scheduler = getSchedulerBySite(site);
         try {
           if (action === "start") {
+            if (site === "chatgpt") {
+              const email = normalizeChatGptEmail(body?.email);
+              const password = normalizeChatGptPassword(body?.password);
+              const nickname = normalizeChatGptNickname(body?.nickname);
+              const birthDate = normalizeBirthDate(body?.birthDate);
+              if (!email) {
+                return badRequest("chatgpt email is required");
+              }
+              if (!password) {
+                return badRequest("chatgpt password must be at least 8 characters");
+              }
+              if (!nickname) {
+                return badRequest("chatgpt nickname is required");
+              }
+              if (!birthDate) {
+                return badRequest("birthDate must be between 1990-01-01 and 2005-12-31");
+              }
+              const proofMailbox = await ensureSavedProofMailbox({
+                address: email,
+                mailboxId: typeof body?.mailboxId === "string" ? body.mailboxId : null,
+              });
+              const job = await chatgptScheduler.startJob({
+                email,
+                password,
+                nickname,
+                birthDate,
+                mailboxId: proofMailbox.mailboxId,
+              });
+              return json({ ok: true, job });
+            }
             const settings = readSettings();
             const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
-            const job = await scheduler.startJob({
+            const job = await tavilyScheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
               parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
@@ -2016,10 +2216,16 @@ async function main(): Promise<void> {
             return json({ ok: true, job });
           }
           if (action === "pause") {
-            return json({ ok: true, job: scheduler.pauseCurrentJob() });
+            if (site === "chatgpt") {
+              return badRequest("pause is not supported for ChatGPT jobs");
+            }
+            return json({ ok: true, job: tavilyScheduler.pauseCurrentJob() });
           }
           if (action === "resume") {
-            return json({ ok: true, job: scheduler.resumeCurrentJob() });
+            if (site === "chatgpt") {
+              return badRequest("resume is not supported for ChatGPT jobs");
+            }
+            return json({ ok: true, job: tavilyScheduler.resumeCurrentJob() });
           }
           if (action === "stop") {
             return json({ ok: true, job: scheduler.stopCurrentJob() });
@@ -2031,7 +2237,10 @@ async function main(): Promise<void> {
             });
           }
           if (action === "update_limits") {
-            const job = scheduler.updateCurrentJobLimits({
+            if (site === "chatgpt") {
+              return badRequest("update_limits is not supported for ChatGPT jobs");
+            }
+            const job = tavilyScheduler.updateCurrentJobLimits({
               parallel: body?.parallel == null ? undefined : Number(body.parallel),
               need: body?.need == null ? undefined : Number(body.need),
               maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
@@ -2234,7 +2443,7 @@ async function main(): Promise<void> {
   console.log(`Tavreg Hikari web admin ready at http://${server.hostname}:${server.port}`);
 
   const shutdown = async () => {
-    await scheduler.shutdown().catch(() => {});
+    await Promise.all([tavilyScheduler.shutdown(), chatgptScheduler.shutdown()]).catch(() => {});
     db.close();
     process.exit(0);
   };

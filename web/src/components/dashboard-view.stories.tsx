@@ -40,7 +40,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "主流程页，包含指标卡、四源自动补号控制、运行中 attempts、最近 attempts 与实时事件流。",
+        component: "Tavily 页，包含指标卡、四源自动补号控制、运行中 attempts、最近 attempts 与实时事件流。",
       },
     },
   },
@@ -80,7 +80,7 @@ export const Running: Story = {
 
 export const Empty: Story = {
   args: {
-    job: { job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, autoExtractState: null },
+    job: { site: "tavily", job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, autoExtractState: null },
     events: [],
     jobDraft: {
       runMode: "headless",

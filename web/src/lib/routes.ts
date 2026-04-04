@@ -8,11 +8,13 @@ export function normalizeAppPath(pathname: string): string {
 
 export function getPageFromPathname(pathname: string): PageKey {
   const normalized = normalizeAppPath(pathname);
+  if (normalized === "/chatgpt") return "chatgpt";
+  if (normalized === "/tavily" || normalized === "/dashboard") return "tavily";
   if (normalized === "/accounts") return "accounts";
   if (normalized === "/mailboxes" || normalized.startsWith("/mailboxes/")) return "mailboxes";
   if (normalized === "/api-keys") return "apiKeys";
   if (normalized === "/proxies") return "proxies";
-  return "dashboard";
+  return "tavily";
 }
 
 export function isMailboxSettingsPath(pathname: string): boolean {
