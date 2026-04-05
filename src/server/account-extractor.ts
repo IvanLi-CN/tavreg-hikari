@@ -1,6 +1,7 @@
 import type { AccountExtractorAccountType, AccountExtractorProvider } from "../storage/app-db.js";
 
 export type AccountExtractorFailureCode = "invalid_key" | "insufficient_stock" | "parse_failed" | "upstream_error";
+type ConcreteAccountExtractorAccountType = Exclude<AccountExtractorAccountType, "unlimited">;
 
 export interface AccountExtractorCandidate {
   provider: AccountExtractorProvider;
@@ -36,6 +37,18 @@ const PROVIDER_LABELS: Record<AccountExtractorProvider, string> = {
   hotmail666: "Hotmail666",
 };
 
+type AccountTypeStrategy =
+  | { mode: "direct"; upstreamValue: string }
+  | { mode: "alternate" };
+
+// Only switch a provider to direct passthrough after its explicit "unlimited" token is verified.
+const PROVIDER_ACCOUNT_TYPE_STRATEGIES: Record<AccountExtractorProvider, AccountTypeStrategy> = {
+  zhanghaoya: { mode: "alternate" },
+  shanyouxiang: { mode: "alternate" },
+  shankeyun: { mode: "alternate" },
+  hotmail666: { mode: "alternate" },
+};
+
 interface ExtractorRequestSpec {
   url: string;
   init?: RequestInit;
@@ -51,8 +64,8 @@ interface ExtractorSuccessPayload {
 interface ExtractorDescriptor {
   label: string;
   getKey: (config: AccountExtractorRuntimeConfig) => string;
-  buildRequest: (key: string, accountType: AccountExtractorAccountType) => ExtractorRequestSpec;
-  parseResponse: (rawResponse: string, accountType: AccountExtractorAccountType) => ExtractorSuccessPayload;
+  buildRequest: (key: string, accountType: string) => ExtractorRequestSpec;
+  parseResponse: (rawResponse: string) => ExtractorSuccessPayload;
 }
 
 function normalizeLines(raw: string): string[] {
@@ -74,6 +87,22 @@ function maskKey(raw: string | null | undefined): string | null {
   if (!value) return null;
   if (value.length <= 8) return `${"*".repeat(Math.max(0, value.length - 2))}${value.slice(-2)}`;
   return `${value.slice(0, 4)}${"*".repeat(Math.max(4, value.length - 8))}${value.slice(-4)}`;
+}
+
+function alternateAccountType(attemptIndex: number): ConcreteAccountExtractorAccountType {
+  return attemptIndex % 2 === 0 ? "outlook" : "hotmail";
+}
+
+function resolveUpstreamAccountType(
+  provider: AccountExtractorProvider,
+  requestedAccountType: AccountExtractorAccountType,
+  alternationIndex: number,
+): string {
+  if (requestedAccountType !== "unlimited") {
+    return requestedAccountType;
+  }
+  const strategy = PROVIDER_ACCOUNT_TYPE_STRATEGIES[provider];
+  return strategy.mode === "direct" ? strategy.upstreamValue : alternateAccountType(alternationIndex);
 }
 
 function splitDashedFields(line: string): string[] {
@@ -333,20 +362,26 @@ const EXTRACTOR_DESCRIPTORS: Record<AccountExtractorProvider, ExtractorDescripto
 export async function fetchSingleExtractedAccount(input: {
   provider: AccountExtractorProvider;
   accountType?: AccountExtractorAccountType;
+  alternationIndex?: number;
   config: AccountExtractorRuntimeConfig;
   signal?: AbortSignal;
 }): Promise<AccountExtractorFetchResult> {
   const accountType = input.accountType || "outlook";
+  const upstreamAccountType = resolveUpstreamAccountType(
+    input.provider,
+    accountType,
+    Math.max(0, input.alternationIndex ?? 0),
+  );
   const timeoutMs = Math.max(3000, input.config.timeoutMs || 20000);
   const descriptor = EXTRACTOR_DESCRIPTORS[input.provider];
   const key = descriptor.getKey(input.config).trim();
-  const request = descriptor.buildRequest(key, accountType);
+  const request = descriptor.buildRequest(key, upstreamAccountType);
   const { status, rawResponse } = await fetchText(request, timeoutMs, input.signal);
   if (status < 200 || status >= 300) {
     const message = extractJsonMessage(rawResponse) || `HTTP ${status}`;
     return buildFailureResult(input.provider, accountType, rawResponse, message, key);
   }
-  const parsed = descriptor.parseResponse(rawResponse, accountType);
+  const parsed = descriptor.parseResponse(rawResponse);
   return {
     provider: input.provider,
     accountType,

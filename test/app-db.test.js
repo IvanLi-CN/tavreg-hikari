@@ -1030,6 +1030,7 @@ describe("AppDatabase account import", () => {
     const batch = appDb.createAccountExtractBatch({
       jobId: job.id,
       provider: "zhanghaoya",
+      accountType: "unlimited",
       requestedUsableCount: 1,
       attemptBudget: 4,
       acceptedCount: 1,
@@ -1053,6 +1054,7 @@ describe("AppDatabase account import", () => {
     expect(history.total).toBe(1);
     expect(history.rows[0]).toMatchObject({
       provider: "zhanghaoya",
+      accountType: "unlimited",
       acceptedCount: 1,
       status: "accepted",
     });
@@ -1151,9 +1153,12 @@ describe("scheduler helpers", () => {
     const hotmailBodies = [];
     const hotmailUrls = [];
     const shankeyunUrls = [];
+    const zhanghaoyaUrls = [];
+    const shanyouxiangUrls = [];
     globalThis.fetch = async (url, init) => {
       const href = String(url);
       if (href.includes("zhanghaoya")) {
+        zhanghaoyaUrls.push(href);
         return new Response(
           JSON.stringify({
             Code: 200,
@@ -1164,6 +1169,7 @@ describe("scheduler helpers", () => {
         );
       }
       if (href.includes("shanyouxiang")) {
+        shanyouxiangUrls.push(href);
         return new Response(JSON.stringify({ status: -1, msg: "库存不足！" }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -1207,6 +1213,9 @@ describe("scheduler helpers", () => {
       password: "pass-a",
       parseStatus: "parsed",
     });
+    expect(zhanghaoyaUrls).toEqual([
+      "https://www.zhanghaoya.com/store/ga/account?type=outlook&quantity=1&key=zhya-demo-key-001",
+    ]);
 
     const shanyouxiang = await fetchSingleExtractedAccount({
       provider: "shanyouxiang",
@@ -1214,6 +1223,9 @@ describe("scheduler helpers", () => {
     });
     expect(shanyouxiang.ok).toBe(false);
     expect(shanyouxiang.failureCode).toBe("insufficient_stock");
+    expect(shanyouxiangUrls).toEqual([
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=outlook&card=shan-demo-key-001",
+    ]);
 
     const shankeyun = await fetchSingleExtractedAccount({
       provider: "shankeyun",
@@ -1250,6 +1262,118 @@ describe("scheduler helpers", () => {
     ]);
     expect(hotmailUrls).toEqual([
       "https://api.hotmail666.com/api/extract-mail",
+    ]);
+
+    await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config,
+      accountType: "hotmail",
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config,
+      accountType: "hotmail",
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+      accountType: "hotmail",
+    });
+    await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+      accountType: "hotmail",
+    });
+
+    expect(zhanghaoyaUrls.at(-1)).toBe(
+      "https://www.zhanghaoya.com/store/ga/account?type=hotmail&quantity=1&key=zhya-demo-key-001",
+    );
+    expect(shanyouxiangUrls.at(-1)).toBe(
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=hotmail&card=shan-demo-key-001",
+    );
+    expect(shankeyunUrls.at(-1)).toBe(
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=hotmail&num=1",
+    );
+    expect(hotmailBodies.at(-1)).toEqual({
+      cardKey: "hotmail666-demo-key-001",
+      mailType: "hotmail",
+      quantity: 1,
+    });
+
+    await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "zhanghaoya",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shanyouxiang",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    const shankeyunUnlimitedFirst = await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "shankeyun",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+    const hotmail666UnlimitedFirst = await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 0,
+    });
+    await fetchSingleExtractedAccount({
+      provider: "hotmail666",
+      config,
+      accountType: "unlimited",
+      alternationIndex: 1,
+    });
+
+    expect(shankeyunUnlimitedFirst.accountType).toBe("unlimited");
+    expect(hotmail666UnlimitedFirst.accountType).toBe("unlimited");
+    expect(zhanghaoyaUrls.slice(-2)).toEqual([
+      "https://www.zhanghaoya.com/store/ga/account?type=outlook&quantity=1&key=zhya-demo-key-001",
+      "https://www.zhanghaoya.com/store/ga/account?type=hotmail&quantity=1&key=zhya-demo-key-001",
+    ]);
+    expect(shanyouxiangUrls.slice(-2)).toEqual([
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=outlook&card=shan-demo-key-001",
+      "https://zizhu.shanyouxiang.com/huoqu?shuliang=1&leixing=hotmail&card=shan-demo-key-001",
+    ]);
+    expect(shankeyunUrls.slice(-2)).toEqual([
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=outlook&num=1",
+      "https://fk.shankeyun.com/api/win/buy?card=shanke-demo-key-001&type=hotmail&num=1",
+    ]);
+    expect(hotmailBodies.slice(-2)).toEqual([
+      {
+        cardKey: "hotmail666-demo-key-001",
+        mailType: "outlook",
+        quantity: 1,
+      },
+      {
+        cardKey: "hotmail666-demo-key-001",
+        mailType: "hotmail",
+        quantity: 1,
+      },
     ]);
   });
 

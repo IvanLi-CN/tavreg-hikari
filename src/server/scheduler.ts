@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import {
   AppDatabase,
   computeLaunchCapacity,
+  normalizeAccountExtractorAccountType,
   normalizeJobMaxAttempts,
   type AccountExtractorAccountType,
   type AccountExtractorProvider,
@@ -69,6 +70,7 @@ interface AutoExtractState {
   nextProviderIndex: number;
   providerNextAttemptAtMs: Record<AccountExtractorProvider, number>;
   providerInFlightCount: Record<AccountExtractorProvider, number>;
+  providerAttemptCount: Record<AccountExtractorProvider, number>;
   phase: AutoExtractPhase;
   startedAt: string | null;
   lastProvider: AccountExtractorProvider | null;
@@ -83,6 +85,7 @@ interface AutoExtractRequestContext {
   jobId: number;
   provider: AccountExtractorProvider;
   accountType: AccountExtractorAccountType;
+  alternationIndex: number;
   requestedUsableCount: number;
   attemptBudget: number;
   dispatchStartedAt: string;
@@ -480,6 +483,15 @@ function createProviderAttemptClock(): Record<AccountExtractorProvider, number> 
 }
 
 function createProviderInFlightCounter(): Record<AccountExtractorProvider, number> {
+  return {
+    zhanghaoya: 0,
+    shanyouxiang: 0,
+    shankeyun: 0,
+    hotmail666: 0,
+  };
+}
+
+function createProviderAttemptCounter(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
     shanyouxiang: 0,
@@ -1306,7 +1318,9 @@ export class JobScheduler {
         autoExtractSources: [],
         autoExtractQuantity: 0,
         autoExtractMaxWaitSec: 0,
-        autoExtractAccountType: "outlook",
+        autoExtractAccountType: normalizeAccountExtractorAccountType(
+          input.autoExtractAccountType ?? fallback?.autoExtractAccountType,
+        ),
       };
     }
     const autoExtractQuantity = Math.max(1, Math.trunc(input.autoExtractQuantity ?? fallback?.autoExtractQuantity ?? 0));
@@ -1331,7 +1345,9 @@ export class JobScheduler {
       autoExtractSources,
       autoExtractQuantity,
       autoExtractMaxWaitSec,
-      autoExtractAccountType: "outlook",
+      autoExtractAccountType: normalizeAccountExtractorAccountType(
+        input.autoExtractAccountType ?? fallback?.autoExtractAccountType,
+      ),
     };
   }
 
@@ -1354,6 +1370,7 @@ export class JobScheduler {
       nextProviderIndex: 0,
       providerNextAttemptAtMs: createProviderAttemptClock(),
       providerInFlightCount: createProviderInFlightCounter(),
+      providerAttemptCount: createProviderAttemptCounter(),
       phase: "idle",
       startedAt: null,
       lastProvider: null,
@@ -1969,6 +1986,7 @@ export class JobScheduler {
     void fetchSingleExtractedAccount({
       provider: context.provider,
       accountType: context.accountType,
+      alternationIndex: context.alternationIndex,
       config: runtimeConfig,
       signal: controller.signal,
     })
@@ -2040,18 +2058,21 @@ export class JobScheduler {
         break;
       }
       const dispatchStartedAt = nowIso();
+      const alternationIndex = state.providerAttemptCount[provider];
       state.phase = "extracting";
       state.lastProvider = provider;
       state.lastMessage = `${providerLabel(provider)} request dispatched`;
       state.rawAttemptCount += 1;
       state.inFlightCount += 1;
       state.providerInFlightCount[provider] += 1;
+      state.providerAttemptCount[provider] += 1;
       state.providerNextAttemptAtMs[provider] = nowMs + AUTO_EXTRACT_REQUEST_INTERVAL_MS;
       state.updatedAt = dispatchStartedAt;
       this.launchAutoExtractRequest({
         jobId: job.id,
         provider,
         accountType: state.accountType,
+        alternationIndex,
         requestedUsableCount: state.currentRoundTarget,
         attemptBudget: state.attemptBudget,
         dispatchStartedAt,

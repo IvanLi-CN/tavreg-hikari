@@ -10,6 +10,7 @@ import {
 import { AppDatabase } from "../src/storage/app-db.ts";
 
 const tempDirs: string[] = [];
+const originalFetch = globalThis.fetch;
 
 async function createTempDb() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-runtime-"));
@@ -19,6 +20,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -213,6 +215,7 @@ describe("account extractor runtime helpers", () => {
       nextProviderIndex: 0,
       providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       providerInFlightCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerAttemptCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       lastBudgetTickMs: Date.now(),
       lastPublishedAtMs: 0,
       requestControllers: new Map([["req-1", controller]]),
@@ -240,6 +243,122 @@ describe("account extractor runtime helpers", () => {
     expect(stopped.status).toBe("stopped");
     expect(stopped.inFlightCount).toBe(0);
     expect(stopped.lastMessage).toBe("提号已取消");
+    appDb.close();
+  });
+
+  test("start preserves the requested hotmail extractor account type", async () => {
+    const { appDb } = await createTempDb();
+    const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    globalThis.fetch = (async (_input, init) =>
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      })) as typeof fetch;
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      (event) => published.push(event),
+      () => false,
+    );
+
+    const snapshot = await runtime.start({
+      sources: ["zhanghaoya"],
+      quantity: 1,
+      maxWaitSec: 60,
+      accountType: "hotmail",
+    });
+
+    expect(snapshot.accountType).toBe("hotmail");
+    expect(published.some((event) => event.type === "toast" && String(event.payload.message || "").includes("类型 Hotmail"))).toBe(true);
+
+    await runtime.stop();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    appDb.close();
+  });
+
+  test("manual runtime alternates unlimited requests independently for each provider", async () => {
+    const { appDb } = await createTempDb();
+    const zhanghaoyaTypes: string[] = [];
+    const shanyouxiangTypes: string[] = [];
+    globalThis.fetch = (async (input: URL | RequestInfo) => {
+      const url = new URL(String(input));
+      if (url.hostname.includes("zhanghaoya")) {
+        zhanghaoyaTypes.push(url.searchParams.get("type") || "");
+        return new Response(JSON.stringify({ Code: 1, Message: "库存不足" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      shanyouxiangTypes.push(url.searchParams.get("leixing") || "");
+      return new Response(JSON.stringify({ status: -1, msg: "库存不足" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const runtime = new AccountExtractorRuntime(
+      appDb,
+      () =>
+        ({
+          microsoftGraphClientId: "client-id",
+          microsoftGraphClientSecret: "client-secret",
+          microsoftGraphRedirectUri: "https://example.com/callback",
+          extractorZhanghaoyaKey: "zhya-demo-key-001",
+          extractorShanyouxiangKey: "shan-demo-key-001",
+          extractorShankeyunKey: "",
+          extractorHotmail666Key: "",
+        }) as never,
+      () => undefined,
+      () => false,
+    );
+    const now = "2026-04-03T03:25:00.000Z";
+    runtime["state"] = {
+      runId: 8,
+      status: "running",
+      enabledSources: ["zhanghaoya", "shanyouxiang"],
+      accountType: "unlimited",
+      requestedUsableCount: 4,
+      acceptedCount: 0,
+      rawAttemptCount: 0,
+      attemptBudget: 4,
+      inFlightCount: 0,
+      remainingWaitMs: 60_000,
+      maxWaitMs: 60_000,
+      startedAt: now,
+      lastProvider: null,
+      lastMessage: "准备提号",
+      updatedAt: now,
+      errorMessage: null,
+      lastBatchId: null,
+      nextProviderIndex: 0,
+      providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerInFlightCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerAttemptCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      lastBudgetTickMs: Date.now(),
+      lastPublishedAtMs: 0,
+      requestControllers: new Map(),
+      pendingBootstrapCandidates: new Map(),
+    };
+
+    runtime["maybeDispatchRequests"](runtime["state"]!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runtime["state"]!.providerNextAttemptAtMs = { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 };
+    runtime["maybeDispatchRequests"](runtime["state"]!);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(zhanghaoyaTypes).toEqual(["outlook", "hotmail"]);
+    expect(shanyouxiangTypes).toEqual(["outlook", "hotmail"]);
     appDb.close();
   });
 
@@ -285,6 +404,7 @@ describe("account extractor runtime helpers", () => {
       nextProviderIndex: 0,
       providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       providerInFlightCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerAttemptCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       lastBudgetTickMs: Date.now(),
       lastPublishedAtMs: 0,
       requestControllers: new Map(),
@@ -397,6 +517,7 @@ describe("account extractor runtime helpers", () => {
       nextProviderIndex: 0,
       providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       providerInFlightCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerAttemptCount: { zhanghaoya: 1, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       lastBudgetTickMs: Date.now(),
       lastPublishedAtMs: 0,
       requestControllers: new Map(),
@@ -518,6 +639,7 @@ describe("account extractor runtime helpers", () => {
       nextProviderIndex: 0,
       providerNextAttemptAtMs: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       providerInFlightCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
+      providerAttemptCount: { zhanghaoya: 0, shanyouxiang: 0, shankeyun: 0, hotmail666: 0 },
       lastBudgetTickMs: Date.now(),
       lastPublishedAtMs: 0,
       requestControllers: new Map(),

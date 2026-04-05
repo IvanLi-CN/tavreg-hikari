@@ -6,7 +6,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
-import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -31,7 +30,16 @@ const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "shankeyun", label: "闪客云" },
   { provider: "hotmail666", label: "Hotmail666" },
 ] as const satisfies Array<{ provider: AccountExtractorProvider; label: string }>;
+const EXTRACTOR_ACCOUNT_TYPE_OPTIONS = [
+  { value: "outlook", label: "Outlook" },
+  { value: "hotmail", label: "Hotmail" },
+  { value: "unlimited", label: "不限" },
+] as const;
 const AUTO_EXTRACT_WORKERS_PER_PROVIDER = 3;
+
+function extractorAccountTypeLabel(accountType: JobDraft["autoExtractAccountType"]): string {
+  return EXTRACTOR_ACCOUNT_TYPE_OPTIONS.find((option) => option.value === accountType)?.label || accountType;
+}
 
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
@@ -117,9 +125,9 @@ export function DashboardView({
   };
 
   const autoExtractHint = job.autoExtractState
-    ? `${autoExtractPhaseLabel(job.autoExtractState.phase)} · 可用补号 ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · 原始请求 ${formatRawAttemptProgress(job.autoExtractState.rawAttemptCount, job.autoExtractState.attemptBudget)} · 并发 ${formatAutoExtractConcurrency(job.autoExtractState.inFlightCount, job.autoExtractState.enabledSources.length)} · 剩余 ${job.autoExtractState.remainingWaitSec}s`
+    ? `${autoExtractPhaseLabel(job.autoExtractState.phase)} · 类型 ${extractorAccountTypeLabel(job.autoExtractState.accountType)} · 可用补号 ${job.autoExtractState.acceptedCount}/${job.autoExtractState.currentRoundTarget} · 原始请求 ${formatRawAttemptProgress(job.autoExtractState.rawAttemptCount, job.autoExtractState.attemptBudget)} · 并发 ${formatAutoExtractConcurrency(job.autoExtractState.inFlightCount, job.autoExtractState.enabledSources.length)} · 剩余 ${job.autoExtractState.remainingWaitSec}s`
     : jobDraft.autoExtractSources.length > 0
-      ? `已启用 · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 3 worker · 500ms/次`
+      ? `已启用 · 类型 ${extractorAccountTypeLabel(jobDraft.autoExtractAccountType)} · 目标 ${jobDraft.autoExtractQuantity} · 超时 ${jobDraft.autoExtractMaxWaitSec}s · 单源 3 worker · 500ms/次`
       : "未启用自动提取";
   const currentStatus = job.job?.status ?? null;
   const primaryAction = resolvePrimaryJobAction(currentStatus);
@@ -248,7 +256,7 @@ export function DashboardView({
 
                 <section className="rounded-[22px] border border-white/8 bg-[#0b1727]/72 p-4">
                   <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Strategy</div>
-                  <div className="mt-1 text-sm text-slate-300">补号上限、等待时间与固定账号类型。</div>
+                  <div className="mt-1 text-sm text-slate-300">补号上限、等待时间与账号类型。</div>
                   <div className="mt-4 grid gap-3 md:grid-cols-3">
                     <Field label="Auto Quantity">
                       <BufferedNumberInput
@@ -269,9 +277,27 @@ export function DashboardView({
                       />
                     </Field>
                     <Field label="Account Type">
-                      <Input value={jobDraft.autoExtractAccountType} readOnly />
+                      <Select
+                        value={jobDraft.autoExtractAccountType}
+                        onValueChange={(value) => onJobDraftChange({ autoExtractAccountType: value as JobDraft["autoExtractAccountType"] })}
+                        disabled={jobDraft.autoExtractSources.length === 0}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="选择账号类型" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {EXTRACTOR_ACCOUNT_TYPE_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </Field>
                   </div>
+                  {jobDraft.autoExtractAccountType === "unlimited" ? (
+                    <div className="mt-4 rounded-2xl border border-cyan-300/16 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
+                      选择“不限”后会优先直传上游支持的不限值；当前未确认支持的号源会按各自请求序号在 Outlook / Hotmail 之间交替请求。
+                    </div>
+                  ) : null}
                   <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
                     自动提取关闭时不会发起任何补号请求；开启后仅把新增进入当前 job 可调度池的账号计为有效补货。
                   </div>
