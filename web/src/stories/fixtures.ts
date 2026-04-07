@@ -669,7 +669,7 @@ export const sampleExtractorRuntimeRunning: AccountExtractorRuntime = {
   maxWaitSec: 45,
   startedAt: "2026-03-18T07:24:00.000Z",
   lastProvider: "shanyouxiang",
-  lastMessage: "闪邮箱 请求已发出，等待微软登录和邮箱连接",
+  lastMessage: "闪邮箱 请求已发出，等待微软登录和邮箱 Bootstrap",
   updatedAt: "2026-03-18T07:24:18.000Z",
   errorMessage: null,
   lastBatchId: 11,

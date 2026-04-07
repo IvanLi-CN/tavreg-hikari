@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,9 +20,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { GroupCombobox } from "@/components/group-combobox";
 import { StatusBadge } from "@/components/status-badge";
 import type {
+  AccountBatchBootstrapMode,
+  AccountBatchBootstrapPreviewPayload,
   AccountExtractorAccountType,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
+  AccountBrowserSessionStatus,
   AccountExtractorProvider,
   AccountExtractorRunDraft,
   AccountExtractorRuntime,
@@ -32,6 +35,7 @@ import type {
   AccountRecord,
   AccountsPayload,
   ExtractorSseState,
+  MailboxStatus,
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -47,6 +51,20 @@ const EXTRACTOR_ACCOUNT_TYPE_OPTIONS = [
   { value: "hotmail", label: "Hotmail" },
   { value: "unlimited", label: "不限" },
 ] as const satisfies Array<{ value: AccountExtractorAccountType; label: string }>;
+const SESSION_STATUS_OPTIONS = [
+  { value: "pending", label: "pending" },
+  { value: "bootstrapping", label: "bootstrapping" },
+  { value: "ready", label: "ready" },
+  { value: "failed", label: "failed" },
+  { value: "blocked", label: "blocked" },
+] as const satisfies Array<{ value: AccountBrowserSessionStatus; label: string }>;
+const MAILBOX_STATUS_OPTIONS = [
+  { value: "preparing", label: "preparing" },
+  { value: "available", label: "available" },
+  { value: "failed", label: "failed" },
+  { value: "invalidated", label: "invalidated" },
+  { value: "locked", label: "locked" },
+] as const satisfies Array<{ value: MailboxStatus; label: string }>;
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
@@ -85,13 +103,13 @@ function getConnectActionLabel(
   account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "mailboxStatus" | "browserSession">,
   connecting: boolean,
 ): string {
-  if (connecting) return "连接中…";
+  if (connecting) return "Bootstrap 中…";
   if (isLockedAccountBlock(account)) return "已锁定";
   if (account.disabledAt) return "已禁用";
   if (account.browserSession?.status === "bootstrapping") return "Bootstrap 中";
   if (account.browserSession?.status === "failed" || account.browserSession?.status === "blocked") return "重试 Bootstrap";
-  if (account.browserSession?.status === "ready") return "重试 Bootstrap";
-  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重试 Bootstrap" : "启动 Bootstrap";
+  if (account.browserSession?.status === "ready") return "重新 Bootstrap";
+  return account.mailboxStatus && account.mailboxStatus !== "preparing" ? "重新 Bootstrap" : "启动 Bootstrap";
 }
 
 function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): string {
@@ -321,6 +339,10 @@ export function AccountsView({
   batchBusy,
   connectBusy,
   connectProgress,
+  batchBootstrapPreview,
+  batchBootstrapPreviewBusy,
+  activeBatchBootstrapMode,
+  initialDesktopToolsCollapsed,
   extractorSettings,
   extractorSettingsBusy,
   extractorRuntime,
@@ -372,6 +394,10 @@ export function AccountsView({
   batchBusy: boolean;
   connectBusy: boolean;
   connectProgress: { current: number; total: number } | null;
+  batchBootstrapPreview: AccountBatchBootstrapPreviewPayload | null;
+  batchBootstrapPreviewBusy: boolean;
+  activeBatchBootstrapMode: AccountBatchBootstrapMode | null;
+  initialDesktopToolsCollapsed?: boolean;
   extractorSettings: AccountExtractorSettings | null;
   extractorSettingsBusy: boolean;
   extractorRuntime: AccountExtractorRuntime;
@@ -397,7 +423,7 @@ export function AccountsView({
   onDeleteSelected: () => void;
   onClearSelection: () => void;
   onConnectAccount: (accountId: number) => Promise<void>;
-  onConnectSelectedAccounts: () => Promise<void>;
+  onConnectSelectedAccounts: (mode?: AccountBatchBootstrapMode) => Promise<void>;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
@@ -438,15 +464,13 @@ export function AccountsView({
   const extractorActionTimerRef = useRef<number | null>(null);
   const [extractorActionCooldown, setExtractorActionCooldown] = useState<"start" | "cancel" | null>(null);
   const [extractorActionPending, setExtractorActionPending] = useState<"start" | "cancel" | null>(null);
+  const [desktopToolsCollapsed, setDesktopToolsCollapsed] = useState(Boolean(initialDesktopToolsCollapsed));
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
   const disabledCount = accounts.summary.disabled;
   const selectedOnPage = accounts.rows.filter((row) => selectedIds.includes(row.id)).length;
-  const selectedConnectCount = selectedIds.filter((accountId) => {
-    const row = accounts.rows.find((item) => item.id === accountId);
-    return !row || (!isConnectBlockedAccount(row) && row.browserSession?.status !== "bootstrapping");
-  }).length;
+  const selectedBootstrapCount = batchBootstrapPreview?.summary.queueableCount ?? 0;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, accounts.total) / Math.max(1, accounts.pageSize)));
   const extractHistoryPageCount = Math.max(
     1,
@@ -704,13 +728,20 @@ export function AccountsView({
 
   return (
     <>
-      <section className="grid gap-4 xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]">
-        <div className="space-y-4">
+      <section
+        className={cn(
+          "grid gap-4",
+          desktopToolsCollapsed
+            ? "xl:grid-cols-[minmax(0,1fr)]"
+            : "xl:grid-cols-[minmax(22rem,0.52fr)_minmax(0,1.48fr)]",
+        )}
+      >
+        <div className={cn("space-y-4", desktopToolsCollapsed && "xl:hidden")}>
           <Card className="min-h-[18rem] border-dashed border-cyan-300/20 bg-cyan-300/[0.03]">
             <CardHeader>
               <CardTitle>提号器</CardTitle>
               <CardDescription>
-                这里会直接提号、自动登录 Microsoft、保存持久 Profile，并自动连接邮箱。提号状态和账号列表通过 SSE 实时刷新。
+                这里会直接提号、自动登录 Microsoft、保存持久 Profile，并自动完成邮箱 Bootstrap。提号状态和账号列表通过 SSE 实时刷新。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -895,11 +926,28 @@ export function AccountsView({
         </div>
 
         <Card>
-          <CardHeader>
-            <CardTitle>账号池</CardTitle>
-            <CardDescription>
-              总数 {accounts.total} 条，已选 {selectedIds.length} 条。支持跨分页勾选、批量分组和批量删除。
-            </CardDescription>
+          <CardHeader className="gap-3">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
+              <div>
+                <CardTitle>账号池</CardTitle>
+                <CardDescription>
+                  总数 {accounts.total} 条，已选 {selectedIds.length} 条。支持跨分页勾选、批量分组、批量 Bootstrap 和批量删除。
+                </CardDescription>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="hidden xl:inline-flex xl:self-start"
+                onClick={() => setDesktopToolsCollapsed((current) => !current)}
+              >
+                {desktopToolsCollapsed ? (
+                  <ChevronRight className="mr-1 size-4" aria-hidden="true" />
+                ) : (
+                  <ChevronLeft className="mr-1 size-4" aria-hidden="true" />
+                )}
+                {desktopToolsCollapsed ? "展开工具列" : "收起工具列"}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap gap-2">
@@ -913,7 +961,7 @@ export function AccountsView({
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-400">
                 <span>当前页已选 {selectedOnPage} / {accounts.rows.length}</span>
                 <span>总已选 {selectedIds.length} / {accounts.total}</span>
-                <span>可连接 {selectedConnectCount} 条</span>
+                <span>{batchBootstrapPreviewBusy ? "可 Bootstrap 计算中…" : `可 Bootstrap ${selectedBootstrapCount} 条`}</span>
               </div>
               <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
                 <div className="min-w-0 flex-1">
@@ -926,11 +974,26 @@ export function AccountsView({
                   />
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" onClick={() => void onConnectSelectedAccounts()} disabled={selectedConnectCount === 0 || connectBusy || !graphSettingsConfigured}>
-                    {connectBusy
-                      ? `连接中 ${connectProgress?.current || 0}/${connectProgress?.total || selectedConnectCount}`
+                  <Button
+                    variant="outline"
+                    onClick={() => void onConnectSelectedAccounts("pending_only")}
+                    disabled={selectedBootstrapCount === 0 || connectBusy || batchBootstrapPreviewBusy || !graphSettingsConfigured}
+                  >
+                    {connectBusy && activeBatchBootstrapMode === "pending_only"
+                      ? `Bootstrap 中 ${connectProgress?.current || 0}/${connectProgress?.total || selectedBootstrapCount}`
                       : graphSettingsConfigured
-                        ? "批量连接"
+                        ? "批量 Bootstrap"
+                        : "先配置 Graph"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => void onConnectSelectedAccounts("force")}
+                    disabled={selectedIds.length === 0 || connectBusy || batchBootstrapPreviewBusy || !graphSettingsConfigured}
+                  >
+                    {connectBusy && activeBatchBootstrapMode === "force"
+                      ? `强制 Bootstrap 中 ${connectProgress?.current || 0}/${connectProgress?.total || selectedIds.length}`
+                      : graphSettingsConfigured
+                        ? "强制 Bootstrap"
                         : "先配置 Graph"}
                   </Button>
                   <Button variant="outline" onClick={onApplyBatchGroup} disabled={selectedIds.length === 0 || batchBusy}>
@@ -951,7 +1014,7 @@ export function AccountsView({
               </div>
             </div>
 
-            <div className="grid gap-3 xl:grid-cols-4">
+            <div className="grid gap-3 xl:grid-cols-6">
               <FilterField label="搜索">
                 <Input
                   name="account-query"
@@ -985,6 +1048,38 @@ export function AccountsView({
                     <SelectItem value="__all__">全部</SelectItem>
                     <SelectItem value="true">true</SelectItem>
                     <SelectItem value="false">false</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FilterField>
+              <FilterField label="Session">
+                <Select
+                  value={query.sessionStatus || "__all__"}
+                  onValueChange={(value) => onQueryChange({ ...query, sessionStatus: value === "__all__" ? "" : value as AccountQuery["sessionStatus"], page: 1 })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="全部" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all__">全部</SelectItem>
+                    {SESSION_STATUS_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FilterField>
+              <FilterField label="收信状态">
+                <Select
+                  value={query.mailboxStatus || "__all__"}
+                  onValueChange={(value) => onQueryChange({ ...query, mailboxStatus: value === "__all__" ? "" : value as AccountQuery["mailboxStatus"], page: 1 })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="全部" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__all__">全部</SelectItem>
+                    {MAILBOX_STATUS_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </FilterField>

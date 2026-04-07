@@ -1556,6 +1556,8 @@ export class AppDatabase {
     q?: string;
     status?: string;
     hasApiKey?: boolean;
+    sessionStatus?: AccountBrowserSessionStatus;
+    mailboxStatus?: MailboxStatus;
     skipReason?: string;
     groupName?: string;
     sortBy?: string;
@@ -1580,6 +1582,14 @@ export class AppDatabase {
     if (typeof filters.hasApiKey === "boolean") {
       where.push("has_api_key = ?");
       params.push(filters.hasApiKey ? 1 : 0);
+    }
+    if (filters.sessionStatus?.trim()) {
+      where.push("COALESCE(s.status, 'pending') = ?");
+      params.push(filters.sessionStatus.trim());
+    }
+    if (filters.mailboxStatus?.trim()) {
+      where.push("COALESCE(m.status, 'preparing') = ?");
+      params.push(filters.mailboxStatus.trim());
     }
     if (filters.skipReason?.trim()) {
       where.push("skip_reason = ?");

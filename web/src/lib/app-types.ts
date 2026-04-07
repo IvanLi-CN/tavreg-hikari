@@ -10,6 +10,7 @@ export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyu
 export type AccountExtractorAccountType = "outlook" | "hotmail" | "unlimited";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+export type AccountBatchBootstrapMode = "pending_only" | "force";
 
 export type AccountBrowserSession = {
   id: number;
@@ -483,11 +484,42 @@ export type AccountQuery = {
   q: string;
   status: string;
   hasApiKey: string;
+  sessionStatus: "" | AccountBrowserSessionStatus;
+  mailboxStatus: "" | MailboxStatus;
   groupName: string;
   sortBy: "" | "importedAt" | "lastUsedAt";
   sortDir: "desc" | "asc";
   page: number;
   pageSize: number;
+};
+
+export type AccountBatchBootstrapPreviewItemDecision =
+  | "queue"
+  | "blocked"
+  | "already_bootstrapped"
+  | "bootstrapping"
+  | "missing";
+
+export type AccountBatchBootstrapPreviewItem = {
+  accountId: number | null;
+  microsoftEmail: string | null;
+  decision: AccountBatchBootstrapPreviewItemDecision;
+  reason: string | null;
+};
+
+export type AccountBatchBootstrapPreviewPayload = {
+  ok: true;
+  mode: AccountBatchBootstrapMode;
+  requestedCount: number;
+  queueIds: number[];
+  items: AccountBatchBootstrapPreviewItem[];
+  summary: {
+    queueableCount: number;
+    blockedCount: number;
+    alreadyBootstrappedCount: number;
+    bootstrappingCount: number;
+    missingCount: number;
+  };
 };
 
 export type ApiKeyQuery = {
