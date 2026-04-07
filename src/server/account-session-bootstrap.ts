@@ -36,9 +36,6 @@ export function getAccountSessionBootstrapBlockMessage(account: BootstrapQueueAc
   if (isLockedAccountRecord(account)) {
     return "Microsoft 账户已锁定，请先恢复可用后再 Bootstrap";
   }
-  if (account.hasApiKey) {
-    return "账号已有关联 API key，无需重新 Bootstrap";
-  }
   if (account.disabledAt) {
     return "账号已被禁用，请先恢复可用后再 Bootstrap";
   }
@@ -79,6 +76,9 @@ export function resolveAccountBatchBootstrapDecision(
 export function shouldQueueImportedAccountBootstrap(account: BootstrapQueueAccount | null | undefined): boolean {
   if (!account) return false;
   if (getAccountSessionBootstrapBlockMessage(account)) {
+    return false;
+  }
+  if (account.hasApiKey) {
     return false;
   }
   return account.browserSession?.status !== "ready";

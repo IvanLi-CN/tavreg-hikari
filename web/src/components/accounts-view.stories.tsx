@@ -178,7 +178,7 @@ function buildStoryBatchBootstrapPreview(
     if (!account) {
       return { accountId, microsoftEmail: null, decision: "missing" as const, reason: "账号不存在" };
     }
-    if (account.hasApiKey || account.disabledAt || account.skipReason === "microsoft_account_locked" || /^microsoft_account_locked/i.test(account.lastErrorCode || "")) {
+    if (account.disabledAt || account.skipReason === "microsoft_account_locked" || /^microsoft_account_locked/i.test(account.lastErrorCode || "")) {
       return { accountId, microsoftEmail: account.microsoftEmail, decision: "blocked" as const, reason: "账号当前不可 Bootstrap" };
     }
     if (account.browserSession?.status === "bootstrapping") {

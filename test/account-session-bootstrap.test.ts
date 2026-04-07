@@ -97,7 +97,7 @@ describe("account session bootstrap helpers", () => {
     expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: true })).toBe("defer_force");
   });
 
-  test("blocks rebootstrap for leased, disabled, or locked accounts", () => {
+  test("blocks rebootstrap for leased, disabled, or locked accounts while keeping linked accounts manually retryable", () => {
     expect(
       getAccountSessionBootstrapBlockMessage({
         leaseJobId: 7,
@@ -114,9 +114,10 @@ describe("account session bootstrap helpers", () => {
         skipReason: null,
         lastErrorCode: null,
         hasApiKey: true,
+        mailboxStatus: "available",
         browserSession: { status: "ready" },
       } as never),
-    ).toContain("API key");
+    ).toBeNull();
     expect(
       getAccountSessionBootstrapBlockMessage({
         leaseJobId: null,
@@ -124,6 +125,7 @@ describe("account session bootstrap helpers", () => {
         skipReason: null,
         lastErrorCode: null,
         hasApiKey: false,
+        mailboxStatus: "preparing",
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已被禁用");
@@ -134,6 +136,7 @@ describe("account session bootstrap helpers", () => {
         skipReason: "microsoft_account_locked",
         lastErrorCode: null,
         hasApiKey: false,
+        mailboxStatus: "locked",
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已锁定");
@@ -177,7 +180,7 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: null,
         lastErrorCode: null,
-        hasApiKey: false,
+        hasApiKey: true,
         mailboxStatus: "available",
         browserSession: { status: "ready" },
       } as never, "pending_only"),
@@ -188,7 +191,7 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: null,
         lastErrorCode: null,
-        hasApiKey: false,
+        hasApiKey: true,
         mailboxStatus: "available",
         browserSession: { status: "ready" },
       } as never, "force"),
@@ -204,5 +207,19 @@ describe("account session bootstrap helpers", () => {
         browserSession: { status: "bootstrapping" },
       } as never, "force"),
     ).toMatchObject({ decision: "bootstrapping" });
+  });
+
+  test("auto import bootstrap still skips linked accounts that already own API keys", () => {
+    expect(
+      shouldQueueImportedAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "failed" },
+      } as never),
+    ).toBe(false);
   });
 });

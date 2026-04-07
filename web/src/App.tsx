@@ -1119,7 +1119,14 @@ export function App() {
   const handleConnectSelectedAccounts = async (mode: AccountBatchBootstrapMode = "pending_only") => {
     if (selectedAccountIds.length === 0) return;
     const uniqueSelectedIds = Array.from(new Set(selectedAccountIds.filter((id) => Number.isInteger(id) && id > 0)));
-    const preview = await previewBatchBootstrap(uniqueSelectedIds, mode);
+    let preview: AccountBatchBootstrapPreviewPayload;
+    try {
+      setError(null);
+      preview = await previewBatchBootstrap(uniqueSelectedIds, mode);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     const queue = preview.queueIds;
     if (queue.length === 0) {
       const parts: string[] = [];
