@@ -6,6 +6,7 @@ import {
   isLockedAccountRecord,
   resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "../src/server/account-session-bootstrap.ts";
@@ -219,6 +220,31 @@ describe("account session bootstrap helpers", () => {
         hasApiKey: true,
         mailboxStatus: "available",
         browserSession: { status: "failed" },
+      } as never),
+    ).toBe(false);
+  });
+
+  test("restart recovery can replay pending bootstraps even for linked accounts", () => {
+    expect(
+      shouldReplayPendingAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "pending" },
+      } as never),
+    ).toBe(true);
+    expect(
+      shouldReplayPendingAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "ready" },
       } as never),
     ).toBe(false);
   });

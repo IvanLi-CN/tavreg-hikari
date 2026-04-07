@@ -84,6 +84,14 @@ export function shouldQueueImportedAccountBootstrap(account: BootstrapQueueAccou
   return account.browserSession?.status !== "ready";
 }
 
+export function shouldReplayPendingAccountBootstrap(account: BootstrapQueueAccount | null | undefined): boolean {
+  if (!account) return false;
+  if (getAccountSessionBootstrapBlockMessage(account)) {
+    return false;
+  }
+  return account.browserSession?.status === "pending";
+}
+
 export function hasConfiguredMicrosoftGraphBootstrap(
   settings:
     | {

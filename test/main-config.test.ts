@@ -117,6 +117,12 @@ test("manual force bootstrap routes keep in-flight retries queueable instead of 
   expect(source).not.toContain('return badRequest("账号当前正在 Bootstrap", 409);');
 });
 
+test("batch bootstrap preview excludes accounts that are already queued in memory", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain("queuedAccountIds?.has(accountId)");
+  expect(source).toContain('reason: "账号已在 Bootstrap 队列中"');
+});
+
 test("last-attempt headed failures honor the resolved keep-browser flag without rechecking env", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;");

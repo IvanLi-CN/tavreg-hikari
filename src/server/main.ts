@@ -29,6 +29,7 @@ import {
   normalizeAccountBatchBootstrapMode,
   resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
   type AccountBatchBootstrapMode,
@@ -539,6 +540,7 @@ function buildAccountBatchBootstrapPreview(
   db: AppDatabase,
   accountIds: number[],
   mode: AccountBatchBootstrapMode,
+  queuedAccountIds?: ReadonlySet<number>,
 ): {
   mode: AccountBatchBootstrapMode;
   requestedCount: number;
@@ -560,7 +562,10 @@ function buildAccountBatchBootstrapPreview(
   const normalizedIds = Array.from(new Set(accountIds.filter((id) => Number.isInteger(id) && id > 0)));
   const items = normalizedIds.map((accountId) => {
     const account = db.getAccount(accountId);
-    const result = resolveAccountBatchBootstrapDecision(account, mode);
+    const result =
+      queuedAccountIds?.has(accountId)
+        ? { decision: "bootstrapping" as const, reason: "账号已在 Bootstrap 队列中" }
+        : resolveAccountBatchBootstrapDecision(account, mode);
     return {
       accountId: account?.id ?? accountId,
       microsoftEmail: account?.microsoftEmail ?? null,
@@ -1131,7 +1136,8 @@ async function main(): Promise<void> {
     ) {
       return false;
     }
-    if (!options?.force && !shouldQueueImportedAccountBootstrap(account)) {
+    const replayPendingBootstrap = options?.reason === "auto" && shouldReplayPendingAccountBootstrap(account);
+    if (!options?.force && !replayPendingBootstrap && !shouldQueueImportedAccountBootstrap(account)) {
       return false;
     }
     const queueDisposition = resolveBootstrapQueueDisposition({
@@ -1424,6 +1430,7 @@ async function main(): Promise<void> {
           db,
           ids,
           normalizeAccountBatchBootstrapMode(body?.mode),
+          sessionBootstrapQueuedIds,
         );
         return json({
           ok: true,

@@ -1134,7 +1134,7 @@ export function App() {
         parts.push(`已跳过 ${preview.summary.blockedCount} 个锁定、禁用或占用中的账号`);
       }
       if (preview.summary.bootstrappingCount > 0) {
-        parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 的账号`);
+        parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 或排队中的账号`);
       }
       if (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only") {
         parts.push(`所选账号里有 ${preview.summary.alreadyBootstrappedCount} 个已 Bootstrap 成功`);
@@ -1177,7 +1177,7 @@ export function App() {
           parts.push(`已跳过 ${preview.summary.blockedCount} 个锁定、禁用或占用中的账号`);
         }
         if (preview.summary.bootstrappingCount > 0) {
-          parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 的账号`);
+          parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 或排队中的账号`);
         }
         if (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only") {
           parts.push(`已跳过 ${preview.summary.alreadyBootstrappedCount} 个已 Bootstrap 成功的账号`);
