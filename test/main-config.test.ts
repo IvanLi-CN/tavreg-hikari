@@ -111,6 +111,12 @@ test("manual imports force rebootstrap when the stored password changes", async 
   expect(serverSource).toContain('reason: "auto",');
 });
 
+test("manual force bootstrap routes keep in-flight retries queueable instead of returning 409 early", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain('queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" })');
+  expect(source).not.toContain('return badRequest("账号当前正在 Bootstrap", 409);');
+});
+
 test("last-attempt headed failures honor the resolved keep-browser flag without rechecking env", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;");

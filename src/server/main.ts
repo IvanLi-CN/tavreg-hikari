@@ -25,7 +25,6 @@ import {
 import {
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
-  isAccountBootstrapping,
   isLockedAccountRecord,
   normalizeAccountBatchBootstrapMode,
   resolveAccountBatchBootstrapDecision,
@@ -1551,9 +1550,6 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        if (isAccountBootstrapping(account)) {
-          return badRequest("账号当前正在 Bootstrap", 409);
-        }
         const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
         return json({
           ok: true,
@@ -1778,9 +1774,6 @@ async function main(): Promise<void> {
         const connectBlockMessage = getAccountConnectBlockMessage(account);
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
-        }
-        if (isAccountBootstrapping(account)) {
-          return badRequest("账号当前正在 Bootstrap", 409);
         }
         const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
         return json({
