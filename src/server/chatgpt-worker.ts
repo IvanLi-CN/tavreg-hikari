@@ -361,7 +361,7 @@ function parseCallbackResultFromUrl(rawUrl: string, expectedState: string): Call
 }
 
 function randomTypingDelayMs(): number {
-  return 200 + Math.floor(Math.random() * 801);
+  return 100 + Math.floor(Math.random() * 401);
 }
 
 async function forceExactInputValue(element: any, value: string): Promise<boolean> {
