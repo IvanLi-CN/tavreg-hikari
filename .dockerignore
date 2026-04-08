@@ -1,0 +1,15 @@
+.git
+.gitignore
+.env.local
+.github
+node_modules
+output
+storybook-static
+web/dist
+coverage
+.docs-plan
+.storybook
+.tools
+README.md
+docs
+test

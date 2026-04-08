@@ -29,6 +29,21 @@
   - 浏览器与邮箱相关配置（按当前运行模式选择）
   - 如需自动补号，请配置一个或多个提取器 KEY：`EXTRACTOR_ZHANGHAOYA_KEY`、`EXTRACTOR_SHANYOUXIANG_KEY`、`EXTRACTOR_SHANKEYUN_KEY`、`EXTRACTOR_HOTMAIL666_KEY`
 
+## 显式指纹浏览器契约
+
+- 运行时现在**只接受显式 `CHROME_EXECUTABLE_PATH`**，不会再扫描系统 Chrome、仓库工具目录、Playwright 缓存或其它候选浏览器。
+- `CHROME_EXECUTABLE_PATH` 必须指向主人提供的指纹浏览器；路径缺失或不是允许的指纹浏览器时，worker 会在启动前直接失败。
+- Docker / Linux 部署推荐固定挂载：
+  - host: `/home/ivan/srv/home-lab/tavreg-hikari-browser/chrome`
+  - container: `/opt/fingerprint-browser/chrome`
+  - env: `CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome`
+
+## 代理设置与发布治理
+
+- `POST /api/proxies/settings` 现在只接受代理字段：`subscriptionUrl`、`groupName`、`routeGroupName`、`checkUrl`、`timeoutMs`、`maxLatencyMs`、`apiPort`、`mixedPort`。
+- 代理页再次保存订阅地址时，不会再把 `defaultRunMode` 等无关设置一起写回。
+- 仓库已补齐 release-intent labels 与质量门禁：`type:*` + `channel:*`、`Review Policy Gate`、`CI PR`、`CI Main`、`Release`、release snapshot、PR release comment。
+
 ## Linked Worktree Bootstrap
 
 - 当主工作区已经准备好 `.env.local` 与 `output/registry/tavreg-hikari.sqlite` 后，新建 linked worktree 会在首次 checkout 时自动补齐缺失项。

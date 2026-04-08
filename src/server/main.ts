@@ -31,7 +31,14 @@ import {
   shouldQueueImportedAccountBootstrap,
 } from "./account-session-bootstrap.js";
 import { resolveTaskLedgerDbPath } from "../storage/db-paths.js";
-import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
+import {
+  buildNextSettings,
+  buildNextProxySettings,
+  listUnexpectedProxySettingsKeys,
+  validateBeforePersist,
+  validateProxySettingsBeforePersist,
+  type ProxySettingsUpdate,
+} from "./app-settings.js";
 import { buildImportPreview, parseImportContent, type InvalidImportRow, type ParsedImportEntry } from "./account-import.js";
 import { serializeAttemptForApi } from "./attempt-view.js";
 import { createExclusiveRunner } from "./exclusive-runner.js";
@@ -2002,9 +2009,16 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/proxies/settings" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as Partial<AppSettings> | null;
+        const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
+        if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
+          return badRequest("proxy settings payload must be a JSON object");
+        }
+        const unexpectedProxySettingsKeys = listUnexpectedProxySettingsKeys(body);
+        if (unexpectedProxySettingsKeys.length > 0) {
+          return badRequest(`unsupported proxy settings keys: ${unexpectedProxySettingsKeys.join(", ")}`);
+        }
         const current = readSettings();
-        const optimisticNext = buildNextSettings(current, body);
+        const optimisticNext = buildNextProxySettings(current, body as Partial<ProxySettingsUpdate> | null);
         if (!optimisticNext.subscriptionUrl.trim()) {
           db.setSettings(optimisticNext);
           db.upsertProxyInventory([], null);
@@ -2018,9 +2032,9 @@ async function main(): Promise<void> {
           });
         }
         const { settings: next, result: inventory } = await runExclusiveProxyOp(() =>
-          validateBeforePersist({
+          validateProxySettingsBeforePersist({
             current,
-            input: body,
+            input: body as Partial<ProxySettingsUpdate> | null,
             sync: fetchProxyInventory,
             persist: (validatedSettings) => db.setSettings(validatedSettings),
           }),

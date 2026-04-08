@@ -335,6 +335,24 @@ export type ProxySettings = {
   defaultMaxAttempts: number;
 };
 
+export type ProxySettingsUpdate = Pick<
+  ProxySettings,
+  "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs" | "apiPort" | "mixedPort"
+>;
+
+export function pickProxySettingsUpdate(settings: ProxySettings): ProxySettingsUpdate {
+  return {
+    subscriptionUrl: settings.subscriptionUrl,
+    groupName: settings.groupName,
+    routeGroupName: settings.routeGroupName,
+    checkUrl: settings.checkUrl,
+    timeoutMs: settings.timeoutMs,
+    maxLatencyMs: settings.maxLatencyMs,
+    apiPort: settings.apiPort,
+    mixedPort: settings.mixedPort,
+  };
+}
+
 export type ProxyNode = {
   id: number;
   nodeName: string;

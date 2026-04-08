@@ -8,6 +8,7 @@ import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
+import { pickProxySettingsUpdate } from "@/lib/app-types";
 import type {
   AccountRecord,
   AccountExtractorHistoryPayload,
@@ -43,7 +44,7 @@ import type {
   PageKey,
   ProxyCheckScope,
   ProxyPayload,
-  ProxySettings,
+  ProxySettingsUpdate,
 } from "@/lib/app-types";
 import { jobToDraft, normalizeJobDraft } from "@/lib/job-draft";
 import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
@@ -793,13 +794,13 @@ export function App() {
     }
   };
 
-  const handleSaveProxySettings = async (settingsOverride?: ProxySettings) => {
+  const handleSaveProxySettings = async (settingsOverride?: ProxySettingsUpdate) => {
     if (!proxies && !settingsOverride) return;
     try {
       setError(null);
       await api("/api/proxies/settings", {
         method: "POST",
-        body: JSON.stringify(settingsOverride || proxies?.settings),
+        body: JSON.stringify(settingsOverride || (proxies ? pickProxySettingsUpdate(proxies.settings) : undefined)),
       });
       await refreshProxies();
     } catch (err) {
@@ -844,7 +845,7 @@ export function App() {
     }
   };
 
-  const updateProxySettings = <K extends keyof ProxySettings>(key: K, value: ProxySettings[K]) => {
+  const updateProxySettings = <K extends keyof ProxySettingsUpdate>(key: K, value: ProxySettingsUpdate[K]) => {
     setProxies((current) => (current ? { ...current, settings: { ...current.settings, [key]: value } } : current));
   };
 

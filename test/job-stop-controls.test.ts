@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,6 +9,7 @@ import { AppDatabase, type AppSettings } from "../src/storage/app-db";
 
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
+const originalChromeExecutablePath = process.env.CHROME_EXECUTABLE_PATH;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
@@ -62,8 +63,22 @@ function markBrowserSessionReady(appDb: AppDatabase, accountId: number) {
   });
 }
 
+async function createFakeFingerprintBrowser(rootDir: string): Promise<string> {
+  const dir = path.join(rootDir, "fingerprint-browser");
+  const executablePath = path.join(dir, "chrome");
+  await mkdir(dir, { recursive: true });
+  await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
+  await chmod(executablePath, 0o755);
+  return executablePath;
+}
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  if (originalChromeExecutablePath == null) {
+    delete process.env.CHROME_EXECUTABLE_PATH;
+  } else {
+    process.env.CHROME_EXECUTABLE_PATH = originalChromeExecutablePath;
+  }
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -600,6 +615,7 @@ test("pending launches block stop finalization until setup drains", async () => 
 
 test("graceful stop rolls back pending launches before they start", async () => {
   const { appDb, dbPath } = await createTempDb();
+  process.env.CHROME_EXECUTABLE_PATH = await createFakeFingerprintBrowser(path.dirname(dbPath));
   const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);

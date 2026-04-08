@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { downloadMihomoBinary, type MihomoConfig } from "../src/proxy/mihomo.ts";
+import { __mihomoTestUtils, downloadMihomoBinary, type MihomoConfig } from "../src/proxy/mihomo.ts";
 
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
@@ -34,6 +34,7 @@ async function createCachedBinary(downloadDir: string, version: string, contents
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  __mihomoTestUtils.resetSubscriptionCaches();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -68,5 +69,36 @@ describe("downloadMihomoBinary", () => {
 
     await expect(downloadMihomoBinary(createMihomoConfig(firstDownloadDir))).resolves.toBe(firstBinary);
     await expect(downloadMihomoBinary(createMihomoConfig(secondDownloadDir))).resolves.toBe(secondBinary);
+  });
+
+  test("reuses the fresh disk subscription cache after the in-memory cache is cleared", async () => {
+    const workRoot = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-mihomo-config-"));
+    tempDirs.push(workRoot);
+    const cfg = createMihomoConfig(path.join(workRoot, "downloads"), {
+      workDir: path.join(workRoot, "work"),
+    });
+    let fetchCount = 0;
+    globalThis.fetch = ((async () => {
+      fetchCount += 1;
+      return new Response("proxies:\n  - name: cached-node\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      });
+    }) as unknown) as typeof fetch;
+
+    await expect(__mihomoTestUtils.writeConfig(cfg)).resolves.toMatchObject({
+      configPath: path.join(cfg.workDir, "mihomo.yaml"),
+    });
+    expect(fetchCount).toBe(1);
+
+    __mihomoTestUtils.resetSubscriptionCaches();
+    globalThis.fetch = ((async () => {
+      throw new Error("fetch should not be called when a fresh disk cache exists");
+    }) as unknown) as typeof fetch;
+
+    await expect(__mihomoTestUtils.writeConfig(cfg)).resolves.toMatchObject({
+      configPath: path.join(cfg.workDir, "mihomo.yaml"),
+    });
+    expect(fetchCount).toBe(1);
   });
 });

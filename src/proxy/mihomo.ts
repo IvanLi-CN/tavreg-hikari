@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { access, chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import path from "node:path";
 import process from "node:process";
@@ -56,6 +56,14 @@ const mihomoBinaryCache = new Map<string, Promise<string>>();
 const subscriptionInflight = new Map<string, Promise<Record<string, unknown>>>();
 const subscriptionSuccessCache = new Map<string, { fetchedAt: number; payload: Record<string, unknown> }>();
 const SUBSCRIPTION_SUCCESS_TTL_MS = 60_000;
+const SUBSCRIPTION_DISK_CACHE_TTL_MS = 10 * 60_000;
+const SUBSCRIPTION_CACHE_LOCK_WAIT_MS = 15_000;
+const SUBSCRIPTION_CACHE_LOCK_POLL_MS = 250;
+
+interface SubscriptionCacheEnvelope {
+  fetchedAt: number;
+  payload: Record<string, unknown>;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -774,14 +782,60 @@ function buildSubscriptionCachePath(cfg: MihomoConfig): string {
   return path.join(cfg.downloadDir, "subscription-cache", `${key}.json`);
 }
 
+function buildSubscriptionCacheLockPath(cachePath: string): string {
+  return `${cachePath}.lock`;
+}
+
+function unwrapCachedSubscription(raw: unknown): { fetchedAt: number | null; payload: Record<string, unknown> | null } {
+  if (!raw || typeof raw !== "object") {
+    return { fetchedAt: null, payload: null };
+  }
+  const maybeEnvelope = raw as Partial<SubscriptionCacheEnvelope>;
+  if (typeof maybeEnvelope.fetchedAt === "number" && maybeEnvelope.payload && typeof maybeEnvelope.payload === "object") {
+    return {
+      fetchedAt: maybeEnvelope.fetchedAt,
+      payload: maybeEnvelope.payload as Record<string, unknown>,
+    };
+  }
+  return {
+    fetchedAt: null,
+    payload: raw as Record<string, unknown>,
+  };
+}
+
 async function readCachedSubscription(cachePath: string): Promise<Record<string, unknown> | null> {
   try {
     const raw = await readFile(cachePath, "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return parsed && typeof parsed === "object" ? parsed : null;
+    const parsed = JSON.parse(raw) as unknown;
+    return unwrapCachedSubscription(parsed).payload;
   } catch {
     return null;
   }
+}
+
+async function readFreshCachedSubscription(cachePath: string, maxAgeMs = SUBSCRIPTION_DISK_CACHE_TTL_MS): Promise<Record<string, unknown> | null> {
+  try {
+    const raw = await readFile(cachePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const entry = unwrapCachedSubscription(parsed);
+    if (!subscriptionHasUsableNodes(entry.payload)) return null;
+    if (entry.fetchedAt != null && Date.now() - entry.fetchedAt > maxAgeMs) {
+      return null;
+    }
+    return entry.payload;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForFreshCachedSubscription(cachePath: string, timeoutMs: number): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const cached = await readFreshCachedSubscription(cachePath);
+    if (cached) return cached;
+    await sleep(SUBSCRIPTION_CACHE_LOCK_POLL_MS);
+  }
+  return readFreshCachedSubscription(cachePath);
 }
 
 function subscriptionHasUsableNodes(payload: Record<string, unknown> | null): boolean {
@@ -799,7 +853,11 @@ function subscriptionHasUsableNodes(payload: Record<string, unknown> | null): bo
 async function writeCachedSubscription(cachePath: string, payload: Record<string, unknown>): Promise<void> {
   if (!subscriptionHasUsableNodes(payload)) return;
   await mkdir(path.dirname(cachePath), { recursive: true });
-  await writeFile(cachePath, `${JSON.stringify(payload)}\n`, "utf8");
+  const envelope: SubscriptionCacheEnvelope = {
+    fetchedAt: Date.now(),
+    payload,
+  };
+  await writeFile(cachePath, `${JSON.stringify(envelope)}\n`, "utf8");
 }
 
 function buildConfigObject(
@@ -1005,32 +1063,101 @@ async function writeConfig(cfg: MihomoConfig): Promise<{ configPath: string; pro
   await mkdir(cfg.workDir, { recursive: true });
   const configPath = path.join(cfg.workDir, "mihomo.yaml");
   const subscriptionCachePath = buildSubscriptionCachePath(cfg);
-  let subscription: Record<string, unknown>;
-  try {
-    subscription = await fetchSubscription(cfg.subscriptionUrl);
-    await writeCachedSubscription(subscriptionCachePath, subscription);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const memoryCached = getLastSuccessfulSubscription(cfg.subscriptionUrl);
-    if (/mihomo_subscription_failed:4\d\d|mihomo_subscription_empty/i.test(message)) {
-      if (subscriptionHasUsableNodes(memoryCached)) {
-        subscription = memoryCached as Record<string, unknown>;
-      } else {
-        throw error;
-      }
-    } else {
-      const cached = await readCachedSubscription(subscriptionCachePath);
-      if (!subscriptionHasUsableNodes(cached)) {
-        throw error;
-      }
-      subscription = cached as Record<string, unknown>;
+  const subscriptionLockPath = buildSubscriptionCacheLockPath(subscriptionCachePath);
+
+  const fetchWithSharedCache = async (): Promise<Record<string, unknown>> => {
+    const freshCached = await readFreshCachedSubscription(subscriptionCachePath);
+    if (freshCached) {
+      return freshCached;
     }
-  }
+
+    let lockHeld = false;
+    const lockDeadline = Date.now() + SUBSCRIPTION_CACHE_LOCK_WAIT_MS;
+    while (!lockHeld && Date.now() < lockDeadline) {
+      try {
+        await mkdir(path.dirname(subscriptionLockPath), { recursive: true });
+        await writeFile(subscriptionLockPath, `${process.pid}\n`, { encoding: "utf8", flag: "wx" });
+        lockHeld = true;
+        break;
+      } catch (error) {
+        const code = error && typeof error === "object" && "code" in error ? String((error as { code?: unknown }).code || "") : "";
+        if (code !== "EEXIST") {
+          throw error;
+        }
+        try {
+          const lockStats = await stat(subscriptionLockPath);
+          if (Date.now() - lockStats.mtimeMs > SUBSCRIPTION_CACHE_LOCK_WAIT_MS * 2) {
+            await rm(subscriptionLockPath, { force: true });
+            continue;
+          }
+        } catch {
+          // ignore lock stat races and retry
+        }
+        const awaitedCached = await waitForFreshCachedSubscription(
+          subscriptionCachePath,
+          Math.min(SUBSCRIPTION_CACHE_LOCK_POLL_MS * 2, Math.max(1, lockDeadline - Date.now())),
+        );
+        if (awaitedCached) {
+          return awaitedCached;
+        }
+      }
+    }
+
+    const loadSubscriptionFromNetwork = async (): Promise<Record<string, unknown>> => {
+      try {
+        const fetched = await fetchSubscription(cfg.subscriptionUrl);
+        await writeCachedSubscription(subscriptionCachePath, fetched);
+        return fetched;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const memoryCached = getLastSuccessfulSubscription(cfg.subscriptionUrl);
+        if (/mihomo_subscription_failed:4\d\d|mihomo_subscription_empty/i.test(message)) {
+          if (subscriptionHasUsableNodes(memoryCached)) {
+            return memoryCached as Record<string, unknown>;
+          }
+          throw error;
+        }
+        const cached = await readCachedSubscription(subscriptionCachePath);
+        if (!subscriptionHasUsableNodes(cached)) {
+          throw error;
+        }
+        return cached as Record<string, unknown>;
+      }
+    };
+
+    if (!lockHeld) {
+      const awaitedCached = await waitForFreshCachedSubscription(subscriptionCachePath, SUBSCRIPTION_CACHE_LOCK_WAIT_MS);
+      if (awaitedCached) {
+        return awaitedCached;
+      }
+      return loadSubscriptionFromNetwork();
+    }
+
+    try {
+      const refreshedCached = await readFreshCachedSubscription(subscriptionCachePath);
+      if (refreshedCached) {
+        return refreshedCached;
+      }
+      return await loadSubscriptionFromNetwork();
+    } finally {
+      await rm(subscriptionLockPath, { force: true }).catch(() => {});
+    }
+  };
+
+  const subscription = await fetchWithSharedCache();
   const { config, providerNames } = buildConfigObject(cfg, subscription);
   const yaml = yamlStringify(config);
   await writeFile(configPath, yaml, "utf8");
   return { configPath, providerNames };
 }
+
+export const __mihomoTestUtils = {
+  writeConfig,
+  resetSubscriptionCaches(): void {
+    subscriptionInflight.clear();
+    subscriptionSuccessCache.clear();
+  },
+};
 
 async function waitForApi(
   apiBaseUrl: string,

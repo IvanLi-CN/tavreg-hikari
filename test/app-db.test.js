@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fetchSingleExtractedAccount } from "../src/server/account-extractor.ts";
-import { buildNextSettings, validateBeforePersist } from "../src/server/app-settings.ts";
+import {
+  buildNextProxySettings,
+  buildNextSettings,
+  listUnexpectedProxySettingsKeys,
+  validateBeforePersist,
+  validateProxySettingsBeforePersist,
+} from "../src/server/app-settings.ts";
 import {
   JobScheduler,
   PENDING_BROWSER_SESSION_WAIT_MS,
@@ -2716,6 +2722,52 @@ describe("settings updates", () => {
 
     expect(persisted).toBeNull();
   });
+
+  test("rejects non-proxy keys from proxy settings updates", () => {
+    expect(
+      listUnexpectedProxySettingsKeys({
+        subscriptionUrl: "https://example.com/next.yaml",
+        defaultRunMode: "headless",
+        defaultNeed: 2,
+      }),
+    ).toEqual(["defaultRunMode", "defaultNeed"]);
+  });
+
+  test("proxy settings updates only change proxy fields", async () => {
+    let persisted = null;
+
+    const { settings, result } = await validateProxySettingsBeforePersist({
+      current: currentSettings,
+      input: {
+        subscriptionUrl: " https://next.example/sub.yaml ",
+        apiPort: 0,
+        mixedPort: 2,
+        defaultRunMode: "headless",
+      },
+      sync: async (nextSettings) => ({ selected: null, subscriptionUrl: nextSettings.subscriptionUrl }),
+      persist: (nextSettings) => {
+        persisted = nextSettings;
+      },
+    });
+
+    expect(result).toEqual({
+      selected: null,
+      subscriptionUrl: "https://next.example/sub.yaml",
+    });
+    expect(settings).toMatchObject({
+      subscriptionUrl: "https://next.example/sub.yaml",
+      apiPort: 1,
+      mixedPort: 2,
+      defaultRunMode: "headed",
+    });
+    expect(buildNextProxySettings(currentSettings, { defaultRunMode: "headless" })).toMatchObject({
+      defaultRunMode: "headed",
+    });
+    expect(persisted).toMatchObject({
+      subscriptionUrl: "https://next.example/sub.yaml",
+      defaultRunMode: "headed",
+    });
+  });
 });
 
 describe("api key queries", () => {
@@ -2879,11 +2931,13 @@ describe("scheduler runtime spec", () => {
         apiPort: 40123,
         mixedPort: 40124,
       },
+      chromeExecutablePath: "/opt/fingerprint-browser/chrome",
       selectedProxyNode: "Tokyo-01",
       baseEnv: {
         PATH: process.env.PATH,
         EXISTING_EMAIL: "legacy@example.com",
         EXISTING_PASSWORD: "legacy-pass",
+        CHROME_EXECUTABLE_PATH: "/usr/bin/google-chrome",
         CHROME_REMOTE_DEBUGGING_PORT: "9222",
       },
     });
@@ -2920,6 +2974,7 @@ describe("scheduler runtime spec", () => {
       TASK_LEDGER_ACCOUNT_ID: "21",
       TASK_LEDGER_DB_PATH: "/tmp/tavreg/app.sqlite",
       OUTPUT_ROOT_DIR: "/tmp/tavreg/job-8/attempt-21",
+      CHROME_EXECUTABLE_PATH: "/opt/fingerprint-browser/chrome",
       CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-profile",
       INSPECT_CHROME_PROFILE_DIR: "/tmp/tavreg/job-8/attempt-21/chrome-inspect-profile",
     });
@@ -2928,6 +2983,7 @@ describe("scheduler runtime spec", () => {
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_PROVIDER).toBe("cfmail");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
+    expect(runtime.env.CHROME_EXECUTABLE_PATH).toBe("/opt/fingerprint-browser/chrome");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
   });
 
@@ -2956,6 +3012,7 @@ describe("scheduler runtime spec", () => {
         apiPort: 40125,
         mixedPort: 40126,
       },
+      chromeExecutablePath: "/opt/fingerprint-browser/chrome",
     });
 
     expect(buildAttemptSpawnOptions("/tmp/tavreg", runtime)).toEqual({
@@ -2993,6 +3050,7 @@ describe("scheduler runtime spec", () => {
         apiPort: 40123,
         mixedPort: 40124,
       },
+      chromeExecutablePath: "/opt/fingerprint-browser/chrome",
     });
 
     expect(runtime.env.CHROME_PROFILE_DIR).toBe(path.resolve("output/browser-profiles/accounts/22/chrome"));
