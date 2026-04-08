@@ -129,6 +129,7 @@ function buildAuthorizeUrl(input: { state: string; codeChallenge: string }): str
 }
 
 async function writeJson(filePath: string, value: unknown): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
@@ -728,6 +729,20 @@ async function maybeSwitchToOtpLogin(page: any, currentUrl: string, text: string
   return activated;
 }
 
+async function maybePreferOtpLogin(page: any, currentUrl: string, text: string, enabled: boolean): Promise<boolean> {
+  if (!enabled || !/log-in\/password/i.test(currentUrl)) {
+    return false;
+  }
+  if (!/log in with a one-time code|use one-time code|one-time code/i.test(text)) {
+    return false;
+  }
+  const activated = await activateAction(page, [/log in with a one-time code/i, /use one-time code/i, /one-time code/i]);
+  if (activated) {
+    log("switched auth surface to one-time-code login proactively");
+  }
+  return activated;
+}
+
 async function pickSequentialOption(page: any, triggerSelector: string, index: number, optionNames: RegExp[]): Promise<boolean> {
   const triggers = page.locator(triggerSelector);
   const count = await triggers.count().catch(() => 0);
@@ -761,6 +776,9 @@ async function fillBirthDate(page: any, birthDate: string): Promise<boolean> {
     'input[placeholder="DD" i]',
     '[role="combobox"]',
     'button[aria-haspopup="listbox"]',
+    '[role="spinbutton"][data-type="month"]',
+    '[role="spinbutton"][data-type="day"]',
+    '[role="spinbutton"][data-type="year"]',
   ];
   const matchesBirthDate = async (): Promise<boolean> => {
     const values = await readVisibleValues(page, birthSelectors);
@@ -769,6 +787,10 @@ async function fillBirthDate(page: any, birthDate: string): Promise<boolean> {
     if (!visibleMatch) return false;
     return !hiddenBirthValue || hiddenBirthValue === birthDate;
   };
+  if (await syncHiddenBirthValue(page, birthDate).catch(() => false)) {
+    await page.waitForTimeout(350);
+    if (await matchesBirthDate()) return true;
+  }
   if (await fillFirstVisible(page, ['input[type="date"]'], birthDate)) {
     await syncHiddenBirthValue(page, birthDate).catch(() => false);
     await page.waitForTimeout(250);
@@ -811,7 +833,6 @@ async function fillBirthDate(page: any, birthDate: string): Promise<boolean> {
       fallbackBirthInputIndex = index;
       break;
     }
-    fallbackBirthInputIndex = index;
   }
   if (fallbackBirthInputIndex >= 0) {
     const input = visibleTextInputs.nth(fallbackBirthInputIndex);
@@ -883,6 +904,42 @@ async function fillBirthDate(page: any, birthDate: string): Promise<boolean> {
     await page.waitForTimeout(400);
     if (await matchesBirthDate()) return true;
   }
+  const spinbuttonValues = [
+    { selector: '[role="spinbutton"][data-type="month"]', value: month },
+    { selector: '[role="spinbutton"][data-type="day"]', value: day },
+    { selector: '[role="spinbutton"][data-type="year"]', value: year },
+  ];
+  let filledSpinbuttons = true;
+  for (const spinbutton of spinbuttonValues) {
+    const control = page.locator(spinbutton.selector).first();
+    const visible = await control.isVisible().catch(() => false);
+    if (!visible) {
+      filledSpinbuttons = false;
+      break;
+    }
+    await control.click({ force: true }).catch(() => {});
+    await page.keyboard.press("Meta+A").catch(() => {});
+    await page.keyboard.press("Control+A").catch(() => {});
+    await page.keyboard.press("Backspace").catch(() => {});
+    await page.keyboard.type(spinbutton.value, { delay: 40 }).catch(() => {});
+    await control
+      .evaluate((element: HTMLElement, value: string) => {
+        element.textContent = value;
+        element.setAttribute("aria-valuenow", String(Number(value) || value));
+        element.setAttribute("aria-valuetext", value);
+        element.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: value }));
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        element.dispatchEvent(new Event("blur", { bubbles: true }));
+      }, spinbutton.value)
+      .catch(() => {});
+    await page.keyboard.press("Tab").catch(() => {});
+  }
+  if (filledSpinbuttons) {
+    await syncHiddenBirthValue(page, birthDate).catch(() => false);
+    await page.waitForTimeout(400);
+    if (await matchesBirthDate()) return true;
+  }
   const yearFilled = await fillFirstVisible(
     page,
     ['input[name*="year" i]', 'input[placeholder*="year" i]', 'input[placeholder="YYYY" i]', 'input[placeholder*="YYYY" i]'],
@@ -907,19 +964,37 @@ async function fillBirthDate(page: any, birthDate: string): Promise<boolean> {
 }
 
 async function readHiddenBirthValue(page: any): Promise<string> {
-  return String(await page.locator('input[type="hidden"][name*="birthday" i]').first().inputValue().catch(() => "")).trim();
+  return String(
+    await page
+      .locator(
+        'input[type="hidden"][name*="birthday" i], input[type="hidden"][id*="birthday" i], input[type="hidden"][name*="birth" i], input[type="hidden"][id*="birth" i]',
+      )
+      .first()
+      .inputValue()
+      .catch(() => ""),
+  ).trim();
 }
 
 async function syncHiddenBirthValue(page: any, birthDate: string): Promise<boolean> {
-  const hiddenLocator = page.locator('input[type="hidden"][name*="birthday" i]').first();
-  if (!(await hiddenLocator.isVisible().catch(() => true)) && (await hiddenLocator.count().catch(() => 0)) === 0) {
+  const hiddenLocator = page.locator(
+    'input[type="hidden"][name*="birthday" i], input[type="hidden"][id*="birthday" i], input[type="hidden"][name*="birth" i], input[type="hidden"][id*="birth" i]',
+  );
+  const count = await hiddenLocator.count().catch(() => 0);
+  if (count === 0) {
     return false;
   }
-  await hiddenLocator.evaluate((element: HTMLInputElement, value: string) => {
-    element.value = value;
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-  }, birthDate).catch(() => {});
+  await hiddenLocator
+    .evaluateAll((elements: HTMLInputElement[], value: string) => {
+      for (const element of elements) {
+        element.value = value;
+        element.defaultValue = value;
+        element.setAttribute("value", value);
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+        element.dispatchEvent(new Event("blur", { bubbles: true }));
+      }
+    }, birthDate)
+    .catch(() => {});
   return (await readHiddenBirthValue(page)) === birthDate;
 }
 
@@ -951,6 +1026,61 @@ async function readVisibleValues(page: any, selectors: string[]): Promise<string
     }
   }
   return values;
+}
+
+async function writeProfileControlDiagnostics(page: any, outputDir: string, label: string): Promise<void> {
+  const controls = await page
+    .evaluate(() => {
+      const selectors = [
+        "input",
+        "select",
+        "textarea",
+        "button",
+        "[role='combobox']",
+        "[aria-haspopup='listbox']",
+      ];
+      const nodes = Array.from(document.querySelectorAll(selectors.join(",")));
+      return nodes.map((node) => {
+        const element = node as HTMLElement & {
+          value?: string;
+          type?: string;
+          name?: string;
+          id?: string;
+          placeholder?: string;
+        };
+        const style = window.getComputedStyle(element);
+        const hidden =
+          style.display === "none"
+          || style.visibility === "hidden"
+          || element.getAttribute("aria-hidden") === "true"
+          || element.getAttribute("type") === "hidden";
+        return {
+          tag: element.tagName.toLowerCase(),
+          type: String(element.getAttribute("type") || element.type || ""),
+          name: String(element.getAttribute("name") || element.name || ""),
+          id: String(element.getAttribute("id") || element.id || ""),
+          placeholder: String(element.getAttribute("placeholder") || element.placeholder || ""),
+          ariaLabel: String(element.getAttribute("aria-label") || ""),
+          role: String(element.getAttribute("role") || ""),
+          text: String(element.textContent || "").replace(/\s+/g, " ").trim(),
+          value: "value" in element ? String(element.value || "") : "",
+          hidden,
+        };
+      });
+    })
+    .catch(() => []);
+  const html = await page.content().catch(() => "");
+  const text = await pageText(page).catch(() => "");
+  const filePath = `${outputDir}/profile-controls-${label}.json`;
+  await writeJson(filePath, {
+    capturedAt: nowIso(),
+    currentUrl: page.url?.() || "",
+    title: await page.title?.().catch(() => ""),
+    text,
+    html,
+    controls,
+  }).catch(() => {});
+  log(`wrote profile controls diagnostics file=${filePath} controls=${Array.isArray(controls) ? controls.length : 0}`);
 }
 
 async function hasVisibleControl(page: any, selectors: string[]): Promise<boolean> {
@@ -1038,6 +1168,7 @@ async function handleOrganizationStep(page: any): Promise<boolean> {
 async function handleProfileStep(page: any, nickname: string, birthDate: string): Promise<boolean> {
   const fullName = profileFullName(nickname);
   const expectedAge = calculateAgeYears(birthDate);
+  const birthdaySignal = /birthday|date of birth|confirm your age/i;
   const hasNameControl = await hasVisibleControl(page, ['input[name*="name" i]', 'input[autocomplete="name"]', 'input[id*="name" i]']);
   let hasAgeControl = await hasVisibleControl(page, ['input[name*="age" i]', 'input[aria-label*="age" i]', 'input[placeholder*="age" i]']);
   let birthModeActivated = false;
@@ -1053,12 +1184,15 @@ async function handleProfileStep(page: any, nickname: string, birthDate: string)
       'input[placeholder="MM" i]',
       'input[placeholder="DD" i]',
       'input[placeholder="YYYY" i]',
+      '[role="spinbutton"][data-type="month"]',
+      '[role="spinbutton"][data-type="day"]',
+      '[role="spinbutton"][data-type="year"]',
     ])) ||
     (await hasVisibleControl(page, ['[role="combobox"]', 'button[aria-haspopup="listbox"]']));
   if (!hasBirthControl) {
     const profileText = await pageText(page);
-    if (/birthday|date of birth|confirm your age/i.test(profileText)) {
-      hasBirthControl = (await countVisibleControls(page, 'input:not([type="hidden"]):not([type="password"]):not([type="email"])')) >= 2;
+    if (birthdaySignal.test(profileText)) {
+      hasBirthControl = true;
     }
   }
   if (!hasBirthControl && (await activateAction(page, [/use date of birth/i]))) {
@@ -1078,12 +1212,15 @@ async function handleProfileStep(page: any, nickname: string, birthDate: string)
         'input[placeholder="MM" i]',
         'input[placeholder="DD" i]',
         'input[placeholder="YYYY" i]',
+        '[role="spinbutton"][data-type="month"]',
+        '[role="spinbutton"][data-type="day"]',
+        '[role="spinbutton"][data-type="year"]',
       ])) ||
       (await hasVisibleControl(page, ['[role="combobox"]', 'button[aria-haspopup="listbox"]']));
     if (!hasBirthControl) {
       const profileText = await pageText(page);
-      if (/birthday|date of birth|confirm your age/i.test(profileText)) {
-        hasBirthControl = (await countVisibleControls(page, 'input:not([type="hidden"]):not([type="password"]):not([type="email"])')) >= 2;
+      if (birthdaySignal.test(profileText)) {
+        hasBirthControl = true;
       }
     }
   }
@@ -1102,18 +1239,22 @@ async function handleProfileStep(page: any, nickname: string, birthDate: string)
       'input[placeholder="MM" i]',
       'input[placeholder="DD" i]',
       'input[placeholder="YYYY" i]',
+      '[role="spinbutton"][data-type="month"]',
+      '[role="spinbutton"][data-type="day"]',
+      '[role="spinbutton"][data-type="year"]',
     ])) ||
     (await hasVisibleControl(page, ['[role="combobox"]', 'button[aria-haspopup="listbox"]']));
   if (!birthControlsAvailable) {
     const profileText = await pageText(page);
-    if (/birthday|date of birth|confirm your age/i.test(profileText)) {
-      birthControlsAvailable = (await countVisibleControls(page, 'input:not([type="hidden"]):not([type="password"]):not([type="email"])')) >= 2;
+    if (birthdaySignal.test(profileText)) {
+      birthControlsAvailable = true;
     }
   }
   const filledBirth = birthControlsAvailable ? await fillBirthDate(page, birthDate) : false;
   const filledAge = !filledBirth && hasAgeControl ? await fillAgeYears(page, birthDate) : false;
   await page.waitForLoadState("domcontentloaded", { timeout: 5000 }).catch(() => {});
   await page.waitForTimeout(1200);
+  const profileSnapshotText = await pageText(page);
   const visibleNameValues = await readVisibleValues(page, ['input[name*="name" i]', 'input[autocomplete="name"]', 'input[id*="name" i]']);
   const visibleAgeValues = await readVisibleValues(page, [
     'input[name*="age" i]',
@@ -1138,14 +1279,24 @@ async function handleProfileStep(page: any, nickname: string, birthDate: string)
     'input[placeholder="DD" i]',
     '[role="combobox"]',
     'button[aria-haspopup="listbox"]',
+    '[role="spinbutton"][data-type="month"]',
+    '[role="spinbutton"][data-type="day"]',
+    '[role="spinbutton"][data-type="year"]',
   ]);
-  const nameReady = !hasNameControl || visibleNameValues.some((value) => value === fullName);
+  const hiddenBirthValue = await readHiddenBirthValue(page);
+  const nameReady = !hasNameControl || visibleNameValues.some((value) => value === fullName) || profileSnapshotText.includes(fullName);
   const ageReady = !hasAgeControl || visibleAgeValues.some((value) => value === expectedAge || value.includes(expectedAge));
-  const birthReady = !birthControlsAvailable || isBirthDateReadyFromVisibleValues(visibleBirthValues, birthDate);
+  const birthReady =
+    !birthControlsAvailable
+    || hiddenBirthValue === birthDate
+    || isBirthDateReadyFromVisibleValues(
+      profileSnapshotText ? [...visibleBirthValues, profileSnapshotText] : visibleBirthValues,
+      birthDate,
+    );
   const requireBirthReady = birthControlsAvailable && (birthModeActivated || !hasAgeControl);
   if ((hasNameControl && !nameReady) || (hasAgeControl && !ageReady) || (requireBirthReady && !birthReady)) {
     log(
-      `profile fields incomplete nameControl=${hasNameControl} nameReady=${nameReady} ageControl=${hasAgeControl} ageReady=${ageReady} birthControl=${birthControlsAvailable} birthModeActivated=${birthModeActivated} birthReady=${birthReady} filledName=${filledName} filledAge=${filledAge} filledBirth=${filledBirth} nameValues=${JSON.stringify(visibleNameValues)} ageValues=${JSON.stringify(visibleAgeValues)} birthValues=${JSON.stringify(visibleBirthValues)}`,
+      `profile fields incomplete nameControl=${hasNameControl} nameReady=${nameReady} ageControl=${hasAgeControl} ageReady=${ageReady} birthControl=${birthControlsAvailable} birthModeActivated=${birthModeActivated} birthReady=${birthReady} hiddenBirthValue=${hiddenBirthValue} filledName=${filledName} filledAge=${filledAge} filledBirth=${filledBirth} nameValues=${JSON.stringify(visibleNameValues)} ageValues=${JSON.stringify(visibleAgeValues)} birthValues=${JSON.stringify(visibleBirthValues)}`,
     );
     return false;
   }
@@ -1411,6 +1562,7 @@ async function run(): Promise<void> {
     let lastProfileSubmitUrl = "";
     let repeatedProfileSubmitCount = 0;
     let lastProfileSubmitAt = 0;
+    let profileIncompleteCount = 0;
     let lastOrganizationSubmitUrl = "";
     let repeatedOrganizationSubmitCount = 0;
     let lastConsentSubmitUrl = "";
@@ -1433,6 +1585,7 @@ async function run(): Promise<void> {
     let loopCount = 0;
     const maxAddPhoneOauthRetries = 10;
     const maxAuthErrorFreshOauthRetries = 3;
+    let preferOtpLogin = false;
     const restartOauthInCurrentBrowser = async (reason: string, extra: Record<string, unknown> = {}): Promise<void> => {
       callbackFromObservedUrl = null;
       callbackFromNavigation = null;
@@ -1442,6 +1595,9 @@ async function run(): Promise<void> {
       authorizeUrl = buildAuthorizeUrl({ state: callbackState, codeChallenge: challenge });
       createAccountActivated = false;
       preferLoginFlow = true;
+      if (/retry_after_add_phone/i.test(reason)) {
+        preferOtpLogin = true;
+      }
       otpRequestedAt = nowIso();
       otpResendCount = 0;
       otpSettlingUntil = 0;
@@ -1608,6 +1764,13 @@ async function run(): Promise<void> {
       const passwordFieldVisible = await locatorVisible(page.locator('input[type="password"], input[name="password"], input[autocomplete="new-password"], input[autocomplete="current-password"]'));
       if (passwordFieldVisible) {
         failureStage = "password_submit";
+        if (await maybePreferOtpLogin(page, currentUrl, text, preferOtpLogin)) {
+          lastPasswordSubmitUrl = "";
+          repeatedPasswordSubmitCount = 0;
+          lastProgressAt = Date.now();
+          await page.waitForTimeout(1500);
+          continue;
+        }
         if (await maybeSwitchToOtpLogin(page, currentUrl, text)) {
           lastPasswordSubmitUrl = "";
           repeatedPasswordSubmitCount = 0;
@@ -1865,7 +2028,20 @@ async function run(): Promise<void> {
           continue;
         }
       }
-      if (hasProfileSetupSignal(currentUrl, text) && (await handleProfileStep(page, payload.nickname, payload.birthDate))) {
+      if (hasProfileSetupSignal(currentUrl, text)) {
+        const handledProfileStep = await handleProfileStep(page, payload.nickname, payload.birthDate);
+        if (!handledProfileStep) {
+          profileIncompleteCount += 1;
+          if (profileIncompleteCount === 1 || profileIncompleteCount % 10 === 0) {
+            await writeProfileControlDiagnostics(page, outputDir, `incomplete_${profileIncompleteCount}`).catch(() => {});
+          }
+        } else {
+          profileIncompleteCount = 0;
+        }
+        if (!handledProfileStep) {
+          await sleepMs(1000);
+          continue;
+        }
         failureStage = "profile_submit";
         lastProfileSubmitAt = Date.now();
         if (currentUrl === lastProfileSubmitUrl) {

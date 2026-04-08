@@ -19,6 +19,39 @@ STARTUP_STAGGER_SECONDS = 10
 STARTUP_READY_TIMEOUT_SECONDS = 12
 CDP_CONNECT_TIMEOUT_MS = 120000
 USE_NATIVE_CDP = False
+DEFAULT_PREFERRED_PATTERNS = [
+    "🇸🇬新加坡01 | 电信联通推荐",
+    "🇦🇪迪拜 | 高速专线-hy2",
+    "🇯🇵日本东京01 | 移动联通推荐",
+    "🇯🇵日本东京 | 移动联通推荐-hy2",
+    "🇺🇸美国圣何塞01 | 三网推荐",
+    "🇦🇺澳大利亚 | 高速专线-hy2",
+    "🇨🇭瑞士苏黎世 | 高速专线-hy2",
+    "🇺🇸",
+    "🇯🇵",
+]
+
+
+def load_preferred_patterns():
+    raw_json = os.environ.get("CHATGPT_PARALLEL_PATTERNS_JSON", "").strip()
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+            if isinstance(parsed, list):
+                values = [str(item).strip() for item in parsed if str(item).strip()]
+                if values:
+                    return values
+        except Exception:
+            pass
+    raw = os.environ.get("CHATGPT_PARALLEL_PATTERNS", "").strip()
+    if not raw:
+        return DEFAULT_PREFERRED_PATTERNS
+    for sep in ("\n", ";;", "||"):
+        if sep in raw:
+            values = [item.strip() for item in raw.split(sep) if item.strip()]
+            if values:
+                return values
+    return [raw]
 
 
 def api_get(path: str):
@@ -37,14 +70,7 @@ def pick_free_port() -> int:
 def select_nodes(limit: int):
     payload = api_get("/api/proxies")
     nodes = payload.get("nodes") or []
-    preferred_patterns = [
-        "🇸🇬新加坡01 | 电信联通推荐",
-        "🇦🇺澳大利亚 | 高速专线-hy2",
-        "🇨🇭瑞士苏黎世 | 高速专线-hy2",
-        "🇺🇸",
-        "🇯🇵",
-        "🇦🇪",
-    ]
+    preferred_patterns = load_preferred_patterns()
     non_hk = [node for node in nodes if "香港" not in str(node.get("nodeName", ""))]
     picked = []
     seen = set()
@@ -139,6 +165,7 @@ def spawn_worker(slot: int, settings: dict, node_name: str):
     draft = get_draft()
     output_dir = RUN_ROOT / f"slot-{slot}"
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "draft.json").write_text(json.dumps(draft, ensure_ascii=False, indent=2), encoding="utf-8")
     api_port = pick_free_port()
     mixed_port = pick_free_port()
     env = os.environ.copy()
