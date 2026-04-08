@@ -161,6 +161,85 @@ function buildSubscriptionRequestHeaders(url: string): Record<string, string> {
   };
 }
 
+function looksLikeChallengeHtml(text: string): boolean {
+  const normalized = String(text || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.includes("<html")
+    && (
+      normalized.includes("just a moment")
+      || normalized.includes("cloudflare")
+      || normalized.includes("checking your browser")
+      || normalized.includes("security check")
+      || normalized.includes("__cf_chl_rt_tk")
+    )
+  );
+}
+
+function fetchSubscriptionTextWithCurl(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "curl",
+      [
+        "-L",
+        "--max-time",
+        "20",
+        "-A",
+        BROWSER_LIKE_SUBSCRIPTION_UA,
+        "-H",
+        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "-H",
+        "Accept-Language: zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "-H",
+        "Cache-Control: no-cache",
+        "-H",
+        "Pragma: no-cache",
+        url,
+      ],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", (error) => {
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`mihomo_subscription_curl_failed:${code}:${stderr.trim() || "unknown"}`));
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function readSubscriptionText(url: string): Promise<string> {
+  try {
+    const resp = await fetch(url, {
+      headers: buildSubscriptionRequestHeaders(url),
+      cache: "no-store",
+    });
+    if (!resp.ok) {
+      return await fetchSubscriptionTextWithCurl(url);
+    }
+    const raw = await resp.text();
+    if (looksLikeChallengeHtml(raw)) {
+      return await fetchSubscriptionTextWithCurl(url);
+    }
+    return raw;
+  } catch {
+    return await fetchSubscriptionTextWithCurl(url);
+  }
+}
+
 function selectAsset(
   assets: ReleaseAsset[],
   os: string,
@@ -703,15 +782,12 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
   }
 
   const pending = (async (): Promise<Record<string, unknown>> => {
-    const resp = await fetch(url, {
-      headers: buildSubscriptionRequestHeaders(url),
-      cache: "no-store",
-    });
-    if (!resp.ok) {
-      throw new Error(`mihomo_subscription_failed:${resp.status}`);
-    }
-    const raw = await resp.text();
+    const raw = await readSubscriptionText(url);
     const content = decodeBase64IfNeeded(raw);
+    const inlineProxies = parseProviderPayloadToProxies(content).filter((proxy) => {
+      const proxyName = typeof proxy?.name === "string" ? proxy.name : "";
+      return !isNonSelectableProxyName(proxyName);
+    });
     let subscription: Record<string, unknown> = {};
     try {
       const parsed = yamlParse(content) as Record<string, unknown>;
@@ -720,17 +796,18 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
       subscription = {};
     }
     if (
-      Object.keys(subscription).length === 0 ||
-      (!Array.isArray(subscription.proxies) && !subscription["proxy-providers"] && !subscription["proxy-groups"])
+      inlineProxies.length > 0 &&
+      (!Array.isArray(subscription.proxies) || subscription.proxies.length === 0) &&
+      !subscription["proxy-providers"]
     ) {
-      const proxies = parseProviderPayloadToProxies(content).filter((proxy) => {
-        const proxyName = typeof proxy?.name === "string" ? proxy.name : "";
-        return !isNonSelectableProxyName(proxyName);
-      });
-      if (proxies.length > 0) {
-        subscription = { proxies };
-      }
+      subscription = {
+        ...subscription,
+        proxies: inlineProxies,
+      };
     }
+    console.info(
+      `[mihomo] subscription parse url=${url} inlineProxies=${inlineProxies.length} keys=${Object.keys(subscription).join(",") || "(none)"}`,
+    );
     const providers = (subscription["proxy-providers"] || {}) as Record<string, Record<string, unknown>>;
     const materializedProviders: Record<string, Record<string, unknown>[]> = {};
 
@@ -738,12 +815,7 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
       const providerUrl = typeof provider?.url === "string" ? provider.url.trim() : "";
       if (!providerUrl) continue;
       try {
-        const providerResp = await fetch(providerUrl, {
-          headers: buildSubscriptionRequestHeaders(providerUrl),
-          cache: "no-store",
-        });
-        if (!providerResp.ok) continue;
-        const providerText = await providerResp.text();
+        const providerText = await readSubscriptionText(providerUrl);
         const proxies = parseProviderPayloadToProxies(providerText).filter((proxy) => {
           const proxyName = typeof proxy?.name === "string" ? proxy.name : "";
           return !isNonSelectableProxyName(proxyName);
@@ -760,6 +832,7 @@ async function fetchSubscription(url: string): Promise<Record<string, unknown>> 
       subscription.__materializedProxyProviders = materializedProviders;
     }
     if (!subscriptionHasUsableNodes(subscription)) {
+      console.warn(`[mihomo] subscription unusable url=${url} contentPrefix=${content.slice(0, 160)}`);
       throw new Error("mihomo_subscription_empty");
     }
     rememberSuccessfulSubscription(url, subscription);

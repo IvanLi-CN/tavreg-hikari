@@ -7,7 +7,6 @@ import {
   ensureCfMailMailbox,
   normalizeCfMailBaseUrl,
   provisionCfMailMailbox,
-  resolveCfMailMailbox,
   type CfMailHttpJson,
 } from "../cfmail-api.js";
 import { startMihomo } from "../proxy/mihomo.js";
@@ -80,6 +79,7 @@ const OUTPUT_ROOT = path.join(REPO_ROOT, "output");
 const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json");
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
+const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "ivanli.asia").trim() || "ivanli.asia";
 
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
@@ -89,6 +89,11 @@ function toInt(value: string | undefined, fallback: number): number {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function randomMailboxSegment(prefix: string): string {
+  const suffix = Math.random().toString(16).slice(2, 10).padEnd(8, "0").slice(0, 8);
+  return `${prefix}-${suffix}`;
 }
 
 function json(data: unknown, init?: ResponseInit): Response {
@@ -149,13 +154,6 @@ function splitEmailAddress(email: string): { local: string; domain: string } | n
   };
 }
 
-function canFallbackToHintedProofMailboxId(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /cfmail_api_key_missing|fetch failed|network|timed out|timeout|ECONN|ENOTFOUND|http_failed:(401|403|429|5\d\d)|HTTP 5\d\d|HTTP 429|HTTP 403|HTTP 401/i.test(
-    message,
-  );
-}
-
 function shouldRetryAccountBootstrapWithFreshProxy(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_TIMED_OUT|network_connection_closed|network_connection_reset|network_timeout|page\.goto:\s*net::ERR_CONNECTION_CLOSED|page\.goto:\s*net::ERR_CONNECTION_RESET|page\.goto:\s*net::ERR_TIMED_OUT|chromium_net_error:ERR_CONNECTION_CLOSED|chromium_net_error:ERR_CONNECTION_RESET|chromium_net_error:ERR_TIMED_OUT|proxy_node_unavailable/i.test(
@@ -181,55 +179,19 @@ async function ensureSavedProofMailbox(input: {
     throw new Error("cfmail_api_key_missing");
   }
   const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
-  let mailboxId = "";
-  try {
-    mailboxId =
-      (
-        await resolveCfMailMailbox({
-          baseUrl,
-          apiKey,
-          address,
-          httpJson: serverHttpJson,
-        })
-      )?.id || "";
-  } catch (error) {
-    if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
-      return {
-        provider: "cfmail",
-        address,
-        mailboxId: hintedMailboxId,
-      };
-    }
-    throw error;
-  }
-  if (!mailboxId) {
-    let provisioned;
-    try {
-      provisioned = await ensureCfMailMailbox({
-        baseUrl,
-        apiKey,
-        httpJson: serverHttpJson,
-        address,
-      });
-    } catch (error) {
-      if (hintedMailboxId && canFallbackToHintedProofMailboxId(error)) {
-        return {
-          provider: "cfmail",
-          address,
-          mailboxId: hintedMailboxId,
-        };
-      }
-      throw error;
-    }
-    if (provisioned.address.trim().toLowerCase() !== address) {
-      throw new Error(`cfmail_mailbox_not_found:${address}`);
-    }
-    mailboxId = provisioned.id;
+  const ensured = await ensureCfMailMailbox({
+    baseUrl,
+    apiKey,
+    httpJson: serverHttpJson,
+    address,
+  });
+  if (ensured.address.trim().toLowerCase() !== address) {
+    throw new Error(`cfmail_mailbox_not_found:${address}`);
   }
   return {
     provider: "cfmail",
     address,
-    mailboxId,
+    mailboxId: ensured.id || hintedMailboxId,
   };
 }
 
@@ -267,6 +229,9 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
         baseUrl,
         apiKey,
         httpJson: serverHttpJson,
+        localPart: randomMailboxSegment("mail"),
+        subdomain: randomMailboxSegment("box"),
+        rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
       });
   return {
     email: mailbox.address,
@@ -696,6 +661,7 @@ function parseJobSite(value: string | null | undefined): JobSite {
 type SiteScheduler = {
   activeAttemptRows(): JobAttemptRecord[];
   getAutoExtractSnapshot(jobId: number): unknown;
+  getCooldownSnapshot?: () => unknown;
 };
 
 function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
@@ -708,6 +674,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       recentAttempts: [],
       eligibleCount: 0,
       autoExtractState: null,
+      cooldown: scheduler.getCooldownSnapshot?.() ?? null,
     };
   }
   return {
@@ -720,6 +687,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: site === "tavily" ? db.countEligibleAccounts(job.id) : 0,
     autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
+    cooldown: scheduler.getCooldownSnapshot?.() ?? null,
   };
 }
 
@@ -752,9 +720,11 @@ function randomPassword(length = 18): string {
 }
 
 function randomNickname(): string {
-  const prefixes = ["Nova", "Pixel", "Mochi", "Kumo", "Sora", "Mika", "Luna", "Rin"];
-  const suffix = Math.floor(100 + Math.random() * 900);
-  return `${prefixes[Math.floor(Math.random() * prefixes.length)] || "Nova"}${suffix}`;
+  const firstNames = ["Mika", "Luna", "Rin", "Sora", "Aiko", "Hana", "Nora", "Yuna"];
+  const lastNames = ["Hoshino", "Amano", "Kobayashi", "Hayashi", "Minase", "Sakurai", "Kisaragi", "Morita"];
+  const first = firstNames[Math.floor(Math.random() * firstNames.length)] || "Mika";
+  const last = lastNames[Math.floor(Math.random() * lastNames.length)] || "Hoshino";
+  return `${first} ${last}`;
 }
 
 function randomBirthDate(): string {
@@ -1345,8 +1315,6 @@ async function main(): Promise<void> {
   });
   const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast);
   const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
-
-  await runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
     queueAccountSessionBootstrap(accountId, { reason: "auto" });
@@ -2441,6 +2409,8 @@ async function main(): Promise<void> {
   });
 
   console.log(`Tavreg Hikari web admin ready at http://${server.hostname}:${server.port}`);
+
+  void runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   const shutdown = async () => {
     await Promise.all([tavilyScheduler.shutdown(), chatgptScheduler.shutdown()]).catch(() => {});

@@ -1177,7 +1177,6 @@ export class AppDatabase {
         UNIQUE(mailbox_id, graph_message_id)
       );
 
-      CREATE INDEX IF NOT EXISTS jobs_site_id_idx ON jobs(site, id DESC);
       CREATE INDEX IF NOT EXISTS chatgpt_credentials_created_idx ON chatgpt_credentials(created_at DESC);
     `);
 
@@ -1236,6 +1235,7 @@ export class AppDatabase {
     if (!jobColumns.has("payload_json")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';");
     }
+    this.db.exec("CREATE INDEX IF NOT EXISTS jobs_site_id_idx ON jobs(site, id DESC);");
     const jobAttemptTableInfo = this.db.query("PRAGMA table_info(job_attempts);").all() as Array<Record<string, unknown>>;
     const jobAttemptColumns = new Set(jobAttemptTableInfo.map((item) => String(item.name || "").toLowerCase()));
     const accountIdColumn = jobAttemptTableInfo.find((item) => String(item.name || "").toLowerCase() === "account_id");

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
-import { mkdir, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   AppDatabase,
   type AppSettings,
@@ -8,6 +9,7 @@ import {
   type JobAttemptRecord,
   type JobRecord,
   type JobSite,
+  type ProxyNodeRecord,
 } from "../storage/app-db.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveAttemptProxyNode, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
@@ -44,6 +46,21 @@ interface ChatGptWorkerResult {
   };
   notes?: string[];
 }
+
+export interface ChatGptStartCooldownState {
+  active: boolean;
+  until: string;
+  sourceAttemptId: number;
+  sourceJobId: number;
+  sourceErrorCode: string;
+  reason: string;
+}
+
+const CHATGPT_START_COOLDOWN_MS = 5 * 60_000;
+const CHATGPT_START_COOLDOWN_ERROR_CODES = new Set([
+  "chatgpt_auth_challenge_detected",
+  "chatgpt_captcha_manual_required",
+]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -106,6 +123,71 @@ function resolveCredentialExpiry(result: NonNullable<ChatGptWorkerResult["creden
   return null;
 }
 
+function deriveWorkerErrorCode(rawMessage: string): string | null {
+  const message = String(rawMessage || "").trim();
+  if (!message) return null;
+  const normalized = message.match(/^(chatgpt_[a-z0-9_]+)/i);
+  const value = normalized?.[1];
+  return value ? value.toLowerCase() : null;
+}
+
+function formatChatGptCooldownReason(errorCode: string): string {
+  switch (String(errorCode || "").trim().toLowerCase()) {
+    case "chatgpt_auth_challenge_detected":
+      return "recent auth challenge detected";
+    case "chatgpt_captcha_manual_required":
+      return "recent captcha/manual verification detected";
+    default:
+      return "recent auth risk detected";
+  }
+}
+
+function attemptOutputShowsAuthChallenge(attempt: Pick<JobAttemptRecord, "outputDir">): boolean {
+  const outputDir = String(attempt.outputDir || "").trim();
+  if (!outputDir) return false;
+  try {
+    const workerLog = readFileSync(path.join(outputDir, "worker.log"), "utf8");
+    return /__cf_chl_rt_tk=|just a moment|checking your browser|cloudflare|security check|enable javascript and cookies/i.test(
+      workerLog,
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isBlockedChatGptProxyNode(nodeName: string): boolean {
+  return /香港|hong\s*kong|\bhk\b/i.test(String(nodeName || "").trim());
+}
+
+function isHealthyChatGptProxyNode(node: Pick<ProxyNodeRecord, "lastStatus">): boolean {
+  const status = String(node.lastStatus || "").trim().toLowerCase();
+  return !status || status === "ok" || status === "succeeded" || status === "running";
+}
+
+function shouldBlockChatGptProxyAfterFailure(input: { errorCode: string; errorMessage: string }): boolean {
+  const errorCode = String(input.errorCode || "").trim().toLowerCase();
+  const errorMessage = String(input.errorMessage || "").trim().toLowerCase();
+  if (errorCode === "chatgpt_auth_challenge_detected") return true;
+  if (errorCode === "chatgpt_phone_verification_required") return true;
+  if (errorCode === "exit_1") {
+    return /__cf_chl_rt_tk=|just a moment|checking your browser|cloudflare|security verification/.test(errorMessage);
+  }
+  return false;
+}
+
+function resolveChatGptProxyNode(
+  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "getProxyNodeLastStatus" | "hasProxyNode" | "listProxyNodes">,
+): string | null {
+  const preferred = resolveAttemptProxyNode(db);
+  if (preferred && !isBlockedChatGptProxyNode(preferred)) {
+    return preferred;
+  }
+  const fallback = db
+    .listProxyNodes()
+    .find((node) => !isBlockedChatGptProxyNode(node.nodeName) && isHealthyChatGptProxyNode(node));
+  return fallback?.nodeName || null;
+}
+
 export class ChatGptJobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
@@ -138,10 +220,43 @@ export class ChatGptJobScheduler {
     return this.db.listChatGptCredentials(limit);
   }
 
+  getCooldownSnapshot(): ChatGptStartCooldownState | null {
+    const job = this.db.getCurrentJob(this.site);
+    if (!job) return null;
+    const attempt = this.db.listAttempts(job.id, false).find((item) => {
+      const errorCode = String(item.errorCode || "").trim().toLowerCase();
+      return CHATGPT_START_COOLDOWN_ERROR_CODES.has(errorCode) || attemptOutputShowsAuthChallenge(item);
+    });
+    if (!attempt?.completedAt) {
+      return null;
+    }
+    const completedAtMs = Date.parse(attempt.completedAt);
+    if (!Number.isFinite(completedAtMs)) {
+      return null;
+    }
+    const untilMs = completedAtMs + CHATGPT_START_COOLDOWN_MS;
+    if (untilMs <= Date.now()) {
+      return null;
+    }
+    const sourceErrorCode = String(attempt.errorCode || "").trim().toLowerCase() || "chatgpt_auth_challenge_detected";
+    return {
+      active: true,
+      until: new Date(untilMs).toISOString(),
+      sourceAttemptId: attempt.id,
+      sourceJobId: job.id,
+      sourceErrorCode,
+      reason: formatChatGptCooldownReason(sourceErrorCode),
+    };
+  }
+
   async startJob(input: ChatGptJobPayload): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
       throw new Error("configure a Mihomo subscription before starting a ChatGPT job");
+    }
+    const cooldown = this.getCooldownSnapshot();
+    if (cooldown?.active) {
+      throw new Error(`${cooldown.reason}; retry after ${cooldown.until}`);
     }
     const job = this.db.createJob({
       site: this.site,
@@ -289,8 +404,9 @@ export class ChatGptJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const selectedProxyNode = resolveAttemptProxyNode(this.db);
+    const selectedProxyNode = resolveChatGptProxyNode(this.db);
     if (selectedProxyNode) {
+      this.db.updateAttempt(attempt.id, { proxyNode: selectedProxyNode });
       this.db.touchProxyLease(selectedProxyNode);
     }
     const args =
@@ -320,7 +436,9 @@ export class ChatGptJobScheduler {
           PROXY_CHECK_TIMEOUT_MS: String(settings.timeoutMs),
           PROXY_LATENCY_MAX_MS: String(settings.maxLatencyMs),
           OUTPUT_ROOT_DIR: outputDir,
-          KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "true",
+          CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
+          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+          KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
           KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
         },
       }),
@@ -335,6 +453,14 @@ export class ChatGptJobScheduler {
       stopRequested: null,
     };
     this.activeAttempts.set(attempt.id, active);
+    let stdout = "";
+    let stderr = "";
+    const workerLogPath = path.join(outputDir, "worker.log");
+    const flushWorkerLog = async () => {
+      const content = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+      if (!content) return;
+      await writeFile(workerLogPath, `${content}\n`, "utf8").catch(() => {});
+    };
     let settled = false;
     const finalize = async (runner: () => Promise<void> | void) => {
       if (settled) return;
@@ -343,6 +469,7 @@ export class ChatGptJobScheduler {
         try {
           await runner();
         } finally {
+          await flushWorkerLog();
           this.activeAttempts.delete(attempt.id);
           await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
         }
@@ -357,6 +484,16 @@ export class ChatGptJobScheduler {
 
     child.once("spawn", () => {
       void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+    });
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      void flushWorkerLog();
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      void flushWorkerLog();
     });
 
     child.once("error", (error) => {
@@ -391,6 +528,7 @@ export class ChatGptJobScheduler {
     const message =
       error?.error
       || (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+    const workerErrorCode = deriveWorkerErrorCode(message);
 
     if (active.stopRequested === "force_stop") {
       const { job, attempt } = this.db.completeAttemptStopped(jobId, attemptId, null, {
@@ -428,6 +566,8 @@ export class ChatGptJobScheduler {
     const errorCode =
       code === 0 && signal == null && accessToken && !refreshToken
         ? "chatgpt_refresh_token_missing"
+        : workerErrorCode
+          ? workerErrorCode
         : code == null
           ? "process_exit"
           : `exit_${code}`;
@@ -438,7 +578,14 @@ export class ChatGptJobScheduler {
   }
 
   private failAttempt(jobId: number, attemptId: number, input: { errorCode: string; errorMessage: string }): void {
+    const priorAttempt = this.db.getAttempt(attemptId);
     const { job, attempt } = this.db.completeAttemptFailure(jobId, attemptId, null, input, null);
+    const failedProxyNode = priorAttempt?.proxyNode || attempt.proxyNode;
+    if (failedProxyNode && shouldBlockChatGptProxyAfterFailure(input)) {
+      this.db.touchProxyLease(failedProxyNode, {
+        status: "failed",
+      });
+    }
     this.emit("attempt.updated", { site: this.site, attempt });
     this.emit("job.updated", { site: this.site, job });
     this.emit("toast", { level: "error", message: `chatgpt attempt #${attempt.id} failed: ${input.errorMessage}` });

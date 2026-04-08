@@ -168,6 +168,7 @@ function createIdleJobSnapshot(site: JobSite): JobSnapshot {
     recentAttempts: [],
     eligibleCount: 0,
     autoExtractState: null,
+    cooldown: null,
   };
 }
 

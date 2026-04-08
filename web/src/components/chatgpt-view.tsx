@@ -81,7 +81,8 @@ export function ChatGptView({
   onExportCredential: (credential: ChatGptCredentialRecord) => void | Promise<void>;
 }) {
   const status = job.job?.status || "idle";
-  const canStart = !job.job || ["completed", "failed", "stopped"].includes(status);
+  const cooldown = job.cooldown?.active ? job.cooldown : null;
+  const canStart = (!job.job || ["completed", "failed", "stopped"].includes(status)) && !cooldown;
   const canStop = status === "running";
   const canForceStop = ["running", "stopping", "force_stopping"].includes(status);
   const credentialDetail = buildCredentialDetail(revealedCredential);
@@ -134,6 +135,13 @@ export function ChatGptView({
               <Badge variant="neutral">max attempts: 1</Badge>
               <span>默认值生成于 {formatDate(draft?.generatedAt)}</span>
             </div>
+            {cooldown ? (
+              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
+                检测到最近一次授权链触发了 challenge，已进入冷却。
+                {" "}
+                请等到 {formatDate(cooldown.until)} 之后再重新开始。
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-3">
               <Button variant="secondary" disabled={draftBusy || jobBusy} onClick={() => void onRegenerateDraft()}>
                 {draftBusy ? "生成中..." : "重新生成默认值"}

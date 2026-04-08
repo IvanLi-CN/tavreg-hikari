@@ -302,6 +302,14 @@ export type JobSnapshot = {
   recentAttempts: AttemptRecord[];
   eligibleCount: number;
   autoExtractState: AutoExtractState | null;
+  cooldown?: null | {
+    active: boolean;
+    until: string;
+    sourceAttemptId: number;
+    sourceJobId: number;
+    sourceErrorCode: string;
+    reason: string;
+  };
 };
 
 export type ChatGptDraft = {

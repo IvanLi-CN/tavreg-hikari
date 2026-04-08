@@ -10446,7 +10446,7 @@ function isPidAlive(pid: number | undefined): boolean {
   }
 }
 
-async function launchNativeChromeCdp(
+export async function launchNativeChromeCdp(
   cfg: AppConfig,
   mode: "headed" | "headless",
   proxyServer: string,
@@ -10454,6 +10454,7 @@ async function launchNativeChromeCdp(
   acceptLanguage: string,
   timezoneId?: string,
   signal?: AbortSignal,
+  startupTargets: string[] = ["https://app.tavily.com/"],
 ): Promise<{
   browser: Browser;
   context: any;
@@ -10474,7 +10475,6 @@ async function launchNativeChromeCdp(
     await mkdir(profileDir, { recursive: true });
     await cleanupChromeProfileArtifacts(profileDir).catch(() => {});
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
-    const startupTargets = ["https://app.tavily.com/"];
     const args = [
       `--remote-debugging-port=${debugPort}`,
       "--remote-debugging-address=127.0.0.1",

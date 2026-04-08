@@ -85,7 +85,7 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain("passwordPlaintext: row.passwordPlaintext,");
   expect(serverSource).toContain("const unchangedSavedProofMailbox =");
   expect(serverSource).toContain("currentAccount.proofMailboxId === requestedProofMailboxId");
-  expect(serverSource).toContain("if (hintedMailboxId && canFallbackToHintedProofMailboxId(error))");
+  expect(serverSource).toContain("const ensured = await ensureCfMailMailbox");
   expect(serverSource).toContain("mailboxId: proofMailboxId,");
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxAddress")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxId")');
