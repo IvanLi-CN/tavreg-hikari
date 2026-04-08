@@ -1089,9 +1089,10 @@ export function App() {
     navigate(`/mailboxes?accountId=${accountId}`);
   };
 
-  const startMailboxConnectionForAccount = async (accountId: number) => {
+  const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean }) => {
     const payload = await api<AccountUpdatePayload>(`/api/accounts/${accountId}/session/rebootstrap`, {
       method: "POST",
+      body: JSON.stringify({ force: options?.force !== false }),
     });
     setAccounts((current) => mergeAccountIntoAccountsPayload(current, payload.account));
     await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
@@ -1105,7 +1106,7 @@ export function App() {
       setActiveBatchBootstrapMode(null);
       setConnectingAccountIds([accountId]);
       setError(null);
-      await startMailboxConnectionForAccount(accountId);
+      await startMailboxConnectionForAccount(accountId, { force: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       throw err;
@@ -1148,6 +1149,7 @@ export function App() {
         .map((item) => [item.accountId as number, item.microsoftEmail || `#${item.accountId}`]),
     );
     const failedAccounts: string[] = [];
+    let revalidatedSkipCount = 0;
     try {
       setAccountConnectBusy(true);
       setActiveBatchBootstrapMode(mode);
@@ -1158,13 +1160,17 @@ export function App() {
         setAccountConnectProgress({ current: index + 1, total: queue.length });
         setConnectingAccountIds([accountId]);
         try {
-          await startMailboxConnectionForAccount(accountId);
+          const payload = await startMailboxConnectionForAccount(accountId, { force: mode === "force" });
+          if (!payload.queued) {
+            revalidatedSkipCount += 1;
+          }
         } catch {
           failedAccounts.push(accountLabel);
         }
       }
       if (
         failedAccounts.length > 0
+        || revalidatedSkipCount > 0
         || preview.summary.blockedCount > 0
         || preview.summary.bootstrappingCount > 0
         || (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only")
@@ -1172,6 +1178,9 @@ export function App() {
         const parts: string[] = [];
         if (failedAccounts.length > 0) {
           parts.push(`部分账号 Bootstrap 失败：${failedAccounts.slice(0, 4).join("、")}${failedAccounts.length > 4 ? " 等" : ""}`);
+        }
+        if (revalidatedSkipCount > 0) {
+          parts.push(`已跳过 ${revalidatedSkipCount} 个执行前状态已变化的账号`);
         }
         if (preview.summary.blockedCount > 0) {
           parts.push(`已跳过 ${preview.summary.blockedCount} 个锁定、禁用或占用中的账号`);

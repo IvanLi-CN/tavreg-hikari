@@ -1137,8 +1137,14 @@ async function main(): Promise<void> {
       return false;
     }
     const replayPendingBootstrap = options?.reason === "auto" && shouldReplayPendingAccountBootstrap(account);
-    if (!options?.force && !replayPendingBootstrap && !shouldQueueImportedAccountBootstrap(account)) {
-      return false;
+    if (!options?.force) {
+      if (options?.reason === "manual") {
+        if (resolveAccountBatchBootstrapDecision(account, "pending_only").decision !== "queue") {
+          return false;
+        }
+      } else if (!replayPendingBootstrap && !shouldQueueImportedAccountBootstrap(account)) {
+        return false;
+      }
     }
     const queueDisposition = resolveBootstrapQueueDisposition({
       alreadyQueued: sessionBootstrapQueuedIds.has(accountId),
@@ -1553,11 +1559,12 @@ async function main(): Promise<void> {
         if (!account) {
           return badRequest(`account not found: ${accountId}`, 404);
         }
+        const body = (await req.json().catch(() => null)) as { force?: boolean | null } | null;
         const connectBlockMessage = getAccountConnectBlockMessage(account);
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
         return json({
           ok: true,
           queued,
@@ -1778,11 +1785,12 @@ async function main(): Promise<void> {
         if (!account) {
           return badRequest(`account not found: ${accountId}`, 404);
         }
+        const body = (await req.json().catch(() => null)) as { force?: boolean | null } | null;
         const connectBlockMessage = getAccountConnectBlockMessage(account);
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
         return json({
           ok: true,
           queued,
