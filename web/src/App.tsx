@@ -10,6 +10,8 @@ import { buildImportCommitEntries, parseImportContent } from "@/lib/account-impo
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import type {
+  AccountBatchBootstrapMode,
+  AccountBatchBootstrapPreviewPayload,
   AccountRecord,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
@@ -109,19 +111,6 @@ function mergeAccountIntoAccountsPayload(current: AccountsPayload, account: Acco
   };
 }
 
-function isLockedBatchConnectAccount(account: Pick<AccountRecord, "skipReason" | "lastErrorCode">): boolean {
-  return (
-    String(account.skipReason || "").trim() === "microsoft_account_locked"
-    || /^microsoft_account_locked/i.test(String(account.lastErrorCode || "").trim())
-  );
-}
-
-function isBatchConnectBlockedAccount(
-  account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "browserSession">,
-): boolean {
-  return Boolean(account.disabledAt) || isLockedBatchConnectAccount(account) || account.browserSession?.status === "bootstrapping";
-}
-
 function createIdleExtractorRuntime(): AccountExtractorRuntime {
   return {
     status: "idle",
@@ -140,6 +129,23 @@ function createIdleExtractorRuntime(): AccountExtractorRuntime {
     updatedAt: null,
     errorMessage: null,
     lastBatchId: null,
+  };
+}
+
+function createEmptyBatchBootstrapPreview(mode: AccountBatchBootstrapMode = "pending_only"): AccountBatchBootstrapPreviewPayload {
+  return {
+    ok: true,
+    mode,
+    requestedCount: 0,
+    queueIds: [],
+    items: [],
+    summary: {
+      queueableCount: 0,
+      blockedCount: 0,
+      alreadyBootstrappedCount: 0,
+      bootstrappingCount: 0,
+      missingCount: 0,
+    },
   };
 }
 
@@ -253,6 +259,8 @@ export function App() {
     q: "",
     status: "",
     hasApiKey: "",
+    sessionStatus: "",
+    mailboxStatus: "",
     groupName: "",
     sortBy: "",
     sortDir: "desc",
@@ -286,8 +294,12 @@ export function App() {
   const [messageBusy, setMessageBusy] = useState(false);
   const [accountConnectBusy, setAccountConnectBusy] = useState(false);
   const [accountConnectProgress, setAccountConnectProgress] = useState<{ current: number; total: number } | null>(null);
+  const [batchBootstrapPreview, setBatchBootstrapPreview] = useState<AccountBatchBootstrapPreviewPayload>(createEmptyBatchBootstrapPreview);
+  const [batchBootstrapPreviewBusy, setBatchBootstrapPreviewBusy] = useState(false);
+  const [activeBatchBootstrapMode, setActiveBatchBootstrapMode] = useState<AccountBatchBootstrapMode | null>(null);
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
+  const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
   const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname), [pathname]);
@@ -323,6 +335,8 @@ export function App() {
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.status) params.set("status", nextQuery.status);
     if (nextQuery.hasApiKey) params.set("hasApiKey", nextQuery.hasApiKey);
+    if (nextQuery.sessionStatus) params.set("sessionStatus", nextQuery.sessionStatus);
+    if (nextQuery.mailboxStatus) params.set("mailboxStatus", nextQuery.mailboxStatus);
     if (nextQuery.groupName) params.set("groupName", nextQuery.groupName);
     if (nextQuery.sortBy) params.set("sortBy", nextQuery.sortBy);
     if (nextQuery.sortBy && nextQuery.sortDir) params.set("sortDir", nextQuery.sortDir);
@@ -335,7 +349,16 @@ export function App() {
       return;
     }
     setAccounts(payload);
+    setAccountsRefreshVersion((current) => current + 1);
   };
+  const previewBatchBootstrap = async (
+    ids: number[],
+    mode: AccountBatchBootstrapMode = "pending_only",
+  ) =>
+    api<AccountBatchBootstrapPreviewPayload>("/api/accounts/session-bootstrap/preview", {
+      method: "POST",
+      body: JSON.stringify({ ids, mode }),
+    });
   const refreshApiKeys = async (nextQuery = apiKeyQuery) => {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
@@ -582,6 +605,36 @@ export function App() {
   useEffect(() => {
     void refreshAccounts(accountQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [accountQuery]);
+
+  useEffect(() => {
+    if (activePage !== "accounts") return;
+    const ids = Array.from(new Set(selectedAccountIds.filter((id) => Number.isInteger(id) && id > 0)));
+    if (ids.length === 0) {
+      setBatchBootstrapPreview(createEmptyBatchBootstrapPreview());
+      setBatchBootstrapPreviewBusy(false);
+      return;
+    }
+    let cancelled = false;
+    setBatchBootstrapPreviewBusy(true);
+    void previewBatchBootstrap(ids, "pending_only")
+      .then((payload) => {
+        if (cancelled) return;
+        setBatchBootstrapPreview(payload);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setBatchBootstrapPreview(createEmptyBatchBootstrapPreview());
+        setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setBatchBootstrapPreviewBusy(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activePage, selectedAccountIds, accountsRefreshVersion]);
 
   useEffect(() => {
     void refreshApiKeys().catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -1037,9 +1090,10 @@ export function App() {
     navigate(`/mailboxes?accountId=${accountId}`);
   };
 
-  const startMailboxConnectionForAccount = async (accountId: number) => {
+  const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean }) => {
     const payload = await api<AccountUpdatePayload>(`/api/accounts/${accountId}/session/rebootstrap`, {
       method: "POST",
+      body: JSON.stringify({ force: options?.force !== false }),
     });
     setAccounts((current) => mergeAccountIntoAccountsPayload(current, payload.account));
     await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
@@ -1050,9 +1104,10 @@ export function App() {
     try {
       setAccountConnectBusy(true);
       setAccountConnectProgress({ current: 1, total: 1 });
+      setActiveBatchBootstrapMode(null);
       setConnectingAccountIds([accountId]);
       setError(null);
-      await startMailboxConnectionForAccount(accountId);
+      await startMailboxConnectionForAccount(accountId, { force: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       throw err;
@@ -1063,46 +1118,86 @@ export function App() {
     }
   };
 
-  const handleConnectSelectedAccounts = async () => {
+  const handleConnectSelectedAccounts = async (mode: AccountBatchBootstrapMode = "pending_only") => {
     if (selectedAccountIds.length === 0) return;
-    const uniqueSelectedIds = Array.from(new Set(selectedAccountIds));
-    const queue = uniqueSelectedIds.filter((accountId) => {
-      const account = accounts.rows.find((row) => row.id === accountId);
-      return !account || !isBatchConnectBlockedAccount(account);
-    });
-    const skippedAccounts = uniqueSelectedIds.length - queue.length;
-    if (queue.length === 0) {
-      setError(skippedAccounts > 0 ? "所选账号都已锁定或禁用，无法发起连接" : null);
+    const uniqueSelectedIds = Array.from(new Set(selectedAccountIds.filter((id) => Number.isInteger(id) && id > 0)));
+    let preview: AccountBatchBootstrapPreviewPayload;
+    try {
+      setError(null);
+      preview = await previewBatchBootstrap(uniqueSelectedIds, mode);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
       return;
     }
+    const queue = preview.queueIds;
+    if (queue.length === 0) {
+      const parts: string[] = [];
+      if (preview.summary.blockedCount > 0) {
+        parts.push(`已跳过 ${preview.summary.blockedCount} 个锁定、禁用或占用中的账号`);
+      }
+      if (preview.summary.bootstrappingCount > 0) {
+        parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 或排队中的账号`);
+      }
+      if (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only") {
+        parts.push(`所选账号里有 ${preview.summary.alreadyBootstrappedCount} 个已 Bootstrap 成功`);
+      }
+      setError(parts.join("；") || "当前没有可执行的 Bootstrap 目标");
+      return;
+    }
+    const emailById = new Map(
+      preview.items
+        .filter((item) => item.accountId != null)
+        .map((item) => [item.accountId as number, item.microsoftEmail || `#${item.accountId}`]),
+    );
     const failedAccounts: string[] = [];
+    let revalidatedSkipCount = 0;
     try {
       setAccountConnectBusy(true);
+      setActiveBatchBootstrapMode(mode);
       setError(null);
       for (let index = 0; index < queue.length; index += 1) {
         const accountId = queue[index]!;
-        const accountLabel = accounts.rows.find((row) => row.id === accountId)?.microsoftEmail || `#${accountId}`;
+        const accountLabel = emailById.get(accountId) || `#${accountId}`;
         setAccountConnectProgress({ current: index + 1, total: queue.length });
         setConnectingAccountIds([accountId]);
         try {
-          await startMailboxConnectionForAccount(accountId);
+          const payload = await startMailboxConnectionForAccount(accountId, { force: mode === "force" });
+          if (!payload.queued) {
+            revalidatedSkipCount += 1;
+          }
         } catch {
           failedAccounts.push(accountLabel);
         }
       }
-      if (failedAccounts.length > 0 || skippedAccounts > 0) {
+      if (
+        failedAccounts.length > 0
+        || revalidatedSkipCount > 0
+        || preview.summary.blockedCount > 0
+        || preview.summary.bootstrappingCount > 0
+        || (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only")
+      ) {
         const parts: string[] = [];
         if (failedAccounts.length > 0) {
-          parts.push(`部分账号连接失败：${failedAccounts.slice(0, 4).join("、")}${failedAccounts.length > 4 ? " 等" : ""}`);
+          parts.push(`部分账号 Bootstrap 失败：${failedAccounts.slice(0, 4).join("、")}${failedAccounts.length > 4 ? " 等" : ""}`);
         }
-        if (skippedAccounts > 0) {
-          parts.push(`已跳过 ${skippedAccounts} 个锁定或禁用账号`);
+        if (revalidatedSkipCount > 0) {
+          parts.push(`已跳过 ${revalidatedSkipCount} 个执行前状态已变化的账号`);
+        }
+        if (preview.summary.blockedCount > 0) {
+          parts.push(`已跳过 ${preview.summary.blockedCount} 个锁定、禁用或占用中的账号`);
+        }
+        if (preview.summary.bootstrappingCount > 0) {
+          parts.push(`已跳过 ${preview.summary.bootstrappingCount} 个正在 Bootstrap 或排队中的账号`);
+        }
+        if (preview.summary.alreadyBootstrappedCount > 0 && mode === "pending_only") {
+          parts.push(`已跳过 ${preview.summary.alreadyBootstrappedCount} 个已 Bootstrap 成功的账号`);
         }
         setError(parts.join("；"));
       }
     } finally {
       setConnectingAccountIds([]);
       setAccountConnectProgress(null);
+      setActiveBatchBootstrapMode(null);
       setAccountConnectBusy(false);
       await refreshMailboxAccountState().catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }
@@ -1234,6 +1329,9 @@ export function App() {
           batchBusy={batchBusy}
           connectBusy={accountConnectBusy}
           connectProgress={accountConnectProgress}
+          batchBootstrapPreview={batchBootstrapPreview}
+          batchBootstrapPreviewBusy={batchBootstrapPreviewBusy}
+          activeBatchBootstrapMode={activeBatchBootstrapMode}
           extractorSettings={extractorSettings}
           extractorSettingsBusy={extractorSettingsBusy}
           extractorRuntime={extractorRuntime}

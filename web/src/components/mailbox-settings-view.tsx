@@ -68,7 +68,7 @@ export function MailboxSettingsView(props: {
         <Card className="border-white/10 bg-slate-950/55 shadow-none">
           <CardHeader className="border-b border-white/8">
             <CardTitle>接入参数</CardTitle>
-            <CardDescription>保存后，收件箱页的“连接邮箱”会使用这里的配置发起 OAuth。</CardDescription>
+            <CardDescription>保存后，微软账号页的“Bootstrap 邮箱”会使用这里的配置发起 OAuth。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-5 p-5">
             <div className="grid gap-4 md:grid-cols-2">
@@ -146,7 +146,7 @@ export function MailboxSettingsView(props: {
               <InfoRow label="默认 authority" value="common" />
               <InfoRow label="建议委托权限" value="Mail.Read, offline_access" />
               <div className="mt-4 rounded-2xl border border-white/8 bg-white/[0.02] px-4 py-3 text-sm leading-6 text-slate-300">
-                配置完成后，回到邮箱页，为具体账号点击“连接邮箱”即可发起授权。
+                配置完成后，回到微软账号页，为具体账号点击“Bootstrap 邮箱”即可发起授权。
               </div>
             </CardContent>
           </Card>

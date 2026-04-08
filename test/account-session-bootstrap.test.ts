@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
+  hasSuccessfulAccountBootstrap,
   isLockedAccountRecord,
+  resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
 } from "../src/server/account-session-bootstrap.ts";
@@ -16,6 +19,8 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: null,
         lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "available",
         browserSession: {
           status: "ready",
         },
@@ -30,6 +35,8 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: null,
         lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "preparing",
         browserSession: null,
       } as never),
     ).toBe(true);
@@ -39,6 +46,8 @@ describe("account session bootstrap helpers", () => {
         disabledAt: null,
         skipReason: null,
         lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "failed",
         browserSession: {
           status: "failed",
         },
@@ -89,7 +98,7 @@ describe("account session bootstrap helpers", () => {
     expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: true })).toBe("defer_force");
   });
 
-  test("blocks rebootstrap for leased, disabled, or locked accounts", () => {
+  test("blocks rebootstrap for leased, disabled, or locked accounts while keeping linked accounts manually retryable", () => {
     expect(
       getAccountSessionBootstrapBlockMessage({
         leaseJobId: 7,
@@ -106,9 +115,10 @@ describe("account session bootstrap helpers", () => {
         skipReason: null,
         lastErrorCode: null,
         hasApiKey: true,
+        mailboxStatus: "available",
         browserSession: { status: "ready" },
       } as never),
-    ).toContain("API key");
+    ).toBeNull();
     expect(
       getAccountSessionBootstrapBlockMessage({
         leaseJobId: null,
@@ -116,6 +126,7 @@ describe("account session bootstrap helpers", () => {
         skipReason: null,
         lastErrorCode: null,
         hasApiKey: false,
+        mailboxStatus: "preparing",
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已被禁用");
@@ -126,6 +137,7 @@ describe("account session bootstrap helpers", () => {
         skipReason: "microsoft_account_locked",
         lastErrorCode: null,
         hasApiKey: false,
+        mailboxStatus: "locked",
         browserSession: { status: "ready" },
       } as never),
     ).toContain("已锁定");
@@ -135,5 +147,105 @@ describe("account session bootstrap helpers", () => {
     expect(isLockedAccountRecord({ skipReason: "microsoft_account_locked", lastErrorCode: null, disabledAt: null } as never)).toBe(true);
     expect(isLockedAccountRecord({ skipReason: null, lastErrorCode: "microsoft_account_locked:challenge", disabledAt: null } as never)).toBe(true);
     expect(isLockedAccountRecord({ skipReason: null, lastErrorCode: "oauth_timeout", disabledAt: null } as never)).toBe(false);
+  });
+
+  test("treats only ready session + available mailbox as successful bootstrap", () => {
+    expect(
+      hasSuccessfulAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "available",
+        browserSession: { status: "ready" },
+      } as never),
+    ).toBe(true);
+    expect(
+      hasSuccessfulAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "preparing",
+        browserSession: { status: "ready" },
+      } as never),
+    ).toBe(false);
+  });
+
+  test("batch bootstrap preview skips successful or in-flight accounts only in pending-only mode", () => {
+    expect(
+      resolveAccountBatchBootstrapDecision({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "ready" },
+      } as never, "pending_only"),
+    ).toMatchObject({ decision: "already_bootstrapped" });
+    expect(
+      resolveAccountBatchBootstrapDecision({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "ready" },
+      } as never, "force"),
+    ).toMatchObject({ decision: "queue" });
+    expect(
+      resolveAccountBatchBootstrapDecision({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: false,
+        mailboxStatus: "preparing",
+        browserSession: { status: "bootstrapping" },
+      } as never, "force"),
+    ).toMatchObject({ decision: "bootstrapping" });
+  });
+
+  test("auto import bootstrap still skips linked accounts that already own API keys", () => {
+    expect(
+      shouldQueueImportedAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "failed" },
+      } as never),
+    ).toBe(false);
+  });
+
+  test("restart recovery can replay pending bootstraps even for linked accounts", () => {
+    expect(
+      shouldReplayPendingAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "pending" },
+      } as never),
+    ).toBe(true);
+    expect(
+      shouldReplayPendingAccountBootstrap({
+        leaseJobId: null,
+        disabledAt: null,
+        skipReason: null,
+        lastErrorCode: null,
+        hasApiKey: true,
+        mailboxStatus: "available",
+        browserSession: { status: "ready" },
+      } as never),
+    ).toBe(false);
   });
 });
