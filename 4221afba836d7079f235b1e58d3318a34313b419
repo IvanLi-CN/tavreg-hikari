@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.0.1",
+  "base_stable_version": "0.0.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-08T03:26:03Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.0.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "e24a534369f47e8f62889f66440b4e3c0a412b82",
+  "pr_number": 27,
+  "pr_title": "feat: enforce explicit fingerprint browser contract",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.0.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.0.1",
+  "target_sha": "4221afba836d7079f235b1e58d3318a34313b419",
+  "type_label": "type:patch"
+}
