@@ -1,9 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { URL } from "node:url";
 import process from "node:process";
+import { promisify } from "node:util";
 import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMailMessageSummary } from "../cfmail-api.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
@@ -17,6 +19,7 @@ const CALLBACK_PORT = 1455;
 const CALLBACK_PATH = "/auth/callback";
 const CALLBACK_ORIGIN = `http://${CALLBACK_HOST}:${CALLBACK_PORT}`;
 const CALLBACK_URL = `${CALLBACK_ORIGIN}${CALLBACK_PATH}`;
+const execFile = promisify(execFileCallback);
 
 interface WorkerArgs {
   proxyNode?: string;
@@ -1202,25 +1205,60 @@ async function tryResendOtp(page: any): Promise<boolean> {
 }
 
 async function exchangeCodexTokens(input: { code: string; codeVerifier: string }): Promise<Record<string, unknown>> {
-  const response = await fetch(`${OAUTH_ISSUER}/oauth/token`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code: input.code,
-      redirect_uri: CALLBACK_URL,
-      client_id: OAUTH_CLIENT_ID,
-      code_verifier: input.codeVerifier,
-    }),
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code: input.code,
+    redirect_uri: CALLBACK_URL,
+    client_id: OAUTH_CLIENT_ID,
+    code_verifier: input.codeVerifier,
   });
-  const text = await response.text();
-  const payload = text.trim() ? (JSON.parse(text) as Record<string, unknown>) : {};
-  if (!response.ok) {
-    throw new Error(`chatgpt_oauth_token_failed:${response.status}:${text.slice(0, 200)}`);
+  const parsePayload = (text: string): Record<string, unknown> => (text.trim() ? (JSON.parse(text) as Record<string, unknown>) : {});
+  try {
+    const response = await fetch(`${OAUTH_ISSUER}/oauth/token`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body,
+    });
+    const text = await response.text();
+    const payload = parsePayload(text);
+    if (!response.ok) {
+      throw new Error(`chatgpt_oauth_token_failed:${response.status}:${text.slice(0, 200)}`);
+    }
+    return payload;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`oauth token exchange via fetch failed; falling back to curl (${message})`);
+    const { stdout, stderr } = await execFile("curl", [
+      "-sS",
+      "-X",
+      "POST",
+      `${OAUTH_ISSUER}/oauth/token`,
+      "-H",
+      "content-type: application/x-www-form-urlencoded",
+      "--data",
+      body.toString(),
+      "--max-time",
+      "30",
+      "-w",
+      "\n__CURL_STATUS__:%{http_code}",
+    ], {
+      maxBuffer: 1024 * 1024,
+    });
+    const normalized = String(stdout || "");
+    const marker = "\n__CURL_STATUS__:";
+    const markerIndex = normalized.lastIndexOf(marker);
+    const responseText = markerIndex >= 0 ? normalized.slice(0, markerIndex) : normalized;
+    const statusText = markerIndex >= 0 ? normalized.slice(markerIndex + marker.length).trim() : "";
+    const status = Number.parseInt(statusText || "0", 10) || 0;
+    const payload = parsePayload(responseText);
+    if (!status || status >= 400) {
+      const stderrText = String(stderr || "").trim();
+      throw new Error(`chatgpt_oauth_token_failed:${status || "curl"}:${(responseText || stderrText).slice(0, 200)}`);
+    }
+    return payload;
   }
-  return payload;
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
