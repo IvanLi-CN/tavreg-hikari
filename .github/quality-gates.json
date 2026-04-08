@@ -23,6 +23,8 @@
           "Bun Tests": 15368,
           "Web Build": 15368,
           "Storybook Build": 15368,
+          "Fingerprint Browser Install (macOS)": 15368,
+          "Fingerprint Browser Install (Linux)": 15368,
           "Docker Smoke": 15368,
           "Review Policy Gate": 15368
         }
@@ -53,6 +55,8 @@
     "Bun Tests",
     "Web Build",
     "Storybook Build",
+    "Fingerprint Browser Install (macOS)",
+    "Fingerprint Browser Install (Linux)",
     "Docker Smoke",
     "Review Policy Gate"
   ],
@@ -72,6 +76,8 @@
         "Bun Tests",
         "Web Build",
         "Storybook Build",
+        "Fingerprint Browser Install (macOS)",
+        "Fingerprint Browser Install (Linux)",
         "Docker Smoke"
       ]
     },
@@ -90,6 +96,8 @@
         "Bun Tests",
         "Web Build",
         "Storybook Build",
+        "Fingerprint Browser Install (macOS)",
+        "Fingerprint Browser Install (Linux)",
         "Docker Smoke",
         "Release Snapshot"
       ]

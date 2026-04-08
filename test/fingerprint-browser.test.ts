@@ -17,6 +17,8 @@ test("resolves only explicit fingerprint browser paths", () => {
 
 test("accepts repository macOS fingerprint Chromium and stable linux fingerprint paths", () => {
   expect(isFingerprintChromiumExecutable("/Users/demo/repo/.tools/Chromium.app/Contents/MacOS/Chromium")).toBe(true);
+  expect(isFingerprintChromiumExecutable("/Users/demo/repo/.tools/fingerprint-browser/linux/chrome")).toBe(true);
+  expect(isFingerprintChromiumExecutable("/Users/demo/repo/.tools/fingerprint-browser/linux/144.0.7559.132/chrome")).toBe(true);
   expect(isFingerprintChromiumExecutable("/opt/fingerprint-browser/chrome")).toBe(true);
   expect(isFingerprintChromiumExecutable("/usr/bin/google-chrome-stable")).toBe(false);
   expect(isFingerprintChromiumExecutable("/usr/bin/chromium")).toBe(false);
@@ -38,7 +40,8 @@ test("rejects system Chrome and missing fingerprint browser executables", () => 
   expect(() => requireFingerprintChromiumExecutablePath("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")).toThrow(
     "Only the provided fingerprint browser is allowed.",
   );
-  expect(() => assertUsableFingerprintChromiumExecutablePath("/opt/fingerprint-browser/missing-chrome")).toThrow(
+  expect(() => requireFingerprintChromiumExecutablePath("/tmp/fingerprint-chrome")).toThrow("Only the provided fingerprint browser is allowed.");
+  expect(() => assertUsableFingerprintChromiumExecutablePath("/opt/fingerprint-browser/chrome")).toThrow(
     "fingerprint browser executable does not exist",
   );
 });

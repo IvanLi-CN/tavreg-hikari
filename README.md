@@ -33,9 +33,17 @@
 
 - 运行时现在**只接受显式 `CHROME_EXECUTABLE_PATH`**，不会再扫描系统 Chrome、仓库工具目录、Playwright 缓存或其它候选浏览器。
 - `CHROME_EXECUTABLE_PATH` 必须指向主人提供的指纹浏览器；路径缺失或不是允许的指纹浏览器时，worker 会在启动前直接失败。
-- Docker / Linux 部署推荐固定挂载：
-  - host: `/home/ivan/srv/home-lab/tavreg-hikari-browser/chrome`
-  - container: `/opt/fingerprint-browser/chrome`
+- 浏览器来源现在固定为仓库内的 release manifest + 安装脚本：
+  - Linux 默认固定 `144.0.7559.132`
+  - macOS 默认固定 `142.0.7444.175`
+- 本地安装统一使用：
+  - `bash ./scripts/install-fingerprint-browser.sh --platform macos --force`
+  - `bash ./scripts/install-fingerprint-browser.sh --platform linux --force`
+- 默认安装路径：
+  - macOS: `.tools/Chromium.app/Contents/MacOS/Chromium`
+  - Linux: `.tools/fingerprint-browser/linux/chrome`
+- Docker / Linux 运行镜像现在直接内置 Linux 指纹浏览器：
+  - image path: `/opt/fingerprint-browser/chrome`
   - env: `CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome`
 
 ## 代理设置与发布治理
@@ -57,6 +65,9 @@
 
 ## 常用脚本
 
+- `bash ./scripts/install-fingerprint-browser.sh --platform macos --force`
+- `bash ./scripts/install-fingerprint-browser.sh --platform linux --force`
+- `node ./scripts/smoke-fingerprint-browser.mjs "$CHROME_EXECUTABLE_PATH"`
 - `bun run typecheck`
 - `bun test`
 - `bun run hooks:install`

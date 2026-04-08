@@ -1,7 +1,8 @@
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import path from "node:path";
 
-const FINGERPRINT_BROWSER_PATH_MARKERS = ["/fingerprint-browser/", "/chromium.app/"] as const;
+const MACOS_FINGERPRINT_BROWSER_PATTERN = /\/chromium\.app\/contents\/macos\/chromium$/i;
+const FINGERPRINT_BROWSER_CHROME_PATTERN = /\/fingerprint-browser\/(?:linux\/)?(?:[\w.+-]+\/)?chrome$/i;
 
 export function resolveExplicitChromeExecutablePath(raw: string | undefined | null): string | undefined {
   const trimmed = String(raw || "").trim();
@@ -11,10 +12,7 @@ export function resolveExplicitChromeExecutablePath(raw: string | undefined | nu
 export function isFingerprintChromiumExecutable(executablePath: string | undefined | null): boolean {
   const normalized = String(executablePath || "").trim().toLowerCase().replaceAll("\\", "/");
   if (!normalized) return false;
-  if (FINGERPRINT_BROWSER_PATH_MARKERS.some((marker) => normalized.includes(marker))) {
-    return true;
-  }
-  return normalized.endsWith("/chromium") && (normalized.includes("/.tools/") || normalized.includes("fingerprint"));
+  return MACOS_FINGERPRINT_BROWSER_PATTERN.test(normalized) || FINGERPRINT_BROWSER_CHROME_PATTERN.test(normalized);
 }
 
 export function requireFingerprintChromiumExecutablePath(executablePath: string | undefined | null): string {

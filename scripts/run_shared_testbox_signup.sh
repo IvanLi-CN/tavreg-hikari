@@ -3,7 +3,7 @@ set -euo pipefail
 
 TESTBOX="${TESTBOX:-codex-testbox}"
 IMAGE="${TESTBOX_IMAGE:-mcr.microsoft.com/playwright:v1.58.2-noble}"
-CHROME_PATH="${TESTBOX_CHROME_PATH:-/ms-playwright/chromium-1208/chrome-linux64/chrome}"
+CHROME_PATH="${TESTBOX_CHROME_PATH:-/work/.tools/fingerprint-browser/linux/chrome}"
 RUN_MODE="${RUN_MODE:-headed}"
 BROWSER_ENGINE="${BROWSER_ENGINE:-chrome}"
 CHROME_NATIVE_AUTOMATION="${CHROME_NATIVE_AUTOMATION:-false}"
@@ -102,6 +102,12 @@ node --version >> remote-test.log 2>&1
 if [ ! -d node_modules ]; then
   npm install --package-lock=false >> remote-test.log 2>&1
 fi
+mkdir -p /work/.tools/fingerprint-browser /work/downloads/fingerprint-browser
+bash ./scripts/install-fingerprint-browser.sh \
+  --platform linux \
+  --dest /work/.tools/fingerprint-browser/linux \
+  --cache-dir /work/downloads/fingerprint-browser \
+  --force >> remote-test.log 2>&1
 run_exit=0
 if ! xvfb-run -a env \\
   RUN_MODE=${RUN_MODE_Q} \\

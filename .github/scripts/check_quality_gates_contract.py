@@ -16,6 +16,8 @@ EXPECTED_REQUIRED_CHECKS = {
     "Bun Tests",
     "Web Build",
     "Storybook Build",
+    "Fingerprint Browser Install (macOS)",
+    "Fingerprint Browser Install (Linux)",
     "Docker Smoke",
     "Review Policy Gate",
 }
@@ -244,7 +246,19 @@ def validate_ci_pr(workflow: dict[str, Any]) -> None:
     pull_request = event_config(workflow, "pull_request", "ci-pr.yml")
     require(set(require_string_list(pull_request.get("branches"), "ci-pr.yml.on.pull_request.branches")) == {"main"}, "ci-pr.yml: pull_request.branches drifted")
     require(set(require_string_list(pull_request.get("types"), "ci-pr.yml.on.pull_request.types")) == EXPECTED_PR_TYPES, "ci-pr.yml: pull_request.types drifted")
-    require(workflow_named_jobs(workflow, "ci-pr.yml") == {"Typecheck & Quality Gates", "Bun Tests", "Web Build", "Storybook Build", "Docker Smoke"}, "ci-pr.yml: named jobs drifted")
+    require(
+        workflow_named_jobs(workflow, "ci-pr.yml")
+        == {
+            "Typecheck & Quality Gates",
+            "Bun Tests",
+            "Web Build",
+            "Storybook Build",
+            "Fingerprint Browser Install (macOS)",
+            "Fingerprint Browser Install (Linux)",
+            "Docker Smoke",
+        },
+        "ci-pr.yml: named jobs drifted",
+    )
 
     typecheck = job_by_name(workflow, "Typecheck & Quality Gates", "ci-pr.yml")
     require_run_contains(step_named(typecheck, "Run typecheck", "ci-pr.yml.jobs.typecheck-quality-gates"), "bun run typecheck", "ci-pr.yml Typecheck step")
@@ -261,6 +275,31 @@ def validate_ci_pr(workflow: dict[str, Any]) -> None:
     storybook = job_by_name(workflow, "Storybook Build", "ci-pr.yml")
     require_run_contains(step_named(storybook, "Build Storybook", "ci-pr.yml.jobs.storybook-build"), "bun run build-storybook", "ci-pr.yml Storybook Build")
 
+    macos_install = job_by_name(workflow, "Fingerprint Browser Install (macOS)", "ci-pr.yml")
+    require_run_contains(
+        step_named(macos_install, "Install fingerprint browser", "ci-pr.yml.jobs.fingerprint-browser-install-macos"),
+        "install-fingerprint-browser.sh --platform macos",
+        "ci-pr.yml Fingerprint Browser Install (macOS) install",
+    )
+    require_run_contains(
+        step_named(macos_install, "Smoke fingerprint browser", "ci-pr.yml.jobs.fingerprint-browser-install-macos"),
+        "smoke-fingerprint-browser.mjs .tools/Chromium.app/Contents/MacOS/Chromium",
+        "ci-pr.yml Fingerprint Browser Install (macOS) smoke",
+    )
+
+    linux_install = job_by_name(workflow, "Fingerprint Browser Install (Linux)", "ci-pr.yml")
+    require(linux_install.get("container") == "mcr.microsoft.com/playwright:v1.58.2-noble", "ci-pr.yml: linux fingerprint install must run in playwright container")
+    require_run_contains(
+        step_named(linux_install, "Install fingerprint browser", "ci-pr.yml.jobs.fingerprint-browser-install-linux"),
+        "install-fingerprint-browser.sh --platform linux",
+        "ci-pr.yml Fingerprint Browser Install (Linux) install",
+    )
+    require_run_contains(
+        step_named(linux_install, "Smoke fingerprint browser", "ci-pr.yml.jobs.fingerprint-browser-install-linux"),
+        "smoke-fingerprint-browser.mjs .tools/fingerprint-browser/linux/chrome",
+        "ci-pr.yml Fingerprint Browser Install (Linux) smoke",
+    )
+
     docker = job_by_name(workflow, "Docker Smoke", "ci-pr.yml")
     step = step_named(docker, "Smoke test image", "ci-pr.yml.jobs.docker-smoke")
     require_run_contains(step, ".github/scripts/smoke-test-image.sh", "ci-pr.yml Docker Smoke")
@@ -270,8 +309,49 @@ def validate_ci_main(workflow: dict[str, Any]) -> None:
     require(workflow.get("name") == "CI Main", "ci-main.yml: workflow name drifted")
     push = event_config(workflow, "push", "ci-main.yml")
     require(set(require_string_list(push.get("branches"), "ci-main.yml.on.push.branches")) == {"main"}, "ci-main.yml: push.branches drifted")
-    require(workflow_named_jobs(workflow, "ci-main.yml") == {"Typecheck & Quality Gates", "Bun Tests", "Web Build", "Storybook Build", "Docker Smoke", "Release Snapshot"}, "ci-main.yml: named jobs drifted")
+    require(
+        workflow_named_jobs(workflow, "ci-main.yml")
+        == {
+            "Typecheck & Quality Gates",
+            "Bun Tests",
+            "Web Build",
+            "Storybook Build",
+            "Fingerprint Browser Install (macOS)",
+            "Fingerprint Browser Install (Linux)",
+            "Docker Smoke",
+            "Release Snapshot",
+        },
+        "ci-main.yml: named jobs drifted",
+    )
+    macos_install = job_by_name(workflow, "Fingerprint Browser Install (macOS)", "ci-main.yml")
+    require_run_contains(
+        step_named(macos_install, "Install fingerprint browser", "ci-main.yml.jobs.fingerprint-browser-install-macos"),
+        "install-fingerprint-browser.sh --platform macos",
+        "ci-main.yml Fingerprint Browser Install (macOS) install",
+    )
+    linux_install = job_by_name(workflow, "Fingerprint Browser Install (Linux)", "ci-main.yml")
+    require(linux_install.get("container") == "mcr.microsoft.com/playwright:v1.58.2-noble", "ci-main.yml: linux fingerprint install must run in playwright container")
+    require_run_contains(
+        step_named(linux_install, "Install fingerprint browser", "ci-main.yml.jobs.fingerprint-browser-install-linux"),
+        "install-fingerprint-browser.sh --platform linux",
+        "ci-main.yml Fingerprint Browser Install (Linux) install",
+    )
     release_snapshot = job_by_name(workflow, "Release Snapshot", "ci-main.yml")
+    needs = release_snapshot.get("needs")
+    require(
+        isinstance(needs, list)
+        and set(needs)
+        == {
+            "typecheck-quality-gates",
+            "bun-tests",
+            "web-build",
+            "storybook-build",
+            "fingerprint-browser-install-macos",
+            "fingerprint-browser-install-linux",
+            "docker-smoke",
+        },
+        "ci-main.yml: release-snapshot.needs drifted",
+    )
     require_run_contains(step_named(release_snapshot, "Ensure immutable release snapshot", "ci-main.yml.jobs.release-snapshot"), "release_snapshot.py ensure", "ci-main.yml Release Snapshot")
 
 

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "defaultVersions": {
+    "linux": "144.0.7559.132",
+    "macos": "142.0.7444.175"
+  },
+  "releases": {
+    "linux": {
+      "144.0.7559.132": {
+        "asset": "ungoogled-chromium-144.0.7559.132-1-x86_64_linux.tar.xz",
+        "downloadUrl": "https://github.com/adryfish/fingerprint-chromium/releases/download/144.0.7559.132/ungoogled-chromium-144.0.7559.132-1-x86_64_linux.tar.xz",
+        "sha256": "bb4c44840bae7e881f6258ed5b33f972f284384d898b6289e1f0c0bf47555ede",
+        "archiveType": "tar.xz",
+        "binaryRelativePath": "chrome"
+      }
+    },
+    "macos": {
+      "142.0.7444.175": {
+        "asset": "ungoogled-chromium_142.0.7444.175-1.1_macos.dmg",
+        "downloadUrl": "https://github.com/adryfish/fingerprint-chromium/releases/download/142.0.7444.175/ungoogled-chromium_142.0.7444.175-1.1_macos.dmg",
+        "sha256": "ae3349a2d6368406543a84e43c783d019ac0743bf4fe08f6391933d207a65696",
+        "archiveType": "dmg",
+        "bundleName": "Chromium.app",
+        "binaryRelativePath": "Contents/MacOS/Chromium"
+      }
+    }
+  }
+}
