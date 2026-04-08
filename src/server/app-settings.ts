@@ -1,5 +1,19 @@
 import { normalizeAccountExtractorAccountType, type AppSettings } from "../storage/app-db.js";
 
+export const PROXY_SETTINGS_KEYS = [
+  "subscriptionUrl",
+  "groupName",
+  "routeGroupName",
+  "checkUrl",
+  "timeoutMs",
+  "maxLatencyMs",
+  "apiPort",
+  "mixedPort",
+] as const;
+
+export type ProxySettingsKey = typeof PROXY_SETTINGS_KEYS[number];
+export type ProxySettingsUpdate = Pick<AppSettings, ProxySettingsKey>;
+
 export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSettings> {
   const next: Partial<AppSettings> = {};
   const isExtractorProvider = (value: unknown): value is AppSettings["defaultAutoExtractSources"][number] =>
@@ -50,10 +64,37 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   return next;
 }
 
+export function listUnexpectedProxySettingsKeys(input: Record<string, unknown> | null | undefined): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  const allowed = new Set<string>(PROXY_SETTINGS_KEYS);
+  return Object.keys(input).filter((key) => !allowed.has(key));
+}
+
+export function normalizeProxySettings(input: Partial<ProxySettingsUpdate>): Partial<ProxySettingsUpdate> {
+  const normalized = normalizeSettings(input);
+  return {
+    ...(Object.prototype.hasOwnProperty.call(normalized, "subscriptionUrl") ? { subscriptionUrl: normalized.subscriptionUrl as string } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "groupName") ? { groupName: normalized.groupName as string } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "routeGroupName") ? { routeGroupName: normalized.routeGroupName as string } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "checkUrl") ? { checkUrl: normalized.checkUrl as string } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "timeoutMs") ? { timeoutMs: normalized.timeoutMs as number } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "maxLatencyMs") ? { maxLatencyMs: normalized.maxLatencyMs as number } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "apiPort") ? { apiPort: normalized.apiPort as number } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "mixedPort") ? { mixedPort: normalized.mixedPort as number } : {}),
+  };
+}
+
 export function buildNextSettings(current: AppSettings, input: Partial<AppSettings> | null | undefined): AppSettings {
   return {
     ...current,
     ...normalizeSettings(input || {}),
+  };
+}
+
+export function buildNextProxySettings(current: AppSettings, input: Partial<ProxySettingsUpdate> | null | undefined): AppSettings {
+  return {
+    ...current,
+    ...normalizeProxySettings(input || {}),
   };
 }
 
@@ -64,6 +105,18 @@ export async function validateBeforePersist<T>(options: {
   persist: (settings: AppSettings) => void;
 }): Promise<{ settings: AppSettings; result: T }> {
   const settings = buildNextSettings(options.current, options.input);
+  const result = await options.sync(settings);
+  options.persist(settings);
+  return { settings, result };
+}
+
+export async function validateProxySettingsBeforePersist<T>(options: {
+  current: AppSettings;
+  input: Partial<ProxySettingsUpdate> | null | undefined;
+  sync: (settings: AppSettings) => Promise<T>;
+  persist: (settings: AppSettings) => void;
+}): Promise<{ settings: AppSettings; result: T }> {
+  const settings = buildNextProxySettings(options.current, options.input);
   const result = await options.sync(settings);
   options.persist(settings);
   return { settings, result };

@@ -196,9 +196,9 @@ test("browser config never falls back to system Google Chrome", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain('if (value === "chrome") return "chrome";');
   expect(source).not.toContain('if (value === "chrome" || value === "camoufox") return "chrome";');
-  expect(source).toContain('path.resolve(cwd, ".tools/Chromium.app/Contents/MacOS/Chromium")');
   expect(source).not.toContain('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
-  expect(source).toContain('Only fingerprint Chromium is allowed.');
+  expect(source).not.toContain('collectFingerprintChromiumCandidates');
+  expect(source).toContain('Only the provided fingerprint browser is allowed.');
 });
 
 test("worktree bootstrap syncs fingerprint Chromium into linked worktrees", async () => {
@@ -386,4 +386,12 @@ test("auth submit flow hydrates challenge tokens from turnstile runtime and patc
   expect(source).toContain('ensureTokenField("cf-turnstile-response", token);');
   expect(source).toContain('!isProviderConnectionSubmit &&');
   expect(source).toContain('(!payload["cf-turnstile-response"] || !String(payload["cf-turnstile-response"]).trim())');
+});
+
+test("browser config uses explicit fingerprint paths only and does not scan repo candidates", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH)");
+  expect(source).not.toContain("collectFingerprintChromiumCandidates");
+  expect(source).not.toContain("resolveGitCommonRepoRoot");
+  expect(source).not.toContain('.tools/Chromium.app/Contents/MacOS/Chromium');
 });

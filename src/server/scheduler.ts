@@ -20,6 +20,10 @@ import {
   keyConfiguredForProvider,
 } from "./account-extractor.js";
 import { isLockedAccountRecord } from "./account-session-bootstrap.js";
+import {
+  assertUsableFingerprintChromiumExecutablePath,
+  resolveExplicitChromeExecutablePath,
+} from "../fingerprint-browser.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 
 export interface ServerEvent {
@@ -144,6 +148,7 @@ const STRIPPED_ATTEMPT_ENV_KEYS = [
   "MICROSOFT_PROOF_MAILBOX_PROVIDER",
   "MICROSOFT_PROOF_MAILBOX_ADDRESS",
   "MICROSOFT_PROOF_MAILBOX_ID",
+  "CHROME_EXECUTABLE_PATH",
   "CHROME_REMOTE_DEBUGGING_PORT",
 ] as const;
 
@@ -352,6 +357,7 @@ export function buildAttemptRuntimeSpec(input: {
   sharedLedgerPath: string;
   settings: Pick<AppSettings, "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs">;
   reservedPorts: { apiPort: number; mixedPort: number };
+  chromeExecutablePath: string;
   selectedProxyNode?: string | null;
   baseEnv?: NodeJS.ProcessEnv;
 }): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
@@ -387,6 +393,7 @@ export function buildAttemptRuntimeSpec(input: {
       TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
       TASK_LEDGER_DB_PATH: input.sharedLedgerPath,
       OUTPUT_ROOT_DIR: input.outputDir,
+      CHROME_EXECUTABLE_PATH: input.chromeExecutablePath,
       CHROME_PROFILE_DIR: persistentProfilePath || path.join(input.outputDir, "chrome-profile"),
       ...(persistentProfilePath
         ? {
@@ -1025,6 +1032,37 @@ export class JobScheduler {
     let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
     let portLeases: { apiPort: PortLease; mixedPort: PortLease } | null = null;
     try {
+      const latestJob = this.db.getJob(job.id);
+      const launchBlockedByStop =
+        pendingLaunch.stopRequested === "force_stop"
+        || Boolean(latestJob && (latestJob.status === "stopped" || isStopInProgressStatus(latestJob.status)));
+      if (launchBlockedByStop) {
+        if (pendingLaunch.stopRequested === "force_stop") {
+          const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
+            job.id,
+            attempt.id,
+            account.id,
+            {
+              errorCode: "force_stopped",
+              errorMessage: "stopped by user",
+            },
+            null,
+          );
+          this.emit("attempt.updated", { attempt: stoppedAttempt });
+          this.emit("account.updated", { account: this.db.getAccount(account.id) });
+          this.emit("job.updated", { job: stoppedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped before launch for account #${account.id}` });
+        } else {
+          const { job: releasedJob, account: releasedAccount } = this.db.rollbackAttemptBeforeLaunch(job.id, attempt.id, account.id);
+          this.emit("account.updated", { account: releasedAccount });
+          this.emit("job.updated", { job: releasedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+        }
+        return false;
+      }
+      const attemptBaseEnv = buildAttemptBaseEnv(undefined);
+      const chromeExecutablePath = assertUsableFingerprintChromiumExecutablePath(
+        resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
+      );
       await mkdir(outputDir, { recursive: true });
       const settings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
@@ -1043,13 +1081,15 @@ export class JobScheduler {
         sharedLedgerPath: this.sharedLedgerPath,
         settings,
         reservedPorts,
+        chromeExecutablePath,
         selectedProxyNode,
+        baseEnv: attemptBaseEnv,
       });
-      const latestJob = this.db.getJob(job.id);
-      const launchBlockedByStop =
+      const refreshedJob = this.db.getJob(job.id);
+      const launchBlockedAfterSetup =
         pendingLaunch.stopRequested === "force_stop"
-        || Boolean(latestJob && (latestJob.status === "stopped" || isStopInProgressStatus(latestJob.status)));
-      if (launchBlockedByStop) {
+        || Boolean(refreshedJob && (refreshedJob.status === "stopped" || isStopInProgressStatus(refreshedJob.status)));
+      if (launchBlockedAfterSetup) {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
         if (pendingLaunch.stopRequested === "force_stop") {
           const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(

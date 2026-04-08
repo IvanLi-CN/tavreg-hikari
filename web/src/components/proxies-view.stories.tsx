@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ProxiesView } from "@/components/proxies-view";
-import type { ProxyCheckScope, ProxyPayload } from "@/lib/app-types";
+import { pickProxySettingsUpdate, type ProxyCheckScope, type ProxyPayload, type ProxySettingsUpdate } from "@/lib/app-types";
 import { sampleProxies } from "@/stories/fixtures";
 
 const meta = {
@@ -88,7 +88,7 @@ export const BufferedSettingsPlay: Story = {
   render: (args) => {
     const [payload, setPayload] = useState<ProxyPayload>(sampleProxies);
     const [scope, setScope] = useState<ProxyCheckScope>("current");
-    const [saved, setSaved] = useState(false);
+    const [savedPayload, setSavedPayload] = useState<ProxySettingsUpdate | null>(null);
     return (
       <>
         <ProxiesView
@@ -103,16 +103,17 @@ export const BufferedSettingsPlay: Story = {
             setPayload((current) => ({ ...current, settings: { ...current.settings, [key]: value } }));
             args.onProxySettingsChange(key, value);
           }}
-          onSaveProxySettings={() => {
-            setSaved(true);
-            args.onSaveProxySettings();
+          onSaveProxySettings={(settings) => {
+            const nextPayload = settings || pickProxySettingsUpdate(payload.settings);
+            setSavedPayload(nextPayload);
+            args.onSaveProxySettings(nextPayload);
           }}
           onCheckScope={args.onCheckScope}
           onSelectNode={args.onSelectNode}
           onCheckNode={args.onCheckNode}
         />
         <pre data-testid="proxy-settings-debug" className="sr-only">
-          {JSON.stringify({ settings: payload.settings, saved })}
+          {JSON.stringify({ settings: payload.settings, savedPayload })}
         </pre>
       </>
     );
@@ -140,6 +141,10 @@ export const BufferedSettingsPlay: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "保存并同步" }));
     await expect(apiPortInput).toHaveValue("1");
     await expect(debug.textContent).toContain("\"apiPort\":1");
-    await expect(debug.textContent).toContain("\"saved\":true");
+    await expect(debug.textContent).toContain("\"savedPayload\"");
+    await expect(debug.textContent).not.toContain("\"defaultRunMode\"");
+    await expect(debug.textContent).not.toContain("\"defaultNeed\"");
+    await expect(debug.textContent).not.toContain("\"defaultParallel\"");
+    await expect(debug.textContent).not.toContain("\"defaultMaxAttempts\"");
   },
 };

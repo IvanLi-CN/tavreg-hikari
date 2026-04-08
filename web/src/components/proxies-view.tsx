@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { ProxyCheckScope, ProxyNode, ProxyPayload, ProxySettings } from "@/lib/app-types";
+import { pickProxySettingsUpdate, type ProxyCheckScope, type ProxyNode, type ProxyPayload, type ProxySettingsUpdate } from "@/lib/app-types";
 import { formatDate, formatLocation } from "@/lib/format";
 
 function Field(props: { label: string; children: React.ReactNode }) {
@@ -35,8 +35,8 @@ export function ProxiesView({
   selectedProxy: ProxyNode | null;
   proxyCheckScope: ProxyCheckScope;
   onProxyCheckScopeChange: (scope: ProxyCheckScope) => void;
-  onProxySettingsChange: <K extends keyof ProxySettings>(key: K, value: ProxySettings[K]) => void;
-  onSaveProxySettings: (settings?: ProxySettings) => void;
+  onProxySettingsChange: <K extends keyof ProxySettingsUpdate>(key: K, value: ProxySettingsUpdate[K]) => void;
+  onSaveProxySettings: (settings?: ProxySettingsUpdate) => void;
   onCheckScope: () => void;
   onSelectNode: (nodeName: string) => void;
   onCheckNode: (nodeName: string) => void;
@@ -46,8 +46,8 @@ export function ProxiesView({
   const apiPortRef = useRef<BufferedNumberInputHandle>(null);
   const mixedPortRef = useRef<BufferedNumberInputHandle>(null);
 
-  const commitSettingsInputs = (): ProxySettings => ({
-    ...proxies.settings,
+  const commitSettingsInputs = (): ProxySettingsUpdate => ({
+    ...pickProxySettingsUpdate(proxies.settings),
     timeoutMs: timeoutRef.current?.commit() ?? proxies.settings.timeoutMs,
     maxLatencyMs: maxLatencyRef.current?.commit() ?? proxies.settings.maxLatencyMs,
     apiPort: apiPortRef.current?.commit() ?? proxies.settings.apiPort,
@@ -55,7 +55,7 @@ export function ProxiesView({
   });
 
   const handleSaveClick = () => {
-    let committedSettings = proxies.settings;
+    let committedSettings: ProxySettingsUpdate = pickProxySettingsUpdate(proxies.settings);
     flushSync(() => {
       committedSettings = commitSettingsInputs();
     });

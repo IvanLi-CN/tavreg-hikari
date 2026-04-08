@@ -3,7 +3,7 @@ import { Resvg } from "@resvg/resvg-js";
 import { Impit } from "impit";
 import { chromium, type Browser, type BrowserContextOptions, type LaunchOptions } from "playwright-core";
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { sep as pathSep } from "node:path";
 import { existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -42,6 +42,12 @@ import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
 import { resolveTaskLedgerDbPath } from "./storage/db-paths.js";
 import { TaskLedger, type SignupTaskRecord, type TaskLedgerConfig } from "./storage/task-ledger.js";
+import {
+  assertUsableFingerprintChromiumExecutablePath,
+  isFingerprintChromiumExecutable,
+  requireFingerprintChromiumExecutablePath,
+  resolveExplicitChromeExecutablePath,
+} from "./fingerprint-browser.js";
 
 type JsonRecord = Record<string, unknown>;
 type RunMode = "headed" | "headless";
@@ -9456,67 +9462,8 @@ async function confirmHumanControl(cfg: AppConfig, email: string, stage: string)
   }
 }
 
-function resolveGitCommonRepoRoot(cwd: string): string | null {
-  try {
-    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    if (!commonDir) return null;
-    const resolvedCommonDir = path.resolve(cwd, commonDir);
-    if (path.basename(resolvedCommonDir) !== ".git") return null;
-    return path.dirname(resolvedCommonDir);
-  } catch {
-    return null;
-  }
-}
-
-function collectFingerprintChromiumCandidates(cwd: string): string[] {
-  const candidates: string[] = [];
-  const seen = new Set<string>();
-  const pushCandidate = (candidate: string) => {
-    if (seen.has(candidate)) return;
-    seen.add(candidate);
-    candidates.push(candidate);
-  };
-
-  pushCandidate(path.resolve(cwd, ".tools/Chromium.app/Contents/MacOS/Chromium"));
-  const commonRepoRoot = resolveGitCommonRepoRoot(cwd);
-  if (commonRepoRoot) {
-    pushCandidate(path.resolve(commonRepoRoot, ".tools/Chromium.app/Contents/MacOS/Chromium"));
-  }
-  return candidates;
-}
-
-function resolveChromeExecutablePath(raw: string | undefined, cwd = process.cwd()): string | undefined {
-  const trimmed = (raw || "").trim();
-  if (trimmed) return trimmed;
-  if (process.platform === "darwin") {
-    for (const candidate of collectFingerprintChromiumCandidates(cwd)) {
-      if (existsSync(candidate)) return candidate;
-    }
-  }
-  return undefined;
-}
-
-function isFingerprintChromiumExecutable(executablePath: string | undefined): boolean {
-  const normalized = (executablePath || "").trim().toLowerCase();
-  return normalized.endsWith('/chromium') || normalized.includes('/chromium.app/');
-}
-
-function requireFingerprintChromiumExecutablePath(executablePath: string | undefined): string {
-  if (!executablePath) {
-    throw new Error("fingerprint Chromium executable path is not configured");
-  }
-  if (!isFingerprintChromiumExecutable(executablePath)) {
-    throw new Error(`Unsupported CHROME_EXECUTABLE_PATH: ${executablePath}. Only fingerprint Chromium is allowed.`);
-  }
-  return executablePath;
-}
-
 function resolveChromeAppName(executablePath: string | undefined): string {
-  return isFingerprintChromiumExecutable(executablePath) ? 'Chromium' : 'Google Chrome';
+  return isFingerprintChromiumExecutable(executablePath) ? "Chromium" : "Google Chrome";
 }
 
 function buildFingerprintSeed(profileDir: string, proxyServer: string, locale: string): string {
@@ -9609,9 +9556,9 @@ export function loadConfig(): AppConfig {
     : undefined;
   const microsoftProofMailboxAddress = (process.env.MICROSOFT_PROOF_MAILBOX_ADDRESS || "").trim() || undefined;
   const microsoftProofMailboxId = (process.env.MICROSOFT_PROOF_MAILBOX_ID || "").trim() || undefined;
-  const resolvedChromeExecutablePath = resolveChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH);
+  const resolvedChromeExecutablePath = resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH);
   if (resolvedChromeExecutablePath && !isFingerprintChromiumExecutable(resolvedChromeExecutablePath)) {
-    throw new Error(`Unsupported CHROME_EXECUTABLE_PATH: ${resolvedChromeExecutablePath}. Only fingerprint Chromium is allowed.`);
+    throw new Error(`Unsupported CHROME_EXECUTABLE_PATH: ${resolvedChromeExecutablePath}. Only the provided fingerprint browser is allowed.`);
   }
   if (rawMicrosoftProofMailboxProvider && !microsoftProofMailboxProvider) {
     throw new Error(`Unsupported env MICROSOFT_PROOF_MAILBOX_PROVIDER: ${rawMicrosoftProofMailboxProvider}`);
@@ -10142,7 +10089,7 @@ export async function launchBrowserWithEngine(
   if (proxyServer?.trim()) {
     options.proxy = { server: proxyServer.trim() };
   }
-  const executablePath = requireFingerprintChromiumExecutablePath(cfg.chromeExecutablePath);
+  const executablePath = assertUsableFingerprintChromiumExecutablePath(cfg.chromeExecutablePath);
   options.executablePath = executablePath;
   const browser = await chromium.launch(options);
   if (process.platform === "darwin" && mode === "headed" && cfg.chromeActivateOnLaunch) {
