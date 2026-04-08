@@ -10464,6 +10464,7 @@ export async function launchNativeChromeCdp(
   if (!cfg.chromeExecutablePath) {
     throw new Error("chrome executable path is not configured");
   }
+  const cdpConnectTimeoutMs = Math.max(60_000, toInt(process.env.CHROME_NATIVE_CDP_CONNECT_TIMEOUT_MS, 60_000));
 
   const profileCandidates = buildChromeProfileCandidates(cfg.chromeProfileDir);
   let lastError: Error | null = null;
@@ -10546,7 +10547,7 @@ export async function launchNativeChromeCdp(
         throwIfAborted(signal, "native chrome launch aborted before CDP connect");
         try {
           browser = await raceWithAbort(
-            connectOverCdpWithTimeout(endpoint, 60_000),
+            connectOverCdpWithTimeout(endpoint, cdpConnectTimeoutMs),
             signal,
             `native chrome launch aborted while connecting to ${endpoint.startsWith("ws://") ? "ws" : "http"} endpoint`,
           );

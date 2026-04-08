@@ -285,6 +285,7 @@ async function waitForCfMailOtp(input: { address: string; mailboxId?: string; no
 async function startCallbackServer(expectedStateRef: { current: string }): Promise<{ waitForCode: Promise<CallbackResult>; close: () => Promise<void> }> {
   let resolveCode: ((value: CallbackResult) => void) | null = null;
   let rejectCode: ((reason?: unknown) => void) | null = null;
+  let serverListening = false;
   const waitForCode = new Promise<CallbackResult>((resolve, reject) => {
     resolveCode = resolve;
     rejectCode = reject;
@@ -318,12 +319,29 @@ async function startCallbackServer(expectedStateRef: { current: string }): Promi
     }
   });
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(CALLBACK_PORT, CALLBACK_HOST, () => resolve());
+    const handleError = (error: unknown) => {
+      const code =
+        error && typeof error === "object" && "code" in error
+          ? String((error as { code?: unknown }).code || "")
+          : "";
+      if (code === "EADDRINUSE") {
+        log(`callback server port ${CALLBACK_PORT} already in use; continuing with observed-callback mode`);
+        resolve();
+        return;
+      }
+      reject(error);
+    };
+    server.once("error", handleError);
+    server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+      serverListening = true;
+      server.off("error", handleError);
+      resolve();
+    });
   });
   return {
     waitForCode,
     close: async () => {
+      if (!serverListening) return;
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
       }).catch(() => {});
