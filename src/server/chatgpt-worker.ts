@@ -1,6 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { createServer } from "node:http";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { URL } from "node:url";
@@ -283,69 +282,11 @@ async function waitForCfMailOtp(input: { address: string; mailboxId?: string; no
 }
 
 async function startCallbackServer(expectedStateRef: { current: string }): Promise<{ waitForCode: Promise<CallbackResult>; close: () => Promise<void> }> {
-  let resolveCode: ((value: CallbackResult) => void) | null = null;
-  let rejectCode: ((reason?: unknown) => void) | null = null;
-  let serverListening = false;
-  const waitForCode = new Promise<CallbackResult>((resolve, reject) => {
-    resolveCode = resolve;
-    rejectCode = reject;
-  });
-  const server = createServer((req, res) => {
-    try {
-      const url = new URL(req.url || "/", CALLBACK_ORIGIN);
-      if (url.pathname !== CALLBACK_PATH) {
-        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-        res.end("Not found");
-        return;
-      }
-      const code = String(url.searchParams.get("code") || "").trim();
-      const state = String(url.searchParams.get("state") || "").trim();
-      const error = String(url.searchParams.get("error") || "").trim();
-      if (error) {
-        rejectCode?.(new Error(`chatgpt_oauth_callback_error:${error}`));
-      } else if (!code || state !== expectedStateRef.current) {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end("<html><body><h1>Authentication ignored</h1><p>Stale callback state.</p></body></html>");
-        return;
-      } else {
-        resolveCode?.({ code, state });
-      }
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end("<html><body><h1>Authentication complete</h1><p>You can close this tab.</p></body></html>");
-    } catch (error) {
-      rejectCode?.(error);
-      res.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-      res.end("Callback failed");
-    }
-  });
-  await new Promise<void>((resolve, reject) => {
-    const handleError = (error: unknown) => {
-      const code =
-        error && typeof error === "object" && "code" in error
-          ? String((error as { code?: unknown }).code || "")
-          : "";
-      if (code === "EADDRINUSE") {
-        log(`callback server port ${CALLBACK_PORT} already in use; continuing with observed-callback mode`);
-        resolve();
-        return;
-      }
-      reject(error);
-    };
-    server.once("error", handleError);
-    server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
-      serverListening = true;
-      server.off("error", handleError);
-      resolve();
-    });
-  });
+  void expectedStateRef;
+  log("callback capture ready; relying on observed callback urls without binding localhost:1455");
   return {
-    waitForCode,
-    close: async () => {
-      if (!serverListening) return;
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      }).catch(() => {});
-    },
+    waitForCode: new Promise<CallbackResult>(() => {}),
+    close: async () => {},
   };
 }
 
@@ -1338,8 +1279,9 @@ async function run(): Promise<void> {
   const callbackStateRef = { current: callbackState };
   await writeStageMarker(outputDir, "bootstrap:oauth_prepared");
   const callbackServer = await startCallbackServer(callbackStateRef);
-  await writeStageMarker(outputDir, "bootstrap:callback_server_ready", {
+  await writeStageMarker(outputDir, "bootstrap:callback_capture_ready", {
     callbackUrl: CALLBACK_URL,
+    mode: "observed_url_only",
   });
   const mihomo = await startMihomo({
     subscriptionUrl: requireEnv("MIHOMO_SUBSCRIPTION_URL"),
@@ -1442,6 +1384,11 @@ async function run(): Promise<void> {
 	        observeCallbackUrl(String(response?.url?.() || ""), "response");
 	      } catch {}
 	    });
+      page.on("requestfailed", (request: any) => {
+        try {
+          observeCallbackUrl(String(request?.url?.() || ""), "requestfailed");
+        } catch {}
+      });
 	    log(`opening authorize url for ${payload.email}`);
 	    await writeStageMarker(outputDir, "oauth:navigating_authorize", {
 	      authorizeUrl,
