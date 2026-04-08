@@ -9,6 +9,16 @@ log() {
   printf 'hooks-install: %s\n' "$*"
 }
 
+if ! command -v git >/dev/null 2>&1; then
+  log "skip: git not installed"
+  exit 0
+fi
+
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  log "skip: not inside a git worktree"
+  exit 0
+fi
+
 canonical_dir() {
   CDPATH= cd -- "$1" && pwd -P
 }
