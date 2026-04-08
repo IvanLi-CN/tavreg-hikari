@@ -206,6 +206,13 @@ def merge_ruleset_ref(existing: RulesetRef, item: dict[str, Any]) -> RulesetRef:
     return RulesetRef(ruleset_id=existing.ruleset_id, source_type=source_type, source=source)
 
 
+def typed_rules_from_ruleset_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    nested_rules = payload.get("rules")
+    if not isinstance(nested_rules, list):
+        return []
+    return [rule for rule in nested_rules if isinstance(rule, dict) and isinstance(rule.get("type"), str)]
+
+
 def extract_rules(payload: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[RulesetRef]]:
     if isinstance(payload, dict) and isinstance(payload.get("data"), list):
         payload = payload["data"]
@@ -217,12 +224,10 @@ def extract_rules(payload: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
     for item in payload:
         if not isinstance(item, dict):
             continue
-        nested_rules = item.get("rules")
-        if isinstance(nested_rules, list):
+        nested_rules = typed_rules_from_ruleset_payload(item)
+        if nested_rules:
             rulesets.append(item)
-            rules.extend(
-                rule for rule in nested_rules if isinstance(rule, dict) and isinstance(rule.get("type"), str)
-            )
+            rules.extend(nested_rules)
             continue
         if isinstance(item.get("type"), str):
             rules.append(item)
@@ -234,7 +239,7 @@ def extract_rules(payload: Any) -> tuple[list[dict[str, Any]], list[dict[str, An
                 source=None,
             )
             unresolved_rulesets[raw_ruleset_id] = merge_ruleset_ref(current, item)
-    if not rules:
+    if not rules and not unresolved_rulesets:
         raise ValidationError("GitHub branch rules payload did not contain any typed rules")
     return rules, rulesets, sorted(unresolved_rulesets.values(), key=lambda ref: ref.ruleset_id)
 
@@ -625,6 +630,7 @@ def main() -> int:
                     if ref.source_type and not ruleset_payload.get("source_type"):
                         ruleset_payload["source_type"] = ref.source_type
                     hydrated_rulesets.append(ruleset_payload)
+                    rules.extend(typed_rules_from_ruleset_payload(ruleset_payload))
                     known_ruleset_ids.add(ref.ruleset_id)
                     continue
                 hydrated_rulesets.append(placeholder_ruleset(ref))
@@ -632,6 +638,10 @@ def main() -> int:
                     f"{branch}: ruleset details unavailable for {ruleset_ref_label(ref)} when using a local fixture"
                 )
                 known_ruleset_ids.add(ref.ruleset_id)
+            if not rules:
+                raise ValidationError(
+                    f"GitHub branch rules payload for {branch} did not expose typed rules, even after hydrating rulesets"
+                )
             checked_rules[branch] = sorted({rule.get("type", "") for rule in rules})
             branch_errors, branch_notes = validate_rules(declaration, rules, hydrated_rulesets, branch)
             errors.extend(branch_errors)
