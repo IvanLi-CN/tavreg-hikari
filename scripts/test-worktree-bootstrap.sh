@@ -150,10 +150,9 @@ cp "$repo_root/scripts/install-hooks.sh" "$fixture_repo/scripts/install-hooks.sh
 cp "$repo_root/scripts/sqlite-snapshot.sh" "$fixture_repo/scripts/sqlite-snapshot.sh"
 cp "$repo_root/scripts/sync-worktree-resources.sh" "$fixture_repo/scripts/sync-worktree-resources.sh"
 cp "$repo_root/scripts/worktree-sync.paths" "$fixture_repo/scripts/worktree-sync.paths"
-chmod +x \
-  "$fixture_repo/scripts/install-hooks.sh" \
-  "$fixture_repo/scripts/sqlite-snapshot.sh" \
-  "$fixture_repo/scripts/sync-worktree-resources.sh"
+cp "$repo_root/scripts/install-fingerprint-browser.sh" "$fixture_repo/scripts/install-fingerprint-browser.sh"
+cp "$repo_root/scripts/fingerprint-browser-manifest.json" "$fixture_repo/scripts/fingerprint-browser-manifest.json"
+chmod +x   "$fixture_repo/scripts/install-hooks.sh"   "$fixture_repo/scripts/sqlite-snapshot.sh"   "$fixture_repo/scripts/sync-worktree-resources.sh"   "$fixture_repo/scripts/install-fingerprint-browser.sh"
 git -C "$fixture_repo" add scripts
 git -C "$fixture_repo" commit -m 'test: add worktree bootstrap scripts' >/dev/null
 head_sha="$(git -C "$fixture_repo" rev-parse HEAD)"
@@ -172,8 +171,17 @@ if [[ "$recorded_main_root" != "$fixture_repo" ]]; then
   exit 1
 fi
 
+mkdir -p "$fixture_repo/.tools/fingerprint-browser/linux/144.0.7559.132"
+cat > "$fixture_repo/.tools/fingerprint-browser/linux/144.0.7559.132/chrome" <<'CHROME'
+#!/bin/sh
+exit 0
+CHROME
+chmod +x "$fixture_repo/.tools/fingerprint-browser/linux/144.0.7559.132/chrome"
+ln -sfn 144.0.7559.132/chrome "$fixture_repo/.tools/fingerprint-browser/linux/chrome"
+
 cat > "$fixture_repo/.env.local" <<'ENVLOCAL'
 SOURCE_ENV=main-root
+CHROME_EXECUTABLE_PATH=.tools/fingerprint-browser/linux/chrome
 ENVLOCAL
 sqlite_insert_value "$fixture_repo/output/registry/signup-tasks.sqlite" "main-ledger"
 assert_exists "$fixture_repo/output/registry/signup-tasks.sqlite-shm"
@@ -181,7 +189,10 @@ assert_exists "$fixture_repo/output/registry/signup-tasks.sqlite-wal"
 
 git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
-assert_file_content "$worktree_default/.env.local" "SOURCE_ENV=main-root"
+assert_file_content "$worktree_default/.env.local" $'SOURCE_ENV=main-root
+CHROME_EXECUTABLE_PATH=.tools/fingerprint-browser/linux/chrome'
+assert_exists "$worktree_default/.tools/fingerprint-browser/linux/chrome"
+assert_exists "$worktree_default/.tools/fingerprint-browser/linux/144.0.7559.132/chrome"
 assert_exists "$worktree_default/node_modules"
 if [[ -e "$worktree_default/bun.lock" ]]; then
   echo "expected bootstrap install without source bun.lock to avoid creating a lockfile" >&2
@@ -220,7 +231,9 @@ assert_output_contains "$main_output" "skip main worktree"
 rm -f "$fixture_repo/output/registry/signup-tasks.sqlite"
 missing_output="$(git -C "$fixture_repo" worktree add --detach "$worktree_missing" HEAD 2>&1)"
 assert_output_contains "$missing_output" "skip source missing: output/registry/tavreg-hikari.sqlite"
-assert_file_content "$worktree_missing/.env.local" "SOURCE_ENV=main-root"
+assert_file_content "$worktree_missing/.env.local" $'SOURCE_ENV=main-root
+CHROME_EXECUTABLE_PATH=.tools/fingerprint-browser/linux/chrome'
+assert_exists "$worktree_missing/.tools/fingerprint-browser/linux/chrome"
 if [[ -e "$worktree_missing/output/registry/tavreg-hikari.sqlite" ]]; then
   echo "expected missing source SQLite file to stay absent in target worktree" >&2
   exit 1

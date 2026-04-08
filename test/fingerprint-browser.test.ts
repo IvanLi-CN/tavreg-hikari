@@ -9,6 +9,25 @@ import {
   requireFingerprintChromiumExecutablePath,
 } from "../src/fingerprint-browser.ts";
 
+async function writeLinuxInstallMarker(installRoot: string, version = "144.0.7559.132") {
+  await mkdir(installRoot, { recursive: true });
+  await writeFile(
+    path.join(installRoot, ".fingerprint-browser-install.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        installer: "install-fingerprint-browser.sh",
+        platform: "linux",
+        version,
+        binaryRelativePath: "chrome",
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
+
 test("resolves only explicit fingerprint browser paths", () => {
   expect(resolveExplicitChromeExecutablePath(undefined)).toBeUndefined();
   expect(resolveExplicitChromeExecutablePath("   ")).toBeUndefined();
@@ -24,11 +43,20 @@ test("accepts repository macOS fingerprint Chromium and stable linux fingerprint
   expect(isFingerprintChromiumExecutable("/usr/bin/chromium")).toBe(false);
 });
 
+test("accepts custom linux install roots emitted by the official installer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fingerprint-custom-root-"));
+  const installRoot = path.join(root, "custom-browser-root");
+  await writeLinuxInstallMarker(installRoot);
+
+  expect(isFingerprintChromiumExecutable(path.join(installRoot, "chrome"))).toBe(true);
+  expect(isFingerprintChromiumExecutable(path.join(installRoot, "144.0.7559.132", "chrome"))).toBe(true);
+});
+
 test("requires the provided fingerprint browser and validates executability", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fingerprint-browser-"));
-  const dir = path.join(root, "fingerprint-browser");
+  const dir = path.join(root, "custom-browser-root");
   const executablePath = path.join(dir, "chrome");
-  await mkdir(dir, { recursive: true });
+  await writeLinuxInstallMarker(dir);
   await writeFile(executablePath, "#!/bin/sh\nexit 0\n", "utf8");
   await chmod(executablePath, 0o755);
 

@@ -189,6 +189,150 @@ copy_resource() {
   fi
 }
 
+extract_env_value() {
+  env_file=$1
+  key=$2
+  [ -f "$env_file" ] || return 1
+  raw_value=$(
+    awk -v key="$key" '
+      {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        if (line ~ /^#/ || line == "") next
+        if (index(line, key "=") == 1) {
+          value = substr(line, length(key) + 2)
+        }
+      }
+      END {
+        if (value == "") exit 1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        print value
+      }
+    ' "$env_file"
+  ) || return 1
+  case "$raw_value" in
+    \"*\")
+      raw_value=${raw_value#\"}
+      raw_value=${raw_value%\"}
+      ;;
+    \'*\')
+      raw_value=${raw_value#\'}
+      raw_value=${raw_value%\'}
+      ;;
+  esac
+  printf '%s\n' "$raw_value"
+}
+
+resolve_browser_runtime_root() {
+  executable_path=$1
+  case "$executable_path" in
+    */Chromium.app/Contents/MacOS/Chromium)
+      printf '%s\n' "${executable_path%/Contents/MacOS/Chromium}"
+      return 0
+      ;;
+    */fingerprint-browser/linux/chrome)
+      printf '%s\n' "${executable_path%/chrome}"
+      return 0
+      ;;
+    */fingerprint-browser/linux/*/chrome)
+      dirname -- "$(dirname -- "$executable_path")"
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+resolve_browser_install_dest() {
+  browser_root=$1
+  case "$browser_root" in
+    */Chromium.app)
+      dirname -- "$browser_root"
+      ;;
+    *)
+      printf '%s\n' "$browser_root"
+      ;;
+  esac
+}
+
+bootstrap_browser_runtime() {
+  env_path="$current_root/.env.local"
+  chrome_path=$(extract_env_value "$env_path" "CHROME_EXECUTABLE_PATH" || true)
+  if [ -z "$chrome_path" ]; then
+    log "skip browser bootstrap: CHROME_EXECUTABLE_PATH unset"
+    return 0
+  fi
+
+  case "$chrome_path" in
+    /*)
+      case "$chrome_path" in
+        "$source_root"/*)
+          rel_path=${chrome_path#"$source_root"/}
+          src_executable="$chrome_path"
+          dst_executable="$current_root/$rel_path"
+          ;;
+        "$current_root"/*)
+          rel_path=${chrome_path#"$current_root"/}
+          src_executable="$source_root/$rel_path"
+          dst_executable="$chrome_path"
+          ;;
+        *)
+          log "skip browser bootstrap: CHROME_EXECUTABLE_PATH external"
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      rel_path="$chrome_path"
+      src_executable="$source_root/$rel_path"
+      dst_executable="$current_root/$rel_path"
+      ;;
+  esac
+
+  if [ -x "$dst_executable" ]; then
+    log "keep browser runtime exists: $chrome_path"
+    return 0
+  fi
+
+  src_browser_root=$(resolve_browser_runtime_root "$src_executable" || true)
+  dst_browser_root=$(resolve_browser_runtime_root "$dst_executable" || true)
+  if [ -z "$dst_browser_root" ]; then
+    log "skip browser bootstrap: unsupported CHROME_EXECUTABLE_PATH"
+    return 0
+  fi
+
+  if [ -e "$src_browser_root" ] || [ -L "$src_browser_root" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      log "would copy browser runtime: $chrome_path"
+      return 0
+    fi
+    mkdir -p "$(dirname -- "$dst_browser_root")"
+    rm -rf "$dst_browser_root"
+    cp -R "$src_browser_root" "$dst_browser_root"
+    log "copied browser runtime: $chrome_path"
+    return 0
+  fi
+
+  installer_path="$current_root/scripts/install-fingerprint-browser.sh"
+  manifest_path="$current_root/scripts/fingerprint-browser-manifest.json"
+  if [ ! -x "$installer_path" ] || [ ! -f "$manifest_path" ]; then
+    log "skip browser bootstrap: installer unavailable"
+    return 0
+  fi
+
+  install_dest=$(resolve_browser_install_dest "$dst_browser_root")
+  if [ "$DRY_RUN" = "1" ]; then
+    log "would install browser runtime: $chrome_path"
+    return 0
+  fi
+
+  log "installing browser runtime: $chrome_path"
+  if ! "$installer_path" --platform auto --dest "$install_dest" --cache-dir "$current_root/downloads/fingerprint-browser" --force >/dev/null 2>&1; then
+    log "skip browser bootstrap failed: $chrome_path"
+    return 0
+  fi
+  log "installed browser runtime: $chrome_path"
+}
+
 current_root=$(canonical_dir "$(git rev-parse --show-toplevel)")
 git_dir=$(resolve_git_path --git-dir)
 common_dir=$(resolve_git_path --git-common-dir)
@@ -229,6 +373,7 @@ while IFS= read -r entry || [ -n "$entry" ]; do
   copy_resource "$entry"
 done < "$MANIFEST_PATH"
 
+bootstrap_browser_runtime
 bootstrap_dependencies
 
 if [ "$DRY_RUN" = "1" ]; then

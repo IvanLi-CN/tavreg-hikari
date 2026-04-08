@@ -148,6 +148,36 @@ read_macos_bundle_version() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist_path" 2>/dev/null || true
 }
 
+write_install_marker() {
+  local marker_dir=$1
+  local platform=$2
+  local version=$3
+  local binary_relative_path=$4
+  local marker_path="$marker_dir/.fingerprint-browser-install.json"
+  mkdir -p "$marker_dir"
+  node --input-type=module - "$marker_path" "$platform" "$version" "$binary_relative_path" <<'NODE'
+import fs from "node:fs";
+
+const [markerPath, platform, version, binaryRelativePath] = process.argv.slice(2);
+const marker = {
+  schemaVersion: 1,
+  installer: "install-fingerprint-browser.sh",
+  platform,
+  version,
+  binaryRelativePath,
+};
+fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2) + "\n", "utf8");
+NODE
+}
+
+write_linux_install_markers() {
+  local install_root=$1
+  local version=$2
+  local binary_relative_path=$3
+  write_install_marker "$install_root" "linux" "$version" "$binary_relative_path"
+  write_install_marker "$install_root/$version" "linux" "$version" "$binary_relative_path"
+}
+
 verify_linux_install() {
   local install_root=$1
   local version=$2
@@ -176,6 +206,7 @@ install_linux_release() {
   fi
   if [ -x "$version_dir/$binary_relative_path" ] && [ "$FORCE" = "0" ]; then
     log "linux release $version already installed"
+    write_linux_install_markers "$install_root" "$version" "$binary_relative_path"
     verify_linux_install "$install_root" "$version" "$binary_relative_path" >/dev/null
     printf '%s\n' "$stable_path"
     return 0
@@ -193,6 +224,7 @@ install_linux_release() {
   mv "$tmp_dir/$archive_root" "$version_dir"
   [ -x "$version_dir/$binary_relative_path" ] || fail "linux fingerprint browser executable missing after extraction: $version_dir/$binary_relative_path"
   ln -sfn "$version/$binary_relative_path" "$stable_path"
+  write_linux_install_markers "$install_root" "$version" "$binary_relative_path"
   verify_linux_install "$install_root" "$version" "$binary_relative_path"
   trap - RETURN
   rm -rf "$tmp_dir"

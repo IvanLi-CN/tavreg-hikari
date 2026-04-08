@@ -116,6 +116,14 @@ test("linux installer installs, verifies, and reuses the pinned release", async 
 
   const stableLink = await readlink(path.join(installRoot, "chrome"));
   expect(stableLink).toBe("144.0.7559.132/chrome");
+  const installMarker = JSON.parse(await readFile(path.join(installRoot, ".fingerprint-browser-install.json"), "utf8"));
+  expect(installMarker).toMatchObject({
+    schemaVersion: 1,
+    installer: "install-fingerprint-browser.sh",
+    platform: "linux",
+    version: "144.0.7559.132",
+    binaryRelativePath: "chrome",
+  });
 
   const verify = runInstaller(["--platform", "linux", "--dest", installRoot, "--cache-dir", cacheDir, "--verify-only"], env);
   expect(verify.status).toBe(0);

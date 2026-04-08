@@ -201,15 +201,19 @@ test("browser config never falls back to system Google Chrome", async () => {
   expect(source).toContain('Only the provided fingerprint browser is allowed.');
 });
 
-test("worktree bootstrap no longer syncs private browser bundles and ships explicit installer assets", async () => {
+test("worktree bootstrap provisions repo-local fingerprint browser paths via the installer-aware bootstrap", async () => {
   const source = await readFile(path.join(repoRoot, "scripts/worktree-sync.paths"), "utf8");
   const manifestSource = await readFile(path.join(repoRoot, "scripts/fingerprint-browser-manifest.json"), "utf8");
   const installerSource = await readFile(path.join(repoRoot, "scripts/install-fingerprint-browser.sh"), "utf8");
+  const syncSource = await readFile(path.join(repoRoot, "scripts/sync-worktree-resources.sh"), "utf8");
   expect(source).not.toContain(".tools/Chromium.app");
   expect(manifestSource).toContain('"linux"');
   expect(manifestSource).toContain('"macos"');
   expect(installerSource).toContain("install-fingerprint-browser.sh");
   expect(installerSource).toContain(".tools/fingerprint-browser/linux");
+  expect(syncSource).toContain("bootstrap_browser_runtime");
+  expect(syncSource).toContain("CHROME_EXECUTABLE_PATH");
+  expect(syncSource).toContain("copied browser runtime");
 });
 
 test("task timeout aborts native CDP launch instead of waiting for the full CDP attach timeout", async () => {
