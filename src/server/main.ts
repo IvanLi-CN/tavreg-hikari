@@ -26,9 +26,13 @@ import {
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
   isLockedAccountRecord,
+  normalizeAccountBatchBootstrapMode,
+  resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
+  type AccountBatchBootstrapMode,
 } from "./account-session-bootstrap.js";
 import { resolveTaskLedgerDbPath } from "../storage/db-paths.js";
 import { buildNextSettings, validateBeforePersist } from "./app-settings.js";
@@ -527,9 +531,64 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
 }
 
 function getAccountConnectBlockMessage(
-  account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "hasApiKey" | "browserSession">,
+  account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "hasApiKey" | "mailboxStatus" | "browserSession">,
 ): string | null {
   return getAccountSessionBootstrapBlockMessage(account);
+}
+
+function buildAccountBatchBootstrapPreview(
+  db: AppDatabase,
+  accountIds: number[],
+  mode: AccountBatchBootstrapMode,
+  queuedAccountIds?: ReadonlySet<number>,
+): {
+  mode: AccountBatchBootstrapMode;
+  requestedCount: number;
+  queueIds: number[];
+  items: Array<{
+    accountId: number | null;
+    microsoftEmail: string | null;
+    decision: "queue" | "blocked" | "already_bootstrapped" | "bootstrapping" | "missing";
+    reason: string | null;
+  }>;
+  summary: {
+    queueableCount: number;
+    blockedCount: number;
+    alreadyBootstrappedCount: number;
+    bootstrappingCount: number;
+    missingCount: number;
+  };
+} {
+  const normalizedIds = Array.from(new Set(accountIds.filter((id) => Number.isInteger(id) && id > 0)));
+  const items = normalizedIds.map((accountId) => {
+    const account = db.getAccount(accountId);
+    const result =
+      queuedAccountIds?.has(accountId)
+        ? { decision: "bootstrapping" as const, reason: "账号已在 Bootstrap 队列中" }
+        : resolveAccountBatchBootstrapDecision(account, mode);
+    return {
+      accountId: account?.id ?? accountId,
+      microsoftEmail: account?.microsoftEmail ?? null,
+      decision: result.decision,
+      reason: result.reason,
+    };
+  });
+  const queueIds = items
+    .filter((item) => item.decision === "queue" && item.accountId != null)
+    .map((item) => item.accountId as number);
+  return {
+    mode,
+    requestedCount: normalizedIds.length,
+    queueIds,
+    items,
+    summary: {
+      queueableCount: queueIds.length,
+      blockedCount: items.filter((item) => item.decision === "blocked").length,
+      alreadyBootstrappedCount: items.filter((item) => item.decision === "already_bootstrapped").length,
+      bootstrappingCount: items.filter((item) => item.decision === "bootstrapping").length,
+      missingCount: items.filter((item) => item.decision === "missing").length,
+    },
+  };
 }
 
 function applyMailboxFailureState(input: {
@@ -1077,8 +1136,15 @@ async function main(): Promise<void> {
     ) {
       return false;
     }
-    if (!options?.force && !shouldQueueImportedAccountBootstrap(account)) {
-      return false;
+    const replayPendingBootstrap = options?.reason === "auto" && shouldReplayPendingAccountBootstrap(account);
+    if (!options?.force) {
+      if (options?.reason === "manual") {
+        if (resolveAccountBatchBootstrapDecision(account, "pending_only").decision !== "queue") {
+          return false;
+        }
+      } else if (!replayPendingBootstrap && !shouldQueueImportedAccountBootstrap(account)) {
+        return false;
+      }
     }
     const queueDisposition = resolveBootstrapQueueDisposition({
       alreadyQueued: sessionBootstrapQueuedIds.has(accountId),
@@ -1177,6 +1243,7 @@ async function main(): Promise<void> {
       const pathname = url.pathname;
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
+      const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
       const mailboxDetailMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)$/);
       const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
@@ -1343,6 +1410,8 @@ async function main(): Promise<void> {
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
           hasApiKey: parseBool(url.searchParams.get("hasApiKey")),
+          sessionStatus: (url.searchParams.get("sessionStatus") || undefined) as any,
+          mailboxStatus: (url.searchParams.get("mailboxStatus") || undefined) as any,
           skipReason: url.searchParams.get("skipReason") || undefined,
           groupName: url.searchParams.get("groupName") || undefined,
           sortBy: url.searchParams.get("sortBy") || undefined,
@@ -1357,6 +1426,21 @@ async function main(): Promise<void> {
           summary: data.summary,
           groups: db.listAccountGroups(),
           rows: data.rows.map((row) => serializeAccount(row)),
+        });
+      }
+
+      if (accountSessionBootstrapPreviewMatch && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: number[]; mode?: unknown } | null;
+        const ids = Array.isArray(body?.ids) ? body.ids.map((id) => Number(id)) : [];
+        const preview = buildAccountBatchBootstrapPreview(
+          db,
+          ids,
+          normalizeAccountBatchBootstrapMode(body?.mode),
+          sessionBootstrapQueuedIds,
+        );
+        return json({
+          ok: true,
+          ...preview,
         });
       }
 
@@ -1475,11 +1559,12 @@ async function main(): Promise<void> {
         if (!account) {
           return badRequest(`account not found: ${accountId}`, 404);
         }
+        const body = (await req.json().catch(() => null)) as { force?: boolean | null } | null;
         const connectBlockMessage = getAccountConnectBlockMessage(account);
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
         return json({
           ok: true,
           queued,
@@ -1700,11 +1785,12 @@ async function main(): Promise<void> {
         if (!account) {
           return badRequest(`account not found: ${accountId}`, 404);
         }
+        const body = (await req.json().catch(() => null)) as { force?: boolean | null } | null;
         const connectBlockMessage = getAccountConnectBlockMessage(account);
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
         return json({
           ok: true,
           queued,

@@ -451,6 +451,57 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("supports session and mailbox status filters in account listing", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "session-ready@outlook.com", password: "pass-a" },
+      { email: "session-failed@outlook.com", password: "pass-b" },
+      { email: "mailbox-preparing@outlook.com", password: "pass-c" },
+    ]);
+
+    const readyAccountId = imported.affectedIds[0];
+    const failedAccountId = imported.affectedIds[1];
+    const preparingAccountId = imported.affectedIds[2];
+
+    markBrowserSessionReady(appDb, readyAccountId);
+    appDb.markMailboxStatus(appDb.getMailboxByAccountId(readyAccountId).id, {
+      status: "available",
+      unreadCount: 1,
+      lastSyncedAt: "2026-04-01T00:00:00.000Z",
+    });
+
+    appDb.markBrowserSessionFailure(failedAccountId, {
+      status: "failed",
+      errorCode: "oauth_timeout",
+      errorMessage: "OAuth timeout",
+    });
+    appDb.markMailboxStatus(appDb.getMailboxByAccountId(failedAccountId).id, {
+      status: "invalidated",
+      lastErrorCode: "oauth_timeout",
+      lastErrorMessage: "OAuth timeout",
+    });
+
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "ready" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["session-ready@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "failed" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["session-failed@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, mailboxStatus: "available" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["session-ready@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, mailboxStatus: "preparing" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["mailbox-preparing@outlook.com"]);
+    expect(
+      appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "failed", mailboxStatus: "invalidated" }).rows.map((account) => account.microsoftEmail),
+    ).toEqual(["session-failed@outlook.com"]);
+
+    expect(appDb.getMailboxByAccountId(preparingAccountId)?.status).toBe("preparing");
+
+    appDb.close();
+  });
+
   test("preserves the original imported_at when an existing account is re-imported", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "stable@outlook.com", password: "first-pass" }]);

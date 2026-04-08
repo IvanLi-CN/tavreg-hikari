@@ -4,6 +4,8 @@ import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
 import { buildImportCommitEntries } from "@/lib/account-import";
 import type {
+  AccountBatchBootstrapMode,
+  AccountBatchBootstrapPreviewPayload,
   AccountExtractorHistoryPayload,
   AccountExtractorHistoryQuery,
   AccountExtractorRunDraft,
@@ -28,7 +30,7 @@ import {
 } from "@/stories/fixtures";
 
 function createDefaultQuery(): AccountQuery {
-  return { q: "", status: "", hasApiKey: "", groupName: "", sortBy: "", sortDir: "desc", page: 1, pageSize: 20 };
+  return { q: "", status: "", hasApiKey: "", sessionStatus: "", mailboxStatus: "", groupName: "", sortBy: "", sortDir: "desc", page: 1, pageSize: 20 };
 }
 
 function createDefaultExtractorHistoryQuery(): AccountExtractorHistoryQuery {
@@ -120,6 +122,9 @@ const baseArgs = {
   batchBusy: false,
   connectBusy: false,
   connectProgress: null,
+  batchBootstrapPreview: null,
+  batchBootstrapPreviewBusy: false,
+  activeBatchBootstrapMode: null,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
   extractorRuntime: sampleExtractorRuntimeIdle,
@@ -163,12 +168,52 @@ const baseArgs = {
 };
 const restoreAvailabilitySpy = fn(async () => undefined);
 
+function buildStoryBatchBootstrapPreview(
+  accounts: AccountsPayload,
+  selectedIds: number[],
+  mode: AccountBatchBootstrapMode = "pending_only",
+): AccountBatchBootstrapPreviewPayload {
+  const items = Array.from(new Set(selectedIds)).map((accountId) => {
+    const account = accounts.rows.find((row) => row.id === accountId) || null;
+    if (!account) {
+      return { accountId, microsoftEmail: null, decision: "missing" as const, reason: "账号不存在" };
+    }
+    if (account.disabledAt || account.skipReason === "microsoft_account_locked" || /^microsoft_account_locked/i.test(account.lastErrorCode || "")) {
+      return { accountId, microsoftEmail: account.microsoftEmail, decision: "blocked" as const, reason: "账号当前不可 Bootstrap" };
+    }
+    if (account.browserSession?.status === "bootstrapping") {
+      return { accountId, microsoftEmail: account.microsoftEmail, decision: "bootstrapping" as const, reason: "账号当前正在 Bootstrap" };
+    }
+    if (mode === "pending_only" && account.browserSession?.status === "ready" && account.mailboxStatus === "available") {
+      return { accountId, microsoftEmail: account.microsoftEmail, decision: "already_bootstrapped" as const, reason: "账号已经 Bootstrap 成功" };
+    }
+    return { accountId, microsoftEmail: account.microsoftEmail, decision: "queue" as const, reason: null };
+  });
+  const queueIds = items.filter((item) => item.decision === "queue").map((item) => item.accountId);
+  return {
+    ok: true,
+    mode,
+    requestedCount: selectedIds.length,
+    queueIds,
+    items,
+    summary: {
+      queueableCount: queueIds.length,
+      blockedCount: items.filter((item) => item.decision === "blocked").length,
+      alreadyBootstrappedCount: items.filter((item) => item.decision === "already_bootstrapped").length,
+      bootstrappingCount: items.filter((item) => item.decision === "bootstrapping").length,
+      missingCount: items.filter((item) => item.decision === "missing").length,
+    },
+  };
+}
+
 function applyStoryAccountQuery(accounts: AccountsPayload, query: AccountQuery): AccountsPayload {
   const pattern = query.q.trim().toLowerCase();
   const filteredRows = accounts.rows.filter((row) => {
     if (query.status && row.lastResultStatus !== query.status) return false;
     if (query.hasApiKey === "true" && !row.hasApiKey) return false;
     if (query.hasApiKey === "false" && row.hasApiKey) return false;
+    if (query.sessionStatus && (row.browserSession?.status || "pending") !== query.sessionStatus) return false;
+    if (query.mailboxStatus && (row.mailboxStatus || "preparing") !== query.mailboxStatus) return false;
     if (query.groupName && (row.groupName || "") !== query.groupName) return false;
     if (!pattern) return true;
     return [
@@ -248,8 +293,9 @@ type AccountsStorySurfaceProps = {
   initialSelectedIds?: number[];
   graphSettingsConfigured?: boolean;
   connectingAccountIds?: number[];
+  initialDesktopToolsCollapsed?: boolean;
   onConnectAccount?: (accountId: number) => Promise<void>;
-  onConnectSelectedAccounts?: () => Promise<void>;
+  onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
@@ -279,6 +325,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
   const visibleAccounts = applyStoryAccountQuery(accounts, query);
+  const batchBootstrapPreview = buildStoryBatchBootstrapPreview(accounts, selectedIds);
 
   useEffect(() => {
     if (!props.extractorRunDraft) return;
@@ -307,7 +354,11 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         previewBusy={Boolean(props.previewBusy)}
         batchBusy={Boolean(props.batchBusy)}
         connectBusy={Boolean(props.connectBusy)}
-        connectProgress={props.connectBusy ? { current: 1, total: Math.max(1, selectedIds.length) } : null}
+        connectProgress={props.connectBusy ? { current: 1, total: Math.max(1, batchBootstrapPreview.summary.queueableCount || selectedIds.length) } : null}
+        batchBootstrapPreview={batchBootstrapPreview}
+        batchBootstrapPreviewBusy={false}
+        activeBatchBootstrapMode={null}
+        initialDesktopToolsCollapsed={props.initialDesktopToolsCollapsed}
         extractorSettings={extractorSettings}
         extractorSettingsBusy={false}
         extractorRuntime={props.extractorRuntime ?? sampleExtractorRuntimeIdle}
@@ -443,7 +494,7 @@ const meta = {
     docs: {
       description: {
         component:
-          "微软账号导入与查询页，包含提号器实时面板、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量串行连接和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序。账号池样例额外覆盖瞬时失败可复用、硬账号阻断、账号锁定和人工停用四类状态，便于核对失败复用策略。",
+          "微软账号导入与查询页，包含提号器实时面板、四个自动提取号源的 KEY 配置、本地提取历史筛选，以及跨分页勾选、批量分组、批量 Bootstrap 和批量删除的交互面。桌面表格额外支持导入时间与最近使用两列的三态排序，并补齐 Session / 收信状态筛选与左侧工具列收起。",
       },
     },
   },
@@ -1005,24 +1056,89 @@ export const SessionBootstrapCompactCards: Story = {
   },
 };
 
-const batchConnectSpy = fn(async () => undefined);
+const batchBootstrapSpy = fn(async () => undefined);
+const forceBootstrapSpy = fn(async () => undefined);
 
-export const BatchConnectSelectionPlay: Story = {
+export const BatchBootstrapSelectionPlay: Story = {
   args: baseArgs,
-  render: () => <AccountsStorySurface initialSelectedIds={[2, 3, 4]} onConnectSelectedAccounts={batchConnectSpy} />,
+  render: () => <AccountsStorySurface initialSelectedIds={[2, 3, 4]} onConnectSelectedAccounts={batchBootstrapSpy} />,
   parameters: {
     docs: {
       description: {
-        story: "批量连接入口固定在微软账号页；锁定或禁用账号仍可保留在勾选集里，但工具栏只统计可连接账号并串行发起连接。",
+        story: "批量 Bootstrap 入口固定在微软账号页；默认只处理未成功 Bootstrap 的账号，并把锁定/禁用/进行中账号排除在外。",
       },
     },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("可连接 2 条")).toBeInTheDocument();
+    await expect(canvas.getByText("可 Bootstrap 1 条")).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "已锁定" })).toBeDisabled();
-    await userEvent.click(canvas.getByRole("button", { name: "批量连接" }));
-    await expect(batchConnectSpy).toHaveBeenCalledTimes(1);
+    await userEvent.click(canvas.getByRole("button", { name: "批量 Bootstrap" }));
+    await expect(batchBootstrapSpy).toHaveBeenCalledTimes(1);
+  },
+};
+
+export const DesktopToolsCollapsed: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialDesktopToolsCollapsed frameClassName="mx-auto max-w-[1600px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "桌面态左侧工具列收起后的账号页，验证右侧账号池拿到完整宽度且仍保留稳定的“展开工具列”入口。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByText("提号器")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("导入微软账号")).not.toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "展开工具列" })).toBeInTheDocument();
+  },
+};
+
+export const ForceBootstrapSelectionPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialSelectedIds={[2, 4]} onConnectSelectedAccounts={forceBootstrapSpy} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证工具栏同时暴露“批量 Bootstrap”和“强制 Bootstrap”两个入口，便于直接对已成功账号重新发起 Bootstrap。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "强制 Bootstrap" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("button", { name: "强制 Bootstrap" }));
+    await expect(forceBootstrapSpy).toHaveBeenCalledWith("force");
+  },
+};
+
+export const StatusFiltersPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证账号池新增 Session 与收信状态筛选，并且能与现有条件组合筛掉不匹配记录。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@outlook.com"));
+
+    await expect(rowCells().length).toBeGreaterThan(3);
+
+    await userEvent.click(canvas.getByRole("combobox", { name: "Session" }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "failed" }));
+    await expect(rowCells()).toHaveLength(1);
+    await expect(rowCells()[0]).toHaveTextContent("delta@outlook.com");
+
+    await userEvent.click(canvas.getByRole("combobox", { name: "收信状态" }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "invalidated" }));
+    await expect(rowCells()).toHaveLength(1);
+    await expect(rowCells()[0]).toHaveTextContent("delta@outlook.com");
   },
 };
 

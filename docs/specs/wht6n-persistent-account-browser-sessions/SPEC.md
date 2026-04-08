@@ -4,21 +4,21 @@
 
 - Status: 已实现
 - Created: 2026-03-31
-- Last: 2026-03-31
+- Last: 2026-04-07
 
 ## 背景 / 问题陈述
 
 - 现有微软账号导入与自动提取只会把账号写入本地台账，并尝试一次性异步 Graph OAuth；浏览器 profile 不持久，账号与代理/IP 也没有一对一绑定。
 - Tavily 主流程每个 attempt 都会创建临时 `run-*` profile，无法稳定复用已登录会话，也无法在账号重新使用时优先回到相同代理出口。
 - 代理池当前只维护全局 selected/pinned node，没有 region 维度和 lease 时间，无法实现“同 IP -> 同地区 -> 全池 LRU”的复用策略。
-- 不做这次改造的话，新增账号仍然会在登录态、代理归属、邮箱连接和 profile 资产上四处分裂，后续自动化链路也无法稳定复用同一会话。
+- 不做这次改造的话，新增账号仍然会在登录态、代理归属、邮箱 Bootstrap 和 profile 资产上四处分裂，后续自动化链路也无法稳定复用同一会话。
 
 ## 目标 / 非目标
 
 ### Goals
 
 - 为每个微软账号维护唯一的持久浏览器会话记录，保存 profile 绝对路径、代理节点/IP/地区快照与最近 bootstrap/使用时间。
-- 手工导入与自动提取账号后立即进入 bootstrap 队列，只有 Tavily 登录 + Graph 邮箱连接成功后才标记为可调度。
+- 手工导入与自动提取账号后立即进入 bootstrap 队列，只有 Tavily 登录 + Graph 邮箱 Bootstrap 成功后才标记为可调度。
 - Tavily 主流程在账号已有 ready 会话时复用该 profile 和代理选择结果，不再创建新的账号级临时 profile。
 - 代理选择遵循固定规则：同 IP 仍可用优先；否则同 `region` 内健康节点按 LRU；否则全池健康节点按 LRU。
 - 在账号页展示最小可见的会话状态、代理/IP、profile 路径摘要和重试入口，并补齐 Storybook 与视觉证据。
@@ -36,7 +36,7 @@
 
 - `account_browser_sessions` 数据模型、proxy region/LRU 扩展与相关 repository API
 - 导入/自动提取后的统一 bootstrap 队列与状态机
-- Tavily 登录 profile 持久化、Graph OAuth 自动连接、失败留痕与手动重试
+- Tavily 登录 profile 持久化、Graph OAuth 自动 Bootstrap、失败留痕与手动重试
 - 调度器对 ready session 的准入控制与 profile/proxy 复用
 - 账号页最小 UI、Storybook、视觉证据、README/spec 更新
 
@@ -56,6 +56,8 @@
 - 代理复用必须按“同 IP -> 同 region -> 全池 LRU”执行，且只在健康节点集合内选择。
 - 持久 profile 必须固定在 `output/browser-profiles/accounts/<accountId>/chrome`。
 - 账号页必须可见会话状态、当前代理/IP、profile 路径摘要与重试入口。
+- 账号页必须提供 `Session / 收信状态` 的服务端筛选，并让批量 Bootstrap 的“可执行数量”以服务端 preview 为准。
+- 桌面态账号页必须支持左侧工具列收起/展开，让右侧账号池在需要时拿到完整宽度。
 
 ### SHOULD
 
@@ -71,10 +73,11 @@
 
 ### Core flows
 
-- 手工导入账号：账号落库 -> ensure session row -> 进入 bootstrap 队列 -> 选代理 -> 用持久 profile 登录 Tavily Home -> 自动发起 Graph OAuth -> 成功后 `browserSession.status=ready`。
+- 手工导入账号：账号落库 -> ensure session row -> 进入 bootstrap 队列 -> 选代理 -> 用持久 profile 登录 Tavily Home -> 自动完成 Graph 邮箱 Bootstrap -> 成功后 `browserSession.status=ready`。
 - 自动提取账号：候选账号先导入本地 -> 进入 bootstrap 队列 -> 只有 bootstrap 成功后才计入当前 job 的可调度账号池。
 - 主流程调度：选到 ready session 的账号时，复用其持久 profile；若原 IP 不再可用，则按同 region / 全池 LRU 选择代理并继续复用同一 profile。
 - 手动重试：账号页点击重试入口后重新排队 bootstrap，并刷新会话状态。
+- 批量工具栏：默认“批量 Bootstrap”只处理未成功 Bootstrap 的账号；“强制 Bootstrap”允许忽略成功判定，但两者都继续跳过锁定、禁用、已被占用或当前正在 bootstrapping 的账号。
 
 ### Edge cases / errors
 
@@ -93,6 +96,8 @@
 | `proxy_nodes.region + last_leased_at` | db | internal | Modify | ./contracts/db.md | server/storage | server/web/scheduler | 复用与 LRU |
 | `proxy_checks.region` | db | internal | Modify | ./contracts/db.md | server/storage | proxy admin | 检查快照补 region |
 | `AccountRecord.browserSession` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React accounts view | 账号页最小可见状态 |
+| `GET /api/accounts?sessionStatus=&mailboxStatus=` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React accounts view | 服务端真相源筛选 |
+| `POST /api/accounts/session-bootstrap/preview` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 跨分页批量 Bootstrap preview |
 | `POST /api/accounts/:id/session/rebootstrap` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 手动重试 bootstrap |
 | `account.updated session_*` | events | internal | Modify | ./contracts/events.md | server/scheduler | web SSE client | 会话状态推送 |
 
@@ -111,6 +116,9 @@
 - Given 原 IP 不可用但同 `proxy_region` 仍有健康节点，When 选择代理，Then 必须在该 region 内按 `last_leased_at` 最久未使用节点优先。
 - Given Graph 设置缺失，When 自动 bootstrap 触发，Then session 进入 `blocked`（或等价错误码）而不是 `ready`。
 - Given 会话 bootstrap 成功，When 账号页刷新，Then 能看到会话状态、当前代理/IP 和 profile 路径摘要。
+- Given 账号页桌面态空间不足，When 点击“收起工具列”，Then 左侧提号器与导入区整列收起，右侧账号池占满主体宽度，并保留“展开工具列”入口。
+- Given 在账号页设置 `Session` 或 `收信状态` 筛选，When 触发查询，Then 过滤作用于筛选后的全量结果集，而不是当前页前端假过滤。
+- Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 仅未成功 Bootstrap 的账号会进入队列；When 触发“强制 Bootstrap”，Then 已成功账号也可重新进入队列。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -154,7 +162,7 @@
 ## Visual Evidence
 
 - Storybook canvas：`Views/AccountsView / ExtractorRuntimeRunning`
-  - 证明 `/accounts` 左侧已升级为“提号器”实时面板，包含号源选择、数量/等待时长、SSE 在线状态，以及“提号后立即自动 bootstrap + 自动连邮箱”的运行摘要。
+  - 证明 `/accounts` 左侧已升级为“提号器”实时面板，包含号源选择、数量/等待时长、SSE 在线状态，以及“提号后立即自动 Bootstrap”的运行摘要。
 
 ![账号页提号器运行态](./assets/accounts-extractor-runtime-running.png)
 
@@ -177,6 +185,16 @@
   - 证明窄视口卡片态仍保留 session、proxy 与 profile 最小可见信息。
 
 ![账号持久会话三态（窄视口卡片态）](./assets/session-bootstrap-compact.png)
+
+- Storybook canvas：`Views/AccountsView / DesktopToolsCollapsed`
+  - 证明桌面态账号页支持整列收起左侧工具区，并让右侧账号池直接拿到完整宽度。
+
+![账号页桌面态左侧工具列收起](./assets/accounts-desktop-tools-collapsed.png)
+
+- Storybook canvas：`Views/AccountsView / StatusFiltersPlay`
+  - 证明 `Session / 收信状态` 已接入服务端真相源筛选，能够组合过滤出 `failed + invalidated` 的目标账号。
+
+![账号页 Session 与收信状态筛选](./assets/accounts-status-filters.png)
 
 ## 资产晋升（Asset promotion）
 
@@ -206,6 +224,7 @@ None
 
 ## 变更记录（Change log）
 
+- 2026-04-07: 补充账号页桌面态工具列收起、`Session / 收信状态` 服务端筛选，以及批量 Bootstrap preview / 强制模式的收口说明与视觉证据。
 - 2026-03-31: 初版 spec，冻结账号持久会话、代理复用与 profile 落库改造范围。
 
 ## 参考（References）
