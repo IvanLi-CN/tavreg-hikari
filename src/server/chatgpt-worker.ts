@@ -453,6 +453,7 @@ async function clickVisibleText(page: any, names: RegExp[]): Promise<boolean> {
 async function activateAction(page: any, names: RegExp[]): Promise<boolean> {
   if (await clickByRoleName(page, "button", names)) return true;
   if (await clickByRoleName(page, "link", names)) return true;
+  if (await clickVisibleText(page, names)) return true;
   return false;
 }
 
@@ -585,7 +586,9 @@ function hasOtpPromptSignal(text: string): boolean {
 }
 
 function hasConsentPromptSignal(currentUrl: string, text: string): boolean {
-  return /\/consent(?:\/|$)|allow access|authorize app|app permissions|continue to application/i.test(`${currentUrl} ${text}`);
+  return /\/consent(?:\/|$)|allow access|authorize app|app permissions|continue to application|sign in to codex with chatgpt|share your name, email, and profile picture|codex will not receive your chat history/i.test(
+    `${currentUrl} ${text}`,
+  );
 }
 
 function hasProfileSetupSignal(currentUrl: string, text: string): boolean {
@@ -745,6 +748,20 @@ async function maybeSwitchKnownAccountToLogin(page: any, currentUrl: string, tex
   const activated = await activateAction(page, [/^log in$/i, /^login$/i, /already have an account\?\s*log in/i, /sign in/i]);
   if (activated) {
     log("switched auth surface to log-in for a known existing account");
+  }
+  return activated;
+}
+
+async function maybeSwitchToOtpLogin(page: any, currentUrl: string, text: string): Promise<boolean> {
+  if (!/log-in\/password/i.test(currentUrl)) {
+    return false;
+  }
+  if (!/incorrect email address or password|log in with a one-time code|use one-time code/i.test(text)) {
+    return false;
+  }
+  const activated = await activateAction(page, [/log in with a one-time code/i, /use one-time code/i, /one-time code/i]);
+  if (activated) {
+    log("switched auth surface to one-time-code login after password rejection");
   }
   return activated;
 }
@@ -1406,11 +1423,52 @@ async function run(): Promise<void> {
     let emailVerificationRecoveryCount = 0;
     let lastEmailVerificationPendingLogAt = 0;
     let addPhoneOauthRetryCount = 0;
+    let authErrorFreshOauthRetryCount = 0;
     let accountKnownExists = false;
     let authSurfaceBlankWaitCount = 0;
     let forcedSurfaceSnapshot: SurfaceSnapshot | null = null;
     let loopCount = 0;
     const maxAddPhoneOauthRetries = 10;
+    const maxAuthErrorFreshOauthRetries = 3;
+    const restartOauthInCurrentBrowser = async (reason: string, extra: Record<string, unknown> = {}): Promise<void> => {
+      callbackFromObservedUrl = null;
+      callbackFromNavigation = null;
+      callbackState = createState();
+      callbackStateRef.current = callbackState;
+      ({ verifier, challenge } = createPkcePair());
+      authorizeUrl = buildAuthorizeUrl({ state: callbackState, codeChallenge: challenge });
+      createAccountActivated = false;
+      preferLoginFlow = true;
+      otpRequestedAt = nowIso();
+      otpResendCount = 0;
+      otpSettlingUntil = 0;
+      allowOtpReplay = false;
+      authChallengeSeenAt = 0;
+      lastAuthChallengeLogAt = 0;
+      emailVerificationSeenAt = 0;
+      emailVerificationRecoveryCount = 0;
+      lastEmailVerificationPendingLogAt = 0;
+      lastObservedUrl = "";
+      lastEmailSubmitUrl = "";
+      repeatedEmailSubmitCount = 0;
+      lastPasswordSubmitUrl = "";
+      repeatedPasswordSubmitCount = 0;
+      lastProfileSubmitUrl = "";
+      repeatedProfileSubmitCount = 0;
+      lastOrganizationSubmitUrl = "";
+      repeatedOrganizationSubmitCount = 0;
+      lastConsentSubmitUrl = "";
+      repeatedConsentSubmitCount = 0;
+      lastProgressAt = Date.now();
+      await writeStageMarker(outputDir, reason, {
+        authorizeUrl,
+        preferLoginFlow,
+        ...extra,
+      });
+      await sleepMs(3500);
+      await page.goto(authorizeUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+      await page.waitForTimeout(1500);
+    };
     const deadline = Date.now() + 12 * 60_000;
     while (Date.now() < deadline) {
       loopCount += 1;
@@ -1515,39 +1573,11 @@ async function run(): Promise<void> {
 	        }
           if (addPhoneOauthRetryCount < maxAddPhoneOauthRetries) {
             addPhoneOauthRetryCount += 1;
-            callbackFromObservedUrl = null;
-            callbackFromNavigation = null;
-            callbackState = createState();
-            callbackStateRef.current = callbackState;
-            ({ verifier, challenge } = createPkcePair());
-            authorizeUrl = buildAuthorizeUrl({ state: callbackState, codeChallenge: challenge });
-            createAccountActivated = false;
-            preferLoginFlow = true;
-            otpResendCount = 0;
-            authChallengeSeenAt = 0;
-            lastAuthChallengeLogAt = 0;
-            emailVerificationSeenAt = 0;
-            emailVerificationRecoveryCount = 0;
-            lastEmailVerificationPendingLogAt = 0;
-            lastObservedUrl = "";
-            lastEmailSubmitUrl = "";
-            repeatedEmailSubmitCount = 0;
-            lastPasswordSubmitUrl = "";
-            repeatedPasswordSubmitCount = 0;
-            lastProfileSubmitUrl = "";
-            repeatedProfileSubmitCount = 0;
-            lastOrganizationSubmitUrl = "";
-            repeatedOrganizationSubmitCount = 0;
-            lastProgressAt = Date.now();
             log("phone verification surfaced; retrying with a fresh oauth authorize round in login mode");
-            await writeStageMarker(outputDir, "oauth:retry_after_add_phone", {
-              authorizeUrl,
+            await restartOauthInCurrentBrowser("oauth:retry_after_add_phone", {
               retryCount: addPhoneOauthRetryCount,
               previousUrl: currentUrl,
-              preferLoginFlow,
             });
-            await page.goto(authorizeUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
-            await page.waitForTimeout(1500);
             continue;
           }
 	        throw new Error("chatgpt_phone_verification_required");
@@ -1575,6 +1605,13 @@ async function run(): Promise<void> {
       const passwordFieldVisible = await locatorVisible(page.locator('input[type="password"], input[name="password"], input[autocomplete="new-password"], input[autocomplete="current-password"]'));
       if (passwordFieldVisible) {
         failureStage = "password_submit";
+        if (await maybeSwitchToOtpLogin(page, currentUrl, text)) {
+          lastPasswordSubmitUrl = "";
+          repeatedPasswordSubmitCount = 0;
+          lastProgressAt = Date.now();
+          await page.waitForTimeout(1500);
+          continue;
+        }
         if (await maybeSwitchToLogin(page, currentUrl, text)) {
           preferLoginFlow = true;
           createAccountActivated = false;
@@ -1663,6 +1700,20 @@ async function run(): Promise<void> {
         }
         if (hasRecoverableAuthErrorSignal(text)) {
           await writeFailureArtifacts(outputDir, page, "email_verification_recoverable_error").catch(() => {});
+          if (
+            /max_check_attempts/i.test(text)
+            && preferLoginFlow
+            && authErrorFreshOauthRetryCount < maxAuthErrorFreshOauthRetries
+          ) {
+            authErrorFreshOauthRetryCount += 1;
+            log(`email verification hit max_check_attempts; restarting oauth in login mode retry=${authErrorFreshOauthRetryCount}`);
+            await restartOauthInCurrentBrowser("oauth:retry_after_email_verification_error", {
+              retryCount: authErrorFreshOauthRetryCount,
+              previousUrl: currentUrl,
+              error: "max_check_attempts",
+            });
+            continue;
+          }
           if (await activateAction(page, [/try again/i, /retry/i, /continue/i])) {
             log("email verification recoverable auth error; retrying current auth step");
             allowOtpReplay = true;
