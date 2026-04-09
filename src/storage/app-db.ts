@@ -3053,7 +3053,24 @@ export class AppDatabase {
     return !this.hasNonRetryableAttemptForJob(jobId, accountId);
   }
 
-  createAttempt(jobId: number, input: { accountId?: number | null; accountEmail?: string | null; outputDir: string }): JobAttemptRecord {
+  createAttempt(
+    jobId: number,
+    input: { accountId?: number | null; accountEmail?: string | null; outputDir: string },
+  ): JobAttemptRecord;
+  createAttempt(jobId: number, accountId: number | null, outputDir: string): JobAttemptRecord;
+  createAttempt(
+    jobId: number,
+    inputOrAccountId: { accountId?: number | null; accountEmail?: string | null; outputDir: string } | number | null,
+    legacyOutputDir?: string,
+  ): JobAttemptRecord {
+    const input =
+      typeof inputOrAccountId === "object" && inputOrAccountId !== null
+        ? inputOrAccountId
+        : {
+            accountId: inputOrAccountId,
+            accountEmail: inputOrAccountId == null ? null : this.getAccount(inputOrAccountId)?.microsoftEmail ?? null,
+            outputDir: legacyOutputDir || "",
+          };
     const now = nowIso();
     const row = this.db
       .query(`

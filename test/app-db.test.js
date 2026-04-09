@@ -1663,6 +1663,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ subscriptionUrl: "" }),
@@ -1686,6 +1687,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),
@@ -1705,7 +1707,7 @@ describe("scheduler helpers", () => {
 
   test("rejects auto extract starts when provider keys are missing", async () => {
     const { appDb, dbPath } = await createTempDb();
-    const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+    const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
     await expect(
       scheduler.startJob({
@@ -1740,6 +1742,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -1796,6 +1799,7 @@ describe("scheduler helpers", () => {
     const queuedImports = [];
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -1935,6 +1939,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () =>
@@ -2071,6 +2076,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () =>
@@ -2146,6 +2152,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -2181,6 +2188,7 @@ describe("scheduler helpers", () => {
     const events = [];
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       "/dev/null",
       dbPath,
       () => ({
@@ -2307,6 +2315,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),
@@ -2389,6 +2398,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),
