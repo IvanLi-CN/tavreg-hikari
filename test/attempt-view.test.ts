@@ -29,7 +29,11 @@ test("serializeAttemptForApi reflects the latest signup task details for active 
     const imported = db.importAccounts([{ email: "alpha@outlook.com", password: "pw123456" }]);
     const accountId = imported.affectedIds[0]!;
     const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
-    const attempt = db.createAttempt(job.id, accountId, path.join(root, "attempt-output"));
+    const attempt = db.createAttempt(job.id, {
+      accountId,
+      accountEmail: "alpha@outlook.com",
+      outputDir: path.join(root, "attempt-output"),
+    });
 
     ledger!.upsertTask({
       runId: "run-1",
@@ -101,7 +105,11 @@ test("serializeAttemptForApi ignores stale signup task rows for a fresh retry at
       errorMessage: "old retry failed",
     });
 
-    const retryAttempt = db.createAttempt(job.id, accountId, path.join(root, "attempt-output"));
+    const retryAttempt = db.createAttempt(job.id, {
+      accountId,
+      accountEmail: "retry@outlook.com",
+      outputDir: path.join(root, "attempt-output"),
+    });
     const serialized = serializeAttemptForApi(db, retryAttempt);
 
     expect(serialized.runId).toBeNull();
@@ -138,7 +146,11 @@ test("serializeAttemptForApi keeps ledger diagnostics for failed attempts", asyn
     const imported = db.importAccounts([{ email: "failed@outlook.com", password: "pw123456" }]);
     const accountId = imported.affectedIds[0]!;
     const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
-    const attempt = db.createAttempt(job.id, accountId, path.join(root, "attempt-output"));
+    const attempt = db.createAttempt(job.id, {
+      accountId,
+      accountEmail: "failed@outlook.com",
+      outputDir: path.join(root, "attempt-output"),
+    });
 
     ledger!.upsertTask({
       runId: "run-failed-1",

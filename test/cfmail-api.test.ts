@@ -223,6 +223,30 @@ describe("CF Mail API", () => {
     ]);
   });
 
+  test("lists messages by mailbox id when provided", async () => {
+    const calls: Array<{ method: string; url: string }> = [];
+    const httpJson: CfMailHttpJson = async <T>(method: string, url: string) => {
+      calls.push({ method, url });
+      return { messages: [] } as T;
+    };
+
+    await listCfMailMessages({
+      baseUrl: "https://api.cfm.707979.xyz/",
+      apiKey: "cfm-key",
+      mailboxId: "mbx-proof",
+      address: "proof@alpha.707979.xyz",
+      httpJson,
+      since: "2026-04-03T00:00:00.000Z",
+    });
+
+    expect(calls).toEqual([
+      {
+        method: "GET",
+        url: "https://api.cfm.707979.xyz/api/messages?mailboxId=mbx-proof&since=2026-04-03T00%3A00%3A00.000Z",
+      },
+    ]);
+  });
+
   test("fails fast when CF Mail API key is missing", async () => {
     const httpJson: CfMailHttpJson = async <T>() => ({ domains: [] } as T);
     await expect(

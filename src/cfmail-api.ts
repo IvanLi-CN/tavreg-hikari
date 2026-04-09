@@ -269,10 +269,46 @@ export async function resolveCfMailMailbox(options: {
   }
 }
 
+export async function getCfMailMailbox(options: {
+  baseUrl: string;
+  apiKey: string;
+  mailboxId: string;
+  httpJson: CfMailHttpJson;
+  proxyUrl?: string;
+}): Promise<CfMailMailboxRecord | null> {
+  const apiKey = options.apiKey.trim();
+  if (!apiKey) {
+    throw new Error("cfmail_api_key_missing");
+  }
+  const mailboxId = options.mailboxId.trim();
+  if (!mailboxId) {
+    throw new Error("cfmail_mailbox_id_missing");
+  }
+  const baseUrl = normalizeCfMailBaseUrl(options.baseUrl);
+  try {
+    const response = await options.httpJson<JsonRecord>(
+      "GET",
+      `${baseUrl}/api/mailboxes/${encodeURIComponent(mailboxId)}`,
+      {
+        headers: buildCfMailAuthHeaders(apiKey),
+        proxyUrl: options.proxyUrl,
+      },
+    );
+    return extractMailboxRecord(response);
+  } catch (error) {
+    const status = parseHttpStatus(error instanceof Error ? error.message : String(error));
+    if (status === 404) {
+      return null;
+    }
+    throw error;
+  }
+}
+
 export async function listCfMailMessages(options: {
   baseUrl: string;
   apiKey: string;
-  address: string;
+  address?: string;
+  mailboxId?: string;
   httpJson: CfMailHttpJson;
   proxyUrl?: string;
   after?: string;
@@ -284,7 +320,15 @@ export async function listCfMailMessages(options: {
   }
   const baseUrl = normalizeCfMailBaseUrl(options.baseUrl);
   const query = new URLSearchParams();
-  query.append("mailbox", options.address.trim().toLowerCase());
+  const mailboxId = String(options.mailboxId || "").trim();
+  const address = String(options.address || "").trim().toLowerCase();
+  if (mailboxId) {
+    query.append("mailboxId", mailboxId);
+  } else if (address) {
+    query.append("mailbox", address);
+  } else {
+    throw new Error("cfmail_mailbox_query_missing");
+  }
   if (options.after?.trim()) query.set("after", options.after.trim());
   if (options.since?.trim()) query.set("since", options.since.trim());
   const response = await options.httpJson<JsonRecord>("GET", `${baseUrl}/api/messages?${query.toString()}`, {

@@ -11,6 +11,7 @@ import {
   type AppSettings,
   type JobAttemptRecord,
   type JobRecord,
+  type JobSite,
   type MicrosoftAccountRecord,
 } from "../storage/app-db.js";
 import {
@@ -527,6 +528,7 @@ export class JobScheduler {
 
   constructor(
     private readonly db: AppDatabase,
+    private readonly site: JobSite,
     private readonly repoRoot: string,
     private readonly sharedLedgerPath: string,
     private readonly getSettings: () => AppSettings,
@@ -537,7 +539,7 @@ export class JobScheduler {
   ) {}
 
   currentJob(): JobRecord | null {
-    return this.db.getCurrentJob();
+    return this.db.getCurrentJob(this.site);
   }
 
   activeAttemptRows(): JobAttemptRecord[] {
@@ -586,6 +588,7 @@ export class JobScheduler {
     const requestedNeed = Math.max(1, Number.isFinite(params.need) ? Math.trunc(params.need) : 1);
     const normalizedMaxAttempts = normalizeJobMaxAttempts(requestedNeed, params.maxAttempts);
     const job = this.db.createJob({
+      site: this.site,
       ...params,
       maxAttempts: normalizedMaxAttempts,
       ...autoExtract,
@@ -635,7 +638,7 @@ export class JobScheduler {
   }
 
   stopCurrentJob(): JobRecord {
-    const job = this.db.getCurrentJob();
+    const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current job");
     if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
       return this.maybeFinalizeStoppedJob(job.id) || job;
@@ -667,7 +670,7 @@ export class JobScheduler {
     if (!confirmForceStop) {
       throw new Error("force stop requires confirmForceStop=true");
     }
-    const job = this.db.getCurrentJob();
+    const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current job");
     if (job.status === "stopped" || job.status === "force_stopping") {
       return this.maybeFinalizeStoppedJob(job.id) || job;
@@ -821,7 +824,7 @@ export class JobScheduler {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
-    const currentJob = this.db.getCurrentJob();
+    const currentJob = this.db.getCurrentJob(this.site);
     for (const job of [currentJob].filter(Boolean) as JobRecord[]) {
       this.abortAutoExtractRequests(job.id, "server shutdown");
     }
@@ -840,7 +843,7 @@ export class JobScheduler {
     }
     await Promise.allSettled(waits);
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
-    const job = this.db.getCurrentJob();
+    const job = this.db.getCurrentJob(this.site);
     if (job && isStopInProgressStatus(job.status)) {
       this.maybeFinalizeStoppedJob(job.id);
     }
@@ -848,7 +851,7 @@ export class JobScheduler {
   }
 
   private requireCurrentJob(): JobRecord {
-    const job = this.db.getCurrentJob();
+    const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current job");
     if (isTerminalJobStatus(job.status)) {
       throw new Error(`current job is already ${job.status}`);
@@ -922,7 +925,11 @@ export class JobScheduler {
         const account = this.db.leaseNextAccount(jobId);
         if (!account) break;
         const attemptOutputDir = path.join(this.repoRoot, "output", "web-runs", `job-${dispatchJob.id}`, `attempt-${Date.now()}-${account.id}`);
-        const attempt = this.db.createAttempt(dispatchJob.id, account.id, attemptOutputDir);
+        const attempt = this.db.createAttempt(dispatchJob.id, {
+          accountId: account.id,
+          accountEmail: account.microsoftEmail,
+          outputDir: attemptOutputDir,
+        });
         const pendingLaunch: PendingAttemptLaunch = {
           jobId: dispatchJob.id,
           attempt,

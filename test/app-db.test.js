@@ -98,6 +98,61 @@ afterEach(async () => {
 });
 
 describe("AppDatabase account import", () => {
+  test("migrates legacy jobs tables before creating the site index", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-legacy-jobs-"));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, "app.sqlite");
+    const { Database } = await import("bun:sqlite");
+    const legacyDb = new Database(dbPath);
+    legacyDb.exec(`
+      CREATE TABLE jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT NOT NULL,
+        run_mode TEXT NOT NULL,
+        need INTEGER NOT NULL,
+        parallel INTEGER NOT NULL,
+        max_attempts INTEGER NOT NULL,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        skip_count INTEGER NOT NULL DEFAULT 0,
+        launched_count INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        paused_at TEXT,
+        completed_at TEXT,
+        last_error TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      INSERT INTO jobs (
+        status, run_mode, need, parallel, max_attempts, success_count, failure_count, skip_count, launched_count,
+        started_at, paused_at, completed_at, last_error, updated_at
+      ) VALUES (
+        'running', 'headed', 1, 1, 1, 0, 0, 0, 0,
+        '2026-04-06T00:00:00.000Z', NULL, NULL, NULL, '2026-04-06T00:00:00.000Z'
+      );
+    `);
+    legacyDb.close(false);
+
+    const appDb = await AppDatabase.open(dbPath);
+    expect(appDb.getCurrentJob("tavily")).toMatchObject({
+      id: 1,
+      site: "tavily",
+      payloadJson: {},
+    });
+    appDb.close();
+
+    const migratedDb = new Database(dbPath, { readonly: true });
+    const jobColumns = migratedDb.query("PRAGMA table_info(jobs);").all();
+    const jobColumnNames = new Set(jobColumns.map((column) => String(column.name || "").toLowerCase()));
+    const jobSiteIndex = migratedDb
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'jobs_site_id_idx'")
+      .get();
+    expect(jobColumnNames.has("site")).toBe(true);
+    expect(jobColumnNames.has("payload_json")).toBe(true);
+    expect(jobSiteIndex).toMatchObject({ name: "jobs_site_id_idx" });
+    migratedDb.close(false);
+  });
+
   test("dedupes by email and preserves skip marker after API key exists", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts([
@@ -1608,6 +1663,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ subscriptionUrl: "" }),
@@ -1631,6 +1687,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),
@@ -1650,7 +1707,7 @@ describe("scheduler helpers", () => {
 
   test("rejects auto extract starts when provider keys are missing", async () => {
     const { appDb, dbPath } = await createTempDb();
-    const scheduler = new JobScheduler(appDb, process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+    const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
     await expect(
       scheduler.startJob({
@@ -1685,6 +1742,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -1741,6 +1799,7 @@ describe("scheduler helpers", () => {
     const queuedImports = [];
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -1880,6 +1939,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () =>
@@ -2016,6 +2076,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () =>
@@ -2091,6 +2152,7 @@ describe("scheduler helpers", () => {
 
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -2126,6 +2188,7 @@ describe("scheduler helpers", () => {
     const events = [];
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       "/dev/null",
       dbPath,
       () => ({
@@ -2252,6 +2315,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),
@@ -2334,6 +2398,7 @@ describe("scheduler helpers", () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
       appDb,
+      "tavily",
       process.cwd(),
       dbPath,
       () => createSchedulerSettings(),

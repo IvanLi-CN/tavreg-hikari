@@ -1,4 +1,5 @@
-export type PageKey = "dashboard" | "accounts" | "mailboxes" | "apiKeys" | "proxies";
+export type PageKey = "tavily" | "chatgpt" | "accounts" | "mailboxes" | "apiKeys" | "proxies";
+export type JobSite = "tavily" | "chatgpt";
 
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
 export type JobControlAction = "start" | "pause" | "resume" | "stop" | "force_stop" | "update_limits";
@@ -263,7 +264,7 @@ export type ApiKeyExportPayload = {
 
 export type AttemptRecord = {
   id: number;
-  accountId: number;
+  accountId: number | null;
   accountEmail: string | null;
   status: string;
   stage: string;
@@ -276,6 +277,7 @@ export type AttemptRecord = {
 };
 
 export type JobSnapshot = {
+  site: JobSite;
   job: null | {
     id: number;
     status: JobStatus;
@@ -300,6 +302,56 @@ export type JobSnapshot = {
   recentAttempts: AttemptRecord[];
   eligibleCount: number;
   autoExtractState: AutoExtractState | null;
+  cooldown?: null | {
+    active: boolean;
+    until: string;
+    sourceAttemptId: number;
+    sourceJobId: number;
+    sourceErrorCode: string;
+    reason: string;
+  };
+};
+
+export type ChatGptDraft = {
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  mailboxId: string;
+  generatedAt: string;
+};
+
+export type ChatGptDraftPayload = {
+  ok: true;
+  draft: ChatGptDraft;
+};
+
+export type ChatGptCredentialRecord = {
+  id: number;
+  jobId: number;
+  attemptId: number;
+  email: string;
+  accountId: string | null;
+  accessTokenMasked: string;
+  refreshTokenMasked: string;
+  idTokenMasked: string;
+  expiresAt: string | null;
+  createdAt: string;
+  hasSecrets: boolean;
+  accessToken?: string;
+  refreshToken?: string;
+  idToken?: string;
+  credentialJson?: string;
+};
+
+export type ChatGptCredentialsPayload = {
+  ok: true;
+  rows: ChatGptCredentialRecord[];
+};
+
+export type ChatGptCredentialDetailPayload = {
+  ok: true;
+  credential: ChatGptCredentialRecord;
 };
 
 export type AutoExtractState = {

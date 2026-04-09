@@ -22,13 +22,13 @@ type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
   args: {
-    activePage: "dashboard",
+    activePage: "tavily",
     error: null,
     onNavigate: fn(),
     children: null,
   },
   render: (args) => {
-    const [page, setPage] = useState<PageKey>("dashboard");
+    const [page, setPage] = useState<PageKey>("tavily");
     return (
       <AppShell {...args} activePage={page} onNavigate={setPage}>
         <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
@@ -41,7 +41,7 @@ export const Default: Story = {
 
 export const NavigationPlay: Story = {
   args: {
-    activePage: "dashboard",
+    activePage: "tavily",
     error: null,
     onNavigate: fn(),
     children: null,
@@ -50,7 +50,7 @@ export const NavigationPlay: Story = {
     return (
       <AppShell {...args}>
         <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
-          dashboard content
+          tavily content
         </div>
       </AppShell>
     );

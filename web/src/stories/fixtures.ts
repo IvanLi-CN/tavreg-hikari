@@ -18,6 +18,7 @@ import type {
 } from "@/lib/app-types";
 
 export const sampleJob: JobSnapshot = {
+  site: "tavily",
   job: {
     id: 17,
     status: "running",
@@ -86,10 +87,10 @@ export const sampleJob: JobSnapshot = {
     phase: "waiting",
     enabledSources: ["zhanghaoya", "shankeyun"],
     accountType: "outlook",
-  currentRoundTarget: 2,
-  acceptedCount: 1,
-  rawAttemptCount: 2,
-  attemptBudget: 0,
+    currentRoundTarget: 2,
+    acceptedCount: 1,
+    rawAttemptCount: 2,
+    attemptBudget: 0,
     inFlightCount: 1,
     remainingWaitSec: 31,
     maxWaitSec: 45,

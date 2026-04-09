@@ -10446,7 +10446,7 @@ function isPidAlive(pid: number | undefined): boolean {
   }
 }
 
-async function launchNativeChromeCdp(
+export async function launchNativeChromeCdp(
   cfg: AppConfig,
   mode: "headed" | "headless",
   proxyServer: string,
@@ -10454,6 +10454,7 @@ async function launchNativeChromeCdp(
   acceptLanguage: string,
   timezoneId?: string,
   signal?: AbortSignal,
+  startupTargets: string[] = ["https://app.tavily.com/"],
 ): Promise<{
   browser: Browser;
   context: any;
@@ -10463,6 +10464,7 @@ async function launchNativeChromeCdp(
   if (!cfg.chromeExecutablePath) {
     throw new Error("chrome executable path is not configured");
   }
+  const cdpConnectTimeoutMs = Math.max(60_000, toInt(process.env.CHROME_NATIVE_CDP_CONNECT_TIMEOUT_MS, 60_000));
 
   const profileCandidates = buildChromeProfileCandidates(cfg.chromeProfileDir);
   let lastError: Error | null = null;
@@ -10474,7 +10476,6 @@ async function launchNativeChromeCdp(
     await mkdir(profileDir, { recursive: true });
     await cleanupChromeProfileArtifacts(profileDir).catch(() => {});
     const debugPort = await resolveDebuggingPort(cfg.chromeRemoteDebuggingPort);
-    const startupTargets = ["https://app.tavily.com/"];
     const args = [
       `--remote-debugging-port=${debugPort}`,
       "--remote-debugging-address=127.0.0.1",
@@ -10546,7 +10547,7 @@ async function launchNativeChromeCdp(
         throwIfAborted(signal, "native chrome launch aborted before CDP connect");
         try {
           browser = await raceWithAbort(
-            connectOverCdpWithTimeout(endpoint, 60_000),
+            connectOverCdpWithTimeout(endpoint, cdpConnectTimeoutMs),
             signal,
             `native chrome launch aborted while connecting to ${endpoint.startsWith("ws://") ? "ws" : "http"} endpoint`,
           );

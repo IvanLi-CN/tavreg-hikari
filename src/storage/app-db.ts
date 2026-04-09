@@ -64,6 +64,7 @@ export type AccountStatus =
   | "skipped_has_key"
   | "disabled";
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
+export type JobSite = "tavily" | "chatgpt";
 export type AttemptStatus = "running" | "succeeded" | "failed" | "stopped";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "cfmail";
@@ -182,6 +183,7 @@ export interface ApiKeyRecord {
 
 export interface JobRecord {
   id: number;
+  site: JobSite;
   status: JobStatus;
   runMode: "headed" | "headless";
   need: number;
@@ -199,6 +201,7 @@ export interface JobRecord {
   pausedAt: string | null;
   completedAt: string | null;
   lastError: string | null;
+  payloadJson: Record<string, unknown>;
   updatedAt: string;
 }
 
@@ -235,7 +238,8 @@ export interface AccountExtractItemRecord {
 export interface JobAttemptRecord {
   id: number;
   jobId: number;
-  accountId: number;
+  accountId: number | null;
+  accountEmail: string | null;
   runId: string | null;
   status: AttemptStatus;
   stage: string;
@@ -247,6 +251,20 @@ export interface JobAttemptRecord {
   startedAt: string;
   completedAt: string | null;
   durationMs: number | null;
+}
+
+export interface ChatGptCredentialRecord {
+  id: number;
+  jobId: number;
+  attemptId: number;
+  email: string;
+  accountId: string;
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+  expiresAt: string | null;
+  credentialJson: string;
+  createdAt: string;
 }
 
 export interface ProxyNodeRecord {
@@ -685,6 +703,7 @@ function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
 function mapJobRow(row: Record<string, unknown>): JobRecord {
   return {
     id: Number(row.id),
+    site: String(row.site || "tavily") as JobSite,
     status: String(row.status) as JobStatus,
     runMode: String(row.run_mode || "headed") as "headed" | "headless",
     need: Number(row.need || 0),
@@ -705,6 +724,7 @@ function mapJobRow(row: Record<string, unknown>): JobRecord {
     pausedAt: row.paused_at == null ? null : String(row.paused_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
     lastError: row.last_error == null ? null : String(row.last_error),
+    payloadJson: parseJson<Record<string, unknown>>(typeof row.payload_json === "string" ? row.payload_json : "{}", {}),
     updatedAt: String(row.updated_at),
   };
 }
@@ -747,7 +767,8 @@ function mapAttemptRow(row: Record<string, unknown>): JobAttemptRecord {
   return {
     id: Number(row.id),
     jobId: Number(row.job_id),
-    accountId: Number(row.account_id),
+    accountId: row.account_id == null ? null : Number(row.account_id),
+    accountEmail: row.account_email == null ? null : String(row.account_email),
     runId: row.run_id == null ? null : String(row.run_id),
     status: String(row.status) as AttemptStatus,
     stage: String(row.stage || ""),
@@ -759,6 +780,22 @@ function mapAttemptRow(row: Record<string, unknown>): JobAttemptRecord {
     startedAt: String(row.started_at),
     completedAt: row.completed_at == null ? null : String(row.completed_at),
     durationMs: row.duration_ms == null ? null : Number(row.duration_ms),
+  };
+}
+
+function mapChatGptCredentialRow(row: Record<string, unknown>): ChatGptCredentialRecord {
+  return {
+    id: Number(row.id),
+    jobId: Number(row.job_id),
+    attemptId: Number(row.attempt_id),
+    email: String(row.email || ""),
+    accountId: String(row.account_id || ""),
+    accessToken: String(row.access_token || ""),
+    refreshToken: String(row.refresh_token || ""),
+    idToken: String(row.id_token || ""),
+    expiresAt: row.expires_at == null ? null : String(row.expires_at),
+    credentialJson: String(row.credential_json || "{}"),
+    createdAt: String(row.created_at || ""),
   };
 }
 
@@ -875,6 +912,43 @@ export class AppDatabase {
     );
   }
 
+  private rebuildJobAttemptsTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS job_attempts_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        account_id INTEGER REFERENCES microsoft_accounts(id) ON DELETE SET NULL,
+        account_email TEXT,
+        run_id TEXT,
+        status TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        proxy_node TEXT,
+        proxy_ip TEXT,
+        error_code TEXT,
+        error_message TEXT,
+        output_dir TEXT,
+        started_at TEXT NOT NULL,
+        completed_at TEXT,
+        duration_ms INTEGER
+      );
+    `);
+    const tableInfo = this.db.query("PRAGMA table_info(job_attempts);").all() as Array<Record<string, unknown>>;
+    const columns = new Set(tableInfo.map((item) => String(item.name || "").toLowerCase()));
+    const accountEmailSelect = columns.has("account_email") ? "account_email" : "NULL AS account_email";
+    this.db.exec(`
+      INSERT INTO job_attempts_v2 (
+        id, job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message,
+        output_dir, started_at, completed_at, duration_ms
+      )
+      SELECT
+        id, job_id, account_id, ${accountEmailSelect}, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message,
+        output_dir, started_at, completed_at, duration_ms
+      FROM job_attempts;
+      DROP TABLE job_attempts;
+      ALTER TABLE job_attempts_v2 RENAME TO job_attempts;
+    `);
+  }
+
   private migrate(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS app_settings (
@@ -923,6 +997,7 @@ export class AppDatabase {
 
       CREATE TABLE IF NOT EXISTS jobs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        site TEXT NOT NULL DEFAULT 'tavily',
         status TEXT NOT NULL,
         run_mode TEXT NOT NULL,
         need INTEGER NOT NULL,
@@ -940,13 +1015,15 @@ export class AppDatabase {
         paused_at TEXT,
         completed_at TEXT,
         last_error TEXT,
+        payload_json TEXT NOT NULL DEFAULT '{}',
         updated_at TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS job_attempts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-        account_id INTEGER NOT NULL REFERENCES microsoft_accounts(id) ON DELETE CASCADE,
+        account_id INTEGER REFERENCES microsoft_accounts(id) ON DELETE SET NULL,
+        account_email TEXT,
         run_id TEXT,
         status TEXT NOT NULL,
         stage TEXT NOT NULL,
@@ -958,6 +1035,20 @@ export class AppDatabase {
         started_at TEXT NOT NULL,
         completed_at TEXT,
         duration_ms INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS chatgpt_credentials (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        attempt_id INTEGER NOT NULL UNIQUE REFERENCES job_attempts(id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        access_token TEXT NOT NULL,
+        refresh_token TEXT NOT NULL,
+        id_token TEXT NOT NULL,
+        expires_at TEXT,
+        credential_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
 
       CREATE TABLE IF NOT EXISTS proxy_nodes (
@@ -1085,6 +1176,8 @@ export class AppDatabase {
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
         UNIQUE(mailbox_id, graph_message_id)
       );
+
+      CREATE INDEX IF NOT EXISTS chatgpt_credentials_created_idx ON chatgpt_credentials(created_at DESC);
     `);
 
     const signupTaskTableExists = this.hasSignupTasksTable();
@@ -1124,6 +1217,9 @@ export class AppDatabase {
     }
     const jobTableInfo = this.db.query("PRAGMA table_info(jobs);").all() as Array<Record<string, unknown>>;
     const jobColumns = new Set(jobTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (!jobColumns.has("site")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN site TEXT NOT NULL DEFAULT 'tavily';");
+    }
     if (!jobColumns.has("auto_extract_sources_json")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_sources_json TEXT NOT NULL DEFAULT '[]';");
     }
@@ -1135,6 +1231,16 @@ export class AppDatabase {
     }
     if (!jobColumns.has("auto_extract_account_type")) {
       this.db.exec("ALTER TABLE jobs ADD COLUMN auto_extract_account_type TEXT NOT NULL DEFAULT 'outlook';");
+    }
+    if (!jobColumns.has("payload_json")) {
+      this.db.exec("ALTER TABLE jobs ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}';");
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS jobs_site_id_idx ON jobs(site, id DESC);");
+    const jobAttemptTableInfo = this.db.query("PRAGMA table_info(job_attempts);").all() as Array<Record<string, unknown>>;
+    const jobAttemptColumns = new Set(jobAttemptTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    const accountIdColumn = jobAttemptTableInfo.find((item) => String(item.name || "").toLowerCase() === "account_id");
+    if (!jobAttemptColumns.has("account_email") || Number(accountIdColumn?.notnull || 0) === 1) {
+      this.rebuildJobAttemptsTable();
     }
     const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
     const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
@@ -1952,18 +2058,21 @@ export class AppDatabase {
   }
 
   createJob(input: {
+    site?: JobSite;
     runMode: "headed" | "headless";
     need: number;
     parallel: number;
     maxAttempts: number;
+    payloadJson?: Record<string, unknown>;
     autoExtractSources?: AccountExtractorProvider[];
     autoExtractQuantity?: number;
     autoExtractMaxWaitSec?: number;
     autoExtractAccountType?: AccountExtractorAccountType;
   }): JobRecord {
-    const active = this.getCurrentJob();
+    const site = input.site || "tavily";
+    const active = this.getCurrentJob(site);
     if (active && ["running", "paused", "stopping", "force_stopping", "completing"].includes(active.status)) {
-      throw new Error(`active job exists: ${active.id}`);
+      throw new Error(`active job exists for site=${site}: ${active.id}`);
     }
     const now = nowIso();
     const need = Math.max(1, Math.trunc(input.need));
@@ -1972,13 +2081,14 @@ export class AppDatabase {
     const result = this.db
       .query(`
         INSERT INTO jobs (
-          status, run_mode, need, parallel, max_attempts, success_count, failure_count, skip_count, launched_count,
+          site, status, run_mode, need, parallel, max_attempts, success_count, failure_count, skip_count, launched_count,
           auto_extract_sources_json, auto_extract_quantity, auto_extract_max_wait_sec, auto_extract_account_type,
-          started_at, paused_at, completed_at, last_error, updated_at
-        ) VALUES ('running', ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?)
+          started_at, paused_at, completed_at, last_error, payload_json, updated_at
+        ) VALUES (?, 'running', ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
         RETURNING *
       `)
       .get(
+        site,
         input.runMode,
         need,
         parallel,
@@ -1988,15 +2098,16 @@ export class AppDatabase {
         Math.max(0, Number(input.autoExtractMaxWaitSec || 0)),
         normalizeAccountExtractorAccountType(input.autoExtractAccountType),
         now,
+        JSON.stringify(input.payloadJson || {}),
         now,
       ) as Record<string, unknown>;
     return mapJobRow(result);
   }
 
-  getCurrentJob(): JobRecord | null {
+  getCurrentJob(site: JobSite = "tavily"): JobRecord | null {
     const row = this.db
-      .query("SELECT * FROM jobs ORDER BY id DESC LIMIT 1")
-      .get() as Record<string, unknown> | null;
+      .query("SELECT * FROM jobs WHERE site = ? ORDER BY id DESC LIMIT 1")
+      .get(site) as Record<string, unknown> | null;
     return row ? mapJobRow(row) : null;
   }
 
@@ -2942,29 +3053,48 @@ export class AppDatabase {
     return !this.hasNonRetryableAttemptForJob(jobId, accountId);
   }
 
-  createAttempt(jobId: number, accountId: number, outputDir: string): JobAttemptRecord {
+  createAttempt(
+    jobId: number,
+    input: { accountId?: number | null; accountEmail?: string | null; outputDir: string },
+  ): JobAttemptRecord;
+  createAttempt(jobId: number, accountId: number | null, outputDir: string): JobAttemptRecord;
+  createAttempt(
+    jobId: number,
+    inputOrAccountId: { accountId?: number | null; accountEmail?: string | null; outputDir: string } | number | null,
+    legacyOutputDir?: string,
+  ): JobAttemptRecord {
+    const input =
+      typeof inputOrAccountId === "object" && inputOrAccountId !== null
+        ? inputOrAccountId
+        : {
+            accountId: inputOrAccountId,
+            accountEmail: inputOrAccountId == null ? null : this.getAccount(inputOrAccountId)?.microsoftEmail ?? null,
+            outputDir: legacyOutputDir || "",
+          };
     const now = nowIso();
     const row = this.db
       .query(`
         INSERT INTO job_attempts (
-          job_id, account_id, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message, output_dir,
+          job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message, output_dir,
           started_at, completed_at, duration_ms
-        ) VALUES (?, ?, NULL, 'running', 'spawned', NULL, NULL, NULL, NULL, ?, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, NULL, 'running', 'spawned', NULL, NULL, NULL, NULL, ?, ?, NULL, NULL)
         RETURNING *
       `)
-      .get(jobId, accountId, outputDir, now) as Record<string, unknown>;
+      .get(jobId, input.accountId ?? null, input.accountEmail ?? null, input.outputDir, now) as Record<string, unknown>;
     const job = this.getJob(jobId);
     if (job) {
       this.updateJobState(jobId, { launchedCount: job.launchedCount + 1 });
     }
-    this.db
-      .query(`
-        UPDATE microsoft_accounts
-        SET last_result_status = 'running', last_used_at = ?, updated_at = ?
-        WHERE id = ?
-      `)
-      .run(now, now, accountId);
-    this.touchBrowserSessionUsage(accountId, { lastUsedAt: now });
+    if (input.accountId != null) {
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET last_result_status = 'running', last_used_at = ?, updated_at = ?
+          WHERE id = ?
+        `)
+        .run(now, now, input.accountId);
+      this.touchBrowserSessionUsage(input.accountId, { lastUsedAt: now });
+    }
     return mapAttemptRow(row);
   }
 
@@ -3217,8 +3347,8 @@ export class AppDatabase {
     };
   }
 
-  getLatestSignupTask(jobId: number, accountId: number): Record<string, unknown> | null {
-    if (!this.hasSignupTasksTable()) return null;
+  getLatestSignupTask(jobId: number, accountId: number | null): Record<string, unknown> | null {
+    if (!this.hasSignupTasksTable() || accountId == null) return null;
     const row = this.db
       .query(`
         SELECT *
@@ -3368,6 +3498,113 @@ export class AppDatabase {
     return { job, attempt };
   }
 
+  recordChatGptCredential(input: {
+    jobId: number;
+    attemptId: number;
+    email: string;
+    accountId: string;
+    accessToken: string;
+    refreshToken: string;
+    idToken: string;
+    expiresAt?: string | null;
+    credentialJson: string;
+  }): ChatGptCredentialRecord {
+    const row = this.db
+      .query(`
+        INSERT INTO chatgpt_credentials (
+          job_id, attempt_id, email, account_id, access_token, refresh_token, id_token, expires_at, credential_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(attempt_id) DO UPDATE SET
+          email = excluded.email,
+          account_id = excluded.account_id,
+          access_token = excluded.access_token,
+          refresh_token = excluded.refresh_token,
+          id_token = excluded.id_token,
+          expires_at = excluded.expires_at,
+          credential_json = excluded.credential_json
+        RETURNING *
+      `)
+      .get(
+        input.jobId,
+        input.attemptId,
+        input.email,
+        input.accountId,
+        input.accessToken,
+        input.refreshToken,
+        input.idToken,
+        input.expiresAt ?? null,
+        input.credentialJson,
+      ) as Record<string, unknown>;
+    return mapChatGptCredentialRow(row);
+  }
+
+  listChatGptCredentials(limit = 20): ChatGptCredentialRecord[] {
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit || 20)));
+    const rows = this.db
+      .query("SELECT * FROM chatgpt_credentials ORDER BY created_at DESC, id DESC LIMIT ?")
+      .all(safeLimit) as Record<string, unknown>[];
+    return rows.map(mapChatGptCredentialRow);
+  }
+
+  getChatGptCredential(credentialId: number): ChatGptCredentialRecord | null {
+    const row = this.db
+      .query("SELECT * FROM chatgpt_credentials WHERE id = ?")
+      .get(credentialId) as Record<string, unknown> | null;
+    return row ? mapChatGptCredentialRow(row) : null;
+  }
+
+  completeChatGptAttemptSuccess(
+    jobId: number,
+    attemptId: number,
+    input: {
+      email: string;
+      accountId: string;
+      accessToken: string;
+      refreshToken: string;
+      idToken: string;
+      expiresAt?: string | null;
+      credentialJson: string;
+    },
+  ): { job: JobRecord; attempt: JobAttemptRecord; credential: ChatGptCredentialRecord } {
+    const now = nowIso();
+    const currentJob = this.getJob(jobId);
+    if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const currentAttempt = this.getAttempt(attemptId);
+    if (!currentAttempt) throw new Error(`attempt not found: ${attemptId}`);
+    const durationMs = Math.max(0, Date.parse(now) - Date.parse(currentAttempt.startedAt));
+    const attempt = this.updateAttempt(attemptId, {
+      status: "succeeded",
+      stage: "completed",
+      completedAt: now,
+      durationMs,
+    });
+    const credential = this.recordChatGptCredential({
+      jobId,
+      attemptId,
+      email: input.email,
+      accountId: input.accountId,
+      accessToken: input.accessToken,
+      refreshToken: input.refreshToken,
+      idToken: input.idToken,
+      expiresAt: input.expiresAt ?? null,
+      credentialJson: input.credentialJson,
+    });
+    const job = this.updateJobState(jobId, {
+      successCount: currentJob.successCount + 1,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting({
+            need: currentJob.need,
+            successCount: currentJob.successCount + 1,
+            maxAttempts: currentJob.maxAttempts,
+            launchedCount: currentJob.launchedCount,
+          })
+          ? "completing"
+          : currentJob.status,
+    });
+    return { job, attempt, credential };
+  }
+
   markAccountDirectSuccess(accountId: number): void {
     const now = nowIso();
     this.db
@@ -3418,14 +3655,14 @@ export class AppDatabase {
   completeAttemptFailure(
     jobId: number,
     attemptId: number,
-    accountId: number,
+    accountId: number | null,
     failure: { errorCode?: string | null; errorMessage?: string | null },
     signupTask?: Record<string, unknown> | null,
   ): { job: JobRecord; attempt: JobAttemptRecord } {
     const now = nowIso();
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
-    const currentAccount = this.getAccount(accountId);
+    const currentAccount = accountId == null ? null : this.getAccount(accountId);
     const startedAt = this.getAttempt(attemptId)?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const errorCode = failure.errorCode || (signupTask?.error_code ? String(signupTask.error_code) : null);
@@ -3441,15 +3678,17 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
-    this.touchBrowserSessionUsage(accountId, {
-      proxyNode: attempt.proxyNode,
-      proxyIp: attempt.proxyIp,
-      proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
-      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
-      proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
-      proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
-      lastUsedAt: now,
-    });
+    if (accountId != null) {
+      this.touchBrowserSessionUsage(accountId, {
+        proxyNode: attempt.proxyNode,
+        proxyIp: attempt.proxyIp,
+        proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+        proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+        proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
+        lastUsedAt: now,
+      });
+    }
     if (attempt.proxyNode) {
       this.touchProxyLease(attempt.proxyNode, {
         status: shouldMarkProxyLeaseFailedForAttemptError(errorCode) ? "failed" : null,
@@ -3460,24 +3699,26 @@ export class AppDatabase {
         leasedAt: now,
       });
     }
-    const nextSkipReason = resolveFailureSkipReason({
-      hasApiKey: currentAccount?.hasApiKey ?? false,
-      currentSkipReason: currentAccount?.skipReason ?? null,
-      errorCode,
-    });
-    this.db
-      .query(`
-        UPDATE microsoft_accounts
-        SET last_result_status = ?,
-            skip_reason = ?,
-            last_result_at = ?,
-            last_error_code = ?,
-            updated_at = ?,
-            lease_job_id = NULL,
-            lease_started_at = NULL
-        WHERE id = ?
-      `)
-      .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
+    if (accountId != null) {
+      const nextSkipReason = resolveFailureSkipReason({
+        hasApiKey: currentAccount?.hasApiKey ?? false,
+        currentSkipReason: currentAccount?.skipReason ?? null,
+        errorCode,
+      });
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET last_result_status = ?,
+              skip_reason = ?,
+              last_result_at = ?,
+              last_error_code = ?,
+              updated_at = ?,
+              lease_job_id = NULL,
+              lease_started_at = NULL
+          WHERE id = ?
+        `)
+        .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
+    }
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,
       status: shouldPreserveManualStopStatus(currentJob.status)
@@ -3549,7 +3790,7 @@ export class AppDatabase {
   completeAttemptStopped(
     jobId: number,
     attemptId: number,
-    accountId: number,
+    accountId: number | null,
     input?: { errorCode?: string | null; errorMessage?: string | null },
     signupTask?: Record<string, unknown> | null,
   ): { job: JobRecord; attempt: JobAttemptRecord } {
@@ -3571,15 +3812,17 @@ export class AppDatabase {
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
     });
-    this.touchBrowserSessionUsage(accountId, {
-      proxyNode: attempt.proxyNode,
-      proxyIp: attempt.proxyIp,
-      proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
-      proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
-      proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
-      proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
-      lastUsedAt: now,
-    });
+    if (accountId != null) {
+      this.touchBrowserSessionUsage(accountId, {
+        proxyNode: attempt.proxyNode,
+        proxyIp: attempt.proxyIp,
+        proxyCountry: signupTask?.proxy_country ? String(signupTask.proxy_country) : null,
+        proxyRegion: signupTask?.proxy_region ? String(signupTask.proxy_region) : null,
+        proxyCity: signupTask?.proxy_city ? String(signupTask.proxy_city) : null,
+        proxyTimezone: signupTask?.proxy_timezone ? String(signupTask.proxy_timezone) : null,
+        lastUsedAt: now,
+      });
+    }
     if (attempt.proxyNode) {
       this.touchProxyLease(attempt.proxyNode, {
         egressIp: attempt.proxyIp,
@@ -3589,22 +3832,24 @@ export class AppDatabase {
         leasedAt: now,
       });
     }
-    this.db
-      .query(`
-        UPDATE microsoft_accounts
-        SET last_result_status = CASE
-              WHEN disabled_at IS NOT NULL THEN 'disabled'
-              WHEN has_api_key = 1 THEN 'skipped_has_key'
-              ELSE 'ready'
-            END,
-            last_result_at = ?,
-            last_error_code = ?,
-            updated_at = ?,
-            lease_job_id = NULL,
-            lease_started_at = NULL
-        WHERE id = ?
-      `)
-      .run(now, errorCode, now, accountId);
+    if (accountId != null) {
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET last_result_status = CASE
+                WHEN disabled_at IS NOT NULL THEN 'disabled'
+                WHEN has_api_key = 1 THEN 'skipped_has_key'
+                ELSE 'ready'
+              END,
+              last_result_at = ?,
+              last_error_code = ?,
+              updated_at = ?,
+              lease_job_id = NULL,
+              lease_started_at = NULL
+          WHERE id = ?
+        `)
+        .run(now, errorCode, now, accountId);
+    }
     return {
       job: currentJob,
       attempt,

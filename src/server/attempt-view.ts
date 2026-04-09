@@ -32,7 +32,7 @@ export function serializeAttemptForApi(db: AppDatabase, row: JobAttemptRecord): 
   if (shouldIgnoreSignupTaskForAttempt(row, signupTask)) {
     return {
       ...row,
-      accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
+      accountEmail: row.accountEmail || (row.accountId == null ? null : db.getAccount(row.accountId)?.microsoftEmail || null),
     };
   }
   const preferRuntimeSnapshot = row.status === "running";
@@ -46,6 +46,6 @@ export function serializeAttemptForApi(db: AppDatabase, row: JobAttemptRecord): 
     proxyIp: preferLedgerDiagnostics && signupTask?.proxy_ip ? String(signupTask.proxy_ip) : row.proxyIp,
     errorCode: preferLedgerDiagnostics && signupTask?.error_code ? String(signupTask.error_code) : row.errorCode,
     errorMessage: preferLedgerDiagnostics && signupTask?.error_message ? String(signupTask.error_message) : row.errorMessage,
-    accountEmail: db.getAccount(row.accountId)?.microsoftEmail || null,
+    accountEmail: row.accountEmail || (row.accountId == null ? null : db.getAccount(row.accountId)?.microsoftEmail || null),
   };
 }

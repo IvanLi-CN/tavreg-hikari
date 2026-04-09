@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
 import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
+import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { MailboxesView } from "@/components/mailboxes-view";
@@ -9,6 +10,7 @@ import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
+import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -25,6 +27,11 @@ import type {
   AccountUpdatePayload,
   AccountQuery,
   AccountsPayload,
+  ChatGptCredentialDetailPayload,
+  ChatGptCredentialRecord,
+  ChatGptCredentialsPayload,
+  ChatGptDraft,
+  ChatGptDraftPayload,
   ApiKeyExportPayload,
   ApiKeysPayload,
   ApiKeyQuery,
@@ -44,6 +51,7 @@ import type {
   MicrosoftGraphSettings,
   MicrosoftGraphSettingsPayload,
   PageKey,
+  JobSite,
   ProxyCheckScope,
   ProxyPayload,
   ProxySettingsUpdate,
@@ -153,15 +161,25 @@ function isExtractorRuntimeTerminal(runtime: AccountExtractorRuntime): boolean {
   return runtime.status === "idle" || runtime.status === "stopped" || runtime.status === "succeeded" || runtime.status === "failed";
 }
 
-export function App() {
-  const { pathname, search, navigate } = usePathname();
-  const [job, setJob] = useState<JobSnapshot>({
+function createIdleJobSnapshot(site: JobSite): JobSnapshot {
+  return {
+    site,
     job: null,
     activeAttempts: [],
     recentAttempts: [],
     eligibleCount: 0,
     autoExtractState: null,
-  });
+    cooldown: null,
+  };
+}
+
+export function App() {
+  const { pathname, search, navigate } = usePathname();
+  const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
+  const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
+  const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
+  const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -300,6 +318,9 @@ export function App() {
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
+  const [chatGptDraftBusy, setChatGptDraftBusy] = useState(false);
+  const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
+  const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
   const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname), [pathname]);
@@ -329,7 +350,31 @@ export function App() {
   const selectedOnCurrentPageCount = currentPageIds.filter((id) => selectedAccountIds.includes(id)).length;
   const allCurrentPageSelected = currentPageIds.length > 0 && selectedOnCurrentPageCount === currentPageIds.length;
 
-  const refreshJob = async () => setJob(await api<JobSnapshot>("/api/jobs/current"));
+  const refreshJob = async (site: JobSite = "tavily") => {
+    const snapshot = await api<JobSnapshot>(`/api/jobs/current?site=${site}`);
+    if (site === "chatgpt") {
+      setChatGptJob(snapshot);
+      return;
+    }
+    setJob(snapshot);
+  };
+  const refreshChatGptDraft = async (requestedEmail?: string) => {
+    try {
+      setChatGptDraftBusy(true);
+      const params = new URLSearchParams();
+      if (requestedEmail?.trim()) {
+        params.set("email", requestedEmail.trim());
+      }
+      const payload = await api<ChatGptDraftPayload>(`/api/chatgpt/draft${params.size > 0 ? `?${params.toString()}` : ""}`);
+      setChatGptDraft(payload.draft);
+    } finally {
+      setChatGptDraftBusy(false);
+    }
+  };
+  const refreshChatGptCredentials = async () => {
+    const payload = await api<ChatGptCredentialsPayload>("/api/chatgpt/credentials");
+    setChatGptCredentials(payload.rows);
+  };
   const refreshAccounts = async (nextQuery = accountQuery) => {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
@@ -456,9 +501,117 @@ export function App() {
     await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
   };
 
+  const ensureChatGptCredentialDetail = async (credential: ChatGptCredentialRecord): Promise<ChatGptCredentialRecord> => {
+    if (credential.accessToken && credential.refreshToken && credential.idToken) {
+      return credential;
+    }
+    const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credential.id}?includeSecrets=1`);
+    setRevealedChatGptCredential(payload.credential);
+    return payload.credential;
+  };
+
+  const handleChatGptDraftChange = (patch: Partial<ChatGptDraft>) => {
+    setChatGptDraft((current) => (current ? { ...current, ...patch } : current));
+  };
+
+  const handleChatGptRegenerateDraft = async () => {
+    try {
+      setError(null);
+      setRevealedChatGptCredential(null);
+      await refreshChatGptDraft();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop") => {
+    try {
+      setChatGptJobBusy(true);
+      setError(null);
+      const body: Record<string, unknown> = {
+        site: "chatgpt",
+        action,
+      };
+      if (action === "start") {
+        if (!chatGptDraft) {
+          throw new Error("chatgpt draft is not ready");
+        }
+        body.email = chatGptDraft.email;
+        body.password = chatGptDraft.password;
+        body.nickname = chatGptDraft.nickname;
+        body.birthDate = chatGptDraft.birthDate;
+        body.mailboxId = chatGptDraft.mailboxId;
+      }
+      if (action === "force_stop") {
+        body.confirmForceStop = true;
+      }
+      await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      await Promise.all([refreshJob("chatgpt"), refreshChatGptCredentials()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptJobBusy(false);
+    }
+  };
+
+  const handleRevealChatGptCredential = async (credentialId: number) => {
+    try {
+      setChatGptCredentialBusy(true);
+      setError(null);
+      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
+      setRevealedChatGptCredential(payload.credential);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptCredentialBusy(false);
+    }
+  };
+
+  const handleCopyChatGptCredential = async (credential: ChatGptCredentialRecord) => {
+    try {
+      setChatGptCredentialBusy(true);
+      setError(null);
+      const detail = await ensureChatGptCredentialDetail(credential);
+      const content = buildCodexVibeMonitorCredentialJson(detail);
+      await navigator.clipboard.writeText(content);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptCredentialBusy(false);
+    }
+  };
+
+  const handleExportChatGptCredential = async (credential: ChatGptCredentialRecord) => {
+    try {
+      setChatGptCredentialBusy(true);
+      setError(null);
+      const detail = await ensureChatGptCredentialDetail(credential);
+      const content = buildCodexVibeMonitorCredentialJson(detail);
+      const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+      const objectUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = `chatgpt-credential-${detail.id}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl), 0);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptCredentialBusy(false);
+    }
+  };
+
   useEffect(() => {
     void Promise.all([
-      refreshJob(),
+      refreshJob("tavily"),
+      refreshJob("chatgpt"),
+      refreshChatGptDraft(),
+      refreshChatGptCredentials(),
       refreshAccounts(),
       refreshApiKeys(),
       refreshProxies(),
@@ -531,7 +684,8 @@ export function App() {
       const next = JSON.parse(event.data) as EventRecord;
       setEvents((current) => [next, ...current].slice(0, 60));
       if (next.type === "job.updated" || next.type === "attempt.updated") {
-        void refreshJob();
+        void Promise.all([refreshJob("tavily"), refreshJob("chatgpt")]);
+        void refreshChatGptCredentials();
       }
       if (next.type === "account.updated") {
         void refreshAccounts(accountQueryRef.current);
@@ -782,6 +936,7 @@ export function App() {
       const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify({
+          site: "tavily",
           action,
           ...(options?.confirmForceStop ? { confirmForceStop: true } : {}),
           ...draft,
@@ -791,7 +946,7 @@ export function App() {
         setJobDraft(jobToDraft(payload.job));
         setJobDraftTouched(false);
       }
-      await refreshJob();
+      await refreshJob("tavily");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1290,11 +1445,11 @@ export function App() {
       error={error}
       onNavigate={(page) =>
         navigate(
-          page === "dashboard" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`,
+          page === "tavily" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`,
         )
       }
     >
-      {activePage === "dashboard" ? (
+      {activePage === "tavily" ? (
         <DashboardView
           job={job}
           events={events}
@@ -1309,6 +1464,26 @@ export function App() {
           }
           onJobDraftChange={updateJobDraft}
           onJobAction={handleJobAction}
+        />
+      ) : null}
+
+      {activePage === "chatgpt" ? (
+        <ChatGptView
+          draft={chatGptDraft}
+          job={chatGptJob}
+          credentials={chatGptCredentials}
+          revealedCredential={revealedChatGptCredential}
+          draftBusy={chatGptDraftBusy}
+          jobBusy={chatGptJobBusy}
+          credentialBusy={chatGptCredentialBusy}
+          onDraftChange={handleChatGptDraftChange}
+          onRegenerateDraft={handleChatGptRegenerateDraft}
+          onStart={() => handleChatGptJobAction("start")}
+          onStop={() => handleChatGptJobAction("stop")}
+          onForceStop={() => handleChatGptJobAction("force_stop")}
+          onRevealCredential={handleRevealChatGptCredential}
+          onCopyCredential={handleCopyChatGptCredential}
+          onExportCredential={handleExportChatGptCredential}
         />
       ) : null}
 

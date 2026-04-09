@@ -5,7 +5,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { PageKey } from "@/lib/app-types";
 
 const pageItems: Array<{ key: PageKey; label: string }> = [
-  { key: "dashboard", label: "主流程" },
+  { key: "tavily", label: "Tavily" },
+  { key: "chatgpt", label: "ChatGPT" },
   { key: "accounts", label: "微软账号" },
   { key: "mailboxes", label: "微软邮箱" },
   { key: "apiKeys", label: "API Keys" },
@@ -38,7 +39,7 @@ export function AppShell({
               <div className="text-xs uppercase tracking-[0.3em] text-cyan-300/80">Tavreg Hikari</div>
               <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">Web 管理台</h1>
               <p className="mt-2 text-sm text-slate-400">
-                账号池、主流程、代理状态统一在一个本机控制面里。
+                Tavily 与 ChatGPT 的浏览器流程、账号池和代理状态统一在一个本机控制面里。
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Badge variant="success">localhost only</Badge>
