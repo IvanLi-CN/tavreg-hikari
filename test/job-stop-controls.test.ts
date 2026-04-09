@@ -110,6 +110,7 @@ test("scheduler preserves hotmail auto extract account type across start and upd
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -146,6 +147,7 @@ test("scheduler preserves unlimited auto extract account type across start and u
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () => createSchedulerSettings({ extractorZhanghaoyaKey: "zhya-demo-key-001" }),
@@ -182,6 +184,7 @@ test("scheduler alternates unlimited requests independently for each provider", 
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(
     appDb,
+    "tavily",
     process.cwd(),
     dbPath,
     () =>
