@@ -4,7 +4,7 @@
 
 - Status: 已实现待评审
 - Created: 2026-04-05
-- Last: 2026-04-05
+- Last: 2026-04-09
 
 ## 背景 / 问题陈述
 
@@ -19,12 +19,11 @@
 - 把现有主流程重命名为 `Tavily`，新增并列 `ChatGPT` 顶层页与站点化路由。
 - 将 job / attempt / scheduler / HTTP API 收敛为 `site=tavily|chatgpt` 的多站点模型，并允许两个站点各自维护 current job。
 - 为 ChatGPT 提供最小表单：邮箱、密码、昵称、出生日期；默认值由服务端生成，邮箱必须来自真实 cf-mail。
-- 为 ChatGPT 增加单账号、有头浏览器优先的 worker 流程，并把结果提升为完整凭据包持久化与可视化展示。
+- 为 ChatGPT 增加批量可配置、有头浏览器优先的 worker 流程，并把结果提升为完整凭据包持久化与可视化展示。
 
 ### Non-goals
 
 - 不把 `微软账号 / 微软邮箱 / API Keys / 代理节点` 页面改造成多站点通用页。
-- 不支持 ChatGPT 批量任务；v1 固定为单账号、单并发、单 attempt。
 - 不接受仅登录成功或仅拿到 session access token 的降级成功定义。
 
 ## 范围（Scope）
@@ -46,10 +45,11 @@
 ### MUST
 
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
-- ChatGPT 页仅显示 `邮箱 / 密码 / 昵称 / 出生日期` 四个输入框与启动/重新生成功能。
-- ChatGPT 默认 job 参数固定为 `need=1 / parallel=1 / maxAttempts=1 / runMode=headed`。
+- ChatGPT 页必须同时提供 `邮箱 / 密码 / 昵称 / 出生日期` 草稿模板，以及 `need / parallel / maxAttempts` 批量控制输入。
+- ChatGPT 仍固定使用 `runMode=headed`，但 `need / parallel / maxAttempts` 必须允许由前端显式配置。
 - ChatGPT 草稿邮箱必须由服务端通过 cf-mail provision/ensure 生成；用户改邮箱后启动前必须重新 ensure。
 - ChatGPT 成功结果必须包含 `access_token / refresh_token / id_token / account_id / email / exp(expires_at)`；缺少 `refresh_token` 视为失败。
+- 当 ChatGPT 批量任务的 `need > 1` 或 `maxAttempts > 1` 时，服务端必须为额外 attempt 生成新的 cf-mail 邮箱，避免重复占用同一 mailbox。
 
 ### SHOULD
 
@@ -66,7 +66,8 @@
 ### Core flows
 
 - 用户进入 `/chatgpt` 时，前端自动请求服务端草稿接口，拿到 cf-mail 邮箱、随机密码、随机昵称、`1990-01-01` 至 `2005-12-31` 之间的出生日期。
-- 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，后端固定 headed 单任务模式启动新 worker。
+- 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，并携带 `need / parallel / maxAttempts`。
+- 后端在固定 headed 模式下创建 ChatGPT job；首个 attempt 使用当前草稿，额外 attempt 复用当前密码 / 昵称 / 生日模板并生成新的 cf-mail 邮箱。
 - 调度器按 `site` 分流：Tavily 继续沿用现有 worker；ChatGPT 走独立 runtime，产出完整凭据后写入 `chatgpt_credentials` 并把 attempt 标记成功。
 - 用户在 ChatGPT 页查看最近凭据时，只看到掩码值；显式 reveal/export 时再读取完整凭据 JSON。
 
@@ -109,6 +110,10 @@
   When 最终没有拿到 `refresh_token`
   Then attempt 标记失败并记录明确 failure code，不得误标成功。
 
+- Given 用户把 ChatGPT job 目标设为 `need=3 / parallel=2 / maxAttempts=5`
+  When 启动任务
+  Then 服务端会以 headed 模式并发拉起最多 2 个 attempt，直到成功数达到 3 或尝试预算耗尽。
+
 - Given ChatGPT worker 成功拿到完整凭据
   When 用户在 ChatGPT 页查看最近结果
   Then 可看到 `access_token / refresh_token / id_token / account_id / email / exp` 的完整语义，且默认以掩码形式展示。
@@ -149,7 +154,7 @@
 
 ## Visual Evidence
 
-- Evidence SHA: `6d54a39`（local working tree）
+- Evidence SHA: `f9158ce`（local working tree）
 - source_type: `storybook_canvas`
   story_id_or_title: `shell-appshell--default`
   state: `top-level navigation`
@@ -157,10 +162,16 @@
   ![App shell navigation](./assets/app-shell-nav.png)
 
 - source_type: `storybook_canvas`
-  story_id_or_title: `views-chatgptview--running`
-  state: `chatgpt running`
-  evidence_note: 验证 ChatGPT 页仅保留四个输入、固定 headed 单任务提示、当前任务区与默认掩码凭据列表
-  ![ChatGPT running view](./assets/chatgpt-view-running.png)
+  story_id_or_title: `views-chatgptview--batch-ready`
+  state: `chatgpt batch ready`
+  evidence_note: 验证 ChatGPT 页新增 `need / parallel / maxAttempts` 批量控制，并在空闲态允许编辑草稿模板与启动批量任务。
+  ![ChatGPT batch ready view](./assets/chatgpt-view-batch-ready.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-chatgptview--batch-running`
+  state: `chatgpt batch running`
+  evidence_note: 验证 ChatGPT 批量运行态会显示并发 attempt、预算进度、最近错误与默认掩码凭据列表。
+  ![ChatGPT batch running view](./assets/chatgpt-view-batch-running.png)
 
 - source_type: `storybook_canvas`
   story_id_or_title: `views-dashboardview--running`
@@ -177,7 +188,7 @@ None
 - [x] M1: 站点化路由、前端类型与 ChatGPT 页面落地，并补齐 Storybook 覆盖
 - [x] M2: SQLite / API / scheduler 改造成按 `site` 隔离的 current job 模型
 - [x] M3: ChatGPT worker 与完整凭据持久化、掩码展示和导出流程落地
-- [ ] M4: 类型检查、站点化测试、视觉证据与 review 收敛完成
+- [x] M4: 类型检查、站点化测试、视觉证据与 review 收敛完成
 
 ## 方案概述（Approach, high-level）
 
@@ -194,6 +205,7 @@ None
 ## 变更记录（Change log）
 
 - 2026-04-05: 创建 spec，冻结多站点 current job、ChatGPT 页面范围与完整凭据成功定义。
+- 2026-04-09: ChatGPT 页补充 `need / parallel / maxAttempts` 批量控制，服务端为批量 attempt 预生成独立 cf-mail 邮箱，并更新 Storybook 视觉证据。
 
 ## 参考（References）
 

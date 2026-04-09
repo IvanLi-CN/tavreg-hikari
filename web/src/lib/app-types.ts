@@ -324,6 +324,12 @@ export type ChatGptDraft = {
   generatedAt: string;
 };
 
+export type ChatGptJobDraft = {
+  need: number;
+  parallel: number;
+  maxAttempts: number;
+};
+
 export type ChatGptDraftPayload = {
   ok: true;
   draft: ChatGptDraft;

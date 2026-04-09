@@ -14,6 +14,7 @@ import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.j
 import {
   AppDatabase,
   normalizeAccountExtractorAccountType,
+  normalizeJobMaxAttempts,
   type AccountExtractorProvider,
   type AppSettings,
   type ChatGptCredentialRecord,
@@ -241,6 +242,42 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
     mailboxId: mailbox.id,
     generatedAt: nowIso(),
   };
+}
+
+async function buildChatGptJobDrafts(input: {
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  mailboxId: string;
+  maxAttempts: number;
+}): Promise<Array<{
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  mailboxId: string;
+}>> {
+  const drafts = [
+    {
+      email: input.email,
+      password: input.password,
+      nickname: input.nickname,
+      birthDate: input.birthDate,
+      mailboxId: input.mailboxId,
+    },
+  ];
+  for (let index = 1; index < input.maxAttempts; index += 1) {
+    const generated = await buildChatGptDraft();
+    drafts.push({
+      email: generated.email,
+      password: input.password,
+      nickname: input.nickname,
+      birthDate: input.birthDate,
+      mailboxId: generated.mailboxId,
+    });
+  }
+  return drafts;
 }
 
 function parseBool(value: string | null): boolean | undefined {
@@ -2145,6 +2182,9 @@ async function main(): Promise<void> {
               const password = normalizeChatGptPassword(body?.password);
               const nickname = normalizeChatGptNickname(body?.nickname);
               const birthDate = normalizeBirthDate(body?.birthDate);
+              const need = toOptionalPositiveInt(body?.need) ?? 1;
+              const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
+              const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
               if (!email) {
                 return badRequest("chatgpt email is required");
               }
@@ -2161,12 +2201,19 @@ async function main(): Promise<void> {
                 address: email,
                 mailboxId: typeof body?.mailboxId === "string" ? body.mailboxId : null,
               });
-              const job = await chatgptScheduler.startJob({
+              const drafts = await buildChatGptJobDrafts({
                 email,
                 password,
                 nickname,
                 birthDate,
                 mailboxId: proofMailbox.mailboxId,
+                maxAttempts,
+              });
+              const job = await chatgptScheduler.startJob({
+                need,
+                parallel,
+                maxAttempts,
+                drafts,
               });
               return json({ ok: true, job });
             }

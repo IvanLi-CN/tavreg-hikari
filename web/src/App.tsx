@@ -34,6 +34,7 @@ import type {
   ChatGptCredentialsPayload,
   ChatGptDraft,
   ChatGptDraftPayload,
+  ChatGptJobDraft,
   ApiKeyExportPayload,
   ApiKeysPayload,
   ApiKeyQuery,
@@ -190,6 +191,11 @@ export function App() {
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
   const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
+  const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
@@ -556,6 +562,20 @@ export function App() {
     setChatGptDraft((current) => (current ? { ...current, ...patch } : current));
   };
 
+  const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
+    setChatGptJobDraft((current) => {
+      const need = Math.max(1, Math.trunc(patch.need ?? current.need));
+      const parallel = Math.max(1, Math.trunc(patch.parallel ?? current.parallel));
+      const requestedMaxAttempts = Math.max(1, Math.trunc(patch.maxAttempts ?? current.maxAttempts));
+      const maxAttempts = requestedMaxAttempts >= need ? requestedMaxAttempts : Math.max(need, Math.ceil(need * 1.5));
+      return {
+        need,
+        parallel,
+        maxAttempts,
+      };
+    });
+  };
+
   const handleChatGptRegenerateDraft = async () => {
     try {
       setError(null);
@@ -565,7 +585,7 @@ export function App() {
     }
   };
 
-  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop") => {
+  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop", draft?: ChatGptJobDraft) => {
     try {
       setChatGptJobBusy(true);
       setError(null);
@@ -577,11 +597,15 @@ export function App() {
         if (!chatGptDraft) {
           throw new Error("chatgpt draft is not ready");
         }
+        const nextJobDraft = draft || chatGptJobDraft;
         body.email = chatGptDraft.email;
         body.password = chatGptDraft.password;
         body.nickname = chatGptDraft.nickname;
         body.birthDate = chatGptDraft.birthDate;
         body.mailboxId = chatGptDraft.mailboxId;
+        body.need = nextJobDraft.need;
+        body.parallel = nextJobDraft.parallel;
+        body.maxAttempts = nextJobDraft.maxAttempts;
       }
       if (action === "force_stop") {
         body.confirmForceStop = true;
@@ -744,6 +768,15 @@ export function App() {
     if (!job.job || jobDraftTouched) return;
     setJobDraft(jobToDraft(job.job));
   }, [job.job, jobDraftTouched]);
+
+  useEffect(() => {
+    if (!chatGptJob.job) return;
+    setChatGptJobDraft({
+      need: chatGptJob.job.need,
+      parallel: chatGptJob.job.parallel,
+      maxAttempts: chatGptJob.job.maxAttempts,
+    });
+  }, [chatGptJob.job]);
 
   useEffect(() => {
     if (!extractorSettings || extractorRunDraftTouched) return;
@@ -1588,12 +1621,14 @@ export function App() {
       {activePage === "chatgpt" ? (
         <ChatGptView
           draft={chatGptDraft}
+          jobDraft={chatGptJobDraft}
           job={chatGptJob}
           draftBusy={chatGptDraftBusy}
           jobBusy={chatGptJobBusy}
           onDraftChange={handleChatGptDraftChange}
+          onJobDraftChange={handleChatGptJobDraftChange}
           onRegenerateDraft={handleChatGptRegenerateDraft}
-          onStart={() => handleChatGptJobAction("start")}
+          onStart={(draft) => handleChatGptJobAction("start", draft)}
           onStop={() => handleChatGptJobAction("stop")}
           onForceStop={() => handleChatGptJobAction("force_stop")}
         />

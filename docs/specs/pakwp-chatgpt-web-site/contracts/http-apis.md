@@ -46,7 +46,11 @@
     - `password`
     - `nickname`
     - `birthDate`
-    - 服务端忽略外部 `need/parallel/maxAttempts/runMode`，固定为 headed 单任务
+    - `need`
+    - `parallel`
+    - `maxAttempts`
+    - 服务端固定忽略外部 `runMode`，统一按 headed 执行
+    - 首个 attempt 使用当前草稿；若 `maxAttempts > 1`，服务端会为额外 attempt 预生成新的 cf-mail 邮箱并复用同一资料模板
 
 ### 响应（Response）
 
@@ -101,4 +105,3 @@
 ### 兼容性与迁移（Compatibility / migration）
 
 - 默认不返回完整 secret；只有 `includeSecrets=true` 时才返回完整凭据字段。
-

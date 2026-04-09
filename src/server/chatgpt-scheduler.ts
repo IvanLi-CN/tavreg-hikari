@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   AppDatabase,
+  computeLaunchCapacity,
+  normalizeJobMaxAttempts,
   type AppSettings,
   type ChatGptCredentialRecord,
   type JobAttemptRecord,
@@ -23,12 +25,16 @@ interface ActiveAttempt {
   stopRequested: "force_stop" | null;
 }
 
-interface ChatGptJobPayload {
+interface ChatGptAttemptDraft {
   email: string;
   password: string;
   nickname: string;
   birthDate: string;
   mailboxId: string;
+}
+
+interface ChatGptJobPayload {
+  drafts: ChatGptAttemptDraft[];
 }
 
 interface ChatGptWorkerResult {
@@ -102,17 +108,35 @@ function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | 
   }
 }
 
+function normalizeDraft(input: unknown): ChatGptAttemptDraft | null {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  const email = String(record.email || "").trim().toLowerCase();
+  const password = String(record.password || "");
+  const nickname = String(record.nickname || "").trim();
+  const birthDate = String(record.birthDate || "").trim();
+  const mailboxId = String(record.mailboxId || "").trim();
+  if (!email || !password || !nickname || !birthDate || !mailboxId) {
+    return null;
+  }
+  return {
+    email,
+    password,
+    nickname,
+    birthDate,
+    mailboxId,
+  };
+}
+
 function parsePayload(job: Pick<JobRecord, "payloadJson">): ChatGptJobPayload {
   const payload = job.payloadJson || {};
-  const email = String(payload.email || "").trim().toLowerCase();
-  const password = String(payload.password || "");
-  const nickname = String(payload.nickname || "").trim();
-  const birthDate = String(payload.birthDate || "").trim();
-  const mailboxId = String(payload.mailboxId || "").trim();
-  if (!email || !password || !nickname || !birthDate || !mailboxId) {
+  const drafts = Array.isArray(payload.drafts)
+    ? payload.drafts.map((item) => normalizeDraft(item)).filter((item): item is ChatGptAttemptDraft => Boolean(item))
+    : [];
+  if (drafts.length === 0) {
     throw new Error("chatgpt_job_payload_invalid");
   }
-  return { email, password, nickname, birthDate, mailboxId };
+  return { drafts };
 }
 
 function resolveCredentialExpiry(result: NonNullable<ChatGptWorkerResult["credentials"]>): string | null {
@@ -257,7 +281,12 @@ export class ChatGptJobScheduler {
     };
   }
 
-  async startJob(input: ChatGptJobPayload): Promise<JobRecord> {
+  async startJob(input: {
+    need: number;
+    parallel: number;
+    maxAttempts: number;
+    drafts: ChatGptAttemptDraft[];
+  }): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
       throw new Error("configure a Mihomo subscription before starting a ChatGPT job");
@@ -266,18 +295,23 @@ export class ChatGptJobScheduler {
     if (cooldown?.active) {
       throw new Error(`${cooldown.reason}; retry after ${cooldown.until}`);
     }
+    const normalizedNeed = Math.max(1, Math.trunc(input.need));
+    const normalizedParallel = Math.max(1, Math.trunc(input.parallel));
+    const normalizedMaxAttempts = normalizeJobMaxAttempts(normalizedNeed, input.maxAttempts);
+    const normalizedDrafts = input.drafts
+      .map((draft) => normalizeDraft(draft))
+      .filter((draft): draft is ChatGptAttemptDraft => Boolean(draft));
+    if (normalizedDrafts.length < normalizedMaxAttempts) {
+      throw new Error(`chatgpt_drafts_insufficient:${normalizedDrafts.length}/${normalizedMaxAttempts}`);
+    }
     const job = this.db.createJob({
       site: this.site,
       runMode: "headed",
-      need: 1,
-      parallel: 1,
-      maxAttempts: 1,
+      need: normalizedNeed,
+      parallel: normalizedParallel,
+      maxAttempts: normalizedMaxAttempts,
       payloadJson: {
-        email: input.email,
-        password: input.password,
-        nickname: input.nickname,
-        birthDate: input.birthDate,
-        mailboxId: input.mailboxId,
+        drafts: normalizedDrafts.slice(0, normalizedMaxAttempts),
       },
     });
     this.emit("job.updated", { site: this.site, job });
@@ -372,22 +406,34 @@ export class ChatGptJobScheduler {
         continue;
       }
 
-      if (this.activeAttempts.size === 0 && job.launchedCount < job.maxAttempts) {
+      const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
+      if (launchCapacity > 0) {
         const payload = parsePayload(job);
-        const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}`);
-        const attempt = this.db.createAttempt(job.id, {
-          accountEmail: payload.email,
-          outputDir,
-        });
-        try {
-          await this.spawnAttempt(job, attempt, payload, outputDir);
-          this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
-          this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
-        } catch (error) {
-          this.failAttempt(job.id, attempt.id, {
-            errorCode: "launch_setup_failed",
-            errorMessage: error instanceof Error ? error.message : String(error),
+        let launchIndex = job.launchedCount;
+        for (let slot = 0; slot < launchCapacity; slot += 1) {
+          const draft = payload.drafts[launchIndex];
+          if (!draft) {
+            const failed = this.db.completeJob(job.id, false, `chatgpt job payload exhausted at attempt #${launchIndex + 1}`);
+            this.emit("job.updated", { site: this.site, job: failed });
+            this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
+            return;
+          }
+          const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
+          const attempt = this.db.createAttempt(job.id, {
+            accountEmail: draft.email,
+            outputDir,
           });
+          try {
+            await this.spawnAttempt(job, attempt, draft, outputDir);
+            this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
+            this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
+          } catch (error) {
+            this.failAttempt(job.id, attempt.id, {
+              errorCode: "launch_setup_failed",
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
+          }
+          launchIndex += 1;
         }
       }
 
@@ -403,7 +449,7 @@ export class ChatGptJobScheduler {
     }
   }
 
-  private async spawnAttempt(job: JobRecord, attempt: JobAttemptRecord, payload: ChatGptJobPayload, outputDir: string): Promise<void> {
+  private async spawnAttempt(job: JobRecord, attempt: JobAttemptRecord, payload: ChatGptAttemptDraft, outputDir: string): Promise<void> {
     await mkdir(outputDir, { recursive: true });
     const settings = this.getSettings();
     const portLeases = await reserveMihomoPortLeases();
@@ -580,9 +626,9 @@ export class ChatGptJobScheduler {
         ? "chatgpt_refresh_token_missing"
         : workerErrorCode
           ? workerErrorCode
-        : code == null
-          ? "process_exit"
-          : `exit_${code}`;
+          : code == null
+            ? "process_exit"
+            : `exit_${code}`;
     this.failAttempt(jobId, attemptId, {
       errorCode,
       errorMessage: message,

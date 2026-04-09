@@ -40,6 +40,16 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
   };
 }
 
+function createDraft(index = 1) {
+  return {
+    email: `draft-${index}@example.com`,
+    password: `Password${index}23!`,
+    nickname: `Hana ${index}`,
+    birthDate: "1995-04-02",
+    mailboxId: `mbx_${index}`,
+  };
+}
+
 async function createTempDb() {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-chatgpt-scheduler-"));
   tempDirs.push(tempDir);
@@ -68,11 +78,7 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
     parallel: 1,
     maxAttempts: 1,
     payloadJson: {
-      email: "mailbox@example.com",
-      password: "Password123!",
-      nickname: "Mika Hoshino",
-      birthDate: "1994-03-01",
-      mailboxId: "mbx_demo",
+      drafts: [createDraft(1)],
     },
   });
   const attempt = appDb.createAttempt(job.id, {
@@ -95,11 +101,10 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
 
   await expect(
     scheduler.startJob({
-      email: "fresh@example.com",
-      password: "Password123!",
-      nickname: "Hana Morita",
-      birthDate: "1995-04-02",
-      mailboxId: "mbx_fresh",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+      drafts: [createDraft(2)],
     }),
   ).rejects.toThrow(/retry after/i);
 
@@ -119,11 +124,7 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
     parallel: 1,
     maxAttempts: 1,
     payloadJson: {
-      email: "mailbox@example.com",
-      password: "Password123!",
-      nickname: "Mika Hoshino",
-      birthDate: "1994-03-01",
-      mailboxId: "mbx_demo",
+      drafts: [createDraft(1)],
     },
   });
   const attempt = appDb.createAttempt(job.id, {
@@ -143,14 +144,44 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
   expect(scheduler.getCooldownSnapshot()).toBeNull();
 
   const next = await scheduler.startJob({
-    email: "fresh@example.com",
-    password: "Password123!",
-    nickname: "Hana Morita",
-    birthDate: "1995-04-02",
-    mailboxId: "mbx_fresh",
+    need: 2,
+    parallel: 2,
+    maxAttempts: 3,
+    drafts: [createDraft(2), createDraft(3), createDraft(4)],
   });
   expect(next.site).toBe("chatgpt");
   expect(next.status).toBe("running");
+  expect(next.need).toBe(2);
+  expect(next.parallel).toBe(2);
+  expect(next.maxAttempts).toBe(3);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler stores batch drafts inside payload", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+
+  const next = await scheduler.startJob({
+    need: 3,
+    parallel: 2,
+    maxAttempts: 5,
+    drafts: [createDraft(1), createDraft(2), createDraft(3), createDraft(4), createDraft(5)],
+  });
+
+  expect(next.need).toBe(3);
+  expect(next.parallel).toBe(2);
+  expect(next.maxAttempts).toBe(5);
+  expect(Array.isArray(next.payloadJson.drafts)).toBe(true);
+  expect((next.payloadJson.drafts as Array<Record<string, unknown>>).map((draft) => draft.email)).toEqual([
+    "draft-1@example.com",
+    "draft-2@example.com",
+    "draft-3@example.com",
+    "draft-4@example.com",
+    "draft-5@example.com",
+  ]);
 
   await scheduler.shutdown();
   appDb.close();
