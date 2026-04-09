@@ -6,7 +6,7 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
-| k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 进行中 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-08 | 显式 `CHROME_EXECUTABLE_PATH`、代理设置隔离、Mihomo 共享缓存、CI/Release/branch rules |
+| k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 进行中 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-08 | 显式 `CHROME_EXECUTABLE_PATH`、跨平台安装脚本、Docker 内置指纹浏览器、CI/Release/branch rules |
 | r6h9s | 主流程停止控制重构 | 进行中 | `r6h9s-job-stop-controls/SPEC.md` | 2026-03-28 | stop / force-stop、统一主按钮、Storybook 视觉证据 |
 | m1sso | 固定 Microsoft Account 登录接入 Tavily 主流程 | 已完成 | `m1sso-microsoft-login/SPEC.md` | 2026-03-18 | 已落地 |
 | 8855j | 增加批量注册（并行数 + 需求数） | 已完成 | `8855j-batch-parallel-need/SPEC.md` | 2026-03-01 | 已落地 |

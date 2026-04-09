@@ -3,7 +3,7 @@ set -euo pipefail
 
 TESTBOX="${TESTBOX:-codex-testbox}"
 IMAGE="${TESTBOX_IMAGE:-mcr.microsoft.com/playwright:v1.58.2-noble}"
-CHROME_PATH="${TESTBOX_CHROME_PATH:-/ms-playwright/chromium-1208/chrome-linux64/chrome}"
+CHROME_PATH="${TESTBOX_CHROME_PATH:-/work/.tools/fingerprint-browser/linux/chrome}"
 RUN_MODE="${RUN_MODE:-headed}"
 BROWSER_ENGINE="${BROWSER_ENGINE:-chrome}"
 CHROME_NATIVE_AUTOMATION="${CHROME_NATIVE_AUTOMATION:-false}"
@@ -54,7 +54,16 @@ REMOTE_RUN="$REMOTE_WORKSPACE/runs/$RUN_ID"
 echo "[local] repo=$REPO_ROOT"
 echo "[local] remote_run=$REMOTE_RUN"
 
-ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN'"
+LOCAL_FINGERPRINT_BROWSER_ROOT="$REPO_ROOT/.tools/fingerprint-browser/linux"
+LOCAL_FINGERPRINT_BROWSER_CACHE="$REPO_ROOT/downloads/fingerprint-browser"
+echo "[local] ensuring linux fingerprint browser at $LOCAL_FINGERPRINT_BROWSER_ROOT"
+bash "$REPO_ROOT/scripts/install-fingerprint-browser.sh" \
+  --platform linux \
+  --dest "$LOCAL_FINGERPRINT_BROWSER_ROOT" \
+  --cache-dir "$LOCAL_FINGERPRINT_BROWSER_CACHE"
+
+
+ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN' '$REMOTE_RUN/.tools/fingerprint-browser'"
 
 rsync -az --delete \
   --exclude '.git/' \
@@ -67,6 +76,9 @@ rsync -az --delete \
   --exclude '.next/' \
   --exclude '.DS_Store' \
   "$REPO_ROOT/" "$TESTBOX:$REMOTE_RUN/"
+
+rsync -az \
+  "$LOCAL_FINGERPRINT_BROWSER_ROOT/" "$TESTBOX:$REMOTE_RUN/.tools/fingerprint-browser/linux/"
 
 for extra in \
   ".env.local" \
@@ -101,6 +113,10 @@ echo \"[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting remote registration test (shar
 node --version >> remote-test.log 2>&1
 if [ ! -d node_modules ]; then
   npm install --package-lock=false >> remote-test.log 2>&1
+fi
+if [ ! -x /work/.tools/fingerprint-browser/linux/chrome ]; then
+  echo "missing preinstalled fingerprint browser: /work/.tools/fingerprint-browser/linux/chrome" >> remote-test.log
+  exit 1
 fi
 run_exit=0
 if ! xvfb-run -a env \\

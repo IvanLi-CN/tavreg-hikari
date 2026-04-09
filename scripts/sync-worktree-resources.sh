@@ -189,6 +189,389 @@ copy_resource() {
   fi
 }
 
+extract_env_value() {
+  env_file=$1
+  key=$2
+  [ -f "$env_file" ] || return 1
+  raw_value=$(
+    awk -v key="$key" '
+      {
+        line = $0
+        sub(/^[[:space:]]+/, "", line)
+        if (line ~ /^#/ || line == "") next
+        if (index(line, key "=") == 1) {
+          value = substr(line, length(key) + 2)
+        }
+      }
+      END {
+        if (value == "") exit 1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        print value
+      }
+    ' "$env_file"
+  ) || return 1
+  case "$raw_value" in
+    \"*\")
+      raw_value=${raw_value#\"}
+      raw_value=${raw_value%\"}
+      ;;
+    \'*\')
+      raw_value=${raw_value#\'}
+      raw_value=${raw_value%\'}
+      ;;
+  esac
+  printf '%s\n' "$raw_value"
+}
+
+write_env_value() {
+  env_file=$1
+  key=$2
+  value=$3
+  tmp_file="${env_file}.tmp.$$"
+  awk -v key="$key" -v value="$value" '
+    BEGIN {
+      replaced = 0
+    }
+    index($0, key "=") == 1 {
+      print key "=" value
+      replaced = 1
+      next
+    }
+    {
+      print
+    }
+    END {
+      if (!replaced) {
+        print key "=" value
+      }
+    }
+  ' "$env_file" > "$tmp_file"
+  mv "$tmp_file" "$env_file"
+}
+
+rewrite_browser_env_path() {
+  env_file=$1
+  original_value=$2
+  desired_value=$3
+
+  if [ -z "$desired_value" ] || [ "$original_value" = "$desired_value" ]; then
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    log "would rewrite browser path: $desired_value"
+    return 0
+  fi
+
+  write_env_value "$env_file" "CHROME_EXECUTABLE_PATH" "$desired_value"
+  log "rewrote browser path: $desired_value"
+}
+
+verify_installer_managed_browser_runtime() {
+  installer_path=$1
+  install_platform=$2
+  install_dest=$3
+  install_version=${4:-}
+
+  [ -x "$installer_path" ] || return 1
+  [ -n "$install_platform" ] || return 1
+  [ -n "$install_dest" ] || return 1
+
+  set -- \
+    --platform "$install_platform" \
+    --dest "$install_dest" \
+    --cache-dir "$current_root/downloads/fingerprint-browser" \
+    --verify-only
+  if [ -n "$install_version" ]; then
+    set -- "$@" --version "$install_version"
+  fi
+  "$installer_path" "$@" >/dev/null 2>&1
+}
+
+resolve_installer_managed_browser_metadata() {
+  executable_path=$1
+  field=$2
+  node --input-type=module - "$executable_path" "$field" <<'NODE'
+import fs from "node:fs";
+import path from "node:path";
+
+const [rawExecutablePath, field] = process.argv.slice(2);
+const resolved = path.resolve(rawExecutablePath);
+const normalized = resolved.replaceAll("\\", "/").toLowerCase();
+let hintedPlatform = null;
+if (/\/chromium\.app\/contents\/macos\/chromium$/i.test(normalized)) {
+  hintedPlatform = "macos";
+} else if (normalized.endsWith("/chrome")) {
+  hintedPlatform = "linux";
+} else {
+  process.exit(1);
+}
+const candidateDirs = [];
+let currentDir = path.dirname(resolved);
+for (let depth = 0; depth < 4; depth += 1) {
+  if (candidateDirs.includes(currentDir)) break;
+  candidateDirs.push(currentDir);
+  const parentDir = path.dirname(currentDir);
+  if (parentDir === currentDir) break;
+  currentDir = parentDir;
+}
+for (const dir of candidateDirs) {
+  try {
+    const markerPath = path.join(dir, ".fingerprint-browser-install.json");
+    const marker = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    if (marker.schemaVersion !== 1 || marker.installer !== "install-fingerprint-browser.sh") continue;
+    if (marker.platform !== "linux" && marker.platform !== "macos") continue;
+    if (hintedPlatform && marker.platform !== hintedPlatform) continue;
+    if (typeof marker.binaryRelativePath !== "string" || marker.binaryRelativePath.trim() === "") continue;
+    if (path.resolve(dir, marker.binaryRelativePath) !== resolved) continue;
+
+    let value = "";
+    if (field === "root") value = dir;
+    if (field === "platform") value = marker.platform;
+    if (field === "version") value = typeof marker.version === "string" ? marker.version.trim() : "";
+    if (!value) process.exit(1);
+    console.log(value);
+    process.exit(0);
+  } catch {
+    // continue
+  }
+}
+process.exit(1);
+NODE
+}
+
+resolve_installer_managed_browser_root() {
+  executable_path=$1
+  resolve_installer_managed_browser_metadata "$executable_path" "root"
+}
+
+resolve_browser_runtime_root() {
+  executable_path=$1
+  case "$executable_path" in
+    */Chromium.app/Contents/MacOS/Chromium)
+      printf '%s\n' "${executable_path%/Contents/MacOS/Chromium}"
+      return 0
+      ;;
+    */fingerprint-browser/linux/chrome)
+      printf '%s\n' "${executable_path%/chrome}"
+      return 0
+      ;;
+    */fingerprint-browser/linux/*/chrome)
+      dirname -- "$(dirname -- "$executable_path")"
+      return 0
+      ;;
+  esac
+  resolve_installer_managed_browser_root "$executable_path"
+}
+
+resolve_browser_install_dest() {
+  browser_root=$1
+  case "$browser_root" in
+    */Chromium.app)
+      dirname -- "$browser_root"
+      ;;
+    *)
+      printf '%s\n' "$browser_root"
+      ;;
+  esac
+}
+
+resolve_browser_install_platform() {
+  executable_path=$1
+  case "$executable_path" in
+    */Chromium.app/Contents/MacOS/Chromium)
+      printf '%s\n' "macos"
+      return 0
+      ;;
+    */fingerprint-browser/linux/chrome|*/fingerprint-browser/linux/*/chrome)
+      printf '%s\n' "linux"
+      return 0
+      ;;
+  esac
+  resolve_installer_managed_browser_metadata "$executable_path" "platform"
+}
+
+resolve_host_browser_install_platform() {
+  case "$(uname -s)" in
+    Linux)
+      printf '%s\n' "linux"
+      ;;
+    Darwin)
+      printf '%s\n' "macos"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_default_browser_executable_path() {
+  platform=$1
+  case "$platform" in
+    linux)
+      printf '%s\n' ".tools/fingerprint-browser/linux/chrome"
+      ;;
+    macos)
+      printf '%s\n' ".tools/Chromium.app/Contents/MacOS/Chromium"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+resolve_browser_install_version() {
+  executable_path=$1
+  case "$executable_path" in
+    */fingerprint-browser/linux/*/chrome)
+      basename -- "$(dirname -- "$executable_path")"
+      return 0
+      ;;
+  esac
+  resolve_installer_managed_browser_metadata "$executable_path" "version"
+}
+
+bootstrap_browser_runtime() {
+  env_path="$current_root/.env.local"
+  chrome_path=$(extract_env_value "$env_path" "CHROME_EXECUTABLE_PATH" || true)
+  if [ -z "$chrome_path" ]; then
+    log "skip browser bootstrap: CHROME_EXECUTABLE_PATH unset"
+    return 0
+  fi
+
+  case "$chrome_path" in
+    /*)
+      path_style="absolute"
+      case "$chrome_path" in
+        "$source_root"/*)
+          rel_path=${chrome_path#"$source_root"/}
+          src_executable="$chrome_path"
+          dst_executable="$current_root/$rel_path"
+          ;;
+        "$current_root"/*)
+          rel_path=${chrome_path#"$current_root"/}
+          src_executable="$source_root/$rel_path"
+          dst_executable="$chrome_path"
+          ;;
+        *)
+          log "skip browser bootstrap: CHROME_EXECUTABLE_PATH external"
+          return 0
+          ;;
+      esac
+      ;;
+    *)
+      path_style="relative"
+      rel_path="$chrome_path"
+      src_executable="$source_root/$rel_path"
+      dst_executable="$current_root/$rel_path"
+      ;;
+  esac
+
+  host_platform=$(resolve_host_browser_install_platform || true)
+  if [ -z "$host_platform" ]; then
+    log "skip browser bootstrap: unsupported host platform"
+    return 0
+  fi
+
+  source_platform=$(resolve_browser_install_platform "$dst_executable" || resolve_browser_install_platform "$src_executable" || true)
+  install_platform="$host_platform"
+  install_version=""
+  if [ -n "$source_platform" ] && [ "$source_platform" = "$host_platform" ]; then
+    install_version=$(resolve_browser_install_version "$dst_executable" || resolve_browser_install_version "$src_executable" || true)
+  else
+    rel_path=$(resolve_default_browser_executable_path "$host_platform" || true)
+    if [ -z "$rel_path" ]; then
+      log "skip browser bootstrap: unsupported host platform"
+      return 0
+    fi
+    src_executable="$source_root/$rel_path"
+    dst_executable="$current_root/$rel_path"
+  fi
+
+  if [ "$path_style" = "absolute" ]; then
+    rewritten_chrome_path="$dst_executable"
+  else
+    rewritten_chrome_path="$rel_path"
+  fi
+
+  src_browser_root=$(resolve_browser_runtime_root "$src_executable" || true)
+  dst_browser_root=$(resolve_browser_runtime_root "$dst_executable" || true)
+  if [ -z "$dst_browser_root" ] && [ -n "$src_browser_root" ]; then
+    case "$src_browser_root" in
+      "$source_root"/*)
+        dst_browser_root="$current_root/${src_browser_root#"$source_root"/}"
+        ;;
+    esac
+  fi
+  if [ -z "$dst_browser_root" ]; then
+    log "skip browser bootstrap: unsupported CHROME_EXECUTABLE_PATH"
+    return 0
+  fi
+
+  installer_path="$current_root/scripts/install-fingerprint-browser.sh"
+  manifest_path="$current_root/scripts/fingerprint-browser-manifest.json"
+  if [ ! -x "$installer_path" ] || [ ! -f "$manifest_path" ]; then
+    log "skip browser bootstrap: installer unavailable"
+    return 0
+  fi
+
+  install_dest=$(resolve_browser_install_dest "$dst_browser_root")
+  if [ -x "$dst_executable" ]; then
+    if verify_installer_managed_browser_runtime "$installer_path" "$install_platform" "$install_dest" "$install_version"; then
+      rewrite_browser_env_path "$env_path" "$chrome_path" "$rewritten_chrome_path"
+      log "keep browser runtime exists: $chrome_path"
+      return 0
+    fi
+    log "repairing invalid browser runtime: $chrome_path"
+  fi
+
+  if [ -e "$src_browser_root" ] || [ -L "$src_browser_root" ]; then
+    source_install_dest=$(resolve_browser_install_dest "$src_browser_root")
+    if verify_installer_managed_browser_runtime "$installer_path" "$install_platform" "$source_install_dest" "$install_version"; then
+      if [ "$DRY_RUN" = "1" ]; then
+        log "would copy browser runtime: $chrome_path"
+        return 0
+      fi
+      mkdir -p "$(dirname -- "$dst_browser_root")"
+      rm -rf "$dst_browser_root"
+      cp -R "$src_browser_root" "$dst_browser_root"
+      if [ "$source_install_dest" != "$src_browser_root" ] && [ "$source_install_dest" != "$install_dest" ] && [ -f "$source_install_dest/.fingerprint-browser-install.json" ]; then
+        mkdir -p "$install_dest"
+        cp "$source_install_dest/.fingerprint-browser-install.json" "$install_dest/.fingerprint-browser-install.json"
+      fi
+      if verify_installer_managed_browser_runtime "$installer_path" "$install_platform" "$install_dest" "$install_version"; then
+        rewrite_browser_env_path "$env_path" "$chrome_path" "$rewritten_chrome_path"
+        log "copied browser runtime: $chrome_path"
+        return 0
+      fi
+      log "copied browser runtime failed verification: $chrome_path"
+    fi
+    log "skip invalid source browser runtime: $chrome_path"
+  fi
+
+  if [ "$DRY_RUN" = "1" ]; then
+    log "would install browser runtime: $chrome_path"
+    return 0
+  fi
+
+  set -- \
+    --platform "$install_platform" \
+    --dest "$install_dest" \
+    --cache-dir "$current_root/downloads/fingerprint-browser" \
+    --force
+  if [ -n "$install_version" ]; then
+    set -- "$@" --version "$install_version"
+  fi
+
+  log "installing browser runtime: $chrome_path"
+  if ! "$installer_path" "$@" >/dev/null 2>&1; then
+    log "skip browser bootstrap failed: $chrome_path"
+    return 0
+  fi
+  rewrite_browser_env_path "$env_path" "$chrome_path" "$rewritten_chrome_path"
+  log "installed browser runtime: $chrome_path"
+}
+
 current_root=$(canonical_dir "$(git rev-parse --show-toplevel)")
 git_dir=$(resolve_git_path --git-dir)
 common_dir=$(resolve_git_path --git-common-dir)
@@ -229,6 +612,7 @@ while IFS= read -r entry || [ -n "$entry" ]; do
   copy_resource "$entry"
 done < "$MANIFEST_PATH"
 
+bootstrap_browser_runtime
 bootstrap_dependencies
 
 if [ "$DRY_RUN" = "1" ]; then

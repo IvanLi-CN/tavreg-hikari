@@ -33,10 +33,19 @@
 
 - 运行时现在**只接受显式 `CHROME_EXECUTABLE_PATH`**，不会再扫描系统 Chrome、仓库工具目录、Playwright 缓存或其它候选浏览器。
 - `CHROME_EXECUTABLE_PATH` 必须指向主人提供的指纹浏览器；路径缺失或不是允许的指纹浏览器时，worker 会在启动前直接失败。
-- Docker / Linux 部署推荐固定挂载：
-  - host: `/home/ivan/srv/home-lab/tavreg-hikari-browser/chrome`
-  - container: `/opt/fingerprint-browser/chrome`
+- 浏览器来源现在固定为仓库内的 release manifest + 安装脚本：
+  - Linux 默认固定 `144.0.7559.132`
+  - macOS 默认固定 `142.0.7444.175`
+- 本地安装统一使用：
+  - `bash ./scripts/install-fingerprint-browser.sh --platform macos --force`
+  - `bash ./scripts/install-fingerprint-browser.sh --platform linux --force`
+- 默认安装路径：
+  - macOS: `.tools/Chromium.app/Contents/MacOS/Chromium`
+  - Linux: `.tools/fingerprint-browser/linux/chrome`
+- Docker / Linux 运行镜像现在直接内置 Linux 指纹浏览器：
+  - image path: `/opt/fingerprint-browser/chrome`
   - env: `CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome`
+- 当前 Linux 发布资产与 Docker 运行镜像都**仅支持 amd64 / x86_64**；arm64 Linux 会在安装阶段直接失败，避免装入错误架构的浏览器。
 
 ## 代理设置与发布治理
 
@@ -49,7 +58,7 @@
 - 当主工作区已经准备好 `.env.local` 与 `output/registry/tavreg-hikari.sqlite` 后，新建 linked worktree 会在首次 checkout 时自动补齐缺失项。
 - 若主工作区仍保留历史文件名 `output/registry/signup-tasks.sqlite`，首次启动或 bootstrap 会自动兼容到新的默认库名。
 - 如果 worktree 里还没有 `node_modules`，bootstrap 还会自动执行依赖安装；存在 `bun.lock` 时固定走 `bun install --frozen-lockfile`，没有锁文件时改用 Bun 官方 `bun install --no-save`，避免历史 revision 被自动写出新锁文件。手工 `WORKTREE_SYNC_FORCE=1` 重跑时只有“之前已成功 bootstrap 的依赖状态”才会跳过，半失败残留会继续重试；安装失败也只记日志，不会让 checkout 直接失败。
-- 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 主文件，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图。
+- 同步清单固定来自 `scripts/worktree-sync.paths`；v1 只覆盖 `.env.local` 与 ledger 主文件，不复制浏览器 profile、Mihomo 工作目录、运行日志或截图；但如果 `.env.local` 的 `CHROME_EXECUTABLE_PATH` 指向仓库内的指纹浏览器路径，bootstrap 会自动补齐当前 worktree 对应的浏览器运行时。
 - SQLite ledger 会通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不直接复制活跃数据库的 `-wal/-shm` 文件，也不会把整库一次性读进 JS 内存；若本机 `sqlite3` 不支持该语法，脚本会自动回退到 Bun 内置 SQLite 实现。
 - 自动与手工重跑都遵循“只补缺，不覆盖”：目标文件已存在时会保留现状，不会覆盖 worktree 内的本地修改。
 - 手工预演可用 `WORKTREE_SYNC_FORCE=1 WORKTREE_SYNC_DRY_RUN=1 ./scripts/sync-worktree-resources.sh`。
@@ -57,6 +66,9 @@
 
 ## 常用脚本
 
+- `bash ./scripts/install-fingerprint-browser.sh --platform macos --force`
+- `bash ./scripts/install-fingerprint-browser.sh --platform linux --force`
+- `node ./scripts/smoke-fingerprint-browser.mjs "$CHROME_EXECUTABLE_PATH"`
 - `bun run typecheck`
 - `bun test`
 - `bun run hooks:install`

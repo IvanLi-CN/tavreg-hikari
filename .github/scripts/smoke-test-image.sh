@@ -17,6 +17,7 @@ cleanup
 docker run -d \
   --name "${SMOKE_CONTAINER_NAME}" \
   --platform "${SMOKE_PLATFORM}" \
+  --cap-drop=all \
   -e WEB_HOST=0.0.0.0 \
   -e WEB_PORT=3717 \
   -e RUN_MODE=headless \
@@ -26,8 +27,7 @@ docker run -d \
 start_ts="$(date +%s)"
 while true; do
   if curl -fsS "http://127.0.0.1:${SMOKE_PORT}/api/health" | grep -q '"ok":true'; then
-    echo "[smoke-test-image] health check passed for ${IMAGE_TAG}"
-    exit 0
+    break
   fi
 
   now_ts="$(date +%s)"
@@ -38,3 +38,16 @@ while true; do
   fi
   sleep 2
 done
+
+docker exec "${SMOKE_CONTAINER_NAME}" bash -lc '
+  set -euo pipefail
+  printenv CHROME_EXECUTABLE_PATH
+  test -x /opt/fingerprint-browser/chrome
+  node /app/scripts/smoke-fingerprint-browser.mjs /opt/fingerprint-browser/chrome
+' >/dev/null || {
+  echo "[smoke-test-image] browser smoke failed for ${IMAGE_TAG}" >&2
+  docker logs "${SMOKE_CONTAINER_NAME}" >&2 || true
+  exit 1
+}
+
+echo "[smoke-test-image] health + browser smoke passed for ${IMAGE_TAG}"

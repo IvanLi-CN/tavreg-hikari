@@ -13,18 +13,35 @@ FROM deps AS build
 COPY . .
 RUN bun run web:build
 
+FROM mcr.microsoft.com/playwright:v1.58.2-noble AS fingerprint-browser
+ARG TARGETARCH
+RUN test "${TARGETARCH:-$(dpkg --print-architecture)}" = "amd64" || (echo "fingerprint browser image supports linux/amd64 only" >&2; exit 1)
+RUN apt-get update && apt-get install -y xz-utils && rm -rf /var/lib/apt/lists/*
+WORKDIR /tmp/fingerprint-browser-installer
+COPY scripts/fingerprint-browser-manifest.json ./scripts/fingerprint-browser-manifest.json
+COPY scripts/install-fingerprint-browser.sh ./scripts/install-fingerprint-browser.sh
+RUN bash ./scripts/install-fingerprint-browser.sh \
+  --platform linux \
+  --dest /opt/fingerprint-browser \
+  --cache-dir /tmp/fingerprint-browser-cache
+
 FROM mcr.microsoft.com/playwright:v1.58.2-noble AS runtime
+ARG TARGETARCH
+RUN test "${TARGETARCH:-$(dpkg --print-architecture)}" = "amd64" || (echo "fingerprint browser runtime supports linux/amd64 only" >&2; exit 1)
 WORKDIR /app
 ARG APP_EFFECTIVE_VERSION=dev
 ENV NODE_ENV=production \
-    APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION}
+    APP_EFFECTIVE_VERSION=${APP_EFFECTIVE_VERSION} \
+    CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome
 COPY --from=bun-bin /usr/local/bin/bun /usr/local/bin/bun
 COPY package.json bun.lock ./
 COPY scripts/install-hooks.sh ./scripts/install-hooks.sh
 RUN bun install --frozen-lockfile --production
+COPY --from=fingerprint-browser /opt/fingerprint-browser /opt/fingerprint-browser
 COPY --from=build /app/src ./src
 COPY --from=build /app/web/dist ./web/dist
 COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/.env.example ./.env.example
+COPY --from=build /app/scripts/smoke-fingerprint-browser.mjs ./scripts/smoke-fingerprint-browser.mjs
 EXPOSE 3717
 CMD ["bun", "run", "src/server/main.ts"]
