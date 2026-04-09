@@ -9,8 +9,6 @@ import time
 import urllib.request
 from pathlib import Path
 
-import websocket
-
 BASE_URL = "http://127.0.0.1:4317"
 REPO_ROOT = Path("/Users/ivan/.codex/worktrees/2949/tavreg-hikari")
 RUN_ROOT = REPO_ROOT / "output" / "web-runs" / f"chatgpt-parallel-{int(time.time())}"
@@ -108,6 +106,8 @@ def debug_port_for(output_dir: Path):
 
 
 def cdp_eval(ws_url: str, expr: str):
+    import websocket
+
     ws = websocket.create_connection(ws_url, timeout=5)
     try:
         for index, (method, params) in enumerate(
