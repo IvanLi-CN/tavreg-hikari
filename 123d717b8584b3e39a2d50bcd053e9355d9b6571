@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.1.0",
+  "base_stable_version": "0.0.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-09T08:37:48Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.1.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "252c559cf3d572564e069350c41e53626d34f338",
+  "pr_number": 29,
+  "pr_title": "feat: add chatgpt web site flow",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.1.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.1.0",
+  "target_sha": "123d717b8584b3e39a2d50bcd053e9355d9b6571",
+  "type_label": "type:minor"
+}
