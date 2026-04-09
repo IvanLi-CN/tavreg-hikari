@@ -18,7 +18,7 @@
 
 - 把现有主流程重命名为 `Tavily`，新增并列 `ChatGPT` 顶层页与站点化路由。
 - 将 job / attempt / scheduler / HTTP API 收敛为 `site=tavily|chatgpt` 的多站点模型，并允许两个站点各自维护 current job。
-- 为 ChatGPT 提供最小表单：邮箱、密码、昵称、出生日期；默认值由服务端生成，邮箱必须来自真实 cf-mail。
+- 为 ChatGPT 提供批量任务控制面，并在启动时由服务端为每个 attempt 自动生成完整注册资料。
 - 为 ChatGPT 增加批量可配置、有头浏览器优先的 worker 流程，并把结果提升为完整凭据包持久化与可视化展示。
 
 ### Non-goals
@@ -32,7 +32,7 @@
 
 - 顶层导航、路由与页面文案从单 `dashboard` 收敛为 `Tavily` 与 `ChatGPT` 双站点入口。
 - `jobs` 新增 `site` 与 `payload_json`，站点化 `jobs/current` / `jobs/current/control` 接口落地，旧路径保持 Tavily alias 兼容。
-- 新增 ChatGPT 默认草稿生成接口、最近凭据列表接口、显式 reveal/export 接口与 `chatgpt_credentials` 表。
+- 新增 ChatGPT 最近凭据列表接口、显式 reveal/export 接口与 `chatgpt_credentials` 表。
 - 新增 ChatGPT worker 运行时分流，并接入现有输出目录、失败保留浏览器、代理租约与 cf-mail。
 
 ### Out of scope
@@ -45,11 +45,11 @@
 ### MUST
 
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
-- ChatGPT 页必须同时提供 `邮箱 / 密码 / 昵称 / 出生日期` 草稿模板，以及 `need / parallel / maxAttempts` 批量控制输入。
+- ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，并明确说明 attempt 资料由服务端自动生成。
 - ChatGPT 仍固定使用 `runMode=headed`，但 `need / parallel / maxAttempts` 必须允许由前端显式配置。
-- ChatGPT 草稿邮箱必须由服务端通过 cf-mail provision/ensure 生成；用户改邮箱后启动前必须重新 ensure。
+- ChatGPT 每个 attempt 的邮箱必须由服务端通过 cf-mail provision/ensure 生成，且每个 attempt 都要拿到独立资料。
 - ChatGPT 成功结果必须包含 `access_token / refresh_token / id_token / account_id / email / exp(expires_at)`；缺少 `refresh_token` 视为失败。
-- 当 ChatGPT 批量任务的 `need > 1` 或 `maxAttempts > 1` 时，服务端必须为额外 attempt 生成新的 cf-mail 邮箱，避免重复占用同一 mailbox。
+- 当 ChatGPT 批量任务启动时，服务端必须为每个 attempt 生成新的 cf-mail 邮箱、密码、昵称与生日，避免跨 attempt 共享资料。
 
 ### SHOULD
 
@@ -57,23 +57,19 @@
 - Tavily 与 ChatGPT 的 current job 可以并行运行，互不覆盖。
 - ChatGPT worker 失败时应保留现有 headed 调试体验与诊断输出。
 
-### COULD
-
-- 在 ChatGPT 页展示最近一次草稿生成时间与凭据导出时间。
-
 ## 功能与行为规格（Functional/Behavior Spec）
 
 ### Core flows
 
-- 用户进入 `/chatgpt` 时，前端自动请求服务端草稿接口，拿到 cf-mail 邮箱、随机密码、随机昵称、`1990-01-01` 至 `2005-12-31` 之间的出生日期。
+- 用户进入 `/chatgpt` 时，前端展示批量控制与自动生成说明，不暴露单次 attempt 的邮箱 / 密码 / 昵称 / 出生日期输入框。
 - 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，并携带 `need / parallel / maxAttempts`。
-- 后端在固定 headed 模式下创建 ChatGPT job；首个 attempt 使用当前草稿，额外 attempt 复用当前密码 / 昵称 / 生日模板并生成新的 cf-mail 邮箱。
+- 后端在固定 headed 模式下创建 ChatGPT job，并在启动时为每个 attempt 预生成独立的 cf-mail 邮箱、随机密码、随机昵称与 `1990-01-01` 至 `2005-12-31` 之间的生日。
 - 调度器按 `site` 分流：Tavily 继续沿用现有 worker；ChatGPT 走独立 runtime，产出完整凭据后写入 `chatgpt_credentials` 并把 attempt 标记成功。
 - 用户在 ChatGPT 页查看最近凭据时，只看到掩码值；显式 reveal/export 时再读取完整凭据 JSON。
 
 ### Edge cases / errors
 
-- cf-mail 未配置、ensure 失败或邮箱域名不受支持时，草稿生成与启动都必须返回明确错误。
+- cf-mail 未配置、provision/ensure 失败或邮箱域名不受支持时，启动必须返回明确错误。
 - ChatGPT worker 只拿到 session access token 或 callback 不完整时，attempt 必须失败并记录 failure code。
 - 若当前 `site=chatgpt` 已有活跃 job，则新的 ChatGPT start 请求返回冲突；但 Tavily 活跃 job 不应阻塞 ChatGPT。
 
@@ -84,7 +80,7 @@
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 站点化 current job API | http | internal | Modify | ./contracts/http-apis.md | web server | React app / scheduler | 旧 Tavily 路径保留 alias |
-| ChatGPT 草稿与凭据 API | http | internal | New | ./contracts/http-apis.md | web server | React app | 仅供 ChatGPT 页使用 |
+| ChatGPT 凭据 API | http | internal | New | ./contracts/http-apis.md | web server | React app | 仅供 ChatGPT 页使用 |
 | 多站点 jobs 与 ChatGPT 凭据表 | db | internal | Modify/New | ./contracts/db.md | SQLite | server / scheduler | jobs 增加 site 与 payload |
 
 ### 契约文档（按 Kind 拆分）
@@ -100,7 +96,7 @@
 
 - Given 用户打开 ChatGPT 页
   When 页面首次加载
-  Then 自动展示一组默认草稿，且出生日期落在 1990-2005 年之间。
+  Then 页面只展示批量控制与自动生成说明，不暴露 attempt 草稿字段。
 
 - Given Tavily 已有 current job
   When 用户再启动 ChatGPT job
@@ -129,14 +125,14 @@
 ### Testing
 
 - Unit tests: 站点化 job/db/server 逻辑的 Bun 测试。
-- Integration tests: ChatGPT 草稿与 current job API 的服务端集成校验。
+- Integration tests: ChatGPT current job 与凭据 API 的服务端集成校验。
 - E2E tests (if applicable): 一次 headed ChatGPT 手工链路验证。
 
 ### UI / Storybook (if applicable)
 
 - Stories to add/update: AppShell、Tavily 页面、ChatGPT 页面。
 - Docs pages / state galleries to add/update: ChatGPT 页主要状态与凭据列表态。
-- `play` / interaction coverage to add/update: ChatGPT 草稿加载、重新生成、启动按钮交互。
+- `play` / interaction coverage to add/update: ChatGPT 批量控件输入、凭据 reveal 与启动按钮交互。
 
 ### Quality checks
 
@@ -154,7 +150,7 @@
 
 ## Visual Evidence
 
-- Evidence SHA: `f9158ce`（local working tree）
+- Evidence SHA: `local working tree`
 - source_type: `storybook_canvas`
   story_id_or_title: `shell-appshell--default`
   state: `top-level navigation`
@@ -164,7 +160,7 @@
 - source_type: `storybook_canvas`
   story_id_or_title: `views-chatgptview--batch-ready`
   state: `chatgpt batch ready`
-  evidence_note: 验证 ChatGPT 页新增 `need / parallel / maxAttempts` 批量控制，并在空闲态允许编辑草稿模板与启动批量任务。
+  evidence_note: 验证 ChatGPT 页新增 `need / parallel / maxAttempts` 批量控制，并在空闲态明确显示 attempt 资料会在启动时自动生成。
   ![ChatGPT batch ready view](./assets/chatgpt-view-batch-ready.png)
 
 - source_type: `storybook_canvas`
@@ -205,7 +201,7 @@ None
 ## 变更记录（Change log）
 
 - 2026-04-05: 创建 spec，冻结多站点 current job、ChatGPT 页面范围与完整凭据成功定义。
-- 2026-04-09: ChatGPT 页补充 `need / parallel / maxAttempts` 批量控制，服务端为批量 attempt 预生成独立 cf-mail 邮箱，并更新 Storybook 视觉证据。
+- 2026-04-09: ChatGPT 页补充 `need / parallel / maxAttempts` 批量控制，服务端改为为每个 attempt 自动生成完整资料，并更新 Storybook 视觉证据。
 
 ## 参考（References）
 

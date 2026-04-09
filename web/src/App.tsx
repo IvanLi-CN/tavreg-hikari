@@ -32,8 +32,6 @@ import type {
   ChatGptCredentialQuery,
   ChatGptCredentialSort,
   ChatGptCredentialsPayload,
-  ChatGptDraft,
-  ChatGptDraftPayload,
   ChatGptJobDraft,
   ApiKeyExportPayload,
   ApiKeysPayload,
@@ -190,13 +188,13 @@ export function App() {
   const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
-  const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
   const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
     need: 1,
     parallel: 1,
     maxAttempts: 1,
   });
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -355,7 +353,6 @@ export function App() {
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
-  const [chatGptDraftBusy, setChatGptDraftBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
 
@@ -396,19 +393,6 @@ export function App() {
       return;
     }
     setJob(snapshot);
-  };
-  const refreshChatGptDraft = async (requestedEmail?: string) => {
-    try {
-      setChatGptDraftBusy(true);
-      const params = new URLSearchParams();
-      if (requestedEmail?.trim()) {
-        params.set("email", requestedEmail.trim());
-      }
-      const payload = await api<ChatGptDraftPayload>(`/api/chatgpt/draft${params.size > 0 ? `?${params.toString()}` : ""}`);
-      setChatGptDraft(payload.draft);
-    } finally {
-      setChatGptDraftBusy(false);
-    }
   };
   const refreshChatGptCredentials = async (
     nextQuery = chatGptCredentialQueryRef.current,
@@ -558,10 +542,6 @@ export function App() {
     return payload.credential;
   };
 
-  const handleChatGptDraftChange = (patch: Partial<ChatGptDraft>) => {
-    setChatGptDraft((current) => (current ? { ...current, ...patch } : current));
-  };
-
   const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
     setChatGptJobDraft((current) => {
       const need = Math.max(1, Math.trunc(patch.need ?? current.need));
@@ -576,15 +556,6 @@ export function App() {
     });
   };
 
-  const handleChatGptRegenerateDraft = async () => {
-    try {
-      setError(null);
-      await refreshChatGptDraft();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop", draft?: ChatGptJobDraft) => {
     try {
       setChatGptJobBusy(true);
@@ -594,15 +565,7 @@ export function App() {
         action,
       };
       if (action === "start") {
-        if (!chatGptDraft) {
-          throw new Error("chatgpt draft is not ready");
-        }
         const nextJobDraft = draft || chatGptJobDraft;
-        body.email = chatGptDraft.email;
-        body.password = chatGptDraft.password;
-        body.nickname = chatGptDraft.nickname;
-        body.birthDate = chatGptDraft.birthDate;
-        body.mailboxId = chatGptDraft.mailboxId;
         body.need = nextJobDraft.need;
         body.parallel = nextJobDraft.parallel;
         body.maxAttempts = nextJobDraft.maxAttempts;
@@ -622,6 +585,19 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setChatGptJobBusy(false);
+    }
+  };
+
+  const handleRevealChatGptCredential = async (credentialId: number) => {
+    try {
+      setChatGptCredentialBusy(true);
+      setError(null);
+      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
+      setRevealedChatGptCredential(payload.credential);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptCredentialBusy(false);
     }
   };
 
@@ -735,7 +711,6 @@ export function App() {
     void Promise.all([
       refreshJob("tavily"),
       refreshJob("chatgpt"),
-      refreshChatGptDraft(),
       refreshChatGptCredentials(),
       refreshAccounts(),
       refreshApiKeys(),
@@ -1620,17 +1595,19 @@ export function App() {
 
       {activePage === "chatgpt" ? (
         <ChatGptView
-          draft={chatGptDraft}
           jobDraft={chatGptJobDraft}
           job={chatGptJob}
-          draftBusy={chatGptDraftBusy}
+          credentials={chatGptCredentials}
+          revealedCredential={revealedChatGptCredential}
           jobBusy={chatGptJobBusy}
-          onDraftChange={handleChatGptDraftChange}
+          credentialBusy={chatGptCredentialBusy}
           onJobDraftChange={handleChatGptJobDraftChange}
-          onRegenerateDraft={handleChatGptRegenerateDraft}
           onStart={(draft) => handleChatGptJobAction("start", draft)}
           onStop={() => handleChatGptJobAction("stop")}
           onForceStop={() => handleChatGptJobAction("force_stop")}
+          onRevealCredential={handleRevealChatGptCredential}
+          onCopyCredential={handleCopyChatGptCredential}
+          onExportCredential={handleExportChatGptCredential}
         />
       ) : null}
 

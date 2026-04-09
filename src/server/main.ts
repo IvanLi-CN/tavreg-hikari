@@ -245,11 +245,6 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
 }
 
 async function buildChatGptJobDrafts(input: {
-  email: string;
-  password: string;
-  nickname: string;
-  birthDate: string;
-  mailboxId: string;
   maxAttempts: number;
 }): Promise<Array<{
   email: string;
@@ -258,22 +253,20 @@ async function buildChatGptJobDrafts(input: {
   birthDate: string;
   mailboxId: string;
 }>> {
-  const drafts = [
-    {
-      email: input.email,
-      password: input.password,
-      nickname: input.nickname,
-      birthDate: input.birthDate,
-      mailboxId: input.mailboxId,
-    },
-  ];
-  for (let index = 1; index < input.maxAttempts; index += 1) {
+  const drafts: Array<{
+    email: string;
+    password: string;
+    nickname: string;
+    birthDate: string;
+    mailboxId: string;
+  }> = [];
+  for (let index = 0; index < input.maxAttempts; index += 1) {
     const generated = await buildChatGptDraft();
     drafts.push({
       email: generated.email,
-      password: input.password,
-      nickname: input.nickname,
-      birthDate: input.birthDate,
+      password: generated.password,
+      nickname: generated.nickname,
+      birthDate: generated.birthDate,
       mailboxId: generated.mailboxId,
     });
   }
@@ -2178,35 +2171,10 @@ async function main(): Promise<void> {
         try {
           if (action === "start") {
             if (site === "chatgpt") {
-              const email = normalizeChatGptEmail(body?.email);
-              const password = normalizeChatGptPassword(body?.password);
-              const nickname = normalizeChatGptNickname(body?.nickname);
-              const birthDate = normalizeBirthDate(body?.birthDate);
               const need = toOptionalPositiveInt(body?.need) ?? 1;
               const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
               const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
-              if (!email) {
-                return badRequest("chatgpt email is required");
-              }
-              if (!password) {
-                return badRequest("chatgpt password must be at least 8 characters");
-              }
-              if (!nickname) {
-                return badRequest("chatgpt nickname is required");
-              }
-              if (!birthDate) {
-                return badRequest("birthDate must be between 1990-01-01 and 2005-12-31");
-              }
-              const proofMailbox = await ensureSavedProofMailbox({
-                address: email,
-                mailboxId: typeof body?.mailboxId === "string" ? body.mailboxId : null,
-              });
               const drafts = await buildChatGptJobDrafts({
-                email,
-                password,
-                nickname,
-                birthDate,
-                mailboxId: proofMailbox.mailboxId,
                 maxAttempts,
               });
               const job = await chatgptScheduler.startJob({

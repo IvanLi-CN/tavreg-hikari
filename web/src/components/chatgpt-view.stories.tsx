@@ -2,16 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ChatGptView } from "@/components/chatgpt-view";
-import type { ChatGptCredentialRecord, ChatGptDraft, ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
-
-const sampleDraft: ChatGptDraft = {
-  email: "nova123@mail.707979.xyz",
-  password: "Pw8$hikariDemo19",
-  nickname: "Nova318",
-  birthDate: "1998-07-14",
-  mailboxId: "mailbox-demo-318",
-  generatedAt: "2026-04-05T09:30:00.000Z",
-};
+import type { ChatGptCredentialRecord, ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
 
 const sampleJobDraft: ChatGptJobDraft = {
   need: 3,
@@ -45,7 +36,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 104,
       accountId: null,
-      accountEmail: sampleDraft.email,
+      accountEmail: "mail-a72f3d18@box-3189a6b1.ivanli.asia",
       status: "running",
       stage: "otp_verify",
       proxyNode: "Tokyo-01",
@@ -58,7 +49,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 105,
       accountId: null,
-      accountEmail: "batch-2@mail.707979.xyz",
+      accountEmail: "mail-c4917e0b@box-4df1be91.ivanli.asia",
       status: "running",
       stage: "consent_submit",
       proxyNode: "Singapore-03",
@@ -73,7 +64,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 103,
       accountId: null,
-      accountEmail: "batch-1@mail.707979.xyz",
+      accountEmail: "mail-0cb2f761@box-90ce7a14.ivanli.asia",
       status: "failed",
       stage: "failed",
       proxyNode: "Tokyo-02",
@@ -93,7 +84,7 @@ const sampleCredentials: ChatGptCredentialRecord[] = [
     id: 17,
     jobId: 39,
     attemptId: 99,
-    email: "sample@mail.707979.xyz",
+    email: "mail-43c9fc87@box-79818a03.ivanli.asia",
     accountId: "acc-demo-17",
     accessTokenMasked: "*********************9NjG2Q",
     refreshTokenMasked: "*********************Zp4mLK",
@@ -112,7 +103,7 @@ const revealedCredential: ChatGptCredentialRecord = {
   credentialJson: JSON.stringify(
     {
       type: "codex",
-      email: "sample@mail.707979.xyz",
+      email: "mail-43c9fc87@box-79818a03.ivanli.asia",
       account_id: "acc-demo-17",
       expired: "2026-04-05T16:10:00.000Z",
       access_token: "access-token-demo",
@@ -133,7 +124,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "ChatGPT 批量有头浏览器流，聚焦草稿模板、批量任务控制、运行中的多 attempt 与完整凭据 reveal/export。",
+        component: "ChatGPT 批量有头浏览器流，聚焦自动生成 attempt 资料、批量任务控制、运行中的多 attempt 与完整凭据 reveal/export。",
       },
     },
   },
@@ -144,17 +135,13 @@ type Story = StoryObj<typeof meta>;
 
 export const BatchRunning: Story = {
   args: {
-    draft: sampleDraft,
     jobDraft: sampleJobDraft,
     job: sampleJob,
     credentials: sampleCredentials,
     revealedCredential,
-    draftBusy: false,
     jobBusy: false,
     credentialBusy: false,
-    onDraftChange: fn(),
     onJobDraftChange: fn(),
-    onRegenerateDraft: fn(),
     onStart: fn(),
     onStop: fn(),
     onForceStop: fn(),
@@ -181,27 +168,22 @@ export const BatchReady: Story = {
   },
 };
 
-export const InteractiveDraft: Story = {
+export const InteractiveBatchControls: Story = {
   args: {
     ...BatchRunning.args,
   },
   render: () => {
-    const [draft, setDraft] = useState(sampleDraft);
     const [batchDraft, setBatchDraft] = useState(sampleJobDraft);
     const [revealed, setRevealed] = useState<ChatGptCredentialRecord | null>(null);
     return (
       <ChatGptView
-        draft={draft}
         jobDraft={batchDraft}
         job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [] }}
         credentials={sampleCredentials}
         revealedCredential={revealed}
-        draftBusy={false}
         jobBusy={false}
         credentialBusy={false}
-        onDraftChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
         onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
-        onRegenerateDraft={() => undefined}
         onStart={() => undefined}
         onStop={() => undefined}
         onForceStop={() => undefined}
