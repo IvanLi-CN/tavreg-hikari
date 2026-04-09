@@ -423,8 +423,8 @@ describe("account extractor runtime helpers", () => {
         candidates: [
           {
             provider: "zhanghaoya",
-            rawPayload: "pending-a@outlook.com:pass-a",
-            email: "pending-a@outlook.com",
+            rawPayload: "pending-a@example.test:pass-a",
+            email: "pending-a@example.test",
             password: "pass-a",
             parseStatus: "parsed",
           },
@@ -467,7 +467,7 @@ describe("account extractor runtime helpers", () => {
       acceptedCount: 1,
     });
     expect(history.rows[0]?.items[0]).toMatchObject({
-      email: "pending-a@outlook.com",
+      email: "pending-a@example.test",
       acceptStatus: "accepted",
       rejectReason: null,
     });
@@ -536,8 +536,8 @@ describe("account extractor runtime helpers", () => {
         candidates: [
           {
             provider: "zhanghaoya",
-            rawPayload: "pending-stop@outlook.com:pass-a",
-            email: "pending-stop@outlook.com",
+            rawPayload: "pending-stop@example.test:pass-a",
+            email: "pending-stop@example.test",
             password: "pass-a",
             parseStatus: "parsed",
           },
@@ -594,7 +594,7 @@ describe("account extractor runtime helpers", () => {
       () => undefined,
       () => false,
     );
-    const imported = appDb.importAccounts([{ email: "late-ready@outlook.com", password: "pass-a" }]);
+    const imported = appDb.importAccounts([{ email: "late-ready@example.test", password: "pass-a" }]);
     const accountId = imported.affectedIds[0]!;
     appDb.queueBrowserSessionBootstrap(accountId);
     const batch = appDb.createAccountExtractBatch({
@@ -609,8 +609,8 @@ describe("account extractor runtime helpers", () => {
     const item = appDb.createAccountExtractItem({
       batchId: batch.id,
       provider: "zhanghaoya",
-      rawPayload: "late-ready@outlook.com:pass-a",
-      email: "late-ready@outlook.com",
+      rawPayload: "late-ready@example.test:pass-a",
+      email: "late-ready@example.test",
       password: "pass-a",
       parseStatus: "parsed",
       acceptStatus: "rejected",
@@ -670,7 +670,7 @@ describe("account extractor runtime helpers", () => {
       acceptedCount: 1,
     });
     expect(history.rows[0]?.items[0]).toMatchObject({
-      email: "late-ready@outlook.com",
+      email: "late-ready@example.test",
       acceptStatus: "accepted",
       rejectReason: null,
       importedAccountId: accountId,

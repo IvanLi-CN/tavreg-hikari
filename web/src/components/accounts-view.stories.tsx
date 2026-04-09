@@ -47,24 +47,24 @@ const previewFixture: AccountImportPreviewPayload = {
     inputDuplicate: 1,
   },
   effectiveEntries: [
-    { email: "new@outlook.com", password: "password321" },
-    { email: "beta@outlook.com", password: "password789" },
+    { email: "new@example.test", password: "password321" },
+    { email: "beta@example.test", password: "password789" },
   ],
   items: [
     {
       lineNumber: 1,
-      rawLine: "new@outlook.com----password321",
-      email: "new@outlook.com",
-      normalizedEmail: "new@outlook.com",
+      rawLine: "new@example.test----password321",
+      email: "new@example.test",
+      normalizedEmail: "new@example.test",
       password: "password321",
       decision: "create",
       note: "新增账号",
     },
     {
       lineNumber: 2,
-      rawLine: "beta@outlook.com password789",
-      email: "beta@outlook.com",
-      normalizedEmail: "beta@outlook.com",
+      rawLine: "beta@example.test password789",
+      email: "beta@example.test",
+      normalizedEmail: "beta@example.test",
       password: "password789",
       decision: "update_password",
       note: "已有账号，密码会更新；该账号已有 API key，后续调度仍会跳过",
@@ -74,9 +74,9 @@ const previewFixture: AccountImportPreviewPayload = {
     },
     {
       lineNumber: 3,
-      rawLine: "beta@outlook.com password000",
-      email: "beta@outlook.com",
-      normalizedEmail: "beta@outlook.com",
+      rawLine: "beta@example.test password000",
+      email: "beta@example.test",
+      normalizedEmail: "beta@example.test",
       password: "password000",
       decision: "input_duplicate",
       note: "同一批导入中邮箱重复，已以后出现的记录为准",
@@ -84,9 +84,9 @@ const previewFixture: AccountImportPreviewPayload = {
     },
     {
       lineNumber: 4,
-      rawLine: "gamma@outlook.com pass-111",
-      email: "gamma@outlook.com",
-      normalizedEmail: "gamma@outlook.com",
+      rawLine: "gamma@example.test pass-111",
+      email: "gamma@example.test",
+      normalizedEmail: "gamma@example.test",
       password: "pass-111",
       decision: "keep_existing",
       note: "已有账号且密码未变",
@@ -415,7 +415,7 @@ const failureReuseAccounts: AccountsPayload = {
     disabled: 3,
   },
   groups: ["failed-pool", "manual-hold", "retry-pool"],
-  rows: sampleAccounts.rows.filter((row) => ["gamma@outlook.com", "delta@outlook.com", "omega@outlook.com", "manual-hold@outlook.com"].includes(row.microsoftEmail)),
+  rows: sampleAccounts.rows.filter((row) => ["gamma@example.test", "delta@example.test", "omega@example.test", "manual-hold@example.test"].includes(row.microsoftEmail)),
 };
 
 const sessionBootstrapAccounts: AccountsPayload = {
@@ -429,7 +429,7 @@ const sessionBootstrapAccounts: AccountsPayload = {
     disabled: 1,
   },
   groups: ["default", "linked", "failed-pool"],
-  rows: sampleAccounts.rows.filter((row) => ["alpha@outlook.com", "beta@outlook.com", "gamma@outlook.com"].includes(row.microsoftEmail)),
+  rows: sampleAccounts.rows.filter((row) => ["alpha@example.test", "beta@example.test", "gamma@example.test"].includes(row.microsoftEmail)),
 };
 
 const sortingDemoAccounts: AccountsPayload = {
@@ -524,7 +524,7 @@ export const ProofMailboxDialogPlay: Story = {
     const dialog = await waitFor(() => within(document.body).getByRole("dialog", { name: "绑定备用邮箱" }));
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByText(/cfmail/i)).toBeInTheDocument();
-    expect(within(dialog).getByDisplayValue("alpha-proof@mail-us.707079.xyz")).toBeInTheDocument();
+    expect(within(dialog).getByDisplayValue("alpha-proof@mail.example.test")).toBeInTheDocument();
   },
 };
 
@@ -593,7 +593,7 @@ export const ImportPreviewPlay: Story = {
     const canvas = within(canvasElement);
     const trigger = canvas.getByRole("button", { name: "导入预览" });
     await expect(trigger).toBeDisabled();
-    await userEvent.type(canvas.getByRole("textbox", { name: "account-import" }), "new@outlook.com----password321");
+    await userEvent.type(canvas.getByRole("textbox", { name: "account-import" }), "new@example.test----password321");
     await expect(trigger).toBeEnabled();
     await userEvent.click(trigger);
     await expect(within(document.body).getByRole("dialog", { name: "导入预览" })).toBeInTheDocument();
@@ -941,7 +941,7 @@ export const PasswordCopyPlay: Story = {
       value: { writeText },
     });
     const canvas = within(canvasElement);
-    const trigger = canvas.getByRole("button", { name: "复制 alpha@outlook.com 密码" });
+    const trigger = canvas.getByRole("button", { name: "复制 alpha@example.test 密码" });
     await userEvent.click(trigger);
     await expect(writeText).toHaveBeenCalledWith("pass-456");
     await expect(within(trigger).getByText("已复制")).toBeInTheDocument();
@@ -1126,19 +1126,19 @@ export const StatusFiltersPlay: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@outlook.com"));
+    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@example.test"));
 
     await expect(rowCells().length).toBeGreaterThan(3);
 
     await userEvent.click(canvas.getByRole("combobox", { name: "Session" }));
     await userEvent.click(within(document.body).getByRole("option", { name: "failed" }));
     await expect(rowCells()).toHaveLength(1);
-    await expect(rowCells()[0]).toHaveTextContent("delta@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("delta@example.test");
 
     await userEvent.click(canvas.getByRole("combobox", { name: "收信状态" }));
     await userEvent.click(within(document.body).getByRole("option", { name: "invalidated" }));
     await expect(rowCells()).toHaveLength(1);
-    await expect(rowCells()[0]).toHaveTextContent("delta@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("delta@example.test");
   },
 };
 
@@ -1156,20 +1156,20 @@ export const SortingTimeColumnsPlay: Story = {
     const canvas = within(canvasElement);
     const importedAtButton = canvas.getByRole("button", { name: /导入时间排序/ });
     const lastUsedButton = canvas.getByRole("button", { name: /最近使用排序/ });
-    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@outlook.com"));
+    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("@example.test"));
 
-    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
     await userEvent.click(importedAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("alpha@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("alpha@example.test");
     await userEvent.click(importedAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("gamma@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("gamma@example.test");
     await userEvent.click(importedAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
 
     await userEvent.click(lastUsedButton);
-    await expect(rowCells()[0]).toHaveTextContent("beta@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
     await userEvent.click(lastUsedButton);
-    await expect(rowCells()[0]).toHaveTextContent("alpha@outlook.com");
+    await expect(rowCells()[0]).toHaveTextContent("alpha@example.test");
     await expect(importedAtButton).toHaveAttribute("aria-label", expect.stringContaining("当前未排序"));
   },
 };

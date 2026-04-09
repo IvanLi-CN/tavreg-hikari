@@ -191,7 +191,7 @@ export const ActiveAttemptsNoWrap: Story = {
         {
           id: 307,
           accountId: 91,
-          accountEmail: "jmunyxy196@outlook.com",
+          accountEmail: "jmunyxy196@example.test",
           status: "failed",
           stage: "login_home",
           proxyNode: "美国03 | 合适下载使用-0.01倍率",
@@ -204,7 +204,7 @@ export const ActiveAttemptsNoWrap: Story = {
         {
           id: 309,
           accountId: 93,
-          accountEmail: "myarjzor2958@outlook.com",
+          accountEmail: "myarjzor2958@example.test",
           status: "running",
           stage: "login_home",
           proxyNode: "美国圣何塞07 | 三网推荐",
@@ -217,7 +217,7 @@ export const ActiveAttemptsNoWrap: Story = {
         {
           id: 310,
           accountId: 94,
-          accountEmail: "lbajazwav629@outlook.com",
+          accountEmail: "lbajazwav629@example.test",
           status: "running",
           stage: "proxy_select",
           proxyNode: "香港04 | 移动联通推荐",

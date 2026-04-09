@@ -30,12 +30,12 @@ export const AccountGrid: Story = {
         </TableHeader>
         <TableBody>
           <TableRow>
-            <TableCell className="break-all">alpha@outlook.com</TableCell>
+            <TableCell className="break-all">alpha@example.test</TableCell>
             <TableCell>ready</TableCell>
             <TableCell>2026/3/18 15:38:08</TableCell>
           </TableRow>
           <TableRow>
-            <TableCell className="break-all">beta@outlook.com</TableCell>
+            <TableCell className="break-all">beta@example.test</TableCell>
             <TableCell>succeeded</TableCell>
             <TableCell>2026/3/18 15:39:12</TableCell>
           </TableRow>

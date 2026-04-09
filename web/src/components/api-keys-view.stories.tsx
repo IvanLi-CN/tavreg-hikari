@@ -6,7 +6,7 @@ import type { ApiKeyQuery, ApiKeysPayload } from "@/lib/app-types";
 import { sampleApiKeys } from "@/stories/fixtures";
 
 function createDefaultQuery(): ApiKeyQuery {
-  return { q: "", status: "", groupName: "", page: 1, pageSize: 20 };
+  return { q: "", status: "", groupName: "", sortBy: "extractedAt", sortDir: "desc", page: 1, pageSize: 20 };
 }
 
 const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | null }> = {
@@ -22,6 +22,60 @@ function buildExportContent(selectedIds: number[]): string {
     .join("\n");
 }
 
+const sortingDemoApiKeys: ApiKeysPayload = {
+  ...sampleApiKeys,
+  rows: [
+    {
+      id: 101,
+      accountId: 301,
+      microsoftEmail: "sort.alpha@example.test",
+      groupName: "linked",
+      apiKeyMasked: "tvly-****-alpha",
+      apiKeyPrefix: "tvly-alpha",
+      status: "active",
+      extractedAt: "2026-03-18T09:00:00.000Z",
+      lastVerifiedAt: "2026-03-18T09:10:00.000Z",
+    },
+    {
+      id: 102,
+      accountId: 302,
+      microsoftEmail: "sort.beta@example.test",
+      groupName: "ops",
+      apiKeyMasked: "tvly-****-beta",
+      apiKeyPrefix: "tvly-beta",
+      status: "active",
+      extractedAt: "2026-03-18T12:00:00.000Z",
+      lastVerifiedAt: "2026-03-18T07:00:00.000Z",
+    },
+    {
+      id: 103,
+      accountId: 303,
+      microsoftEmail: "sort.gamma@example.test",
+      groupName: "ops",
+      apiKeyMasked: "tvly-****-gamma",
+      apiKeyPrefix: "tvly-gamma",
+      status: "revoked",
+      extractedAt: "2026-03-18T08:00:00.000Z",
+      lastVerifiedAt: null,
+    },
+  ],
+};
+
+function parseTime(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function compareNullableTime(left: string | null | undefined, right: string | null | undefined, sortDir: "desc" | "asc"): number {
+  const leftValue = parseTime(left);
+  const rightValue = parseTime(right);
+  if (leftValue == null && rightValue == null) return 0;
+  if (leftValue == null) return 1;
+  if (rightValue == null) return -1;
+  return sortDir === "asc" ? leftValue - rightValue : rightValue - leftValue;
+}
+
 function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload {
   const pattern = query.q.trim().toLowerCase();
   const filteredRows = source.rows.filter((row) => {
@@ -30,12 +84,20 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
     if (!pattern) return true;
     return [row.microsoftEmail, row.apiKeyPrefix, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
   });
+  const sortedRows = [...filteredRows].sort((left, right) => {
+    const primary =
+      query.sortBy === "lastVerifiedAt"
+        ? compareNullableTime(left.lastVerifiedAt, right.lastVerifiedAt, query.sortDir)
+        : compareNullableTime(left.extractedAt, right.extractedAt, query.sortDir);
+    if (primary !== 0) return primary;
+    return query.sortDir === "asc" ? left.id - right.id : right.id - left.id;
+  });
   const start = (query.page - 1) * query.pageSize;
-  const pagedRows = filteredRows.slice(start, start + query.pageSize);
+  const pagedRows = sortedRows.slice(start, start + query.pageSize);
   return {
     ...source,
     rows: pagedRows,
-    total: filteredRows.length,
+    total: sortedRows.length,
     page: query.page,
     pageSize: query.pageSize,
     summary: {
@@ -184,5 +246,24 @@ export const ActionsOnly: Story = {
     onExportOpenChange: fn(),
     onCopyExport: fn(),
     onSaveExport: fn(),
+  },
+};
+
+export const SortingTimeColumnsPlay: Story = {
+  args: baseArgs,
+  render: () => <ApiKeysStorySurface apiKeys={sortingDemoApiKeys} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const extractedAtButton = canvas.getByRole("button", { name: /提取时间排序/ });
+    const lastVerifiedButton = canvas.getByRole("button", { name: /最近验证排序/ });
+    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("sort."));
+
+    await expect(rowCells()[0]).toHaveTextContent("sort.beta@example.test");
+    await userEvent.click(extractedAtButton);
+    await expect(rowCells()[0]).toHaveTextContent("sort.gamma@example.test");
+    await userEvent.click(lastVerifiedButton);
+    await expect(rowCells()[0]).toHaveTextContent("sort.alpha@example.test");
+    await userEvent.click(lastVerifiedButton);
+    await expect(rowCells()[0]).toHaveTextContent("sort.beta@example.test");
   },
 };

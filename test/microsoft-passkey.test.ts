@@ -11,7 +11,7 @@ describe("Microsoft passkey detection", () => {
   test("ignores completed callback URLs", () => {
     expect(
       isMicrosoftPasskeyInterruptUrl(
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        "https://console.example.test/api/microsoft-mail/oauth/callback?code=abc&state=123",
       ),
     ).toBe(false);
   });

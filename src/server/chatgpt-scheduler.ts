@@ -218,8 +218,14 @@ export class ChatGptJobScheduler {
     return null;
   }
 
-  getRecentCredentials(limit = 20): ChatGptCredentialRecord[] {
-    return this.db.listChatGptCredentials(limit);
+  getRecentCredentials(filters?: {
+    limit?: number;
+    sortBy?: "createdAt" | "expiresAt";
+    sortDir?: "desc" | "asc";
+    q?: string;
+    expiryStatus?: "valid" | "expired" | "noExpiry";
+  }): ChatGptCredentialRecord[] {
+    return this.db.listChatGptCredentials(filters);
   }
 
   getCooldownSnapshot(): ChatGptStartCooldownState | null {

@@ -79,7 +79,7 @@ const OUTPUT_ROOT = path.join(REPO_ROOT, "output");
 const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json");
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
-const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "ivanli.asia").trim() || "ivanli.asia";
+const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "example.test").trim() || "example.test";
 
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
@@ -178,7 +178,7 @@ async function ensureSavedProofMailbox(input: {
     }
     throw new Error("cfmail_api_key_missing");
   }
-  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
   const ensured = await ensureCfMailMailbox({
     baseUrl,
     apiKey,
@@ -216,7 +216,7 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
   if (!apiKey) {
     throw new Error("cfmail_api_key_missing");
   }
-  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
   const normalizedEmail = String(requestedEmail || "").trim().toLowerCase();
   const mailbox = normalizedEmail
     ? await ensureCfMailMailbox({
@@ -1693,6 +1693,8 @@ async function main(): Promise<void> {
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
           groupName: url.searchParams.get("groupName") || undefined,
+          sortBy: (url.searchParams.get("sortBy") as "extractedAt" | "lastVerifiedAt" | null) || undefined,
+          sortDir: (url.searchParams.get("sortDir") as "desc" | "asc" | null) || undefined,
           page,
           pageSize,
         });
@@ -1749,9 +1751,13 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
         const limit = Math.max(1, Math.min(100, toInt(url.searchParams.get("limit") || undefined, 20)));
+        const sortBy = (url.searchParams.get("sortBy") as "createdAt" | "expiresAt" | null) || "createdAt";
+        const sortDir = (url.searchParams.get("sortDir") as "desc" | "asc" | null) || "desc";
+        const q = url.searchParams.get("q") || undefined;
+        const expiryStatus = (url.searchParams.get("expiryStatus") as "valid" | "expired" | "noExpiry" | null) || undefined;
         return json({
           ok: true,
-          rows: chatgptScheduler.getRecentCredentials(limit).map((row) => serializeChatGptCredential(row)),
+          rows: chatgptScheduler.getRecentCredentials({ limit, sortBy, sortDir, q, expiryStatus }).map((row) => serializeChatGptCredential(row)),
         });
       }
 

@@ -600,6 +600,26 @@ function resolveAccountListOrderClause(sortBy?: string, sortDir?: string): strin
   return "ORDER BY a.updated_at DESC";
 }
 
+function normalizeOrderDirection(sortDir?: string): "ASC" | "DESC" {
+  return sortDir === "asc" ? "ASC" : "DESC";
+}
+
+function resolveApiKeyListOrderClause(sortBy?: string, sortDir?: string): string {
+  const direction = normalizeOrderDirection(sortDir);
+  if (sortBy === "lastVerifiedAt") {
+    return `ORDER BY CASE WHEN k.last_verified_at IS NULL THEN 1 ELSE 0 END ASC, k.last_verified_at ${direction}, k.id ${direction}`;
+  }
+  return `ORDER BY k.extracted_at ${direction}, k.id ${direction}`;
+}
+
+function resolveChatGptCredentialOrderClause(sortBy?: string, sortDir?: string): string {
+  const direction = normalizeOrderDirection(sortDir);
+  if (sortBy === "expiresAt") {
+    return `ORDER BY CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END ASC, expires_at ${direction}, id ${direction}`;
+  }
+  return `ORDER BY created_at ${direction}, id ${direction}`;
+}
+
 function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
   return {
     id: Number(row.id),
@@ -1984,7 +2004,15 @@ export class AppDatabase {
     return { deleted, blockedIds };
   }
 
-  listApiKeys(filters: { q?: string; status?: string; groupName?: string; page?: number; pageSize?: number }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
+  listApiKeys(filters: {
+    q?: string;
+    status?: string;
+    groupName?: string;
+    sortBy?: "extractedAt" | "lastVerifiedAt";
+    sortDir?: "desc" | "asc";
+    page?: number;
+    pageSize?: number;
+  }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
     const where: string[] = [];
@@ -2015,13 +2043,14 @@ export class AppDatabase {
       `)
       .get(...(params as any[])) as { total?: number; active_count?: number; revoked_count?: number } | null;
     const total = Number(summaryRow?.total || 0);
+    const orderClause = resolveApiKeyListOrderClause(filters.sortBy, filters.sortDir);
     const rows = this.db
       .query(`
         SELECT k.*, a.microsoft_email, a.group_name
         FROM api_keys k
         JOIN microsoft_accounts a ON a.id = k.account_id
         ${whereSql}
-        ORDER BY k.extracted_at DESC
+        ${orderClause}
         LIMIT ? OFFSET ?
       `)
       .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
@@ -3538,11 +3567,35 @@ export class AppDatabase {
     return mapChatGptCredentialRow(row);
   }
 
-  listChatGptCredentials(limit = 20): ChatGptCredentialRecord[] {
-    const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit || 20)));
+  listChatGptCredentials(filters?: {
+    limit?: number;
+    sortBy?: "createdAt" | "expiresAt";
+    sortDir?: "desc" | "asc";
+    q?: string;
+    expiryStatus?: "valid" | "expired" | "noExpiry";
+  }): ChatGptCredentialRecord[] {
+    const safeLimit = Math.max(1, Math.min(200, Math.trunc(filters?.limit || 20)));
+    const orderClause = resolveChatGptCredentialOrderClause(filters?.sortBy, filters?.sortDir);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filters?.q?.trim()) {
+      const pattern = `%${filters.q.trim().toLowerCase()}%`;
+      where.push("(LOWER(email) LIKE ? OR LOWER(account_id) LIKE ?)");
+      params.push(pattern, pattern);
+    }
+    if (filters?.expiryStatus === "valid") {
+      where.push("expires_at IS NOT NULL AND expires_at > ?");
+      params.push(nowIso());
+    } else if (filters?.expiryStatus === "expired") {
+      where.push("expires_at IS NOT NULL AND expires_at <= ?");
+      params.push(nowIso());
+    } else if (filters?.expiryStatus === "noExpiry") {
+      where.push("expires_at IS NULL");
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const rows = this.db
-      .query("SELECT * FROM chatgpt_credentials ORDER BY created_at DESC, id DESC LIMIT ?")
-      .all(safeLimit) as Record<string, unknown>[];
+      .query(`SELECT * FROM chatgpt_credentials ${whereSql} ${orderClause} LIMIT ?`)
+      .all(...([...(params as any[]), safeLimit] as any[])) as Record<string, unknown>[];
     return rows.map(mapChatGptCredentialRow);
   }
 

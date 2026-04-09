@@ -9,7 +9,7 @@ const pageItems: Array<{ key: PageKey; label: string }> = [
   { key: "chatgpt", label: "ChatGPT" },
   { key: "accounts", label: "微软账号" },
   { key: "mailboxes", label: "微软邮箱" },
-  { key: "apiKeys", label: "API Keys" },
+  { key: "keys", label: "Keys" },
   { key: "proxies", label: "代理节点" },
 ];
 

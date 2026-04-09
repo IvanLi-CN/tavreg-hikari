@@ -28,12 +28,12 @@ export const NavigationTabs: Story = {
             <TabsTrigger value="tavily">Tavily</TabsTrigger>
             <TabsTrigger value="chatgpt">ChatGPT</TabsTrigger>
             <TabsTrigger value="accounts">微软账号</TabsTrigger>
-            <TabsTrigger value="apiKeys">API Keys</TabsTrigger>
+            <TabsTrigger value="keys">Keys</TabsTrigger>
           </TabsList>
           <TabsContent value="tavily" className="pt-4 text-sm text-slate-300">当前在 Tavily 面板。</TabsContent>
           <TabsContent value="chatgpt" className="pt-4 text-sm text-slate-300">当前在 ChatGPT 面板。</TabsContent>
           <TabsContent value="accounts" className="pt-4 text-sm text-slate-300">当前在账号池面板。</TabsContent>
-          <TabsContent value="apiKeys" className="pt-4 text-sm text-slate-300">当前在 API keys 面板。</TabsContent>
+          <TabsContent value="keys" className="pt-4 text-sm text-slate-300">当前在 Keys 面板。</TabsContent>
         </Tabs>
       </div>
     );

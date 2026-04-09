@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
-import { ApiKeysView } from "@/components/api-keys-view";
 import { AppShell } from "@/components/app-shell";
 import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
+import { KeysView } from "@/components/keys-view";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
@@ -29,6 +29,8 @@ import type {
   AccountsPayload,
   ChatGptCredentialDetailPayload,
   ChatGptCredentialRecord,
+  ChatGptCredentialQuery,
+  ChatGptCredentialSort,
   ChatGptCredentialsPayload,
   ChatGptDraft,
   ChatGptDraftPayload,
@@ -108,6 +110,16 @@ function mergeIds(current: number[], next: number[]): number[] {
   return Array.from(new Set([...current, ...next]));
 }
 
+function buildChatGptCredentialExportFilename(now = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+  return `chatgpt-keys-${year}${month}${day}-${hours}${minutes}${seconds}.json`;
+}
+
 function mergeAccountIntoAccountsPayload(current: AccountsPayload, account: AccountRecord): AccountsPayload {
   const rowIndex = current.rows.findIndex((row) => row.id === account.id);
   if (rowIndex < 0) return current;
@@ -179,7 +191,6 @@ export function App() {
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
   const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
-  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -262,6 +273,7 @@ export function App() {
   const [importPreviewOpen, setImportPreviewOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [selectedApiKeyIds, setSelectedApiKeyIds] = useState<number[]>([]);
+  const [selectedChatGptCredentialIds, setSelectedChatGptCredentialIds] = useState<number[]>([]);
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({
     runMode: "headed",
@@ -285,7 +297,23 @@ export function App() {
     page: 1,
     pageSize: 20,
   });
-  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({ q: "", status: "", groupName: "", page: 1, pageSize: 20 });
+  const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({
+    q: "",
+    status: "",
+    groupName: "",
+    sortBy: "extractedAt",
+    sortDir: "desc",
+    page: 1,
+    pageSize: 20,
+  });
+  const [chatGptCredentialQuery, setChatGptCredentialQuery] = useState<ChatGptCredentialQuery>({
+    q: "",
+    expiryStatus: "",
+  });
+  const [chatGptCredentialSort, setChatGptCredentialSort] = useState<ChatGptCredentialSort>({
+    sortBy: "createdAt",
+    sortDir: "desc",
+  });
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>({
     provider: "",
     status: "",
@@ -301,6 +329,9 @@ export function App() {
   const [apiKeyExportOpen, setApiKeyExportOpen] = useState(false);
   const [apiKeyExportContent, setApiKeyExportContent] = useState("");
   const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
+  const [chatGptExportOpen, setChatGptExportOpen] = useState(false);
+  const [chatGptExportContent, setChatGptExportContent] = useState("");
+  const [chatGptExportBusy, setChatGptExportBusy] = useState(false);
   const [extractorSettingsBusy, setExtractorSettingsBusy] = useState(false);
   const [extractorHistoryBusy, setExtractorHistoryBusy] = useState(false);
   const [extractorRunBusy, setExtractorRunBusy] = useState(false);
@@ -338,6 +369,8 @@ export function App() {
   );
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
+  const chatGptCredentialQueryRef = useRef(chatGptCredentialQuery);
+  const chatGptCredentialSortRef = useRef(chatGptCredentialSort);
   const extractorHistoryQueryRef = useRef(extractorHistoryQuery);
   const extractorRuntimeRef = useRef(extractorRuntime);
   const activePageRef = useRef(activePage);
@@ -371,8 +404,16 @@ export function App() {
       setChatGptDraftBusy(false);
     }
   };
-  const refreshChatGptCredentials = async () => {
-    const payload = await api<ChatGptCredentialsPayload>("/api/chatgpt/credentials");
+  const refreshChatGptCredentials = async (
+    nextQuery = chatGptCredentialQueryRef.current,
+    nextSort = chatGptCredentialSortRef.current,
+  ) => {
+    const params = new URLSearchParams();
+    if (nextQuery.q) params.set("q", nextQuery.q);
+    if (nextQuery.expiryStatus) params.set("expiryStatus", nextQuery.expiryStatus);
+    params.set("sortBy", nextSort.sortBy);
+    params.set("sortDir", nextSort.sortDir);
+    const payload = await api<ChatGptCredentialsPayload>(`/api/chatgpt/credentials?${params.toString()}`);
     setChatGptCredentials(payload.rows);
   };
   const refreshAccounts = async (nextQuery = accountQuery) => {
@@ -409,6 +450,8 @@ export function App() {
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.status) params.set("status", nextQuery.status);
     if (nextQuery.groupName) params.set("groupName", nextQuery.groupName);
+    params.set("sortBy", nextQuery.sortBy);
+    params.set("sortDir", nextQuery.sortDir);
     params.set("page", String(nextQuery.page));
     params.set("pageSize", String(nextQuery.pageSize));
     const payload = await api<ApiKeysPayload>(`/api/api-keys?${params.toString()}`);
@@ -506,7 +549,6 @@ export function App() {
       return credential;
     }
     const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credential.id}?includeSecrets=1`);
-    setRevealedChatGptCredential(payload.credential);
     return payload.credential;
   };
 
@@ -517,7 +559,6 @@ export function App() {
   const handleChatGptRegenerateDraft = async () => {
     try {
       setError(null);
-      setRevealedChatGptCredential(null);
       await refreshChatGptDraft();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -549,24 +590,14 @@ export function App() {
         method: "POST",
         body: JSON.stringify(body),
       });
-      await Promise.all([refreshJob("chatgpt"), refreshChatGptCredentials()]);
+      await Promise.all([
+        refreshJob("chatgpt"),
+        refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current),
+      ]);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setChatGptJobBusy(false);
-    }
-  };
-
-  const handleRevealChatGptCredential = async (credentialId: number) => {
-    try {
-      setChatGptCredentialBusy(true);
-      setError(null);
-      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
-      setRevealedChatGptCredential(payload.credential);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setChatGptCredentialBusy(false);
     }
   };
 
@@ -604,6 +635,76 @@ export function App() {
     } finally {
       setChatGptCredentialBusy(false);
     }
+  };
+
+  const handleToggleChatGptCredentialSelection = (credentialId: number, checked: boolean) => {
+    setSelectedChatGptCredentialIds((current) => (checked ? mergeIds(current, [credentialId]) : current.filter((id) => id !== credentialId)));
+  };
+
+  const handleToggleChatGptCredentialPageSelection = (checked: boolean) => {
+    const currentPageCredentialIds = chatGptCredentials.map((row) => row.id);
+    if (checked) {
+      setSelectedChatGptCredentialIds((current) => mergeIds(current, currentPageCredentialIds));
+      return;
+    }
+    setSelectedChatGptCredentialIds((current) => current.filter((id) => !currentPageCredentialIds.includes(id)));
+  };
+
+  const handleOpenChatGptCredentialExport = async () => {
+    if (selectedChatGptCredentialIds.length === 0) return;
+    try {
+      setChatGptExportBusy(true);
+      setError(null);
+      const detailRows = (
+        await Promise.all(
+          selectedChatGptCredentialIds.map(async (credentialId) => {
+            const credential = chatGptCredentials.find((row) => row.id === credentialId);
+            if (!credential) return null;
+            return await ensureChatGptCredentialDetail(credential);
+          }),
+        )
+      ).filter((row): row is ChatGptCredentialRecord => Boolean(row));
+
+      if (detailRows.length === 0) {
+        setError("选中的 ChatGPT keys 已不存在");
+        return;
+      }
+
+      const content = JSON.stringify(
+        detailRows.map((row) => JSON.parse(buildCodexVibeMonitorCredentialJson(row))),
+        null,
+        2,
+      );
+      setChatGptExportContent(content);
+      setChatGptExportOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptExportBusy(false);
+    }
+  };
+
+  const handleCopyChatGptExport = async () => {
+    if (!chatGptExportContent) return;
+    try {
+      setError(null);
+      await navigator.clipboard.writeText(chatGptExportContent);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleSaveChatGptExport = () => {
+    if (!chatGptExportContent) return;
+    const blob = new Blob([chatGptExportContent], { type: "application/json;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = buildChatGptCredentialExportFilename();
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
   };
 
   useEffect(() => {
@@ -663,6 +764,14 @@ export function App() {
   }, [apiKeyQuery]);
 
   useEffect(() => {
+    chatGptCredentialQueryRef.current = chatGptCredentialQuery;
+  }, [chatGptCredentialQuery]);
+
+  useEffect(() => {
+    chatGptCredentialSortRef.current = chatGptCredentialSort;
+  }, [chatGptCredentialSort]);
+
+  useEffect(() => {
     extractorHistoryQueryRef.current = extractorHistoryQuery;
   }, [extractorHistoryQuery]);
 
@@ -685,7 +794,7 @@ export function App() {
       setEvents((current) => [next, ...current].slice(0, 60));
       if (next.type === "job.updated" || next.type === "attempt.updated") {
         void Promise.all([refreshJob("tavily"), refreshJob("chatgpt")]);
-        void refreshChatGptCredentials();
+        void refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current);
       }
       if (next.type === "account.updated") {
         void refreshAccounts(accountQueryRef.current);
@@ -793,6 +902,15 @@ export function App() {
   useEffect(() => {
     void refreshApiKeys().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [apiKeyQuery]);
+
+  useEffect(() => {
+    void refreshChatGptCredentials(chatGptCredentialQuery, chatGptCredentialSort).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [chatGptCredentialQuery, chatGptCredentialSort]);
+
+  useEffect(() => {
+    const existingIds = new Set(chatGptCredentials.map((row) => row.id));
+    setSelectedChatGptCredentialIds((current) => current.filter((id) => existingIds.has(id)));
+  }, [chatGptCredentials]);
 
   useEffect(() => {
     void refreshExtractorHistory(extractorHistoryQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -1445,7 +1563,7 @@ export function App() {
       error={error}
       onNavigate={(page) =>
         navigate(
-          page === "tavily" ? "/" : page === "apiKeys" ? "/api-keys" : `/${page}`,
+          page === "tavily" ? "/" : page === "keys" ? "/keys" : `/${page}`,
         )
       }
     >
@@ -1471,19 +1589,13 @@ export function App() {
         <ChatGptView
           draft={chatGptDraft}
           job={chatGptJob}
-          credentials={chatGptCredentials}
-          revealedCredential={revealedChatGptCredential}
           draftBusy={chatGptDraftBusy}
           jobBusy={chatGptJobBusy}
-          credentialBusy={chatGptCredentialBusy}
           onDraftChange={handleChatGptDraftChange}
           onRegenerateDraft={handleChatGptRegenerateDraft}
           onStart={() => handleChatGptJobAction("start")}
           onStop={() => handleChatGptJobAction("stop")}
           onForceStop={() => handleChatGptJobAction("force_stop")}
-          onRevealCredential={handleRevealChatGptCredential}
-          onCopyCredential={handleCopyChatGptCredential}
-          onExportCredential={handleExportChatGptCredential}
         />
       ) : null}
 
@@ -1591,22 +1703,45 @@ export function App() {
         )
       ) : null}
 
-      {activePage === "apiKeys" ? (
-        <ApiKeysView
-          apiKeys={apiKeys}
-          query={apiKeyQuery}
-          selectedIds={selectedApiKeyIds}
-          exportOpen={apiKeyExportOpen}
-          exportContent={apiKeyExportContent}
-          exportBusy={apiKeyExportBusy}
-          onQueryChange={setApiKeyQuery}
-          onToggleSelection={handleToggleApiKeySelection}
-          onTogglePageSelection={handleToggleApiKeyPageSelection}
-          onClearSelection={() => setSelectedApiKeyIds([])}
-          onOpenExport={handleOpenApiKeyExport}
-          onExportOpenChange={setApiKeyExportOpen}
-          onCopyExport={handleCopyApiKeyExport}
-          onSaveExport={handleSaveApiKeyExport}
+      {activePage === "keys" ? (
+        <KeysView
+          tavily={{
+            apiKeys,
+            query: apiKeyQuery,
+            selectedIds: selectedApiKeyIds,
+            exportOpen: apiKeyExportOpen,
+            exportContent: apiKeyExportContent,
+            exportBusy: apiKeyExportBusy,
+            onQueryChange: setApiKeyQuery,
+            onToggleSelection: handleToggleApiKeySelection,
+            onTogglePageSelection: handleToggleApiKeyPageSelection,
+            onClearSelection: () => setSelectedApiKeyIds([]),
+            onOpenExport: handleOpenApiKeyExport,
+            onExportOpenChange: setApiKeyExportOpen,
+            onCopyExport: handleCopyApiKeyExport,
+            onSaveExport: handleSaveApiKeyExport,
+          }}
+          chatgpt={{
+            credentials: chatGptCredentials,
+            query: chatGptCredentialQuery,
+            sort: chatGptCredentialSort,
+            credentialBusy: chatGptCredentialBusy,
+            selectedIds: selectedChatGptCredentialIds,
+            exportOpen: chatGptExportOpen,
+            exportContent: chatGptExportContent,
+            exportBusy: chatGptExportBusy,
+            onQueryChange: setChatGptCredentialQuery,
+            onSortChange: setChatGptCredentialSort,
+            onToggleSelection: handleToggleChatGptCredentialSelection,
+            onTogglePageSelection: handleToggleChatGptCredentialPageSelection,
+            onClearSelection: () => setSelectedChatGptCredentialIds([]),
+            onOpenExport: handleOpenChatGptCredentialExport,
+            onExportOpenChange: setChatGptExportOpen,
+            onCopyExport: handleCopyChatGptExport,
+            onSaveExport: handleSaveChatGptExport,
+            onCopyCredential: handleCopyChatGptCredential,
+            onExportCredential: handleExportChatGptCredential,
+          }}
         />
       ) : null}
 
