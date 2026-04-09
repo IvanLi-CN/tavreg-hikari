@@ -7,6 +7,7 @@ import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusBadge } from "@/components/status-badge";
 import type { ChatGptCredentialRecord, ChatGptDraft, JobSnapshot } from "@/lib/app-types";
+import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
 import { formatDate } from "@/lib/format";
 
 function Field(props: { label: string; children: ReactNode }) {
@@ -26,25 +27,7 @@ function buildCredentialDetail(credential: ChatGptCredentialRecord | null): stri
   if (!credential) {
     return "";
   }
-  if (credential.credentialJson) {
-    try {
-      return JSON.stringify(JSON.parse(credential.credentialJson), null, 2);
-    } catch {
-      return credential.credentialJson;
-    }
-  }
-  return JSON.stringify(
-    {
-      email: credential.email,
-      account_id: credential.accountId,
-      access_token: credential.accessToken || null,
-      refresh_token: credential.refreshToken || null,
-      id_token: credential.idToken || null,
-      expires_at: credential.expiresAt,
-    },
-    null,
-    2,
-  );
+  return buildCodexVibeMonitorCredentialJson(credential);
 }
 
 export function ChatGptView({

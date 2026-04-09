@@ -78,12 +78,15 @@ const revealedCredential: ChatGptCredentialRecord = {
   idToken: "id-token-demo",
   credentialJson: JSON.stringify(
     {
+      type: "codex",
+      email: "sample@mail.707979.xyz",
+      account_id: "acc-demo-17",
+      expired: "2026-04-05T16:10:00.000Z",
       access_token: "access-token-demo",
       refresh_token: "refresh-token-demo",
       id_token: "id-token-demo",
-      account_id: "acc-demo-17",
-      email: "sample@mail.707979.xyz",
-      exp: 1775405400,
+      last_refresh: "2026-04-05T09:10:00.000Z",
+      token_type: "Bearer",
     },
     null,
     2,

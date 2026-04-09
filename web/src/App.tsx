@@ -10,6 +10,7 @@ import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
+import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -574,20 +575,7 @@ export function App() {
       setChatGptCredentialBusy(true);
       setError(null);
       const detail = await ensureChatGptCredentialDetail(credential);
-      const content =
-        detail.credentialJson
-        || JSON.stringify(
-          {
-            email: detail.email,
-            account_id: detail.accountId,
-            access_token: detail.accessToken,
-            refresh_token: detail.refreshToken,
-            id_token: detail.idToken,
-            expires_at: detail.expiresAt,
-          },
-          null,
-          2,
-        );
+      const content = buildCodexVibeMonitorCredentialJson(detail);
       await navigator.clipboard.writeText(content);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -601,20 +589,7 @@ export function App() {
       setChatGptCredentialBusy(true);
       setError(null);
       const detail = await ensureChatGptCredentialDetail(credential);
-      const content =
-        detail.credentialJson
-        || JSON.stringify(
-          {
-            email: detail.email,
-            account_id: detail.accountId,
-            access_token: detail.accessToken,
-            refresh_token: detail.refreshToken,
-            id_token: detail.idToken,
-            expires_at: detail.expiresAt,
-          },
-          null,
-          2,
-        );
+      const content = buildCodexVibeMonitorCredentialJson(detail);
       const blob = new Blob([content], { type: "application/json;charset=utf-8" });
       const objectUrl = window.URL.createObjectURL(blob);
       const anchor = document.createElement("a");

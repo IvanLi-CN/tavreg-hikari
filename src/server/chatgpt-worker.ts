@@ -2150,6 +2150,7 @@ async function run(): Promise<void> {
         id_token: idToken,
         account_id: accountId,
         expires_at: expiresAt,
+        token_type: typeof tokenPayload.token_type === "string" ? tokenPayload.token_type : null,
         exp: typeof idTokenPayload.exp === "number" ? idTokenPayload.exp : null,
       },
       notes: [

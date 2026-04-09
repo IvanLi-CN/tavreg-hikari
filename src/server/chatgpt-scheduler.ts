@@ -11,6 +11,7 @@ import {
   type JobSite,
   type ProxyNodeRecord,
 } from "../storage/app-db.js";
+import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveAttemptProxyNode, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 
@@ -42,6 +43,7 @@ interface ChatGptWorkerResult {
     id_token?: string;
     account_id?: string;
     expires_at?: string | null;
+    token_type?: string | null;
     exp?: number | null;
   };
   notes?: string[];
@@ -541,12 +543,16 @@ export class ChatGptJobScheduler {
     }
 
     if (code === 0 && signal == null && accessToken && refreshToken && idToken) {
-      const payloadJson = JSON.stringify({
-        ...credentials,
+      const expiresAt = credentials ? resolveCredentialExpiry(credentials) : null;
+      const payloadJson = buildCodexVibeMonitorCredentialJson({
         email: result?.email || "",
-        nickname: result?.nickname || "",
-        birthDate: result?.birthDate || "",
-        notes: result?.notes || [],
+        accountId,
+        accessToken,
+        refreshToken,
+        idToken,
+        expiresAt,
+        createdAt: new Date().toISOString(),
+        tokenType: typeof credentials?.token_type === "string" ? credentials.token_type : null,
       });
       const { job, attempt, credential } = this.db.completeChatGptAttemptSuccess(jobId, attemptId, {
         email: result?.email || "",
@@ -554,7 +560,7 @@ export class ChatGptJobScheduler {
         accessToken,
         refreshToken,
         idToken,
-        expiresAt: credentials ? resolveCredentialExpiry(credentials) : null,
+        expiresAt,
         credentialJson: payloadJson,
       });
       this.emit("attempt.updated", { site: this.site, attempt });
