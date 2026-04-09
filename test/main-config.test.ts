@@ -212,7 +212,10 @@ test("worktree bootstrap provisions repo-local fingerprint browser paths via the
   expect(installerSource).toContain("install-fingerprint-browser.sh");
   expect(installerSource).toContain(".tools/fingerprint-browser/linux");
   expect(syncSource).toContain("bootstrap_browser_runtime");
+  expect(syncSource).toContain("resolve_installer_managed_browser_root");
+  expect(syncSource).toContain("resolve_browser_install_platform");
   expect(syncSource).toContain("CHROME_EXECUTABLE_PATH");
+  expect(syncSource).toContain("--platform \"$install_platform\"");
   expect(syncSource).toContain("copied browser runtime");
 });
 

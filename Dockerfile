@@ -14,6 +14,8 @@ COPY . .
 RUN bun run web:build
 
 FROM mcr.microsoft.com/playwright:v1.58.2-noble AS fingerprint-browser
+ARG TARGETARCH
+RUN test "${TARGETARCH:-$(dpkg --print-architecture)}" = "amd64" || (echo "fingerprint browser image supports linux/amd64 only" >&2; exit 1)
 RUN apt-get update && apt-get install -y xz-utils && rm -rf /var/lib/apt/lists/*
 WORKDIR /tmp/fingerprint-browser-installer
 COPY scripts/fingerprint-browser-manifest.json ./scripts/fingerprint-browser-manifest.json
@@ -24,6 +26,8 @@ RUN bash ./scripts/install-fingerprint-browser.sh \
   --cache-dir /tmp/fingerprint-browser-cache
 
 FROM mcr.microsoft.com/playwright:v1.58.2-noble AS runtime
+ARG TARGETARCH
+RUN test "${TARGETARCH:-$(dpkg --print-architecture)}" = "amd64" || (echo "fingerprint browser runtime supports linux/amd64 only" >&2; exit 1)
 WORKDIR /app
 ARG APP_EFFECTIVE_VERSION=dev
 ENV NODE_ENV=production \

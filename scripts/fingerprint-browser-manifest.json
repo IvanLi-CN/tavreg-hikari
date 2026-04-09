@@ -11,7 +11,8 @@
         "downloadUrl": "https://github.com/adryfish/fingerprint-chromium/releases/download/144.0.7559.132/ungoogled-chromium-144.0.7559.132-1-x86_64_linux.tar.xz",
         "sha256": "bb4c44840bae7e881f6258ed5b33f972f284384d898b6289e1f0c0bf47555ede",
         "archiveType": "tar.xz",
-        "binaryRelativePath": "chrome"
+        "binaryRelativePath": "chrome",
+        "arch": "x86_64"
       }
     },
     "macos": {

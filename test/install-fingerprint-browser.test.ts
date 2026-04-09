@@ -64,6 +64,7 @@ async function writeManifest(
                   sha256: payload.sha256,
                   archiveType: "tar.xz",
                   binaryRelativePath: "chrome",
+                  arch: "x86_64",
                 },
               }
             : {},
@@ -95,6 +96,7 @@ afterEach(async () => {
 test("linux installer installs, verifies, and reuses the pinned release", async () => {
   const rootDir = await makeTempRoot("fingerprint-linux-");
   const { archivePath, sha } = await createLinuxFixture(rootDir);
+  const binarySha = await sha256(path.join(rootDir, "ungoogled-chromium-144.0.7559.132-1-x86_64_linux", "chrome"));
   const manifestPath = path.join(rootDir, "manifest.json");
   const installRoot = path.join(rootDir, "install");
   const cacheDir = path.join(rootDir, "cache");
@@ -123,8 +125,10 @@ test("linux installer installs, verifies, and reuses the pinned release", async 
     platform: "linux",
     version: "144.0.7559.132",
     binaryRelativePath: "chrome",
+    binarySha256: binarySha,
   });
 
+  await rm(cacheDir, { recursive: true, force: true });
   const verify = runInstaller(["--platform", "linux", "--dest", installRoot, "--cache-dir", cacheDir, "--verify-only"], env);
   expect(verify.status).toBe(0);
   expect(verify.stdout).toContain(path.join(installRoot, "chrome"));
@@ -132,6 +136,126 @@ test("linux installer installs, verifies, and reuses the pinned release", async 
   const second = runInstaller(["--platform", "linux", "--dest", installRoot, "--cache-dir", cacheDir], env);
   expect(second.status).toBe(0);
   expect(`${second.stdout}\n${second.stderr}`).toContain("already installed");
+}, 40_000);
+
+test("linux verify-only accepts pinned older installs after the shared symlink moves to a newer version", async () => {
+  const rootDir = await makeTempRoot("fingerprint-linux-multi-");
+  const olderVersion = "143.0.7000.0";
+  const newerVersion = "144.0.7559.132";
+  const olderFixture = await createLinuxFixture(rootDir, olderVersion);
+  const newerFixture = await createLinuxFixture(rootDir, newerVersion);
+  const manifestPath = path.join(rootDir, "manifest.json");
+  const installRoot = path.join(rootDir, "install");
+  const cacheDir = path.join(rootDir, "cache");
+  await writeFile(
+    manifestPath,
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        defaultVersions: {
+          linux: newerVersion,
+          macos: "142.0.7444.175",
+        },
+        releases: {
+          linux: {
+            [olderVersion]: {
+              asset: `fixture-${olderVersion}.tar.xz`,
+              downloadUrl: pathToFileURL(olderFixture.archivePath).href,
+              sha256: olderFixture.sha,
+              archiveType: "tar.xz",
+              binaryRelativePath: "chrome",
+              arch: "x86_64",
+            },
+            [newerVersion]: {
+              asset: `fixture-${newerVersion}.tar.xz`,
+              downloadUrl: pathToFileURL(newerFixture.archivePath).href,
+              sha256: newerFixture.sha,
+              archiveType: "tar.xz",
+              binaryRelativePath: "chrome",
+              arch: "x86_64",
+            },
+          },
+          macos: {},
+        },
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  const env = {
+    ...process.env,
+    FINGERPRINT_BROWSER_MANIFEST_PATH: manifestPath,
+  };
+
+  const installOlder = runInstaller(["--platform", "linux", "--version", olderVersion, "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(installOlder.status).toBe(0);
+
+  const installNewer = runInstaller(["--platform", "linux", "--version", newerVersion, "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(installNewer.status).toBe(0);
+  expect(await readlink(path.join(installRoot, "chrome"))).toBe(`${newerVersion}/chrome`);
+
+  const verifyOlder = runInstaller(["--platform", "linux", "--version", olderVersion, "--dest", installRoot, "--cache-dir", cacheDir, "--verify-only"], env);
+  expect(verifyOlder.status).toBe(0);
+  expect(verifyOlder.stdout).toContain(path.join(installRoot, olderVersion, "chrome"));
+
+  const reuseOlder = runInstaller(["--platform", "linux", "--version", olderVersion, "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(reuseOlder.status).toBe(0);
+  expect(`${reuseOlder.stdout}\n${reuseOlder.stderr}`).toContain("already installed");
+  expect(reuseOlder.stdout).toContain(path.join(installRoot, olderVersion, "chrome"));
+}, 40_000);
+
+test("linux installer reinstalls invalid existing releases before reusing them", async () => {
+  const rootDir = await makeTempRoot("fingerprint-linux-stale-");
+  const { archivePath, sha } = await createLinuxFixture(rootDir);
+  const manifestPath = path.join(rootDir, "manifest.json");
+  const installRoot = path.join(rootDir, "install");
+  const cacheDir = path.join(rootDir, "cache");
+  const versionDir = path.join(installRoot, "144.0.7559.132");
+  await writeManifest(manifestPath, {
+    platform: "linux",
+    version: "144.0.7559.132",
+    url: pathToFileURL(archivePath).href,
+    sha256: sha,
+  });
+  await mkdir(versionDir, { recursive: true });
+  await writeFile(path.join(versionDir, "chrome"), "#!/usr/bin/env bash\nexit 7\n", "utf8");
+  await chmod(path.join(versionDir, "chrome"), 0o755);
+  await Bun.$`ln -sfn 144.0.7559.132/chrome ${path.join(installRoot, "chrome")}`.quiet();
+
+  const env = {
+    ...process.env,
+    FINGERPRINT_BROWSER_MANIFEST_PATH: manifestPath,
+  };
+  const result = runInstaller(["--platform", "linux", "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(result.status).toBe(0);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("reinstalling invalid linux release");
+  expect(await readFile(path.join(versionDir, "chrome"), "utf8")).toContain("exit 0");
+}, 20_000);
+
+test("linux installer rejects unsupported Linux host architectures", async () => {
+  const rootDir = await makeTempRoot("fingerprint-linux-arch-");
+  const { archivePath, sha } = await createLinuxFixture(rootDir, "144.0.7559.132");
+  const manifestPath = path.join(rootDir, "manifest.json");
+  const installRoot = path.join(rootDir, "install");
+  const cacheDir = path.join(rootDir, "cache");
+  await writeManifest(manifestPath, {
+    platform: "linux",
+    version: "144.0.7559.132",
+    url: pathToFileURL(archivePath).href,
+    sha256: sha,
+  });
+
+  const env = {
+    ...process.env,
+    FINGERPRINT_BROWSER_MANIFEST_PATH: manifestPath,
+    FINGERPRINT_BROWSER_HOST_OS: "Linux",
+    FINGERPRINT_BROWSER_HOST_ARCH: "arm64",
+  };
+  const result = runInstaller(["--platform", "linux", "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(result.status).toBe(1);
+  expect(`${result.stdout}\n${result.stderr}`).toContain("supports only x86_64");
 });
 
 test("linux installer rejects checksum mismatch and unsupported versions", async () => {
@@ -234,4 +358,15 @@ test.if(process.platform === "darwin")("macOS installer installs and verifies th
 
   const verify = runInstaller(["--platform", "macos", "--dest", installRoot, "--cache-dir", cacheDir, "--verify-only"], env);
   expect(verify.status).toBe(0);
-}, 20_000);
+
+  await writeFile(path.join(installRoot, "Chromium.app/Contents/MacOS/Chromium"), "#!/usr/bin/env bash\nexit 9\n", "utf8");
+  await chmod(path.join(installRoot, "Chromium.app/Contents/MacOS/Chromium"), 0o755);
+
+  const tamperedVerify = runInstaller(["--platform", "macos", "--dest", installRoot, "--cache-dir", cacheDir, "--verify-only"], env);
+  expect(tamperedVerify.status).toBe(1);
+  expect(`${tamperedVerify.stdout}\n${tamperedVerify.stderr}`).toContain("macOS fingerprint browser executable drifted");
+
+  const reinstall = runInstaller(["--platform", "macos", "--dest", installRoot, "--cache-dir", cacheDir], env);
+  expect(reinstall.status).toBe(0);
+  expect(await readFile(path.join(installRoot, "Chromium.app/Contents/MacOS/Chromium"), "utf8")).toContain("exit 0");
+}, 40_000);

@@ -54,7 +54,16 @@ REMOTE_RUN="$REMOTE_WORKSPACE/runs/$RUN_ID"
 echo "[local] repo=$REPO_ROOT"
 echo "[local] remote_run=$REMOTE_RUN"
 
-ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN'"
+LOCAL_FINGERPRINT_BROWSER_ROOT="$REPO_ROOT/.tools/fingerprint-browser/linux"
+LOCAL_FINGERPRINT_BROWSER_CACHE="$REPO_ROOT/downloads/fingerprint-browser"
+echo "[local] ensuring linux fingerprint browser at $LOCAL_FINGERPRINT_BROWSER_ROOT"
+bash "$REPO_ROOT/scripts/install-fingerprint-browser.sh" \
+  --platform linux \
+  --dest "$LOCAL_FINGERPRINT_BROWSER_ROOT" \
+  --cache-dir "$LOCAL_FINGERPRINT_BROWSER_CACHE"
+
+
+ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN' '$REMOTE_RUN/.tools/fingerprint-browser'"
 
 rsync -az --delete \
   --exclude '.git/' \
@@ -67,6 +76,9 @@ rsync -az --delete \
   --exclude '.next/' \
   --exclude '.DS_Store' \
   "$REPO_ROOT/" "$TESTBOX:$REMOTE_RUN/"
+
+rsync -az \
+  "$LOCAL_FINGERPRINT_BROWSER_ROOT/" "$TESTBOX:$REMOTE_RUN/.tools/fingerprint-browser/linux/"
 
 for extra in \
   ".env.local" \
@@ -102,12 +114,10 @@ node --version >> remote-test.log 2>&1
 if [ ! -d node_modules ]; then
   npm install --package-lock=false >> remote-test.log 2>&1
 fi
-mkdir -p /work/.tools/fingerprint-browser /work/downloads/fingerprint-browser
-bash ./scripts/install-fingerprint-browser.sh \
-  --platform linux \
-  --dest /work/.tools/fingerprint-browser/linux \
-  --cache-dir /work/downloads/fingerprint-browser \
-  --force >> remote-test.log 2>&1
+if [ ! -x /work/.tools/fingerprint-browser/linux/chrome ]; then
+  echo "missing preinstalled fingerprint browser: /work/.tools/fingerprint-browser/linux/chrome" >> remote-test.log
+  exit 1
+fi
 run_exit=0
 if ! xvfb-run -a env \\
   RUN_MODE=${RUN_MODE_Q} \\

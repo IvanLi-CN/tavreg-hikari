@@ -45,6 +45,7 @@
 - Docker / Linux 运行镜像现在直接内置 Linux 指纹浏览器：
   - image path: `/opt/fingerprint-browser/chrome`
   - env: `CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome`
+- 当前 Linux 发布资产与 Docker 运行镜像都**仅支持 amd64 / x86_64**；arm64 Linux 会在安装阶段直接失败，避免装入错误架构的浏览器。
 
 ## 代理设置与发布治理
 

@@ -1,4 +1,5 @@
 # Repo-relative runtime resources that should be copied into new linked worktrees.
 # Copy happens only when the source exists and the destination is missing.
 .env.local
+.tools/.fingerprint-browser-install.json
 output/registry/tavreg-hikari.sqlite
