@@ -2171,6 +2171,7 @@ async function main(): Promise<void> {
         try {
           if (action === "start") {
             if (site === "chatgpt") {
+              const runMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : "headed";
               const need = toOptionalPositiveInt(body?.need) ?? 1;
               const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
               const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
@@ -2178,6 +2179,7 @@ async function main(): Promise<void> {
                 maxAttempts,
               });
               const job = await chatgptScheduler.startJob({
+                runMode,
                 need,
                 parallel,
                 maxAttempts,

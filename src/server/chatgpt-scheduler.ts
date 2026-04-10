@@ -282,6 +282,7 @@ export class ChatGptJobScheduler {
   }
 
   async startJob(input: {
+    runMode: "headed" | "headless";
     need: number;
     parallel: number;
     maxAttempts: number;
@@ -301,12 +302,13 @@ export class ChatGptJobScheduler {
     const normalizedDrafts = input.drafts
       .map((draft) => normalizeDraft(draft))
       .filter((draft): draft is ChatGptAttemptDraft => Boolean(draft));
+    const runMode = input.runMode === "headless" ? "headless" : "headed";
     if (normalizedDrafts.length < normalizedMaxAttempts) {
       throw new Error(`chatgpt_drafts_insufficient:${normalizedDrafts.length}/${normalizedMaxAttempts}`);
     }
     const job = this.db.createJob({
       site: this.site,
-      runMode: "headed",
+      runMode,
       need: normalizedNeed,
       parallel: normalizedParallel,
       maxAttempts: normalizedMaxAttempts,
@@ -474,7 +476,7 @@ export class ChatGptJobScheduler {
       ...buildAttemptSpawnOptions(this.repoRoot, {
         env: {
           ...process.env,
-          RUN_MODE: "headed",
+          RUN_MODE: job.runMode,
           CHATGPT_JOB_EMAIL: payload.email,
           CHATGPT_JOB_PASSWORD: payload.password,
           CHATGPT_JOB_NICKNAME: payload.nickname,

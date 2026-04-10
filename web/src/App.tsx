@@ -189,6 +189,7 @@ export function App() {
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
   const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
+    runMode: "headed",
     need: 1,
     parallel: 1,
     maxAttempts: 1,
@@ -544,11 +545,13 @@ export function App() {
 
   const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
     setChatGptJobDraft((current) => {
+      const runMode = patch.runMode === "headless" || patch.runMode === "headed" ? patch.runMode : current.runMode;
       const need = Math.max(1, Math.trunc(patch.need ?? current.need));
       const parallel = Math.max(1, Math.trunc(patch.parallel ?? current.parallel));
       const requestedMaxAttempts = Math.max(1, Math.trunc(patch.maxAttempts ?? current.maxAttempts));
       const maxAttempts = requestedMaxAttempts >= need ? requestedMaxAttempts : Math.max(need, Math.ceil(need * 1.5));
       return {
+        runMode,
         need,
         parallel,
         maxAttempts,
@@ -566,6 +569,7 @@ export function App() {
       };
       if (action === "start") {
         const nextJobDraft = draft || chatGptJobDraft;
+        body.runMode = nextJobDraft.runMode;
         body.need = nextJobDraft.need;
         body.parallel = nextJobDraft.parallel;
         body.maxAttempts = nextJobDraft.maxAttempts;
@@ -747,6 +751,7 @@ export function App() {
   useEffect(() => {
     if (!chatGptJob.job) return;
     setChatGptJobDraft({
+      runMode: chatGptJob.job.runMode,
       need: chatGptJob.job.need,
       parallel: chatGptJob.job.parallel,
       maxAttempts: chatGptJob.job.maxAttempts,

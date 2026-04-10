@@ -325,6 +325,7 @@ export type ChatGptDraft = {
 };
 
 export type ChatGptJobDraft = {
+  runMode: "headed" | "headless";
   need: number;
   parallel: number;
   maxAttempts: number;

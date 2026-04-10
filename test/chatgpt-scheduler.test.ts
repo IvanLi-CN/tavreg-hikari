@@ -101,6 +101,7 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
 
   await expect(
     scheduler.startJob({
+      runMode: "headed",
       need: 1,
       parallel: 1,
       maxAttempts: 1,
@@ -144,6 +145,7 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
   expect(scheduler.getCooldownSnapshot()).toBeNull();
 
   const next = await scheduler.startJob({
+    runMode: "headed",
     need: 2,
     parallel: 2,
     maxAttempts: 3,
@@ -165,12 +167,14 @@ test("chatgpt scheduler stores batch drafts inside payload", async () => {
   (scheduler as any).ensureLoop = () => undefined;
 
   const next = await scheduler.startJob({
+    runMode: "headless",
     need: 3,
     parallel: 2,
     maxAttempts: 5,
     drafts: [createDraft(1), createDraft(2), createDraft(3), createDraft(4), createDraft(5)],
   });
 
+  expect(next.runMode).toBe("headless");
   expect(next.need).toBe(3);
   expect(next.parallel).toBe(2);
   expect(next.maxAttempts).toBe(5);

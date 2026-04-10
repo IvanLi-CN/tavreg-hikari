@@ -5,6 +5,7 @@ import { ChatGptView } from "@/components/chatgpt-view";
 import type { ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
 
 const sampleJobDraft: ChatGptJobDraft = {
+  runMode: "headed",
   need: 3,
   parallel: 2,
   maxAttempts: 5,
@@ -122,6 +123,16 @@ export const BatchReady: Story = {
   },
 };
 
+export const BatchReadyHeadless: Story = {
+  args: {
+    ...BatchReady.args,
+    jobDraft: {
+      ...sampleJobDraft,
+      runMode: "headless",
+    },
+  },
+};
+
 export const InteractiveBatchControls: Story = {
   args: {
     ...BatchRunning.args,
@@ -147,9 +158,14 @@ export const InteractiveBatchControls: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
+    await expect(canvas.getByText("mode: headed")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
+    await userEvent.click(within(document.body).getByRole("option", { name: "headless" }));
+    await expect(canvas.getByText("mode: headless")).toBeInTheDocument();
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
     await userEvent.tab();
+    await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"need":4');
     await expect(canvas.queryByText("最近凭据")).toBeNull();
     await expect(canvas.getByText(/Keys > ChatGPT/)).toBeInTheDocument();
