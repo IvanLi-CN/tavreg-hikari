@@ -17,7 +17,7 @@
 | 5nkhw | Tavreg Hikari Web 管理台 | 已完成 | `5nkhw-tavreg-hikari-web-control/SPEC.md` | 2026-03-19 | Web 控制台、调度器、预解析导入与账号分组已落地 |
 | 2dkks | API Keys 批量选择与导出（`key | ip`） | 已完成 | `2dkks-api-key-batch-export/SPEC.md` | 2026-03-20 | PR #6 |
 | svjx5 | 微软账号自动提取与本地历史接入 | 已完成 | `svjx5-microsoft-account-auto-extractor/SPEC.md` | 2026-03-27 | 四源适配、自动补号、本地历史 |
-| gw9zj | 主工作区运行态同步到新 Worktree 的自动 Bootstrap | 已完成 | `gw9zj-worktree-runtime-bootstrap/SPEC.md` | 2026-04-10 | `.env.local` 默认改为共享软链接；仅在浏览器路径需要 worktree 专属改写时落地为本地文件，shared testbox 上传链路会自动传输解析后的 env 内容，SQLite ledger 仍保持独立快照 |
+| gw9zj | 主工作区运行态同步到新 Worktree 的自动 Bootstrap | 已完成 | `gw9zj-worktree-runtime-bootstrap/SPEC.md` | 2026-04-10 | `.env.local` 默认改为共享软链接；仅在浏览器路径需要 worktree 专属改写时落地为本地文件，shared testbox 上传链路会自动传输解析后的 env 内容，并补齐 source-only helper 的 SQLite staging 覆盖 |
 | 9h2xd | 收敛 macOS 下 fingerprint Chromium + CDP 登录恢复链路 | 已完成 | `9h2xd-macos-headless-chrome-launch/SPEC.md` | 2026-03-27 | 保持 fingerprint-chromium + CDP，worker 优先走 Node，并修正 Tavily home / passkey 恢复链路 |
 | jg53e | 微软邮箱 Graph/OAuth 收信模块 | 已实现 | `jg53e-microsoft-mail-inbox/SPEC.md` | 2026-03-31 | `/mailboxes` 三栏页、独立 Graph 设置页、账号页收信状态，补齐桌面操作列防挤压证据 |
 | rxae7 | 默认 SQLite 数据库文件名规范化 | 已完成 | `rxae7-registry-db-filename/SPEC.md` | 2026-03-31 | 默认库名收敛为 tavreg-hikari.sqlite，并兼容历史 signup-tasks.sqlite |
