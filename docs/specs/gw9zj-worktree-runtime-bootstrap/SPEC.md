@@ -106,6 +106,7 @@
 
 - Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/tavreg-hikari.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到共享 `.env.local` 软链接与一致性 ledger 快照。
 - Given 新 linked worktree 的 `.env.local` 需要改写 `CHROME_EXECUTABLE_PATH` 才能适配当前 worktree，When bootstrap 执行浏览器运行时补齐，Then 脚本会先把共享 `.env.local` 落地为本地文件，再写入 worktree 专属路径。
+- Given linked worktree 仍保留共享 `.env.local` 软链接，When repo-local 的远端运行脚本把该 env 发送到其它目录或机器，Then 上传结果必须是解析后的常规文件内容，而不是指回主工作区路径的失效软链接。
 - Given 新 linked worktree 初次 bootstrap 时尚无 `node_modules`，When `post-checkout` hook 触发脚本，Then worktree 会自动完成依赖安装，且带 `bun.lock` 的 revision 使用 `bun install --frozen-lockfile`。
 - Given worktree 已有 `node_modules`，When 执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，Then 脚本只会输出 `keep dependency install: node_modules exists`，不会再次执行依赖安装。
 - Given linked worktree 缺少 `node_modules` 但当前环境下 `bun install` 失败，When hook 或 forced sync 触发依赖 bootstrap，Then 脚本会输出 `skip dependency install failed` 并继续完成非依赖资源同步，不会让 checkout 失败。
@@ -177,7 +178,7 @@
 - 2026-03-27: 将无锁文件 revision 的依赖 bootstrap 切到 `bun install --no-save`，并用成功标记避免半失败 `node_modules` 阻断后续重试。
 - 2026-03-27: 最终实现对齐规格：无锁文件 revision 真实执行 `bun install --no-save`，并修正 smoke test 中的 Bun 包装脚本以避免递归调用。
 - 2026-03-31: 跟随默认运行态数据库文件名规范化，将 bootstrap manifest 与文档口径统一到 `output/registry/tavreg-hikari.sqlite`，并兼容旧源文件名。
-- 2026-04-10: 将 `.env.local` 默认同步策略改为共享软链接；仅在需要改写 `CHROME_EXECUTABLE_PATH` 适配当前 worktree 时，才落地为本地文件后继续改写。
+- 2026-04-10: 将 `.env.local` 默认同步策略改为共享软链接；仅在需要改写 `CHROME_EXECUTABLE_PATH` 适配当前 worktree 时，才落地为本地文件后继续改写，并补齐 shared testbox 上传链路对共享软链接的自动落地。
 
 ## 参考（References）
 

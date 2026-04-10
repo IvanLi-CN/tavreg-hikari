@@ -197,9 +197,10 @@ cp "$repo_root/scripts/install-hooks.sh" "$fixture_repo/scripts/install-hooks.sh
 cp "$repo_root/scripts/sqlite-snapshot.sh" "$fixture_repo/scripts/sqlite-snapshot.sh"
 cp "$repo_root/scripts/sync-worktree-resources.sh" "$fixture_repo/scripts/sync-worktree-resources.sh"
 cp "$repo_root/scripts/worktree-sync.paths" "$fixture_repo/scripts/worktree-sync.paths"
+cp "$repo_root/scripts/run_shared_testbox_signup.sh" "$fixture_repo/scripts/run_shared_testbox_signup.sh"
 cp "$repo_root/scripts/install-fingerprint-browser.sh" "$fixture_repo/scripts/install-fingerprint-browser.sh"
 cp "$repo_root/scripts/fingerprint-browser-manifest.json" "$fixture_repo/scripts/fingerprint-browser-manifest.json"
-chmod +x   "$fixture_repo/scripts/install-hooks.sh"   "$fixture_repo/scripts/sqlite-snapshot.sh"   "$fixture_repo/scripts/sync-worktree-resources.sh"   "$fixture_repo/scripts/install-fingerprint-browser.sh"
+chmod +x   "$fixture_repo/scripts/install-hooks.sh"   "$fixture_repo/scripts/sqlite-snapshot.sh"   "$fixture_repo/scripts/sync-worktree-resources.sh"   "$fixture_repo/scripts/run_shared_testbox_signup.sh"   "$fixture_repo/scripts/install-fingerprint-browser.sh"
 git -C "$fixture_repo" add scripts
 git -C "$fixture_repo" commit -m 'test: add worktree bootstrap scripts' >/dev/null
 head_sha="$(git -C "$fixture_repo" rev-parse HEAD)"
@@ -407,6 +408,20 @@ ENVLOCAL
 git -C "$fixture_repo" worktree add --detach "$worktree_shared_env" HEAD >/dev/null
 assert_symlink_target "$worktree_shared_env/.env.local" "$fixture_repo/.env.local"
 assert_file_content "$worktree_shared_env/.env.local" "SOURCE_ENV=shared-symlink"
+shared_env_stage_output="$(
+  RUN_SHARED_TESTBOX_SOURCE_ONLY=1 bash -lc '
+    set -euo pipefail
+    source "$1"
+    staged_path="$(prepare_extra_upload_path "$2" ".env.local")"
+    if [[ -L "$staged_path" ]]; then
+      echo "expected staged env upload to be materialized" >&2
+      exit 1
+    fi
+    printf "staged-content<<EOF\n%s\nEOF\n" "$(cat "$staged_path")"
+    cleanup
+  ' bash "$fixture_repo/scripts/run_shared_testbox_signup.sh" "$worktree_shared_env/.env.local"
+)"
+assert_output_contains "$shared_env_stage_output" $'staged-content<<EOF\nSOURCE_ENV=shared-symlink\nEOF'
 
 cat > "$fixture_repo/.env.local" <<ENVLOCAL
 SOURCE_ENV=absolute-runtime
