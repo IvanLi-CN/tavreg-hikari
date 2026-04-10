@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 SQLITE_SNAPSHOT="$SCRIPT_DIR/sqlite-snapshot.sh"
 TEMP_UPLOADS=()
 

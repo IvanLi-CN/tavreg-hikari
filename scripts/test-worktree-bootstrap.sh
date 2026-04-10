@@ -422,6 +422,21 @@ shared_env_stage_output="$(
   ' bash "$fixture_repo/scripts/run_shared_testbox_signup.sh" "$worktree_shared_env/.env.local"
 )"
 assert_output_contains "$shared_env_stage_output" $'staged-content<<EOF\nSOURCE_ENV=shared-symlink\nEOF'
+shared_sqlite_stage_output="$(
+  RUN_SHARED_TESTBOX_SOURCE_ONLY=1 bash -lc '
+    set -euo pipefail
+    source "$1"
+    staged_path="$(prepare_extra_upload_path "$2" "output/registry/tavreg-hikari.sqlite")"
+    if [[ -L "$staged_path" ]]; then
+      echo "expected staged sqlite upload to be materialized" >&2
+      exit 1
+    fi
+    latest_value="$(bun --eval '\''import { Database } from "bun:sqlite"; const db = new Database(process.argv[1]); const row = db.query("SELECT value FROM smoke ORDER BY id DESC LIMIT 1").get(); console.log(row?.value ?? ""); db.close(false);'\'' "$staged_path")"
+    printf "staged-sqlite=%s\n" "$latest_value"
+    cleanup
+  ' bash "$fixture_repo/scripts/run_shared_testbox_signup.sh" "$fixture_repo/output/registry/signup-tasks.sqlite"
+)"
+assert_output_contains "$shared_sqlite_stage_output" "staged-sqlite=main-ledger"
 
 cat > "$fixture_repo/.env.local" <<ENVLOCAL
 SOURCE_ENV=absolute-runtime
