@@ -1465,7 +1465,7 @@ async function run(): Promise<void> {
     if (cfg.browserEngine === "chrome" && cfg.chromeNativeAutomation) {
       const launched = await launchNativeChromeCdp(
         cfg,
-        "headed",
+        cfg.runMode,
         mihomo.proxyServer,
         "en-US",
         "en-US,en;q=0.9",
@@ -1496,7 +1496,7 @@ async function run(): Promise<void> {
         browserMode: "chrome-native-cdp",
       });
     } else {
-      browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, "headed", mihomo.proxyServer, "en-US", "");
+      browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, cfg.runMode, mihomo.proxyServer, "en-US", "");
       log("browser launched");
       await writeStageMarker(outputDir, "bootstrap:browser_launched");
       context = await browser.newContext({
@@ -2139,7 +2139,7 @@ async function run(): Promise<void> {
           : null;
 
     await writeJson(`${outputDir}/result.json`, {
-      mode: "headed",
+      mode: cfg.runMode,
       email,
       password: payload.password,
       nickname: payload.nickname,
