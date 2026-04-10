@@ -5,6 +5,7 @@ SCRIPT_PATH="${BASH_SOURCE[0]}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd -P)
 SQLITE_SNAPSHOT="$SCRIPT_DIR/sqlite-snapshot.sh"
 TEMP_UPLOADS=()
+PREPARED_UPLOAD_PATH=""
 
 cleanup() {
   if [ "${#TEMP_UPLOADS[@]}" -eq 0 ]; then
@@ -33,7 +34,7 @@ prepare_extra_upload_path() {
     TEMP_UPLOADS+=("$upload_path")
   fi
 
-  printf '%s\n' "$upload_path"
+  PREPARED_UPLOAD_PATH="$upload_path"
 }
 
 main() {
@@ -138,7 +139,8 @@ PY
 
     source_path="$REPO_ROOT/$source_extra"
     if [ -e "$source_path" ] || [ -L "$source_path" ]; then
-      upload_path="$(prepare_extra_upload_path "$source_path" "$target_extra")"
+      prepare_extra_upload_path "$source_path" "$target_extra"
+      upload_path="$PREPARED_UPLOAD_PATH"
       ssh -o BatchMode=yes "$TESTBOX" "mkdir -p '$REMOTE_RUN/$(dirname "$target_extra")'"
       rsync -az "$upload_path" "$TESTBOX:$REMOTE_RUN/$target_extra"
     fi
