@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-27
-- Last: 2026-03-31
+- Last: 2026-04-10
 
 ## 背景 / 问题陈述
 
@@ -177,6 +177,7 @@
 - 2026-03-27: 将无锁文件 revision 的依赖 bootstrap 切到 `bun install --no-save`，并用成功标记避免半失败 `node_modules` 阻断后续重试。
 - 2026-03-27: 最终实现对齐规格：无锁文件 revision 真实执行 `bun install --no-save`，并修正 smoke test 中的 Bun 包装脚本以避免递归调用。
 - 2026-03-31: 跟随默认运行态数据库文件名规范化，将 bootstrap manifest 与文档口径统一到 `output/registry/tavreg-hikari.sqlite`，并兼容旧源文件名。
+- 2026-04-10: 将 `.env.local` 默认同步策略改为共享软链接；仅在需要改写 `CHROME_EXECUTABLE_PATH` 适配当前 worktree 时，才落地为本地文件后继续改写。
 
 ## 参考（References）
 
