@@ -77,7 +77,7 @@
 
 - 主工作区执行 `bun install` 时，`prepare` 调用 `scripts/install-hooks.sh`，在共享 hooks 目录安装 managed `post-checkout` wrapper。
 - 用户执行 `git worktree add` 创建新 linked worktree 时，`post-checkout` 调用 `scripts/sync-worktree-resources.sh`。
-- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 做普通复制、对 ledger 主文件做基于 SQLite 原生 `VACUUM INTO` 的一致性快照，并在缺少 `node_modules` 时自动安装依赖。
+- 同步脚本发现当前目录是 linked worktree 且处于首次 checkout，就从主工作区读取 `scripts/worktree-sync.paths`，对 `.env.local` 默认创建共享软链接、对 ledger 主文件做基于 SQLite 原生 `VACUUM INTO` 的一致性快照，并在缺少 `node_modules` 时自动安装依赖。
 - 用户在 worktree 内执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh` 时，脚本重新遍历 manifest，但仍只补缺、不覆盖。
 
 ### Edge cases / errors
@@ -104,7 +104,8 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/tavreg-hikari.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到 `.env.local` 与一致性 ledger 快照。
+- Given 主工作区已经存在 `.env.local` 与活跃的 `output/registry/tavreg-hikari.sqlite`，When 执行 `git worktree add` 创建新 linked worktree，Then 新 worktree 无需手工复制即可拿到共享 `.env.local` 软链接与一致性 ledger 快照。
+- Given 新 linked worktree 的 `.env.local` 需要改写 `CHROME_EXECUTABLE_PATH` 才能适配当前 worktree，When bootstrap 执行浏览器运行时补齐，Then 脚本会先把共享 `.env.local` 落地为本地文件，再写入 worktree 专属路径。
 - Given 新 linked worktree 初次 bootstrap 时尚无 `node_modules`，When `post-checkout` hook 触发脚本，Then worktree 会自动完成依赖安装，且带 `bun.lock` 的 revision 使用 `bun install --frozen-lockfile`。
 - Given worktree 已有 `node_modules`，When 执行 `WORKTREE_SYNC_FORCE=1 ./scripts/sync-worktree-resources.sh`，Then 脚本只会输出 `keep dependency install: node_modules exists`，不会再次执行依赖安装。
 - Given linked worktree 缺少 `node_modules` 但当前环境下 `bun install` 失败，When hook 或 forced sync 触发依赖 bootstrap，Then 脚本会输出 `skip dependency install failed` 并继续完成非依赖资源同步，不会让 checkout 失败。

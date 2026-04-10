@@ -1,5 +1,5 @@
-# Repo-relative runtime resources that should be copied into new linked worktrees.
-# Copy happens only when the source exists and the destination is missing.
+# Repo-relative runtime resources that should be synced into new linked worktrees.
+# `.env.local` is shared via symlink by default; other entries keep their per-resource strategy.
 .env.local
 .tools/.fingerprint-browser-install.json
 output/registry/tavreg-hikari.sqlite

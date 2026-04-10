@@ -87,10 +87,14 @@ bun run test:worktree-bootstrap
   - `skip source missing: <path>`
   - `keep target exists: <path>`
   - `keep dependency install: node_modules exists`
+  - `would symlink: <path>`
   - `would snapshot: <path>`
   - `would install dependencies: bun install ...`
+  - `symlinked: <path>`
   - `copied: <path>`
   - `snapshotted sqlite: <path>`
+  - `would materialize shared env: .env.local`
+  - `materialized shared env: .env.local`
   - `installing dependencies: bun install ...`
   - `installed dependencies`
   - `skip dependency install failed: bun install ...`
@@ -105,6 +109,7 @@ bun run test:worktree-bootstrap
 ### 兼容性与迁移（Compatibility / migration）
 
 - 同步范围固定来自 `scripts/worktree-sync.paths`
+- `.env.local` 默认创建为指向主工作区对应文件的软链接；仅在需要写入 worktree 专属浏览器路径时，脚本才会先把该软链接落地为本地文件
 - `.sqlite` 路径通过 SQLite 原生 `VACUUM INTO` 生成一致性快照，不复制 `-wal/-shm`
 - `.sqlite` 路径优先使用本机 `sqlite3` 执行 `VACUUM INTO`，若本机版本不支持则回退到 Bun 内置 SQLite
 - 依赖安装会在 linked worktree 缺少 `node_modules` 时自动执行；存在 `bun.lock` 时使用 `bun install --frozen-lockfile`，否则使用 `bun install --no-save`

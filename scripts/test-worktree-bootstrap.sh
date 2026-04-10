@@ -14,6 +14,7 @@ tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/tavreg-hikari-worktree-test.XXXXXX")"
 tmp_root="$(cd "$tmp_root" && pwd -P)"
 fixture_repo="$tmp_root/fixture-repo"
 worktree_default="$tmp_root/default-worktree"
+worktree_shared_env="$tmp_root/shared-env-worktree"
 worktree_missing="$tmp_root/missing-source-worktree"
 worktree_absolute="$tmp_root/absolute-browser-worktree"
 worktree_cross_platform="$tmp_root/cross-platform-browser-worktree"
@@ -23,6 +24,7 @@ legacy_hook_marker="$tmp_root/legacy-post-checkout.log"
 cleanup() {
   set +e
   git -C "$fixture_repo" worktree remove -f "$worktree_default" >/dev/null 2>&1
+  git -C "$fixture_repo" worktree remove -f "$worktree_shared_env" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_missing" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_absolute" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_cross_platform" >/dev/null 2>&1
@@ -53,6 +55,31 @@ assert_exists() {
   local path="$1"
   if [[ ! -e "$path" ]]; then
     echo "expected path missing: $path" >&2
+    exit 1
+  fi
+}
+
+assert_symlink_target() {
+  local path="$1"
+  local expected_target="$2"
+  local actual_target
+
+  if [[ ! -L "$path" ]]; then
+    echo "expected symlink missing: $path" >&2
+    exit 1
+  fi
+
+  actual_target="$(python3 - <<'PY' "$path"
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+
+  if [[ "$actual_target" != "$expected_target" ]]; then
+    echo "unexpected symlink target for $path" >&2
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected_target" "$actual_target" >&2
     exit 1
   fi
 }
@@ -347,6 +374,9 @@ git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" $'SOURCE_ENV=main-root
 CHROME_EXECUTABLE_PATH='"$expected_host_browser_path"
+if [[ "$(uname -s)" = "Linux" ]]; then
+  assert_symlink_target "$worktree_default/.env.local" "$fixture_repo/.env.local"
+fi
 assert_exists "$worktree_default/$expected_host_browser_path"
 if [[ "$expected_host_browser_path" = ".tools/Chromium.app/Contents/MacOS/Chromium" ]]; then
   assert_exists "$worktree_default/.tools/.fingerprint-browser-install.json"
@@ -370,6 +400,13 @@ if [[ "$(sqlite_latest_value "$worktree_default/output/registry/tavreg-hikari.sq
   echo "expected copied SQLite ledger to contain source fixture data" >&2
   exit 1
 fi
+
+cat > "$fixture_repo/.env.local" <<'ENVLOCAL'
+SOURCE_ENV=shared-symlink
+ENVLOCAL
+git -C "$fixture_repo" worktree add --detach "$worktree_shared_env" HEAD >/dev/null
+assert_symlink_target "$worktree_shared_env/.env.local" "$fixture_repo/.env.local"
+assert_file_content "$worktree_shared_env/.env.local" "SOURCE_ENV=shared-symlink"
 
 cat > "$fixture_repo/.env.local" <<ENVLOCAL
 SOURCE_ENV=absolute-runtime
