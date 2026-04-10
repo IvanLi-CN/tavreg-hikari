@@ -180,6 +180,7 @@
 - 2026-03-31: 跟随默认运行态数据库文件名规范化，将 bootstrap manifest 与文档口径统一到 `output/registry/tavreg-hikari.sqlite`，并兼容旧源文件名。
 - 2026-04-10: 将 `.env.local` 默认同步策略改为共享软链接；仅在需要改写 `CHROME_EXECUTABLE_PATH` 适配当前 worktree 时，才落地为本地文件后继续改写，并补齐 shared testbox 上传链路对共享软链接的自动落地。
 - 2026-04-10: 修正 shared testbox upload helper 在 source-only 模式下的脚本路径解析，并补齐 SQLite staging 覆盖，确保共享 env / ledger 两条 helper 分支都可复用。
+- 2026-04-10: 修正 shared testbox upload helper 的临时文件清理链路，避免 staging helper 在上传 `.env.local` / SQLite 快照后遗留 `/tmp` 副本。
 
 ## 参考（References）
 
