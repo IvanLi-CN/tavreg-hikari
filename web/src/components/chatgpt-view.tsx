@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
+import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import type { ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
@@ -27,6 +27,13 @@ function normalizeMaxAttempts(need: number, maxAttempts: number): number {
     return maxAttempts;
   }
   return Math.max(need, Math.ceil(need * 1.5));
+}
+
+function statusTone(status: string): "default" | "good" | "warn" | "bad" {
+  if (status === "completed") return "good";
+  if (status === "failed") return "bad";
+  if (["running", "stopping", "force_stopping"].includes(status)) return "warn";
+  return "default";
 }
 
 export function ChatGptView({
@@ -80,13 +87,20 @@ export function ChatGptView({
   };
 
   return (
-    <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+    <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.16fr)_minmax(0,0.84fr)]">
       <div className="min-w-0 space-y-4">
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <MetricCard label="任务状态" value={status} tone={statusTone(status)} />
+          <MetricCard label="成功 / 目标" value={`${job.job?.successCount || 0} / ${effectiveNeed}`} tone="good" />
+          <MetricCard label="并行 / 已发起" value={`${effectiveParallel} / ${job.job?.launchedCount || 0}`} tone="warn" />
+          <MetricCard label="运行中" value={job.activeAttempts.length} />
+        </div>
+
         <Card>
           <CardHeader>
-            <CardTitle>ChatGPT 浏览器流</CardTitle>
+            <CardTitle>任务控制</CardTitle>
             <CardDescription>
-              这里仅负责批量流程控制；生成结果统一在 <span className="font-medium text-slate-200">Keys &gt; ChatGPT</span> 查看。
+              ChatGPT 页负责批量任务控制；生成结果统一在 <span className="font-medium text-slate-200">Keys &gt; ChatGPT</span> 查看。
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -134,6 +148,11 @@ export function ChatGptView({
                 检测到最近一次授权链触发了 challenge。请等到 {formatDate(cooldown.until)} 之后再重新开始。
               </div>
             ) : null}
+            {job.job?.lastError ? (
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                最近错误：<span className="font-medium text-slate-200">{job.job.lastError}</span>
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-3">
               <Button disabled={!canStart || jobBusy} onClick={handleStartClick}>
                 {jobBusy ? "提交中..." : job.job ? "重新开始" : "开始"}
@@ -147,80 +166,135 @@ export function ChatGptView({
             </div>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>运行中 Attempts</CardTitle>
+            <CardDescription>这里显示当前正在处理的账号与代理节点。</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {job.activeAttempts.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+                当前没有运行中的 attempt。
+              </div>
+            ) : (
+              <>
+                <div className="space-y-3 md:hidden">
+                  {job.activeAttempts.map((attempt) => (
+                    <article key={attempt.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-white">Attempt #{attempt.id}</div>
+                          <div
+                            className="mt-1 truncate whitespace-nowrap text-sm text-slate-300"
+                            title={attempt.accountEmail || `#${attempt.accountId}`}
+                          >
+                            {attempt.accountEmail || `#${attempt.accountId}`}
+                          </div>
+                        </div>
+                        <StatusBadge status={attempt.status} />
+                      </div>
+                      <dl className="mt-4 grid gap-3 text-sm text-slate-300">
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+                          <dt className="text-slate-500">阶段</dt>
+                          <dd className="truncate whitespace-nowrap text-right" title={attempt.stage}>
+                            {attempt.stage}
+                          </dd>
+                        </div>
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+                          <dt className="text-slate-500">代理节点</dt>
+                          <dd className="truncate whitespace-nowrap text-right" title={attempt.proxyNode || "—"}>
+                            {attempt.proxyNode || "—"}
+                          </dd>
+                        </div>
+                        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
+                          <dt className="text-slate-500">开始时间</dt>
+                          <dd className="whitespace-nowrap text-right">{formatDate(attempt.startedAt)}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <div className="hidden md:block">
+                  <div className="overflow-hidden rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                    <div className="grid grid-cols-[5.5rem_minmax(0,2.2fr)_10rem_minmax(0,1fr)] gap-4 border-b border-white/8 bg-white/[0.03] px-4 py-3 text-left text-xs font-medium tracking-[0.14em] uppercase text-slate-400">
+                      <div>ID</div>
+                      <div>账号</div>
+                      <div>状态</div>
+                      <div>阶段</div>
+                    </div>
+                    <div>
+                      {job.activeAttempts.map((attempt) => (
+                        <article key={attempt.id} className="border-b border-white/8 px-4 py-4 text-slate-100 transition duration-200 last:border-b-0 hover:bg-white/[0.03]">
+                          <div className="grid grid-cols-[5.5rem_minmax(0,2.2fr)_10rem_minmax(0,1fr)] items-center gap-4">
+                            <div className="whitespace-nowrap">#{attempt.id}</div>
+                            <div className="min-w-0">
+                              <span
+                                className="block truncate whitespace-nowrap font-medium text-slate-100"
+                                title={attempt.accountEmail || `#${attempt.accountId}`}
+                              >
+                                {attempt.accountEmail || `#${attempt.accountId}`}
+                              </span>
+                            </div>
+                            <div className="whitespace-nowrap">
+                              <StatusBadge status={attempt.status} />
+                            </div>
+                            <div className="min-w-0">
+                              <span className="block truncate whitespace-nowrap" title={attempt.stage}>
+                                {attempt.stage}
+                              </span>
+                            </div>
+                          </div>
+                          <dl className="mt-3 grid grid-cols-2 gap-4 text-xs">
+                            <div className="min-w-0">
+                              <dt className="mb-1 uppercase tracking-[0.14em] text-slate-500">代理节点</dt>
+                              <dd className="truncate whitespace-nowrap text-sm text-slate-200" title={attempt.proxyNode || "—"}>
+                                {attempt.proxyNode || "—"}
+                              </dd>
+                            </div>
+                            <div className="min-w-0">
+                              <dt className="mb-1 uppercase tracking-[0.14em] text-slate-500">开始时间</dt>
+                              <dd className="truncate whitespace-nowrap text-sm text-slate-200" title={formatDate(attempt.startedAt)}>
+                                {formatDate(attempt.startedAt)}
+                              </dd>
+                            </div>
+                          </dl>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="min-w-0 space-y-4">
-        <Card>
+        <Card className="min-w-0">
           <CardHeader>
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <CardTitle>当前任务</CardTitle>
-                <CardDescription>
-                  右侧集中展示当前预算、运行中的 attempts 与最近 attempts；每个 attempt 使用独立自动生成资料，缺少 refresh token 仍直接判失败。
-                </CardDescription>
-              </div>
-              <StatusBadge status={status} />
-            </div>
+            <CardTitle>最近 Attempts</CardTitle>
+            <CardDescription>快速确认最近成功、失败与节点分布。</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-slate-500">成功 / 目标</div>
-                <div className="mt-2 text-2xl font-semibold text-white">
-                  {job.job?.successCount || 0} / {job.job?.need || jobDraft.need}
-                </div>
+          <CardContent className="min-w-0 space-y-3">
+            {job.recentAttempts.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+                还没有 attempt 历史。
               </div>
-              <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-slate-500">已发起 / 预算</div>
-                <div className="mt-2 text-2xl font-semibold text-white">
-                  {job.job?.launchedCount || 0} / {job.job?.maxAttempts || jobDraft.maxAttempts}
-                </div>
-              </div>
-              <div className="rounded-3xl border border-white/8 bg-white/[0.03] p-4">
-                <div className="text-xs uppercase tracking-[0.22em] text-slate-500">最近错误</div>
-                <div className="mt-2 text-sm text-slate-200">{job.job?.lastError || "—"}</div>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Active Attempts</div>
-              {job.activeAttempts.length > 0 ? (
-                job.activeAttempts.map((attempt) => (
-                  <div key={attempt.id} className="rounded-3xl border border-cyan-400/15 bg-cyan-400/[0.04] p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-white">{attempt.accountEmail || `attempt #${attempt.id}`}</div>
-                        <div className="mt-1 text-sm text-slate-400">{summarizeAttempt(attempt)}</div>
-                      </div>
-                      <StatusBadge status={attempt.status} />
-                    </div>
+            ) : (
+              job.recentAttempts.slice(0, 8).map((attempt) => (
+                <article key={attempt.id} className="min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                  <div className="flex min-w-0 items-start justify-between gap-4">
+                    <div className="min-w-0 font-medium text-white">Attempt #{attempt.id}</div>
+                    <StatusBadge status={attempt.status} />
                   </div>
-                ))
-              ) : (
-                <div className="rounded-3xl border border-dashed border-white/10 px-4 py-6 text-sm text-slate-500">当前没有运行中的浏览器 attempt。</div>
-              )}
-            </div>
-
-            <Separator className="bg-white/8" />
-
-            <div className="space-y-3">
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Recent Attempts</div>
-              {job.recentAttempts.length > 0 ? (
-                job.recentAttempts.map((attempt) => (
-                  <div key={attempt.id} className="rounded-3xl border border-white/8 bg-white/[0.03] p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-medium text-white">{attempt.accountEmail || `attempt #${attempt.id}`}</div>
-                        <div className="mt-1 text-sm text-slate-400">{summarizeAttempt(attempt)}</div>
-                      </div>
-                      <StatusBadge status={attempt.status} />
-                    </div>
+                  <div className="mt-3 break-all text-sm text-slate-300">
+                    {attempt.accountEmail || `账号 #${attempt.accountId}`} · {attempt.proxyNode || "未绑定代理"}
                   </div>
-                ))
-              ) : (
-                <div className="rounded-3xl border border-dashed border-white/10 px-4 py-6 text-sm text-slate-500">还没有 attempt 历史。</div>
-              )}
-            </div>
+                  <div className="mt-2 break-all text-xs text-slate-500">{attempt.errorCode || attempt.stage}</div>
+                </article>
+              ))
+            )}
           </CardContent>
         </Card>
       </div>
