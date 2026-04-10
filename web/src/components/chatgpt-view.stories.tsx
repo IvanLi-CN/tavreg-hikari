@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ChatGptView } from "@/components/chatgpt-view";
-import type { ChatGptCredentialRecord, ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
+import type { ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
 
 const sampleJobDraft: ChatGptJobDraft = {
   need: 3,
@@ -79,44 +79,6 @@ const sampleJob: JobSnapshot = {
   autoExtractState: null,
 };
 
-const sampleCredentials: ChatGptCredentialRecord[] = [
-  {
-    id: 17,
-    jobId: 39,
-    attemptId: 99,
-    email: "mail-43c9fc87@box-79818a03.ivanli.asia",
-    accountId: "acc-demo-17",
-    accessTokenMasked: "*********************9NjG2Q",
-    refreshTokenMasked: "*********************Zp4mLK",
-    idTokenMasked: "*********************2Vh9sd",
-    expiresAt: "2026-04-05T16:10:00.000Z",
-    createdAt: "2026-04-05T09:10:00.000Z",
-    hasSecrets: true,
-  },
-];
-
-const revealedCredential: ChatGptCredentialRecord = {
-  ...sampleCredentials[0]!,
-  accessToken: "access-token-demo",
-  refreshToken: "refresh-token-demo",
-  idToken: "id-token-demo",
-  credentialJson: JSON.stringify(
-    {
-      type: "codex",
-      email: "mail-43c9fc87@box-79818a03.ivanli.asia",
-      account_id: "acc-demo-17",
-      expired: "2026-04-05T16:10:00.000Z",
-      access_token: "access-token-demo",
-      refresh_token: "refresh-token-demo",
-      id_token: "id-token-demo",
-      last_refresh: "2026-04-05T09:10:00.000Z",
-      token_type: "Bearer",
-    },
-    null,
-    2,
-  ),
-};
-
 const meta = {
   title: "Views/ChatGptView",
   component: ChatGptView,
@@ -124,7 +86,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "ChatGPT 批量有头浏览器流，聚焦自动生成 attempt 资料、批量任务控制、运行中的多 attempt 与完整凭据 reveal/export。",
+        component: "ChatGPT 批量有头浏览器流页面，仅负责批量任务控制与运行态；生成结果统一在 Keys > ChatGPT 查看与导出。",
       },
     },
   },
@@ -137,17 +99,11 @@ export const BatchRunning: Story = {
   args: {
     jobDraft: sampleJobDraft,
     job: sampleJob,
-    credentials: sampleCredentials,
-    revealedCredential,
     jobBusy: false,
-    credentialBusy: false,
     onJobDraftChange: fn(),
     onStart: fn(),
     onStop: fn(),
     onForceStop: fn(),
-    onRevealCredential: fn(),
-    onCopyCredential: fn(),
-    onExportCredential: fn(),
   },
 };
 
@@ -163,8 +119,6 @@ export const BatchReady: Story = {
       autoExtractState: null,
       cooldown: null,
     },
-    credentials: [],
-    revealedCredential: null,
   },
 };
 
@@ -174,23 +128,21 @@ export const InteractiveBatchControls: Story = {
   },
   render: () => {
     const [batchDraft, setBatchDraft] = useState(sampleJobDraft);
-    const [revealed, setRevealed] = useState<ChatGptCredentialRecord | null>(null);
     return (
-      <ChatGptView
-        jobDraft={batchDraft}
-        job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [] }}
-        credentials={sampleCredentials}
-        revealedCredential={revealed}
-        jobBusy={false}
-        credentialBusy={false}
-        onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
-        onStart={() => undefined}
-        onStop={() => undefined}
-        onForceStop={() => undefined}
-        onRevealCredential={() => setRevealed(revealedCredential)}
-        onCopyCredential={() => undefined}
-        onExportCredential={() => undefined}
-      />
+      <>
+        <ChatGptView
+          jobDraft={batchDraft}
+          job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [] }}
+          jobBusy={false}
+          onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
+          onStart={() => undefined}
+          onStop={() => undefined}
+          onForceStop={() => undefined}
+        />
+        <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
+          {JSON.stringify(batchDraft)}
+        </pre>
+      </>
     );
   },
   play: async ({ canvasElement }) => {
@@ -198,8 +150,8 @@ export const InteractiveBatchControls: Story = {
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
     await userEvent.tab();
-    await expect(canvas.getByDisplayValue("4")).toBeTruthy();
-    await userEvent.click(canvas.getByRole("button", { name: "显示凭据" }));
-    await expect(canvas.getByDisplayValue(/access-token-demo/)).toBeTruthy();
+    await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"need":4');
+    await expect(canvas.queryByText("最近凭据")).toBeNull();
+    await expect(canvas.getByText(/Keys > ChatGPT/)).toBeInTheDocument();
   },
 };

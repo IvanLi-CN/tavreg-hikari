@@ -1597,17 +1597,11 @@ export function App() {
         <ChatGptView
           jobDraft={chatGptJobDraft}
           job={chatGptJob}
-          credentials={chatGptCredentials}
-          revealedCredential={revealedChatGptCredential}
           jobBusy={chatGptJobBusy}
-          credentialBusy={chatGptCredentialBusy}
           onJobDraftChange={handleChatGptJobDraftChange}
           onStart={(draft) => handleChatGptJobAction("start", draft)}
           onStop={() => handleChatGptJobAction("stop")}
           onForceStop={() => handleChatGptJobAction("force_stop")}
-          onRevealCredential={handleRevealChatGptCredential}
-          onCopyCredential={handleCopyChatGptCredential}
-          onExportCredential={handleExportChatGptCredential}
         />
       ) : null}
 

@@ -169,6 +169,18 @@ None
   evidence_note: 验证 ChatGPT keys 已迁移到 Keys 页内，使用标准列表骨架提供搜索、有效期筛选、时间排序、多选导出与行内 `复制` / `下载` 操作，且页面不展示明文详情。
   ![Keys ChatGPT tab](./assets/keys-chatgpt-tab.png)
 
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/ChatGptView/BatchReady`
+  state: `chatgpt route ready`
+  evidence_note: 验证 `/chatgpt` 页面已收敛为批量控制与任务态，不再重复展示凭据区块；生成结果统一引导到 `Keys > ChatGPT`。
+  ![ChatGPT route ready](./assets/chatgpt-view-batch-ready.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/ChatGptView/BatchRunning`
+  state: `chatgpt route running`
+  evidence_note: 验证运行态只保留预算、attempt 与错误摘要；右侧 reveal / export 凭据功能不再出现在 `/chatgpt` 页面。
+  ![ChatGPT route running](./assets/chatgpt-view-batch-running.png)
+
 ## 资产晋升（Asset promotion）
 
 None
