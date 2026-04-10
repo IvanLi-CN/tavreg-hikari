@@ -166,7 +166,9 @@ copy_resource() {
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
-    if [ "${rel_path##*.}" = "sqlite" ]; then
+    if [ "$rel_path" = ".env.local" ]; then
+      log "would symlink: $rel_path"
+    elif [ "${rel_path##*.}" = "sqlite" ]; then
       log "would snapshot: $rel_path"
     else
       log "would copy: $rel_path"
@@ -175,7 +177,10 @@ copy_resource() {
   fi
 
   mkdir -p "$(dirname -- "$dst_path")"
-  if [ "${rel_path##*.}" = "sqlite" ]; then
+  if [ "$rel_path" = ".env.local" ]; then
+    ln -s "$src_path" "$dst_path"
+    log "symlinked: $rel_path"
+  elif [ "${rel_path##*.}" = "sqlite" ]; then
     tmp_path="${dst_path}.tmp.$$"
     if ! snapshot_sqlite "$src_path" "$tmp_path"; then
       rm -f "$tmp_path"
@@ -256,6 +261,18 @@ rewrite_browser_env_path() {
 
   if [ -z "$desired_value" ] || [ "$original_value" = "$desired_value" ]; then
     return 0
+  fi
+
+  if [ -L "$env_file" ]; then
+    if [ "$DRY_RUN" = "1" ]; then
+      log "would materialize shared env: .env.local"
+    else
+      tmp_file="${env_file}.tmp.$$"
+      cat "$env_file" > "$tmp_file"
+      rm "$env_file"
+      mv "$tmp_file" "$env_file"
+      log "materialized shared env: .env.local"
+    fi
   fi
 
   if [ "$DRY_RUN" = "1" ]; then

@@ -14,6 +14,7 @@ tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/tavreg-hikari-worktree-test.XXXXXX")"
 tmp_root="$(cd "$tmp_root" && pwd -P)"
 fixture_repo="$tmp_root/fixture-repo"
 worktree_default="$tmp_root/default-worktree"
+worktree_shared_env="$tmp_root/shared-env-worktree"
 worktree_missing="$tmp_root/missing-source-worktree"
 worktree_absolute="$tmp_root/absolute-browser-worktree"
 worktree_cross_platform="$tmp_root/cross-platform-browser-worktree"
@@ -23,6 +24,7 @@ legacy_hook_marker="$tmp_root/legacy-post-checkout.log"
 cleanup() {
   set +e
   git -C "$fixture_repo" worktree remove -f "$worktree_default" >/dev/null 2>&1
+  git -C "$fixture_repo" worktree remove -f "$worktree_shared_env" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_missing" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_absolute" >/dev/null 2>&1
   git -C "$fixture_repo" worktree remove -f "$worktree_cross_platform" >/dev/null 2>&1
@@ -53,6 +55,31 @@ assert_exists() {
   local path="$1"
   if [[ ! -e "$path" ]]; then
     echo "expected path missing: $path" >&2
+    exit 1
+  fi
+}
+
+assert_symlink_target() {
+  local path="$1"
+  local expected_target="$2"
+  local actual_target
+
+  if [[ ! -L "$path" ]]; then
+    echo "expected symlink missing: $path" >&2
+    exit 1
+  fi
+
+  actual_target="$(python3 - <<'PY' "$path"
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+)"
+
+  if [[ "$actual_target" != "$expected_target" ]]; then
+    echo "unexpected symlink target for $path" >&2
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected_target" "$actual_target" >&2
     exit 1
   fi
 }
@@ -170,9 +197,10 @@ cp "$repo_root/scripts/install-hooks.sh" "$fixture_repo/scripts/install-hooks.sh
 cp "$repo_root/scripts/sqlite-snapshot.sh" "$fixture_repo/scripts/sqlite-snapshot.sh"
 cp "$repo_root/scripts/sync-worktree-resources.sh" "$fixture_repo/scripts/sync-worktree-resources.sh"
 cp "$repo_root/scripts/worktree-sync.paths" "$fixture_repo/scripts/worktree-sync.paths"
+cp "$repo_root/scripts/run_shared_testbox_signup.sh" "$fixture_repo/scripts/run_shared_testbox_signup.sh"
 cp "$repo_root/scripts/install-fingerprint-browser.sh" "$fixture_repo/scripts/install-fingerprint-browser.sh"
 cp "$repo_root/scripts/fingerprint-browser-manifest.json" "$fixture_repo/scripts/fingerprint-browser-manifest.json"
-chmod +x   "$fixture_repo/scripts/install-hooks.sh"   "$fixture_repo/scripts/sqlite-snapshot.sh"   "$fixture_repo/scripts/sync-worktree-resources.sh"   "$fixture_repo/scripts/install-fingerprint-browser.sh"
+chmod +x   "$fixture_repo/scripts/install-hooks.sh"   "$fixture_repo/scripts/sqlite-snapshot.sh"   "$fixture_repo/scripts/sync-worktree-resources.sh"   "$fixture_repo/scripts/run_shared_testbox_signup.sh"   "$fixture_repo/scripts/install-fingerprint-browser.sh"
 git -C "$fixture_repo" add scripts
 git -C "$fixture_repo" commit -m 'test: add worktree bootstrap scripts' >/dev/null
 head_sha="$(git -C "$fixture_repo" rev-parse HEAD)"
@@ -347,6 +375,9 @@ git -C "$fixture_repo" worktree add --detach "$worktree_default" HEAD >/dev/null
 assert_file_content "$legacy_hook_marker" "legacy-hook-preserved"
 assert_file_content "$worktree_default/.env.local" $'SOURCE_ENV=main-root
 CHROME_EXECUTABLE_PATH='"$expected_host_browser_path"
+if [[ "$(uname -s)" = "Linux" ]]; then
+  assert_symlink_target "$worktree_default/.env.local" "$fixture_repo/.env.local"
+fi
 assert_exists "$worktree_default/$expected_host_browser_path"
 if [[ "$expected_host_browser_path" = ".tools/Chromium.app/Contents/MacOS/Chromium" ]]; then
   assert_exists "$worktree_default/.tools/.fingerprint-browser-install.json"
@@ -370,6 +401,48 @@ if [[ "$(sqlite_latest_value "$worktree_default/output/registry/tavreg-hikari.sq
   echo "expected copied SQLite ledger to contain source fixture data" >&2
   exit 1
 fi
+
+cat > "$fixture_repo/.env.local" <<'ENVLOCAL'
+SOURCE_ENV=shared-symlink
+ENVLOCAL
+git -C "$fixture_repo" worktree add --detach "$worktree_shared_env" HEAD >/dev/null
+assert_symlink_target "$worktree_shared_env/.env.local" "$fixture_repo/.env.local"
+assert_file_content "$worktree_shared_env/.env.local" "SOURCE_ENV=shared-symlink"
+shared_env_stage_output="$(
+  RUN_SHARED_TESTBOX_SOURCE_ONLY=1 bash -lc '
+    set -euo pipefail
+    source "$1"
+    prepare_extra_upload_path "$2" ".env.local"
+    staged_path="$PREPARED_UPLOAD_PATH"
+    if [[ -L "$staged_path" ]]; then
+      echo "expected staged env upload to be materialized" >&2
+      exit 1
+    fi
+    printf "temp-count=%s\n" "${#TEMP_UPLOADS[@]}"
+    printf "staged-content<<EOF\n%s\nEOF\n" "$(cat "$staged_path")"
+    cleanup
+  ' bash "$fixture_repo/scripts/run_shared_testbox_signup.sh" "$worktree_shared_env/.env.local"
+)"
+assert_output_contains "$shared_env_stage_output" "temp-count=1"
+assert_output_contains "$shared_env_stage_output" $'staged-content<<EOF\nSOURCE_ENV=shared-symlink\nEOF'
+shared_sqlite_stage_output="$(
+  RUN_SHARED_TESTBOX_SOURCE_ONLY=1 bash -lc '
+    set -euo pipefail
+    source "$1"
+    prepare_extra_upload_path "$2" "output/registry/tavreg-hikari.sqlite"
+    staged_path="$PREPARED_UPLOAD_PATH"
+    if [[ -L "$staged_path" ]]; then
+      echo "expected staged sqlite upload to be materialized" >&2
+      exit 1
+    fi
+    printf "temp-count=%s\n" "${#TEMP_UPLOADS[@]}"
+    latest_value="$(bun --eval '\''import { Database } from "bun:sqlite"; const db = new Database(process.argv[1]); const row = db.query("SELECT value FROM smoke ORDER BY id DESC LIMIT 1").get(); console.log(row?.value ?? ""); db.close(false);'\'' "$staged_path")"
+    printf "staged-sqlite=%s\n" "$latest_value"
+    cleanup
+  ' bash "$fixture_repo/scripts/run_shared_testbox_signup.sh" "$fixture_repo/output/registry/signup-tasks.sqlite"
+)"
+assert_output_contains "$shared_sqlite_stage_output" "temp-count=1"
+assert_output_contains "$shared_sqlite_stage_output" "staged-sqlite=main-ledger"
 
 cat > "$fixture_repo/.env.local" <<ENVLOCAL
 SOURCE_ENV=absolute-runtime
