@@ -9529,7 +9529,7 @@ export function loadConfig(): AppConfig {
   }
   const gptmailBaseUrl = normalizeGptmailBaseUrl(process.env.GPTMAIL_BASE_URL || "https://mail.chatgpt.org.uk");
   const vmailBaseUrl = (process.env.VMAIL_BASE_URL || "").trim();
-  const cfmailBaseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
+  const cfmailBaseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
   const duckmailBaseUrl = (process.env.DUCKMAIL_BASE_URL || "").trim();
   if (envMailProvider === "vmail" && !vmailBaseUrl) {
     throw new Error("Missing env: VMAIL_BASE_URL (required when MAIL_PROVIDER=vmail)");

@@ -1,5 +1,6 @@
-export type PageKey = "tavily" | "chatgpt" | "accounts" | "mailboxes" | "apiKeys" | "proxies";
+export type PageKey = "tavily" | "chatgpt" | "accounts" | "mailboxes" | "keys" | "proxies";
 export type JobSite = "tavily" | "chatgpt";
+export type SortDir = "desc" | "asc";
 
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
 export type JobControlAction = "start" | "pause" | "resume" | "stop" | "force_stop" | "update_limits";
@@ -239,6 +240,8 @@ export type ApiKeyRecord = {
   lastVerifiedAt: string | null;
 };
 
+export type ApiKeySortBy = "extractedAt" | "lastVerifiedAt";
+
 export type ApiKeysPayload = {
   rows: ApiKeyRecord[];
   total: number;
@@ -342,6 +345,20 @@ export type ChatGptCredentialRecord = {
   refreshToken?: string;
   idToken?: string;
   credentialJson?: string;
+};
+
+export type ChatGptCredentialSortBy = "createdAt" | "expiresAt";
+
+export type ChatGptCredentialSort = {
+  sortBy: ChatGptCredentialSortBy;
+  sortDir: SortDir;
+};
+
+export type ChatGptCredentialExpiryStatus = "" | "valid" | "expired" | "noExpiry";
+
+export type ChatGptCredentialQuery = {
+  q: string;
+  expiryStatus: ChatGptCredentialExpiryStatus;
 };
 
 export type ChatGptCredentialsPayload = {
@@ -558,7 +575,7 @@ export type AccountQuery = {
   mailboxStatus: "" | MailboxStatus;
   groupName: string;
   sortBy: "" | "importedAt" | "lastUsedAt";
-  sortDir: "desc" | "asc";
+  sortDir: SortDir;
   page: number;
   pageSize: number;
 };
@@ -596,6 +613,8 @@ export type ApiKeyQuery = {
   q: string;
   status: string;
   groupName: string;
+  sortBy: ApiKeySortBy;
+  sortDir: SortDir;
   page: number;
   pageSize: number;
 };

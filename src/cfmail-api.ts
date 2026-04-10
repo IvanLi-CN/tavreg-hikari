@@ -52,7 +52,7 @@ function parseHttpStatus(message: string): number | null {
 
 export function normalizeCfMailBaseUrl(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, "");
-  return trimmed || "https://api.cfm.707979.xyz";
+  return trimmed || "https://api.cfm.example.test";
 }
 
 export function buildCfMailAuthHeaders(apiKey: string): Record<string, string> {

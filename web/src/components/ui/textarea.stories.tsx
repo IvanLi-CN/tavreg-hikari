@@ -19,7 +19,7 @@ type Story = StoryObj<typeof meta>;
 
 export const ImportFormat: Story = {
   args: {
-    value: "alpha@outlook.com,password123\nbeta@outlook.com,password456",
+    value: "alpha@example.test,password123\nbeta@example.test,password456",
     className: "min-h-56",
   },
 };

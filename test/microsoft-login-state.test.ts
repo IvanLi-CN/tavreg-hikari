@@ -96,13 +96,13 @@ describe("Microsoft login state", () => {
     const base = buildMicrosoftPasswordSurfaceKey({
       url: "https://login.live.com/ppsecure/post.srf?client_id=1&context=a",
       title: "Enter your password",
-      accountHint: "spencerjeffrey5596@outlook.com",
+      accountHint: "account-hint@example.test",
       bodyText: "Enter your password Forgot your password?",
     });
     const changedQueryAndBody = buildMicrosoftPasswordSurfaceKey({
       url: "https://login.live.com/ppsecure/post.srf?client_id=2&context=b",
       title: "Enter your password",
-      accountHint: "spencerjeffrey5596@outlook.com",
+      accountHint: "account-hint@example.test",
       bodyText:
         "Enter your password You've tried to sign in too many times with an incorrect account or password. Forgot your password?",
     });
@@ -251,7 +251,7 @@ describe("Microsoft login state", () => {
         url: "https://login.live.com/ppsecure/post.srf?client_id=123",
         title: "要保持登入嗎?",
         bodyText:
-          "ngadilick0360@outlook.com 要保持登入嗎? 不要每次都要重新登入。深入了解 是 否 說明 使用條款 隱私權與 Cookie",
+          "signin-hint@example.test 要保持登入嗎? 不要每次都要重新登入。深入了解 是 否 說明 使用條款 隱私權與 Cookie",
       }),
     ).toBe(true);
   });

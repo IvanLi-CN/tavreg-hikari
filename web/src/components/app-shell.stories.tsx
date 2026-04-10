@@ -28,7 +28,26 @@ export const Default: Story = {
     children: null,
   },
   render: (args) => {
-    const [page, setPage] = useState<PageKey>("tavily");
+    const [page, setPage] = useState<PageKey>(args.activePage);
+    return (
+      <AppShell {...args} activePage={page} onNavigate={setPage}>
+        <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
+          {page} content
+        </div>
+      </AppShell>
+    );
+  },
+};
+
+export const KeysActive: Story = {
+  args: {
+    activePage: "keys",
+    error: null,
+    onNavigate: fn(),
+    children: null,
+  },
+  render: (args) => {
+    const [page, setPage] = useState<PageKey>(args.activePage);
     return (
       <AppShell {...args} activePage={page} onNavigate={setPage}>
         <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
@@ -57,7 +76,8 @@ export const NavigationPlay: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("tab", { name: "微软邮箱" }));
-    await expect(args.onNavigate).toHaveBeenCalledWith("mailboxes");
+    await expect(canvas.getByRole("tab", { name: "Keys" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("tab", { name: "Keys" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("keys");
   },
 };

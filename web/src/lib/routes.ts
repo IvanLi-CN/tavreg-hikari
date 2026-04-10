@@ -12,7 +12,7 @@ export function getPageFromPathname(pathname: string): PageKey {
   if (normalized === "/tavily" || normalized === "/dashboard") return "tavily";
   if (normalized === "/accounts") return "accounts";
   if (normalized === "/mailboxes" || normalized.startsWith("/mailboxes/")) return "mailboxes";
-  if (normalized === "/api-keys") return "apiKeys";
+  if (normalized === "/keys" || normalized === "/api-keys") return "keys";
   if (normalized === "/proxies") return "proxies";
   return "tavily";
 }

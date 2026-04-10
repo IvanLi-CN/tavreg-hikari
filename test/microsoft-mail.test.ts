@@ -41,14 +41,14 @@ describe("Microsoft mail failure helpers", () => {
   test("recognizes callback and workspace URLs as valid OAuth completion targets", () => {
     expect(
       isMicrosoftOauthCompletionUrl(
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+        "https://console.example.test/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        "https://console.example.test/api/microsoft-mail/oauth/callback",
       ),
     ).toBe(true);
     expect(
       isMicrosoftOauthCompletionUrl(
-        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=success",
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+        "https://console.example.test/mailboxes?accountId=12&oauth=success",
+        "https://console.example.test/api/microsoft-mail/oauth/callback",
       ),
     ).toBe(true);
   });
@@ -57,35 +57,35 @@ describe("Microsoft mail failure helpers", () => {
     expect(
       isMicrosoftOauthCompletionUrl(
         "https://login.microsoft.com/consumers/fido/create?mkt=zh-CN",
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback",
+        "https://console.example.test/api/microsoft-mail/oauth/callback",
       ),
     ).toBe(false);
   });
 
   test("distinguishes callback transit from final browser oauth outcome", () => {
-    const redirectUri = "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback";
+    const redirectUri = "https://console.example.test/api/microsoft-mail/oauth/callback";
 
     expect(
       isMicrosoftOauthCallbackUrl(
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        "https://console.example.test/api/microsoft-mail/oauth/callback?code=abc&state=123",
         redirectUri,
       ),
     ).toBe(true);
     expect(
       getMicrosoftOauthBrowserOutcome(
-        "https://tavreg-hikari-dev.ivanli.cc/api/microsoft-mail/oauth/callback?code=abc&state=123",
+        "https://console.example.test/api/microsoft-mail/oauth/callback?code=abc&state=123",
         redirectUri,
       ),
     ).toBeNull();
     expect(
       getMicrosoftOauthBrowserOutcome(
-        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=success",
+        "https://console.example.test/mailboxes?accountId=12&oauth=success",
         redirectUri,
       ),
     ).toBe("success");
     expect(
       getMicrosoftOauthBrowserOutcome(
-        "https://tavreg-hikari-dev.ivanli.cc/mailboxes?accountId=12&oauth=error",
+        "https://console.example.test/mailboxes?accountId=12&oauth=error",
         redirectUri,
       ),
     ).toBe("error");

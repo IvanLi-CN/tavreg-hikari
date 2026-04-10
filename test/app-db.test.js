@@ -156,8 +156,8 @@ describe("AppDatabase account import", () => {
   test("dedupes by email and preserves skip marker after API key exists", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts([
-      { email: "demo@outlook.com", password: "first-pass" },
-      { email: "demo@outlook.com", password: "second-pass" },
+      { email: "demo@example.test", password: "first-pass" },
+      { email: "demo@example.test", password: "second-pass" },
     ]);
     let accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(accounts).toHaveLength(1);
@@ -167,7 +167,7 @@ describe("AppDatabase account import", () => {
     const apiKey = appDb.recordApiKey(accountId, "tvly-abcdef1234567890");
     expect(apiKey.apiKeyPrefix).toBe("tvly-abcdef1");
 
-    appDb.importAccounts([{ email: "demo@outlook.com", password: "third-pass" }]);
+    appDb.importAccounts([{ email: "demo@example.test", password: "third-pass" }]);
     accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(accounts[0]?.passwordPlaintext).toBe("third-pass");
     expect(accounts[0]?.hasApiKey).toBe(true);
@@ -180,8 +180,8 @@ describe("AppDatabase account import", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
       [
-        { email: "group-a@outlook.com", password: "pass-a" },
-        { email: "group-b@outlook.com", password: "pass-b" },
+        { email: "group-a@example.test", password: "pass-a" },
+        { email: "group-b@example.test", password: "pass-b" },
       ],
       { groupName: "batch-a" },
     );
@@ -211,8 +211,8 @@ describe("AppDatabase account import", () => {
   test("listAccounts summary only counts browser-ready accounts as ready", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "ready-count-a@outlook.com", password: "pass-a" },
-      { email: "ready-count-b@outlook.com", password: "pass-b" },
+      { email: "ready-count-a@example.test", password: "pass-a" },
+      { email: "ready-count-b@example.test", password: "pass-b" },
     ]);
 
     appDb.markBrowserSessionReady(imported.affectedIds[0], {
@@ -229,7 +229,7 @@ describe("AppDatabase account import", () => {
 
   test("blocks deleting accounts that already own extracted api keys", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "linked@outlook.com", password: "linked-pass" }]);
+    const imported = appDb.importAccounts([{ email: "linked@example.test", password: "linked-pass" }]);
     const accountId = imported.affectedIds[0];
     appDb.recordApiKey(accountId, "tvly-abcdef1234567890");
 
@@ -245,8 +245,8 @@ describe("AppDatabase account import", () => {
   test("reassigning a duplicate api key clears the previous owner state", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "first@outlook.com", password: "first-pass" },
-      { email: "second@outlook.com", password: "second-pass" },
+      { email: "first@example.test", password: "first-pass" },
+      { email: "second@example.test", password: "second-pass" },
     ]);
     const [firstId, secondId] = imported.affectedIds;
     const firstKey = appDb.recordApiKey(firstId, "tvly-shared-key", "1.1.1.1");
@@ -270,7 +270,7 @@ describe("AppDatabase account import", () => {
     expect(keys.total).toBe(1);
     expect(keys.rows[0]).toMatchObject({
       accountId: secondId,
-      microsoftEmail: "second@outlook.com",
+      microsoftEmail: "second@example.test",
       extractedIp: "2.2.2.2",
     });
     expect(new Date(keys.rows[0].extractedAt).getTime()).toBeGreaterThanOrEqual(new Date(firstKey.extractedAt).getTime());
@@ -280,7 +280,7 @@ describe("AppDatabase account import", () => {
 
   test("recording the same api key for the same account preserves the original extracted time and ip", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "same@outlook.com", password: "same-pass" }]);
+    const imported = appDb.importAccounts([{ email: "same@example.test", password: "same-pass" }]);
     const accountId = imported.affectedIds[0];
     const firstKey = appDb.recordApiKey(accountId, "tvly-stable-key", "3.3.3.3");
     await new Promise((resolve) => setTimeout(resolve, 5));
@@ -296,7 +296,7 @@ describe("AppDatabase account import", () => {
 
   test("recording a legacy api key backfills missing extracted ip for the same account", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
     const firstKey = appDb.recordApiKey(accountId, "tvly-legacy-key");
     appDb.db.query("UPDATE api_keys SET extracted_ip = NULL WHERE id = ?").run(firstKey.id);
@@ -309,20 +309,141 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("sorts api keys by extracted time and last verified time", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "sort-alpha@example.test", password: "alpha-pass" },
+      { email: "sort-beta@example.test", password: "beta-pass" },
+      { email: "sort-gamma@example.test", password: "gamma-pass" },
+    ]);
+    const [alphaId, betaId, gammaId] = imported.affectedIds;
+    const alphaKey = appDb.recordApiKey(alphaId, "tvly-sort-alpha", "1.1.1.1");
+    const betaKey = appDb.recordApiKey(betaId, "tvly-sort-beta", "2.2.2.2");
+    const gammaKey = appDb.recordApiKey(gammaId, "tvly-sort-gamma", "3.3.3.3");
+
+    appDb.db.query("UPDATE api_keys SET extracted_at = ?, last_verified_at = ? WHERE id = ?").run("2026-04-08T10:00:00.000Z", "2026-04-08T11:00:00.000Z", alphaKey.id);
+    appDb.db.query("UPDATE api_keys SET extracted_at = ?, last_verified_at = ? WHERE id = ?").run("2026-04-08T12:00:00.000Z", "2026-04-08T09:00:00.000Z", betaKey.id);
+    appDb.db.query("UPDATE api_keys SET extracted_at = ?, last_verified_at = ? WHERE id = ?").run("2026-04-08T08:00:00.000Z", null, gammaKey.id);
+
+    expect(appDb.listApiKeys({ page: 1, pageSize: 10 }).rows.map((row) => row.microsoftEmail)).toEqual([
+      "sort-beta@example.test",
+      "sort-alpha@example.test",
+      "sort-gamma@example.test",
+    ]);
+    expect(appDb.listApiKeys({ sortBy: "extractedAt", sortDir: "asc", page: 1, pageSize: 10 }).rows.map((row) => row.microsoftEmail)).toEqual([
+      "sort-gamma@example.test",
+      "sort-alpha@example.test",
+      "sort-beta@example.test",
+    ]);
+    expect(appDb.listApiKeys({ sortBy: "lastVerifiedAt", sortDir: "desc", page: 1, pageSize: 10 }).rows.map((row) => row.microsoftEmail)).toEqual([
+      "sort-alpha@example.test",
+      "sort-beta@example.test",
+      "sort-gamma@example.test",
+    ]);
+    expect(appDb.listApiKeys({ sortBy: "lastVerifiedAt", sortDir: "asc", page: 1, pageSize: 10 }).rows.map((row) => row.microsoftEmail)).toEqual([
+      "sort-beta@example.test",
+      "sort-alpha@example.test",
+      "sort-gamma@example.test",
+    ]);
+
+    appDb.close();
+  });
+
+  test("sorts chatgpt credentials by created time and expiry time", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({ site: "chatgpt", runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const alphaAttempt = appDb.createAttempt(job.id, { accountId: null, accountEmail: "sort-alpha@mail.example.test", outputDir: "/tmp/alpha" });
+    const betaAttempt = appDb.createAttempt(job.id, { accountId: null, accountEmail: "sort-beta@mail.example.test", outputDir: "/tmp/beta" });
+    const gammaAttempt = appDb.createAttempt(job.id, { accountId: null, accountEmail: "sort-gamma@mail.example.test", outputDir: "/tmp/gamma" });
+
+    const alphaCredential = appDb.recordChatGptCredential({
+      jobId: job.id,
+      attemptId: alphaAttempt.id,
+      email: "sort-alpha@mail.example.test",
+      accountId: "acc-sort-alpha",
+      accessToken: "access-alpha",
+      refreshToken: "refresh-alpha",
+      idToken: "id-alpha",
+      expiresAt: "2026-04-08T12:00:00.000Z",
+      credentialJson: "{}",
+    });
+    const betaCredential = appDb.recordChatGptCredential({
+      jobId: job.id,
+      attemptId: betaAttempt.id,
+      email: "sort-beta@mail.example.test",
+      accountId: "acc-sort-beta",
+      accessToken: "access-beta",
+      refreshToken: "refresh-beta",
+      idToken: "id-beta",
+      expiresAt: "2026-04-08T09:30:00.000Z",
+      credentialJson: "{}",
+    });
+    const gammaCredential = appDb.recordChatGptCredential({
+      jobId: job.id,
+      attemptId: gammaAttempt.id,
+      email: "sort-gamma@mail.example.test",
+      accountId: "acc-sort-gamma",
+      accessToken: "access-gamma",
+      refreshToken: "refresh-gamma",
+      idToken: "id-gamma",
+      expiresAt: null,
+      credentialJson: "{}",
+    });
+
+    appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T08:00:00.000Z", "2099-04-08T12:00:00.000Z", alphaCredential.id);
+    appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T12:00:00.000Z", "2020-04-08T09:30:00.000Z", betaCredential.id);
+    appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T10:00:00.000Z", null, gammaCredential.id);
+
+    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+      "sort-beta@mail.example.test",
+      "sort-gamma@mail.example.test",
+      "sort-alpha@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+      "sort-alpha@mail.example.test",
+      "sort-gamma@mail.example.test",
+      "sort-beta@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+      "sort-alpha@mail.example.test",
+      "sort-beta@mail.example.test",
+      "sort-gamma@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+      "sort-beta@mail.example.test",
+      "sort-alpha@mail.example.test",
+      "sort-gamma@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, q: "gamma" }).map((row) => row.email)).toEqual([
+      "sort-gamma@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "noExpiry" }).map((row) => row.email)).toEqual([
+      "sort-gamma@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "expired" }).map((row) => row.email)).toEqual([
+      "sort-beta@mail.example.test",
+    ]);
+    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "valid" }).map((row) => row.email)).toEqual([
+      "sort-alpha@mail.example.test",
+    ]);
+
+    appDb.close();
+  });
+
   test("searches accounts by email, password, and group", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts(
       [
-        { email: "search-a@outlook.com", password: "alpha-pass" },
-        { email: "search-b@outlook.com", password: "bravo-pass" },
+        { email: "search-a@example.test", password: "alpha-pass" },
+        { email: "search-b@example.test", password: "bravo-pass" },
       ],
       { groupName: "team-bravo" },
     );
-    appDb.importAccounts([{ email: "solo@outlook.com", password: "solo-pass" }], { groupName: "solo-group" });
+    appDb.importAccounts([{ email: "solo@example.test", password: "solo-pass" }], { groupName: "solo-group" });
     const proofAccount = appDb.listAccounts({ q: "search-a", page: 1, pageSize: 10 }).rows[0];
     appDb.updateAccountProofMailbox(proofAccount.id, {
       provider: "cfmail",
-      address: "search-a-proof@mail-us.707079.xyz",
+      address: "search-a-proof@mail.example.test",
       mailboxId: "proof-search-a",
     });
 
@@ -336,7 +457,7 @@ describe("AppDatabase account import", () => {
 
   test("keeps newly imported accounts pending until browser bootstrap succeeds", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "pending-session@outlook.com", password: "pending-pass" }]);
+    const imported = appDb.importAccounts([{ email: "pending-session@example.test", password: "pending-pass" }]);
     const accountId = imported.affectedIds[0];
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
 
@@ -357,7 +478,7 @@ describe("AppDatabase account import", () => {
 
   test("preserves existing ready browser sessions across restart", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "restart-ready@outlook.com", password: "restart-pass" }]);
+    const imported = appDb.importAccounts([{ email: "restart-ready@example.test", password: "restart-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId, { proxyIp: "9.9.9.9" });
     appDb.close();
@@ -373,7 +494,7 @@ describe("AppDatabase account import", () => {
 
   test("reopen seeds missing browser sessions as pending for untouched legacy imports", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy-usable@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy-usable@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
     const profilePath = appDb.accountBrowserProfilePath(accountId);
 
@@ -394,7 +515,7 @@ describe("AppDatabase account import", () => {
 
   test("reopen keeps legacy accounts ready only when a reusable browser profile already exists", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy-used@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy-used@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
     const profilePath = appDb.accountBrowserProfilePath(accountId);
 
@@ -418,7 +539,7 @@ describe("AppDatabase account import", () => {
 
   test("reopen keeps attempted legacy accounts pending when no reusable browser profile exists", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy-attempted@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy-attempted@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
     const profilePath = appDb.accountBrowserProfilePath(accountId);
 
@@ -441,9 +562,9 @@ describe("AppDatabase account import", () => {
   test("returns account summary counts across the full filtered result set, not just one page", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "ready-a@outlook.com", password: "pass-a" },
-      { email: "ready-b@outlook.com", password: "pass-b" },
-      { email: "failed-c@outlook.com", password: "pass-c" },
+      { email: "ready-a@example.test", password: "pass-a" },
+      { email: "ready-b@example.test", password: "pass-b" },
+      { email: "failed-c@example.test", password: "pass-c" },
     ]);
     markImportedAccountsReady(appDb, imported.affectedIds);
     appDb.recordApiKey(imported.affectedIds[0], "tvly-summary-0001");
@@ -469,18 +590,18 @@ describe("AppDatabase account import", () => {
 
   test("supports importedAt sorting across the full filtered result set", async () => {
     const { appDb } = await createTempDb();
-    appDb.importAccounts([{ email: "first@outlook.com", password: "pass-a" }]);
+    appDb.importAccounts([{ email: "first@example.test", password: "pass-a" }]);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    appDb.importAccounts([{ email: "second@outlook.com", password: "pass-b" }]);
+    appDb.importAccounts([{ email: "second@example.test", password: "pass-b" }]);
     await new Promise((resolve) => setTimeout(resolve, 5));
-    appDb.importAccounts([{ email: "third@outlook.com", password: "pass-c" }]);
+    appDb.importAccounts([{ email: "third@example.test", password: "pass-c" }]);
 
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "importedAt", sortDir: "desc" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["third@outlook.com", "second@outlook.com", "first@outlook.com"]);
+    ).toEqual(["third@example.test", "second@example.test", "first@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "importedAt", sortDir: "asc" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["first@outlook.com", "second@outlook.com", "third@outlook.com"]);
+    ).toEqual(["first@example.test", "second@example.test", "third@example.test"]);
 
     appDb.close();
   });
@@ -488,9 +609,9 @@ describe("AppDatabase account import", () => {
   test("supports lastUsedAt sorting with nulls last in desc and first in asc", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "never-used@outlook.com", password: "pass-a" },
-      { email: "older-used@outlook.com", password: "pass-b" },
-      { email: "recent-used@outlook.com", password: "pass-c" },
+      { email: "never-used@example.test", password: "pass-a" },
+      { email: "older-used@example.test", password: "pass-b" },
+      { email: "recent-used@example.test", password: "pass-c" },
     ]);
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
@@ -504,10 +625,10 @@ describe("AppDatabase account import", () => {
 
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "lastUsedAt", sortDir: "desc" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["recent-used@outlook.com", "older-used@outlook.com", "never-used@outlook.com"]);
+    ).toEqual(["recent-used@example.test", "older-used@example.test", "never-used@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sortBy: "lastUsedAt", sortDir: "asc" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["never-used@outlook.com", "older-used@outlook.com", "recent-used@outlook.com"]);
+    ).toEqual(["never-used@example.test", "older-used@example.test", "recent-used@example.test"]);
 
     appDb.close();
   });
@@ -515,9 +636,9 @@ describe("AppDatabase account import", () => {
   test("supports session and mailbox status filters in account listing", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "session-ready@outlook.com", password: "pass-a" },
-      { email: "session-failed@outlook.com", password: "pass-b" },
-      { email: "mailbox-preparing@outlook.com", password: "pass-c" },
+      { email: "session-ready@example.test", password: "pass-a" },
+      { email: "session-failed@example.test", password: "pass-b" },
+      { email: "mailbox-preparing@example.test", password: "pass-c" },
     ]);
 
     const readyAccountId = imported.affectedIds[0];
@@ -544,19 +665,19 @@ describe("AppDatabase account import", () => {
 
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "ready" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["session-ready@outlook.com"]);
+    ).toEqual(["session-ready@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "failed" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["session-failed@outlook.com"]);
+    ).toEqual(["session-failed@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, mailboxStatus: "available" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["session-ready@outlook.com"]);
+    ).toEqual(["session-ready@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, mailboxStatus: "preparing" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["mailbox-preparing@outlook.com"]);
+    ).toEqual(["mailbox-preparing@example.test"]);
     expect(
       appDb.listAccounts({ page: 1, pageSize: 10, sessionStatus: "failed", mailboxStatus: "invalidated" }).rows.map((account) => account.microsoftEmail),
-    ).toEqual(["session-failed@outlook.com"]);
+    ).toEqual(["session-failed@example.test"]);
 
     expect(appDb.getMailboxByAccountId(preparingAccountId)?.status).toBe("preparing");
 
@@ -565,11 +686,11 @@ describe("AppDatabase account import", () => {
 
   test("preserves the original imported_at when an existing account is re-imported", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "stable@outlook.com", password: "first-pass" }]);
+    const imported = appDb.importAccounts([{ email: "stable@example.test", password: "first-pass" }]);
     const before = appDb.getAccount(imported.affectedIds[0]);
 
     await new Promise((resolve) => setTimeout(resolve, 5));
-    appDb.importAccounts([{ email: "stable@outlook.com", password: "second-pass" }], { groupName: "retry-pool" });
+    appDb.importAccounts([{ email: "stable@example.test", password: "second-pass" }], { groupName: "retry-pool" });
 
     const after = appDb.getAccount(imported.affectedIds[0]);
     expect(after?.passwordPlaintext).toBe("second-pass");
@@ -582,26 +703,26 @@ describe("AppDatabase account import", () => {
 
   test("stores proof mailbox mapping and clears cached mailbox id when the address changes", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proof@outlook.com", password: "proof-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proof@example.test", password: "proof-pass" }]);
     const accountId = imported.affectedIds[0];
 
     let account = appDb.updateAccountProofMailbox(accountId, {
       provider: "cfmail",
-      address: "proof-a@mail-us.707079.xyz",
+      address: "proof-a@mail.example.test",
       mailboxId: "moe-proof-a",
     });
     expect(account).toMatchObject({
       proofMailboxProvider: "cfmail",
-      proofMailboxAddress: "proof-a@mail-us.707079.xyz",
+      proofMailboxAddress: "proof-a@mail.example.test",
       proofMailboxId: "moe-proof-a",
     });
 
     account = appDb.updateAccountProofMailbox(accountId, {
-      address: "proof-b@mail-us.707079.xyz",
+      address: "proof-b@mail.example.test",
     });
     expect(account).toMatchObject({
       proofMailboxProvider: "cfmail",
-      proofMailboxAddress: "proof-b@mail-us.707079.xyz",
+      proofMailboxAddress: "proof-b@mail.example.test",
       proofMailboxId: null,
     });
 
@@ -619,7 +740,7 @@ describe("AppDatabase account import", () => {
 
   test("stores unavailable reason and keeps disabled status across failure updates", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "disabled@outlook.com", password: "disabled-pass" }]);
+    const imported = appDb.importAccounts([{ email: "disabled@example.test", password: "disabled-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.markAccountUnavailable(accountId, "manual hold", "microsoft_unknown_recovery_email");
@@ -655,7 +776,7 @@ describe("AppDatabase account import", () => {
 
   test("preserves active leases when availability is edited mid-run", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
+    const imported = appDb.importAccounts([{ email: "leased@example.test", password: "leased-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -674,7 +795,7 @@ describe("AppDatabase account import", () => {
 
   test("can keep the active lease while syncing an in-flight worker failure", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "leased@outlook.com", password: "leased-pass" }]);
+    const imported = appDb.importAccounts([{ email: "leased@example.test", password: "leased-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -706,7 +827,7 @@ describe("AppDatabase account import", () => {
 
   test("marks hard microsoft failures as reusable blockers instead of disabled accounts", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "blocked@outlook.com", password: "blocked-pass" }]);
+    const imported = appDb.importAccounts([{ email: "blocked@example.test", password: "blocked-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.markAccountDirectFailure(accountId, "microsoft_account_locked");
@@ -725,7 +846,7 @@ describe("AppDatabase account import", () => {
 
   test("marks locked accounts unavailable with an explicit disabled reason", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "locked-ui@outlook.com", password: "locked-pass" }]);
+    const imported = appDb.importAccounts([{ email: "locked-ui@example.test", password: "locked-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.markAccountLocked(accountId, "Microsoft 账户已锁定", "microsoft_account_locked");
@@ -745,8 +866,8 @@ describe("AppDatabase account import", () => {
   test("can hide unconnected mailboxes from the inbox workspace listing", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "connected-mail@outlook.com", password: "connected-pass" },
-      { email: "pending-mail@outlook.com", password: "pending-pass" },
+      { email: "connected-mail@example.test", password: "connected-pass" },
+      { email: "pending-mail@example.test", password: "pending-pass" },
     ]);
     const connectedAccountId = imported.affectedIds[0];
     const pendingAccountId = imported.affectedIds[1];
@@ -771,7 +892,7 @@ describe("AppDatabase account import", () => {
 
   test("saveMailboxOauthStart clears stale authorization before a forced reconnect", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "oauth-reconnect@outlook.com", password: "oauth-pass" }]);
+    const imported = appDb.importAccounts([{ email: "oauth-reconnect@example.test", password: "oauth-pass" }]);
     const accountId = imported.affectedIds[0];
     const mailbox = appDb.ensureMailboxForAccount(accountId);
 
@@ -804,7 +925,7 @@ describe("AppDatabase account import", () => {
 
   test("clears the unknown recovery block after a proof mailbox is saved", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proof-blocked@outlook.com", password: "proof-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proof-blocked@example.test", password: "proof-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.markAccountDirectFailure(accountId, "microsoft_unknown_recovery_email:pr*****@mail.test");
@@ -833,11 +954,11 @@ describe("AppDatabase account import", () => {
 
   test("clears the password block only when a new password is imported", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "old-pass" }]);
+    const imported = appDb.importAccounts([{ email: "pw-blocked@example.test", password: "old-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.markAccountDirectFailure(accountId, "microsoft_password_incorrect");
-    appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "old-pass" }]);
+    appDb.importAccounts([{ email: "pw-blocked@example.test", password: "old-pass" }]);
     let account = appDb.getAccount(accountId);
     expect(account).toMatchObject({
       lastResultStatus: "disabled",
@@ -845,7 +966,7 @@ describe("AppDatabase account import", () => {
       lastErrorCode: "microsoft_password_incorrect",
     });
 
-    appDb.importAccounts([{ email: "pw-blocked@outlook.com", password: "new-pass" }]);
+    appDb.importAccounts([{ email: "pw-blocked@example.test", password: "new-pass" }]);
     account = appDb.getAccount(accountId);
     expect(account).toMatchObject({
       passwordPlaintext: "new-pass",
@@ -859,7 +980,7 @@ describe("AppDatabase account import", () => {
 
   test("reuses transient failed accounts in the same job and in a new job", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "retryable@outlook.com", password: "retry-pass" }]);
+    const imported = appDb.importAccounts([{ email: "retryable@example.test", password: "retry-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
@@ -884,7 +1005,7 @@ describe("AppDatabase account import", () => {
 
   test("keeps hard-blocked failed accounts out of future jobs until restored", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "hard-blocked@outlook.com", password: "hard-pass" }]);
+    const imported = appDb.importAccounts([{ email: "hard-blocked@example.test", password: "hard-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -908,7 +1029,7 @@ describe("AppDatabase account import", () => {
 
   test("startup bootstrap recovery skips accounts that are already hard-blocked", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "pending-hard-blocked@outlook.com", password: "hard-pass" }]);
+    const imported = appDb.importAccounts([{ email: "pending-hard-blocked@example.test", password: "hard-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
 
@@ -930,7 +1051,7 @@ describe("AppDatabase account import", () => {
 
   test("hard-failed accounts do not re-enter pending-session waits in the same job", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proof-same-job@outlook.com", password: "proof-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proof-same-job@example.test", password: "proof-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
 
@@ -962,7 +1083,7 @@ describe("AppDatabase account import", () => {
 
   test("does not reschedule succeeded accounts within the same job", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "same-job-success@outlook.com", password: "success-pass" }]);
+    const imported = appDb.importAccounts([{ email: "same-job-success@example.test", password: "success-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
@@ -981,7 +1102,7 @@ describe("AppDatabase account import", () => {
 
   test("normalizes legacy hard-blocked failed accounts to disabled on reopen", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy-locked@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy-locked@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.db
@@ -1008,7 +1129,7 @@ describe("AppDatabase account import", () => {
 
   test("migrates legacy locked accounts out of manual disabled fields on reopen", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "legacy-disabled@outlook.com", password: "legacy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "legacy-disabled@example.test", password: "legacy-pass" }]);
     const accountId = imported.affectedIds[0];
 
     appDb.db
@@ -1039,18 +1160,18 @@ describe("AppDatabase account import", () => {
   test("proof mailbox mappings do not make an account ineligible for leasing", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "plain-a@outlook.com", password: "pass-a" },
-      { email: "proof-b@outlook.com", password: "pass-b" },
-      { email: "plain-c@outlook.com", password: "pass-c" },
+      { email: "plain-a@example.test", password: "pass-a" },
+      { email: "proof-b@example.test", password: "pass-b" },
+      { email: "plain-c@example.test", password: "pass-c" },
     ]);
     markImportedAccountsReady(appDb, imported.affectedIds);
     const proofAccountId = appDb.listAccounts({ page: 1, pageSize: 10 }).rows.find(
-      (row) => row.microsoftEmail === "proof-b@outlook.com",
+      (row) => row.microsoftEmail === "proof-b@example.test",
     )?.id;
     expect(proofAccountId).toBeDefined();
     appDb.updateAccountProofMailbox(proofAccountId, {
       provider: "cfmail",
-      address: "proof-b@mail-us.707079.xyz",
+      address: "proof-b@mail.example.test",
       mailboxId: "proof-b-id",
     });
     for (const accountId of imported.affectedIds.filter((accountId) => accountId !== proofAccountId)) {
@@ -1060,7 +1181,7 @@ describe("AppDatabase account import", () => {
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const leased = appDb.leaseNextAccount(job.id);
 
-    expect(leased?.microsoftEmail).toBe("proof-b@outlook.com");
+    expect(leased?.microsoftEmail).toBe("proof-b@example.test");
 
     appDb.close();
   });
@@ -1082,7 +1203,7 @@ describe("AppDatabase account import", () => {
 
   test("preserves manual-stop jobs and attempts across stale-state recovery", async () => {
     const { dbPath, appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "recover-stop@outlook.com", password: "pass-a" }]);
+    const imported = appDb.importAccounts([{ email: "recover-stop@example.test", password: "pass-a" }]);
     const accountId = imported.affectedIds[0];
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-recover-stop-attempt");
@@ -1121,12 +1242,12 @@ describe("AppDatabase account import", () => {
   test("stores extractor source fields and local extract history", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
-      [{ email: "from-extractor@outlook.com", password: "extract-pass" }],
+      [{ email: "from-extractor@example.test", password: "extract-pass" }],
       {
         source: "extractor",
         accountSource: "zhanghaoya",
         rawPayloadByEmail: {
-          "from-extractor@outlook.com": "from-extractor@outlook.com:extract-pass",
+          "from-extractor@example.test": "from-extractor@example.test:extract-pass",
         },
       },
     );
@@ -1135,7 +1256,7 @@ describe("AppDatabase account import", () => {
     expect(account).toMatchObject({
       importSource: "extractor",
       accountSource: "zhanghaoya",
-      sourceRawPayload: "from-extractor@outlook.com:extract-pass",
+      sourceRawPayload: "from-extractor@example.test:extract-pass",
     });
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
@@ -1147,15 +1268,15 @@ describe("AppDatabase account import", () => {
       attemptBudget: 4,
       acceptedCount: 1,
       status: "accepted",
-      rawResponse: "{\"Code\":200,\"Data\":\"from-extractor@outlook.com:extract-pass\"}",
+      rawResponse: "{\"Code\":200,\"Data\":\"from-extractor@example.test:extract-pass\"}",
       maskedKey: "zhya********0001",
       completedAt: new Date().toISOString(),
     });
     appDb.createAccountExtractItem({
       batchId: batch.id,
       provider: "zhanghaoya",
-      rawPayload: "from-extractor@outlook.com:extract-pass",
-      email: "from-extractor@outlook.com",
+      rawPayload: "from-extractor@example.test:extract-pass",
+      email: "from-extractor@example.test",
       password: "extract-pass",
       parseStatus: "parsed",
       acceptStatus: "accepted",
@@ -1171,7 +1292,7 @@ describe("AppDatabase account import", () => {
       status: "accepted",
     });
     expect(history.rows[0]?.items[0]).toMatchObject({
-      email: "from-extractor@outlook.com",
+      email: "from-extractor@example.test",
       acceptStatus: "accepted",
       importedAccountId: account.id,
     });
@@ -1191,8 +1312,8 @@ describe("AppDatabase account import", () => {
     appDb.createAccountExtractItem({
       batchId: secondBatch.id,
       provider: "shankeyun",
-      rawPayload: "fresh-sk@outlook.com----pass-999--------refresh-token----client-id",
-      email: "fresh-sk@outlook.com",
+      rawPayload: "fresh-sk@example.test----pass-999--------refresh-token----client-id",
+      email: "fresh-sk@example.test",
       password: "pass-999",
       parseStatus: "parsed",
       acceptStatus: "rejected",
@@ -1275,7 +1396,7 @@ describe("scheduler helpers", () => {
           JSON.stringify({
             Code: 200,
             Message: "Success",
-            Data: "mail-a@outlook.com:pass-a<br>mail-b@outlook.com:pass-b",
+            Data: "mail-a@example.test:pass-a<br>mail-b@example.test:pass-b",
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
@@ -1289,7 +1410,7 @@ describe("scheduler helpers", () => {
       }
       if (href.includes("/api/win/buy")) {
         shankeyunUrls.push(href);
-        return new Response("mail-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+        return new Response("mail-sk@example.test----pass-sk--------refresh-token----client-id", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
@@ -1300,7 +1421,7 @@ describe("scheduler helpers", () => {
         JSON.stringify({
           success: true,
           data: {
-            mails: ["mail-hm@outlook.com:pass-hm:refresh-token"],
+            mails: ["mail-hm@example.test:pass-hm:refresh-token"],
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -1321,7 +1442,7 @@ describe("scheduler helpers", () => {
     expect(zhanghaoya.ok).toBe(true);
     expect(zhanghaoya.candidates[0]).toMatchObject({
       provider: "zhanghaoya",
-      email: "mail-a@outlook.com",
+      email: "mail-a@example.test",
       password: "pass-a",
       parseStatus: "parsed",
     });
@@ -1346,7 +1467,7 @@ describe("scheduler helpers", () => {
     expect(shankeyun.ok).toBe(true);
     expect(shankeyun.candidates[0]).toMatchObject({
       provider: "shankeyun",
-      email: "mail-sk@outlook.com",
+      email: "mail-sk@example.test",
       password: "pass-sk",
       parseStatus: "parsed",
     });
@@ -1361,7 +1482,7 @@ describe("scheduler helpers", () => {
     expect(hotmail666.ok).toBe(true);
     expect(hotmail666.candidates[0]).toMatchObject({
       provider: "hotmail666",
-      email: "mail-hm@outlook.com",
+      email: "mail-hm@example.test",
       password: "pass-hm",
       parseStatus: "parsed",
     });
@@ -1491,7 +1612,7 @@ describe("scheduler helpers", () => {
 
   test("rejects dashed extractor rows when the password field is empty", async () => {
     globalThis.fetch = async () =>
-      new Response("mail-sk@outlook.com--------refresh-token----client-id", {
+      new Response("mail-sk@example.test--------refresh-token----client-id", {
         status: 200,
         headers: { "content-type": "text/plain" },
       });
@@ -1511,7 +1632,7 @@ describe("scheduler helpers", () => {
     expect(result.candidates).toEqual([
       {
         provider: "shankeyun",
-        rawPayload: "mail-sk@outlook.com--------refresh-token----client-id",
+        rawPayload: "mail-sk@example.test--------refresh-token----client-id",
         email: null,
         password: null,
         parseStatus: "invalid",
@@ -1617,7 +1738,7 @@ describe("scheduler helpers", () => {
 
   test("preserves stopping status when the final successful attempt finishes after a graceful stop request", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "stop-success@outlook.com", password: "pass-a" }]);
+    const imported = appDb.importAccounts([{ email: "stop-success@example.test", password: "pass-a" }]);
     const accountId = imported.affectedIds[0];
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-stop-success-attempt");
@@ -1639,7 +1760,7 @@ describe("scheduler helpers", () => {
 
   test("preserves force stopping status when a remaining attempt fails during manual shutdown", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "stop-failure@outlook.com", password: "pass-a" }]);
+    const imported = appDb.importAccounts([{ email: "stop-failure@example.test", password: "pass-a" }]);
     const accountId = imported.affectedIds[0];
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-stop-failure-attempt");
@@ -1728,14 +1849,14 @@ describe("scheduler helpers", () => {
 
   test("caps auto extracted usable accounts to the current job need", async () => {
     const { appDb, dbPath } = await createTempDb();
-    const seeded = appDb.importAccounts([{ email: "cap-a@outlook.com", password: "pass-a" }]);
+    const seeded = appDb.importAccounts([{ email: "cap-a@example.test", password: "pass-a" }]);
     markImportedAccountsReady(appDb, seeded.affectedIds);
     globalThis.fetch = async () =>
       new Response(
         JSON.stringify({
           Code: 200,
           Message: "Success",
-          Data: "cap-a@outlook.com:pass-a<br>cap-b@outlook.com:pass-b",
+          Data: "cap-a@example.test:pass-a<br>cap-b@example.test:pass-b",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -1766,7 +1887,7 @@ describe("scheduler helpers", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
-    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["cap-a@outlook.com"]);
+    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["cap-a@example.test"]);
     expect(accounts[0]?.browserSession?.status).toBe("ready");
     expect(appDb.countEligibleAccounts(job.id)).toBe(1);
 
@@ -1777,7 +1898,7 @@ describe("scheduler helpers", () => {
     });
     expect(history.rows[0]?.items).toHaveLength(2);
     expect(history.rows[0]?.items[1]).toMatchObject({
-      email: "cap-b@outlook.com",
+      email: "cap-b@example.test",
       acceptStatus: "rejected",
       rejectReason: "request_returned_multiple_accounts",
     });
@@ -1835,7 +1956,7 @@ describe("scheduler helpers", () => {
         JSON.stringify({
           Code: 200,
           Message: "Success",
-          Data: "pending-a@outlook.com:pass-a",
+          Data: "pending-a@example.test:pass-a",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -1844,7 +1965,7 @@ describe("scheduler helpers", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
-    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["pending-a@outlook.com"]);
+    expect(accounts.map((account) => account.microsoftEmail)).toEqual(["pending-a@example.test"]);
     expect(accounts[0]?.browserSession?.status).toBe("pending");
     expect(appDb.countEligibleAccounts(job.id)).toBe(0);
     expect(queuedImports).toEqual([[accounts[0].id]]);
@@ -1884,7 +2005,7 @@ describe("scheduler helpers", () => {
       acceptedCount: 1,
     });
     expect(reconciledHistory.rows[0]?.items[0]).toMatchObject({
-      email: "pending-a@outlook.com",
+      email: "pending-a@example.test",
       acceptStatus: "accepted",
       rejectReason: null,
     });
@@ -1905,19 +2026,19 @@ describe("scheduler helpers", () => {
           JSON.stringify({
             Code: 200,
             Message: "Success",
-            Data: "cadence-zh@outlook.com:pass-zh",
+            Data: "cadence-zh@example.test:pass-zh",
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
       if (href.includes("shanyouxiang")) {
-        return new Response("cadence-sy@outlook.com----pass-sy", {
+        return new Response("cadence-sy@example.test----pass-sy", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
       }
       if (href.includes("shankeyun")) {
-        return new Response("cadence-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+        return new Response("cadence-sk@example.test----pass-sk--------refresh-token----client-id", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
@@ -1926,7 +2047,7 @@ describe("scheduler helpers", () => {
         JSON.stringify({
           success: true,
           data: {
-            mails: ["cadence-hm@outlook.com:pass-hm"],
+            mails: ["cadence-hm@example.test:pass-hm"],
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -2028,10 +2149,10 @@ describe("scheduler helpers", () => {
   test("rejects later in-flight extractor successes after the round target is already met", async () => {
     const { appDb, dbPath } = await createTempDb();
     const seeded = appDb.importAccounts([
-      { email: "target-zh@outlook.com", password: "pass-zh" },
-      { email: "target-sy@outlook.com", password: "pass-sy" },
-      { email: "target-sk@outlook.com", password: "pass-sk" },
-      { email: "target-hm@outlook.com", password: "pass-hm" },
+      { email: "target-zh@example.test", password: "pass-zh" },
+      { email: "target-sy@example.test", password: "pass-sy" },
+      { email: "target-sk@example.test", password: "pass-sk" },
+      { email: "target-hm@example.test", password: "pass-hm" },
     ]);
     markImportedAccountsReady(appDb, seeded.affectedIds);
     const buildResponseForUrl = (href) => {
@@ -2040,19 +2161,19 @@ describe("scheduler helpers", () => {
           JSON.stringify({
             Code: 200,
             Message: "Success",
-            Data: "target-zh@outlook.com:pass-zh",
+            Data: "target-zh@example.test:pass-zh",
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         );
       }
       if (href.includes("shanyouxiang")) {
-        return new Response("target-sy@outlook.com----pass-sy", {
+        return new Response("target-sy@example.test----pass-sy", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
       }
       if (href.includes("shankeyun")) {
-        return new Response("target-sk@outlook.com----pass-sk--------refresh-token----client-id", {
+        return new Response("target-sk@example.test----pass-sk--------refresh-token----client-id", {
           status: 200,
           headers: { "content-type": "text/plain" },
         });
@@ -2061,7 +2182,7 @@ describe("scheduler helpers", () => {
         JSON.stringify({
           success: true,
           data: {
-            mails: ["target-hm@outlook.com:pass-hm"],
+            mails: ["target-hm@example.test:pass-hm"],
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -2116,10 +2237,10 @@ describe("scheduler helpers", () => {
 
     const accounts = appDb.listAccounts({ page: 1, pageSize: 10 }).rows;
     expect(accounts.map((account) => account.microsoftEmail).sort()).toEqual([
-      "target-hm@outlook.com",
-      "target-sk@outlook.com",
-      "target-sy@outlook.com",
-      "target-zh@outlook.com",
+      "target-hm@example.test",
+      "target-sk@example.test",
+      "target-sy@example.test",
+      "target-zh@example.test",
     ]);
     expect(appDb.countEligibleAccounts(job.id)).toBe(4);
 
@@ -2182,7 +2303,7 @@ describe("scheduler helpers", () => {
 
   test("marks attempts failed when launch setup throws before spawn", async () => {
     const { appDb, dbPath } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "broken@outlook.com", password: "broken-pass" }]);
+    const imported = appDb.importAccounts([{ email: "broken@example.test", password: "broken-pass" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const events = [];
@@ -2321,7 +2442,7 @@ describe("scheduler helpers", () => {
       () => createSchedulerSettings(),
       () => undefined,
     );
-    const imported = appDb.importAccounts([{ email: "alpha@outlook.com", password: "pw123456" }]);
+    const imported = appDb.importAccounts([{ email: "alpha@example.test", password: "pw123456" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const account = appDb.getAccount(accountId);
@@ -2404,7 +2525,7 @@ describe("scheduler helpers", () => {
       () => createSchedulerSettings(),
       () => undefined,
     );
-    const imported = appDb.importAccounts([{ email: "retry-sync@outlook.com", password: "pw123456" }]);
+    const imported = appDb.importAccounts([{ email: "retry-sync@example.test", password: "pw123456" }]);
     const accountId = imported.affectedIds[0];
     markBrowserSessionReady(appDb, accountId);
     const account = appDb.getAccount(accountId);
@@ -2520,7 +2641,7 @@ describe("proxy aggregation", () => {
 
   test("derives 24h success counts from signup_tasks", async () => {
     const { dbPath, appDb } = await createTempDb();
-    appDb.importAccounts([{ email: "proxy@outlook.com", password: "proxy-pass" }]);
+    appDb.importAccounts([{ email: "proxy@example.test", password: "proxy-pass" }]);
     const accountId = appDb.listAccounts({ page: 1, pageSize: 10 }).rows[0].id;
     appDb.upsertProxyInventory(["node-a"], "node-a");
     const ledger = await TaskLedger.open({
@@ -2591,7 +2712,7 @@ describe("proxy aggregation", () => {
 
   test("reuses the same ip first, then same-region lru, then global lru", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proxy-reuse@outlook.com", password: "proxy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proxy-reuse@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02", "Seoul-01"], "Tokyo-01");
     appDb.touchProxyLease("Seoul-01", {
@@ -2639,7 +2760,7 @@ describe("proxy aggregation", () => {
 
   test("falls back to untested proxy nodes only when no verified healthy node exists", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proxy-unverified@outlook.com", password: "proxy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proxy-unverified@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
     appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-01");
     markBrowserSessionReady(appDb, accountId, {
@@ -2663,7 +2784,7 @@ describe("proxy aggregation", () => {
 
   test("attempt completion refreshes stored proxy region for later reuse", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proxy-region@outlook.com", password: "proxy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proxy-region@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
     appDb.upsertProxyInventory(["Osaka-01"], "Osaka-01");
     markBrowserSessionReady(appDb, accountId, {
@@ -2700,7 +2821,7 @@ describe("proxy aggregation", () => {
 
   test("account-level failures do not blacklist an otherwise healthy proxy node", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proxy-health@outlook.com", password: "proxy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proxy-health@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
     appDb.upsertProxyInventory(["Tokyo-01"], "Tokyo-01");
     appDb.touchProxyLease("Tokyo-01", {
@@ -2733,7 +2854,7 @@ describe("proxy aggregation", () => {
 
   test("failed rebootstrap preserves the last known proxy geo when capture never starts", async () => {
     const { appDb } = await createTempDb();
-    const imported = appDb.importAccounts([{ email: "proxy-failed-bootstrap@outlook.com", password: "proxy-pass" }]);
+    const imported = appDb.importAccounts([{ email: "proxy-failed-bootstrap@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
 
     markBrowserSessionReady(appDb, accountId, {
@@ -2891,8 +3012,8 @@ describe("api key queries", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
       [
-        { email: "grouped-a@outlook.com", password: "pass-a" },
-        { email: "grouped-b@outlook.com", password: "pass-b" },
+        { email: "grouped-a@example.test", password: "pass-a" },
+        { email: "grouped-b@example.test", password: "pass-b" },
       ],
       { groupName: "team-alpha" },
     );
@@ -2906,12 +3027,12 @@ describe("api key queries", () => {
 
     expect(alphaKeys.rows).toHaveLength(1);
     expect(alphaKeys.rows[0]).toMatchObject({
-      microsoftEmail: "grouped-a@outlook.com",
+      microsoftEmail: "grouped-a@example.test",
       groupName: "team-alpha",
     });
     expect(bravoKeys.rows).toHaveLength(1);
     expect(bravoKeys.rows[0]).toMatchObject({
-      microsoftEmail: "grouped-b@outlook.com",
+      microsoftEmail: "grouped-b@example.test",
       groupName: "team-bravo",
     });
 
@@ -2920,7 +3041,7 @@ describe("api key queries", () => {
     const refreshed = appDb.listApiKeys({ groupName: "team-charlie", page: 1, pageSize: 10 });
     expect(refreshed.rows).toHaveLength(1);
     expect(refreshed.rows[0]).toMatchObject({
-      microsoftEmail: "grouped-a@outlook.com",
+      microsoftEmail: "grouped-a@example.test",
       groupName: "team-charlie",
     });
 
@@ -2931,7 +3052,7 @@ describe("api key queries", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
       Array.from({ length: 25 }, (_, index) => ({
-        email: `key-${index}@outlook.com`,
+        email: `key-${index}@example.test`,
         password: `pass-${index}`,
       })),
     );
@@ -2957,9 +3078,9 @@ describe("api key queries", () => {
   test("returns api key summary counts across the full filtered result set, not just one page", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "active-a@outlook.com", password: "pass-a" },
-      { email: "active-b@outlook.com", password: "pass-b" },
-      { email: "revoked-c@outlook.com", password: "pass-c" },
+      { email: "active-a@example.test", password: "pass-a" },
+      { email: "active-b@example.test", password: "pass-b" },
+      { email: "revoked-c@example.test", password: "pass-c" },
     ]);
 
     const [activeA, activeB, revokedC] = imported.affectedIds;
@@ -2984,9 +3105,9 @@ describe("api key queries", () => {
   test("returns selected api keys for export in request order", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
-      { email: "export-a@outlook.com", password: "pass-a" },
-      { email: "export-b@outlook.com", password: "pass-b" },
-      { email: "export-c@outlook.com", password: "pass-c" },
+      { email: "export-a@example.test", password: "pass-a" },
+      { email: "export-b@example.test", password: "pass-b" },
+      { email: "export-c@example.test", password: "pass-c" },
     ]);
 
     const keyA = appDb.recordApiKey(imported.affectedIds[0], "tvly-export-a", "11.11.11.11");
@@ -3004,7 +3125,7 @@ describe("api key queries", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(
       Array.from({ length: 520 }, (_, index) => ({
-        email: `bulk-export-${index}@outlook.com`,
+        email: `bulk-export-${index}@example.test`,
         password: `pass-${index}`,
       })),
     );
@@ -3027,10 +3148,10 @@ describe("scheduler runtime spec", () => {
       job: { id: 8, runMode: "headed" },
       account: {
         id: 21,
-        microsoftEmail: "worker@outlook.com",
+        microsoftEmail: "worker@example.test",
         passwordPlaintext: "worker-pass",
         proofMailboxProvider: "cfmail",
-        proofMailboxAddress: "worker-proof@mail-us.707079.xyz",
+        proofMailboxAddress: "worker-proof@mail.example.test",
         proofMailboxId: "worker-proof-001",
       },
       outputDir: "/tmp/tavreg/job-8/attempt-21",
@@ -3081,10 +3202,10 @@ describe("scheduler runtime spec", () => {
       PROXY_CHECK_URL: "https://example.com/trace",
       PROXY_CHECK_TIMEOUT_MS: "4321",
       PROXY_LATENCY_MAX_MS: "987",
-      MICROSOFT_ACCOUNT_EMAIL: "worker@outlook.com",
+      MICROSOFT_ACCOUNT_EMAIL: "worker@example.test",
       MICROSOFT_ACCOUNT_PASSWORD: "worker-pass",
       MICROSOFT_PROOF_MAILBOX_PROVIDER: "cfmail",
-      MICROSOFT_PROOF_MAILBOX_ADDRESS: "worker-proof@mail-us.707079.xyz",
+      MICROSOFT_PROOF_MAILBOX_ADDRESS: "worker-proof@mail.example.test",
       MICROSOFT_PROOF_MAILBOX_ID: "worker-proof-001",
       TASK_LEDGER_JOB_ID: "8",
       TASK_LEDGER_ACCOUNT_ID: "21",
@@ -3097,7 +3218,7 @@ describe("scheduler runtime spec", () => {
     expect(runtime.env.EXISTING_EMAIL).toBeUndefined();
     expect(runtime.env.EXISTING_PASSWORD).toBeUndefined();
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_PROVIDER).toBe("cfmail");
-    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail-us.707079.xyz");
+    expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ADDRESS).toBe("worker-proof@mail.example.test");
     expect(runtime.env.MICROSOFT_PROOF_MAILBOX_ID).toBe("worker-proof-001");
     expect(runtime.env.CHROME_EXECUTABLE_PATH).toBe("/opt/fingerprint-browser/chrome");
     expect(runtime.env.CHROME_REMOTE_DEBUGGING_PORT).toBeUndefined();
@@ -3108,7 +3229,7 @@ describe("scheduler runtime spec", () => {
       job: { id: 9, runMode: "headless" },
       account: {
         id: 22,
-        microsoftEmail: "grouped@outlook.com",
+        microsoftEmail: "grouped@example.test",
         passwordPlaintext: "worker-pass",
         proofMailboxProvider: null,
         proofMailboxAddress: null,
@@ -3143,7 +3264,7 @@ describe("scheduler runtime spec", () => {
       job: { id: 9, runMode: "headed" },
       account: {
         id: 22,
-        microsoftEmail: "persistent@outlook.com",
+        microsoftEmail: "persistent@example.test",
         passwordPlaintext: "worker-pass",
         proofMailboxProvider: null,
         proofMailboxAddress: null,

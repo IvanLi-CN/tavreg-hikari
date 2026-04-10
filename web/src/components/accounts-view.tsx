@@ -903,7 +903,7 @@ export function AccountsView({
               <Textarea
                 name="account-import"
                 className="min-h-72"
-                placeholder={"example@outlook.com,password123\nexample@outlook.com----password123\npassword123 example@outlook.com"}
+                placeholder={"example@example.test,password123\nexample@example.test----password123\npassword123 example@example.test"}
                 value={importContent}
                 onChange={(event) => onImportContentChange(event.target.value)}
               />

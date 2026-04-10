@@ -290,7 +290,7 @@ test("force stop aborts tracked auto extract requests and terminates active atte
     () => undefined,
   );
 
-  const imported = appDb.importAccounts([{ email: "stop-force@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "stop-force@example.test", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
   const account = appDb.getAccount(accountId)!;
   const job = appDb.createJob({
@@ -509,8 +509,8 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
   const imported = appDb.importAccounts([
-    { email: "loop-stop-1@outlook.com", password: "pw123456" },
-    { email: "loop-stop-2@outlook.com", password: "pw123456" },
+    { email: "loop-stop-1@example.test", password: "pw123456" },
+    { email: "loop-stop-2@example.test", password: "pw123456" },
   ]);
   imported.affectedIds.forEach((accountId) => markBrowserSessionReady(appDb, accountId));
 
@@ -544,7 +544,7 @@ test("force stop wins over a last-moment successful worker exit", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  const imported = appDb.importAccounts([{ email: "force-stop-success@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "force-stop-success@example.test", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
   const account = appDb.getAccount(accountId)!;
   const job = appDb.createJob({
@@ -595,7 +595,7 @@ test("pending launches block stop finalization until setup drains", async () => 
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  const imported = appDb.importAccounts([{ email: "pending-stop@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "pending-stop@example.test", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
   const account = appDb.getAccount(accountId)!;
   const job = appDb.createJob({
@@ -636,7 +636,7 @@ test("graceful stop rolls back pending launches before they start", async () => 
   process.env.CHROME_EXECUTABLE_PATH = await createFakeFingerprintBrowser(path.dirname(dbPath));
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  const imported = appDb.importAccounts([{ email: "pending-graceful-stop@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "pending-graceful-stop@example.test", password: "pw123456" }]);
   markBrowserSessionReady(appDb, imported.affectedIds[0]!);
   const job = appDb.createJob({
     runMode: "headed",
@@ -677,7 +677,7 @@ test("shutdown preserves stopped semantics while a manual stop is still draining
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
 
-  const imported = appDb.importAccounts([{ email: "stop-shutdown@outlook.com", password: "pw123456" }]);
+  const imported = appDb.importAccounts([{ email: "stop-shutdown@example.test", password: "pw123456" }]);
   const accountId = imported.affectedIds[0]!;
   const account = appDb.getAccount(accountId)!;
   const job = appDb.createJob({

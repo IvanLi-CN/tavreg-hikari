@@ -3,28 +3,28 @@ import { buildImportPreview, parseImportContent, parseImportLine } from "../src/
 
 describe("parseImportLine", () => {
   test("supports common separators and format correction", () => {
-    expect(parseImportLine("alpha@outlook.com,password123", 1)).toMatchObject({
-      email: "alpha@outlook.com",
+    expect(parseImportLine("alpha@example.test,password123", 1)).toMatchObject({
+      email: "alpha@example.test",
       password: "password123",
     });
-    expect(parseImportLine("beta@outlook.com:password456", 1)).toMatchObject({
-      email: "beta@outlook.com",
+    expect(parseImportLine("beta@example.test:password456", 1)).toMatchObject({
+      email: "beta@example.test",
       password: "password456",
     });
-    expect(parseImportLine("gamma@outlook.com | password789", 1)).toMatchObject({
-      email: "gamma@outlook.com",
+    expect(parseImportLine("gamma@example.test | password789", 1)).toMatchObject({
+      email: "gamma@example.test",
       password: "password789",
     });
-    expect(parseImportLine("delta@outlook.com password999", 1)).toMatchObject({
-      email: "delta@outlook.com",
+    expect(parseImportLine("delta@example.test password999", 1)).toMatchObject({
+      email: "delta@example.test",
       password: "password999",
     });
-    expect(parseImportLine("omega@outlook.com----password777", 1)).toMatchObject({
-      email: "omega@outlook.com",
+    expect(parseImportLine("omega@example.test----password777", 1)).toMatchObject({
+      email: "omega@example.test",
       password: "password777",
     });
-    expect(parseImportLine("password888 ---- sigma@outlook.com", 1)).toMatchObject({
-      email: "sigma@outlook.com",
+    expect(parseImportLine("password888 ---- sigma@example.test", 1)).toMatchObject({
+      email: "sigma@example.test",
       password: "password888",
     });
   });
@@ -54,9 +54,9 @@ describe("parseImportLine", () => {
       rawLine: "just-text",
       reason: "email_not_found",
     });
-    expect(parseImportLine("alpha@outlook.com", 3)).toEqual({
+    expect(parseImportLine("alpha@example.test", 3)).toEqual({
       lineNumber: 3,
-      rawLine: "alpha@outlook.com",
+      rawLine: "alpha@example.test",
       reason: "password_not_found",
     });
   });
@@ -65,17 +65,17 @@ describe("parseImportLine", () => {
 describe("parseImportContent", () => {
   test("keeps valid entries and collects invalid rows", () => {
     const parsed = parseImportContent(`
-alpha@outlook.com,password123
-beta@outlook.com----password456
+alpha@example.test,password123
+beta@example.test----password456
 invalid-line
-password789 gamma@outlook.com
+password789 gamma@example.test
     `);
 
     expect(parsed.entries).toHaveLength(3);
     expect(parsed.entries.map((entry) => entry.email)).toEqual([
-      "alpha@outlook.com",
-      "beta@outlook.com",
-      "gamma@outlook.com",
+      "alpha@example.test",
+      "beta@example.test",
+      "gamma@example.test",
     ]);
     expect(parsed.invalidRows).toEqual([
       {
@@ -90,24 +90,24 @@ password789 gamma@outlook.com
 describe("buildImportPreview", () => {
   test("marks input duplicates and existing-account actions", () => {
     const parsed = parseImportContent(`
-alpha@outlook.com,password123
-alpha@outlook.com,password456
-beta@outlook.com,password789
-gamma@outlook.com,password789
+alpha@example.test,password123
+alpha@example.test,password456
+beta@example.test,password789
+gamma@example.test,password789
 bad-line
     `);
 
     const preview = buildImportPreview(parsed.entries, parsed.invalidRows, [
       {
         id: 7,
-        microsoftEmail: "beta@outlook.com",
+        microsoftEmail: "beta@example.test",
         passwordPlaintext: "old-pass",
         hasApiKey: true,
         groupName: "linked",
       },
       {
         id: 8,
-        microsoftEmail: "gamma@outlook.com",
+        microsoftEmail: "gamma@example.test",
         passwordPlaintext: "password789",
         hasApiKey: false,
         groupName: null,
@@ -123,21 +123,21 @@ bad-line
       inputDuplicate: 1,
     });
 
-    expect(preview.items.find((item) => item.email === "alpha@outlook.com" && item.decision === "input_duplicate")).toMatchObject({
+    expect(preview.items.find((item) => item.email === "alpha@example.test" && item.decision === "input_duplicate")).toMatchObject({
       duplicateOfLine: 3,
     });
-    expect(preview.items.find((item) => item.email === "beta@outlook.com")).toMatchObject({
+    expect(preview.items.find((item) => item.email === "beta@example.test")).toMatchObject({
       decision: "update_password",
       existingHasApiKey: true,
       groupName: "linked",
     });
-    expect(preview.items.find((item) => item.email === "beta@outlook.com")).not.toHaveProperty("existingPassword");
-    expect(preview.items.find((item) => item.email === "gamma@outlook.com")).toMatchObject({
+    expect(preview.items.find((item) => item.email === "beta@example.test")).not.toHaveProperty("existingPassword");
+    expect(preview.items.find((item) => item.email === "gamma@example.test")).toMatchObject({
       decision: "keep_existing",
     });
     expect(preview.effectiveEntries).toEqual([
-      { email: "alpha@outlook.com", password: "password456" },
-      { email: "beta@outlook.com", password: "password789" },
+      { email: "alpha@example.test", password: "password456" },
+      { email: "beta@example.test", password: "password789" },
     ]);
   });
 });

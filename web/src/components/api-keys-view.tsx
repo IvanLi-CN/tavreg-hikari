@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Badge } from "@/components/ui/badge";
+import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -16,8 +16,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { StatusBadge } from "@/components/status-badge";
-import type { ApiKeyQuery, ApiKeysPayload } from "@/lib/app-types";
+import type { ApiKeyQuery, ApiKeySortBy, ApiKeysPayload } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -28,6 +29,51 @@ function FilterField(props: { label: string; children: ReactNode }) {
   );
 }
 
+function resolveApiKeySortState(
+  query: Pick<ApiKeyQuery, "sortBy" | "sortDir">,
+  column: ApiKeySortBy,
+): "inactive" | "desc" | "asc" {
+  if (query.sortBy !== column) return "inactive";
+  return query.sortDir;
+}
+
+function SortableApiKeyTimeTableHead(props: {
+  label: string;
+  column: ApiKeySortBy;
+  query: ApiKeyQuery;
+  onQueryChange: (value: ApiKeyQuery) => void;
+}) {
+  const state = resolveApiKeySortState(props.query, props.column);
+  const ariaSort = state === "asc" ? "ascending" : state === "desc" ? "descending" : "none";
+  const nextQuery: ApiKeyQuery =
+    state === "desc"
+      ? { ...props.query, sortBy: props.column, sortDir: "asc", page: 1 }
+      : { ...props.query, sortBy: props.column, sortDir: "desc", page: 1 };
+
+  return (
+    <TableHead aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={cn(
+          "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
+          state === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
+        )}
+        onClick={() => props.onQueryChange(nextQuery)}
+        aria-label={`${props.label}排序：${state === "desc" ? "当前降序，再点升序" : state === "asc" ? "当前升序，再点降序" : "当前未排序，点击按降序排序"}`}
+      >
+        <span>{props.label}</span>
+        {state === "desc" ? (
+          <ArrowDown className="size-3.5" aria-hidden="true" />
+        ) : state === "asc" ? (
+          <ArrowUp className="size-3.5" aria-hidden="true" />
+        ) : (
+          <ArrowUpDown className="size-3.5" aria-hidden="true" />
+        )}
+      </button>
+    </TableHead>
+  );
+}
+
 export function ApiKeysView({
   apiKeys,
   query,
@@ -35,6 +81,7 @@ export function ApiKeysView({
   exportOpen,
   exportContent,
   exportBusy,
+  headerSlot,
   onQueryChange,
   onToggleSelection,
   onTogglePageSelection,
@@ -50,6 +97,7 @@ export function ApiKeysView({
   exportOpen: boolean;
   exportContent: string;
   exportBusy: boolean;
+  headerSlot?: ReactNode;
   onQueryChange: (value: ApiKeyQuery) => void;
   onToggleSelection: (apiKeyId: number, checked: boolean) => void;
   onTogglePageSelection: (checked: boolean) => void;
@@ -60,8 +108,6 @@ export function ApiKeysView({
   onSaveExport: () => void;
 }) {
   const exportTextareaRef = useRef<HTMLTextAreaElement>(null);
-  const activeCount = apiKeys.summary.active;
-  const revokedCount = apiKeys.summary.revoked;
   const pageCount = Math.max(1, Math.ceil(Math.max(1, apiKeys.total) / Math.max(1, query.pageSize)));
   const selectedOnPage = apiKeys.rows.filter((row) => selectedIds.includes(row.id)).length;
   const allCurrentPageSelected = apiKeys.rows.length > 0 && selectedOnPage === apiKeys.rows.length;
@@ -80,16 +126,8 @@ export function ApiKeysView({
   return (
     <>
       <Card>
-        <CardHeader>
-          <CardTitle>API Keys</CardTitle>
-          <CardDescription>共 {apiKeys.total} 条 key 记录，默认展示前缀与遮罩值。支持按账号分组筛选，并可跨分页勾选后批量导出。</CardDescription>
-        </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="success">active · {activeCount}</Badge>
-            <Badge variant="warning">revoked · {revokedCount}</Badge>
-            <Badge variant="info">total · {apiKeys.total}</Badge>
-          </div>
+          {headerSlot ? <div>{headerSlot}</div> : null}
 
           <div className="flex flex-col gap-3 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-400">
@@ -156,7 +194,7 @@ export function ApiKeysView({
 
           {apiKeys.rows.length === 0 ? (
             <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
-              还没有 API key 记录。
+              还没有 Tavily API key 记录。
             </div>
           ) : (
             <>
@@ -216,8 +254,18 @@ export function ApiKeysView({
                       <TableHead>Key 前缀</TableHead>
                       <TableHead>Key 遮罩</TableHead>
                       <TableHead>状态</TableHead>
-                      <TableHead>提取时间</TableHead>
-                      <TableHead>最近验证</TableHead>
+                      <SortableApiKeyTimeTableHead
+                        label="提取时间"
+                        column="extractedAt"
+                        query={query}
+                        onQueryChange={onQueryChange}
+                      />
+                      <SortableApiKeyTimeTableHead
+                        label="最近验证"
+                        column="lastVerifiedAt"
+                        query={query}
+                        onQueryChange={onQueryChange}
+                      />
                     </TableRow>
                   </TableHeader>
                   <TableBody>

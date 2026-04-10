@@ -227,7 +227,7 @@ function extractOpenAiOtpCode(payload: unknown): string | null {
 }
 
 async function waitForCfMailOtp(input: { address: string; mailboxId?: string; notBefore: string; timeoutMs: number; pollMs: number }): Promise<string> {
-  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.707979.xyz");
+  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
   const apiKey = requireEnv("CFMAIL_API_KEY");
   const seen = new Set<string>();
   let lastMessageCount = 0;

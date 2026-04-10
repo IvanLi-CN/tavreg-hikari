@@ -26,12 +26,12 @@ test("serializeAttemptForApi reflects the latest signup task details for active 
   });
 
   try {
-    const imported = db.importAccounts([{ email: "alpha@outlook.com", password: "pw123456" }]);
+    const imported = db.importAccounts([{ email: "alpha@example.test", password: "pw123456" }]);
     const accountId = imported.affectedIds[0]!;
     const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = db.createAttempt(job.id, {
       accountId,
-      accountEmail: "alpha@outlook.com",
+      accountEmail: "alpha@example.test",
       outputDir: path.join(root, "attempt-output"),
     });
 
@@ -85,7 +85,7 @@ test("serializeAttemptForApi ignores stale signup task rows for a fresh retry at
   });
 
   try {
-    const imported = db.importAccounts([{ email: "retry@outlook.com", password: "pw123456" }]);
+    const imported = db.importAccounts([{ email: "retry@example.test", password: "pw123456" }]);
     const accountId = imported.affectedIds[0]!;
     const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 2 });
 
@@ -107,7 +107,7 @@ test("serializeAttemptForApi ignores stale signup task rows for a fresh retry at
 
     const retryAttempt = db.createAttempt(job.id, {
       accountId,
-      accountEmail: "retry@outlook.com",
+      accountEmail: "retry@example.test",
       outputDir: path.join(root, "attempt-output"),
     });
     const serialized = serializeAttemptForApi(db, retryAttempt);
@@ -143,12 +143,12 @@ test("serializeAttemptForApi keeps ledger diagnostics for failed attempts", asyn
   });
 
   try {
-    const imported = db.importAccounts([{ email: "failed@outlook.com", password: "pw123456" }]);
+    const imported = db.importAccounts([{ email: "failed@example.test", password: "pw123456" }]);
     const accountId = imported.affectedIds[0]!;
     const job = db.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     const attempt = db.createAttempt(job.id, {
       accountId,
-      accountEmail: "failed@outlook.com",
+      accountEmail: "failed@example.test",
       outputDir: path.join(root, "attempt-output"),
     });
 
