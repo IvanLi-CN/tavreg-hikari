@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "",
+  "base_stable_version": "",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-11T17:53:05Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "714c3a46ee7e6b771328d64c6297954ab9aeca3e",
+  "pr_number": 34,
+  "pr_title": "ci: add release failure telegram alert",
+  "registry": "ghcr.io",
+  "release_bump": "docs",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_prerelease": false,
+  "release_tag": "",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "",
+  "target_sha": "cf9c9fa7bc8c815a324c451f638a09ddf36f9dbf",
+  "type_label": "type:docs"
+}
