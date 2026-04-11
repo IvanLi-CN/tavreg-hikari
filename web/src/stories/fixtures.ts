@@ -101,6 +101,11 @@ export const sampleJob: JobSnapshot = {
     lastMessage: "账号鸭 accepted 1 usable account(s)",
     updatedAt: "2026-03-18T07:24:32.000Z",
   },
+  runModeAvailability: {
+    headed: true,
+    headless: true,
+    headedReason: null,
+  },
 };
 
 export const sampleEvents: EventRecord[] = [
@@ -618,6 +623,11 @@ export const sampleChatGptJob: JobSnapshot = {
   recentAttempts: [],
   eligibleCount: 0,
   autoExtractState: null,
+  runModeAvailability: {
+    headed: true,
+    headless: true,
+    headedReason: null,
+  },
 };
 
 const sampleChatGptCredentialSeeds = [

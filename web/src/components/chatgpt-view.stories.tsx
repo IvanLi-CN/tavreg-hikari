@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ChatGptView } from "@/components/chatgpt-view";
-import type { ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
+import type { ChatGptJobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 
 const sampleJobDraft: ChatGptJobDraft = {
   runMode: "headed",
@@ -78,6 +78,17 @@ const sampleJob: JobSnapshot = {
   ],
   eligibleCount: 0,
   autoExtractState: null,
+  runModeAvailability: {
+    headed: true,
+    headless: true,
+    headedReason: null,
+  },
+};
+
+const headlessOnlyAvailability: RunModeAvailability = {
+  headed: false,
+  headless: true,
+  headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
 };
 
 const meta = {
@@ -100,6 +111,7 @@ export const BatchRunning: Story = {
   args: {
     jobDraft: sampleJobDraft,
     job: sampleJob,
+    runModeAvailability: sampleJob.runModeAvailability,
     jobBusy: false,
     onJobDraftChange: fn(),
     onStart: fn(),
@@ -118,6 +130,7 @@ export const BatchReady: Story = {
       recentAttempts: [],
       eligibleCount: 0,
       autoExtractState: null,
+      runModeAvailability: sampleJob.runModeAvailability,
       cooldown: null,
     },
   },
@@ -133,6 +146,17 @@ export const BatchReadyHeadless: Story = {
   },
 };
 
+export const BatchReadyHeadlessOnly: Story = {
+  args: {
+    ...BatchReady.args,
+    jobDraft: {
+      ...sampleJobDraft,
+      runMode: "headless",
+    },
+    runModeAvailability: headlessOnlyAvailability,
+  },
+};
+
 export const InteractiveBatchControls: Story = {
   args: {
     ...BatchRunning.args,
@@ -143,7 +167,8 @@ export const InteractiveBatchControls: Story = {
       <>
         <ChatGptView
           jobDraft={batchDraft}
-          job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [] }}
+          job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [], runModeAvailability: sampleJob.runModeAvailability }}
+          runModeAvailability={sampleJob.runModeAvailability}
           jobBusy={false}
           onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
           onStart={() => undefined}
@@ -169,5 +194,45 @@ export const InteractiveBatchControls: Story = {
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"need":4');
     await expect(canvas.queryByText("最近凭据")).toBeNull();
     await expect(canvas.getByText(/Keys > ChatGPT/)).toBeInTheDocument();
+  },
+};
+
+export const InteractiveHeadlessOnly: Story = {
+  args: {
+    ...BatchReady.args,
+    jobDraft: {
+      ...sampleJobDraft,
+      runMode: "headless",
+    },
+    runModeAvailability: headlessOnlyAvailability,
+  },
+  render: () => {
+    const [batchDraft, setBatchDraft] = useState<ChatGptJobDraft>({ ...sampleJobDraft, runMode: "headless" });
+    return (
+      <>
+        <ChatGptView
+          jobDraft={batchDraft}
+          job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [], runModeAvailability: headlessOnlyAvailability }}
+          runModeAvailability={headlessOnlyAvailability}
+          jobBusy={false}
+          onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
+          onStart={() => undefined}
+          onStop={() => undefined}
+          onForceStop={() => undefined}
+        />
+        <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
+          {JSON.stringify(batchDraft)}
+        </pre>
+      </>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("mode: headless")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
+    await expect(within(document.body).queryByRole("option", { name: "headed" })).toBeNull();
+    await expect(within(document.body).getByRole("option", { name: "headless" })).toBeInTheDocument();
+    await expect(canvas.getByText(/当前环境仅支持/)).toBeInTheDocument();
+    await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
   },
 };

@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { ChatGptJobDraft, JobSnapshot } from "@/lib/app-types";
+import type { ChatGptJobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 
 function Field(props: { label: string; children: ReactNode }) {
@@ -40,6 +40,7 @@ function statusTone(status: string): "default" | "good" | "warn" | "bad" {
 export function ChatGptView({
   jobDraft,
   job,
+  runModeAvailability,
   jobBusy,
   onJobDraftChange,
   onStart,
@@ -48,6 +49,7 @@ export function ChatGptView({
 }: {
   jobDraft: ChatGptJobDraft;
   job: JobSnapshot;
+  runModeAvailability: RunModeAvailability;
   jobBusy: boolean;
   onJobDraftChange: (patch: Partial<ChatGptJobDraft>) => void;
   onStart: (draft: ChatGptJobDraft) => void | Promise<void>;
@@ -63,10 +65,10 @@ export function ChatGptView({
   const canStop = status === "running";
   const canForceStop = ["running", "stopping", "force_stopping"].includes(status);
   const jobConfigLocked = Boolean(job.job && !["completed", "failed", "stopped"].includes(status));
-  const effectiveRunMode = job.job?.runMode || jobDraft.runMode;
-  const effectiveNeed = job.job?.need || jobDraft.need;
-  const effectiveParallel = job.job?.parallel || jobDraft.parallel;
-  const effectiveMaxAttempts = job.job?.maxAttempts || jobDraft.maxAttempts;
+  const effectiveRunMode = jobConfigLocked ? (job.job?.runMode || jobDraft.runMode) : jobDraft.runMode;
+  const effectiveNeed = jobConfigLocked ? (job.job?.need || jobDraft.need) : jobDraft.need;
+  const effectiveParallel = jobConfigLocked ? (job.job?.parallel || jobDraft.parallel) : jobDraft.parallel;
+  const effectiveMaxAttempts = jobConfigLocked ? (job.job?.maxAttempts || jobDraft.maxAttempts) : jobDraft.maxAttempts;
 
   const commitJobDraft = (): ChatGptJobDraft => {
     const need = needRef.current?.commit() ?? jobDraft.need;
@@ -118,7 +120,7 @@ export function ChatGptView({
                     <SelectValue placeholder="选择模式" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="headed">headed</SelectItem>
+                    {runModeAvailability.headed ? <SelectItem value="headed">headed</SelectItem> : null}
                     <SelectItem value="headless">headless</SelectItem>
                   </SelectContent>
                 </Select>
@@ -158,6 +160,11 @@ export function ChatGptView({
               <Badge variant="neutral">max attempts: {effectiveMaxAttempts}</Badge>
               <span>{effectiveRunMode === "headless" ? "当前将以无头浏览器模式批量运行" : "当前将以有头浏览器模式批量运行"}</span>
             </div>
+            {!runModeAvailability.headed ? (
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                当前环境仅支持 <span className="font-medium text-slate-200">headless</span>。{runModeAvailability.headedReason || "有头浏览器不可用。"}
+              </div>
+            ) : null}
             <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
               每个 attempt 都会预生成独立邮箱与注册资料；单个 attempt 内若发生页面跳转或登录重试，只会继续复用它自己的那份资料，不会跨 attempt 共享。
             </div>

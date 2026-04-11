@@ -51,6 +51,7 @@ import { createExclusiveRunner } from "./exclusive-runner.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { ChatGptJobScheduler } from "./chatgpt-scheduler.js";
+import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
@@ -695,6 +696,7 @@ type SiteScheduler = {
 };
 
 function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
+  const runModeAvailability = detectBrowserRunModeAvailability();
   const job = db.getCurrentJob(site);
   if (!job) {
     return {
@@ -704,6 +706,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       recentAttempts: [],
       eligibleCount: 0,
       autoExtractState: null,
+      runModeAvailability,
       cooldown: scheduler.getCooldownSnapshot?.() ?? null,
     };
   }
@@ -717,6 +720,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: site === "tavily" ? db.countEligibleAccounts(job.id) : 0,
     autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
+    runModeAvailability,
     cooldown: scheduler.getCooldownSnapshot?.() ?? null,
   };
 }
@@ -2170,8 +2174,13 @@ async function main(): Promise<void> {
         const scheduler = getSchedulerBySite(site);
         try {
           if (action === "start") {
+            const runModeAvailability = detectBrowserRunModeAvailability();
             if (site === "chatgpt") {
-              const runMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : "headed";
+              const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
+              if (explicitRunMode) {
+                assertRunModeAvailable(explicitRunMode, runModeAvailability);
+              }
+              const runMode = explicitRunMode || clampRunModeToAvailability("headed", runModeAvailability);
               const need = toOptionalPositiveInt(body?.need) ?? 1;
               const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
               const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
@@ -2188,7 +2197,11 @@ async function main(): Promise<void> {
               return json({ ok: true, job });
             }
             const settings = readSettings();
-            const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
+            const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
+            if (explicitRunMode) {
+              assertRunModeAvailable(explicitRunMode, runModeAvailability);
+            }
+            const requestedRunMode = explicitRunMode || clampRunModeToAvailability(settings.defaultRunMode, runModeAvailability);
             const job = await tavilyScheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
