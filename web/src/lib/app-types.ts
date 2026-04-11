@@ -279,6 +279,12 @@ export type AttemptRecord = {
   completedAt: string | null;
 };
 
+export type RunModeAvailability = {
+  headed: boolean;
+  headless: true;
+  headedReason: string | null;
+};
+
 export type JobSnapshot = {
   site: JobSite;
   job: null | {
@@ -305,6 +311,7 @@ export type JobSnapshot = {
   recentAttempts: AttemptRecord[];
   eligibleCount: number;
   autoExtractState: AutoExtractState | null;
+  runModeAvailability: RunModeAvailability;
   cooldown?: null | {
     active: boolean;
     until: string;
@@ -322,6 +329,13 @@ export type ChatGptDraft = {
   birthDate: string;
   mailboxId: string;
   generatedAt: string;
+};
+
+export type ChatGptJobDraft = {
+  runMode: "headed" | "headless";
+  need: number;
+  parallel: number;
+  maxAttempts: number;
 };
 
 export type ChatGptDraftPayload = {

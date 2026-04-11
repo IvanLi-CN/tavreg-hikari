@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import {
   AppDatabase,
+  computeLaunchCapacity,
+  normalizeJobMaxAttempts,
   type AppSettings,
   type ChatGptCredentialRecord,
   type JobAttemptRecord,
@@ -23,7 +25,7 @@ interface ActiveAttempt {
   stopRequested: "force_stop" | null;
 }
 
-interface ChatGptJobPayload {
+interface ChatGptAttemptDraft {
   email: string;
   password: string;
   nickname: string;
@@ -102,17 +104,24 @@ function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | 
   }
 }
 
-function parsePayload(job: Pick<JobRecord, "payloadJson">): ChatGptJobPayload {
-  const payload = job.payloadJson || {};
-  const email = String(payload.email || "").trim().toLowerCase();
-  const password = String(payload.password || "");
-  const nickname = String(payload.nickname || "").trim();
-  const birthDate = String(payload.birthDate || "").trim();
-  const mailboxId = String(payload.mailboxId || "").trim();
+function normalizeDraft(input: unknown): ChatGptAttemptDraft | null {
+  if (!input || typeof input !== "object") return null;
+  const record = input as Record<string, unknown>;
+  const email = String(record.email || "").trim().toLowerCase();
+  const password = String(record.password || "");
+  const nickname = String(record.nickname || "").trim();
+  const birthDate = String(record.birthDate || "").trim();
+  const mailboxId = String(record.mailboxId || "").trim();
   if (!email || !password || !nickname || !birthDate || !mailboxId) {
-    throw new Error("chatgpt_job_payload_invalid");
+    return null;
   }
-  return { email, password, nickname, birthDate, mailboxId };
+  return {
+    email,
+    password,
+    nickname,
+    birthDate,
+    mailboxId,
+  };
 }
 
 function resolveCredentialExpiry(result: NonNullable<ChatGptWorkerResult["credentials"]>): string | null {
@@ -193,16 +202,29 @@ function resolveChatGptProxyNode(
 export class ChatGptJobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
+  private readonly draftFailureCounts = new Map<number, number>();
   private loopPromise: Promise<void> | null = null;
   private shuttingDown = false;
+  private readonly site: JobSite;
+  private readonly createAttemptDraft: () => Promise<ChatGptAttemptDraft>;
 
   constructor(
     private readonly db: AppDatabase,
     private readonly repoRoot: string,
     private readonly getSettings: () => AppSettings,
     private readonly publish: (event: ServerEvent) => void,
-    private readonly site: JobSite = "chatgpt",
-  ) {}
+    options?: {
+      site?: JobSite;
+      createAttemptDraft?: () => Promise<ChatGptAttemptDraft>;
+    },
+  ) {
+    this.site = options?.site || "chatgpt";
+    this.createAttemptDraft =
+      options?.createAttemptDraft
+      || (async (): Promise<ChatGptAttemptDraft> => {
+        throw new Error("chatgpt_attempt_draft_factory_missing");
+      });
+  }
 
   currentJob(): JobRecord | null {
     return this.db.getCurrentJob(this.site);
@@ -257,7 +279,12 @@ export class ChatGptJobScheduler {
     };
   }
 
-  async startJob(input: ChatGptJobPayload): Promise<JobRecord> {
+  async startJob(input: {
+    runMode: "headed" | "headless";
+    need: number;
+    parallel: number;
+    maxAttempts: number;
+  }): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
       throw new Error("configure a Mihomo subscription before starting a ChatGPT job");
@@ -266,24 +293,28 @@ export class ChatGptJobScheduler {
     if (cooldown?.active) {
       throw new Error(`${cooldown.reason}; retry after ${cooldown.until}`);
     }
+    const normalizedNeed = Math.max(1, Math.trunc(input.need));
+    const normalizedParallel = Math.max(1, Math.trunc(input.parallel));
+    const normalizedMaxAttempts = normalizeJobMaxAttempts(normalizedNeed, input.maxAttempts);
+    const runMode = input.runMode === "headless" ? "headless" : "headed";
     const job = this.db.createJob({
       site: this.site,
-      runMode: "headed",
-      need: 1,
-      parallel: 1,
-      maxAttempts: 1,
-      payloadJson: {
-        email: input.email,
-        password: input.password,
-        nickname: input.nickname,
-        birthDate: input.birthDate,
-        mailboxId: input.mailboxId,
-      },
+      runMode,
+      need: normalizedNeed,
+      parallel: normalizedParallel,
+      maxAttempts: normalizedMaxAttempts,
+      payloadJson: {},
     });
-    this.emit("job.updated", { site: this.site, job });
+    const startupLaunch = await this.dispatchAttempt(job, { persistFailureOnDraftError: false });
+    if (!startupLaunch.launched && startupLaunch.fatal) {
+      this.db.deleteJob(job.id);
+      throw new Error(startupLaunch.error || "chatgpt attempt draft failed at attempt #1");
+    }
+    const current = this.db.getJob(job.id) || job;
+    this.emit("job.updated", { site: this.site, job: current });
     this.emit("toast", { level: "info", message: `chatgpt job #${job.id} started` });
     this.ensureLoop(job.id);
-    return job;
+    return current;
   }
 
   stopCurrentJob(): JobRecord {
@@ -344,6 +375,64 @@ export class ChatGptJobScheduler {
     });
   }
 
+  private clearJobRuntimeState(jobId: number): void {
+    this.draftFailureCounts.delete(jobId);
+  }
+
+  private async dispatchAttempt(
+    job: JobRecord,
+    options?: { persistFailureOnDraftError?: boolean },
+  ): Promise<{ launched: boolean; fatal: boolean; error?: string }> {
+    const currentJob = this.db.getJob(job.id) || job;
+    const launchIndex = currentJob.launchedCount;
+    let draft: ChatGptAttemptDraft;
+    try {
+      const generatedDraft = await this.createAttemptDraft();
+      const normalizedDraft = normalizeDraft(generatedDraft);
+      if (!normalizedDraft) {
+        throw new Error("chatgpt_attempt_draft_invalid");
+      }
+      draft = normalizedDraft;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const lastError = `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`;
+      if (options?.persistFailureOnDraftError === false) {
+        return { launched: false, fatal: true, error: lastError };
+      }
+      if (currentJob.launchedCount > 0 && this.activeAttempts.size === 0) {
+        this.draftFailureCounts.set(job.id, (this.draftFailureCounts.get(job.id) || 0) + 1);
+      }
+      if (this.activeAttempts.size > 0 || currentJob.launchedCount > 0) {
+        const next = this.db.updateJobState(job.id, { lastError });
+        this.emit("job.updated", { site: this.site, job: next });
+        return { launched: false, fatal: false, error: lastError };
+      }
+      const failed = this.db.completeJob(job.id, false, lastError);
+      this.emit("job.updated", { site: this.site, job: failed });
+      this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
+      return { launched: false, fatal: true, error: failed.lastError || lastError };
+    }
+
+    this.draftFailureCounts.delete(job.id);
+
+    const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
+    const attempt = this.db.createAttempt(job.id, {
+      accountEmail: draft.email,
+      outputDir,
+    });
+    try {
+      await this.spawnAttempt(currentJob, attempt, draft, outputDir);
+      this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
+      this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
+    } catch (error) {
+      this.failAttempt(job.id, attempt.id, {
+        errorCode: "launch_setup_failed",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return { launched: true, fatal: false };
+  }
+
   private async runLoop(jobId: number): Promise<void> {
     while (!this.shuttingDown) {
       const job = this.db.getJob(jobId);
@@ -353,6 +442,7 @@ export class ChatGptJobScheduler {
       if (isStopInProgressStatus(job.status)) {
         if (this.activeAttempts.size === 0) {
           const stopped = this.db.stopJob(job.id);
+          this.clearJobRuntimeState(job.id);
           this.emit("job.updated", { site: this.site, job: stopped });
           this.emit("toast", { level: "info", message: `chatgpt job #${job.id} stopped` });
           return;
@@ -364,6 +454,7 @@ export class ChatGptJobScheduler {
       if (job.successCount >= job.need) {
         if (this.activeAttempts.size === 0) {
           const completed = this.db.completeJob(job.id, true);
+          this.clearJobRuntimeState(job.id);
           this.emit("job.updated", { site: this.site, job: completed });
           this.emit("toast", { level: "success", message: `chatgpt job #${job.id} completed` });
           return;
@@ -372,29 +463,31 @@ export class ChatGptJobScheduler {
         continue;
       }
 
-      if (this.activeAttempts.size === 0 && job.launchedCount < job.maxAttempts) {
-        const payload = parsePayload(job);
-        const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}`);
-        const attempt = this.db.createAttempt(job.id, {
-          accountEmail: payload.email,
-          outputDir,
-        });
-        try {
-          await this.spawnAttempt(job, attempt, payload, outputDir);
-          this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
-          this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
-        } catch (error) {
-          this.failAttempt(job.id, attempt.id, {
-            errorCode: "launch_setup_failed",
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
+      const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
+      if (launchCapacity > 0) {
+        for (let slot = 0; slot < launchCapacity; slot += 1) {
+          const launch = await this.dispatchAttempt(job);
+          if (!launch.launched) {
+            if (launch.fatal) {
+              return;
+            }
+            break;
+          }
         }
       }
 
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
-      if (this.activeAttempts.size === 0 && refreshed.launchedCount >= refreshed.maxAttempts && refreshed.successCount < refreshed.need) {
-        const failed = this.db.completeJob(jobId, false, "chatgpt attempts exhausted");
+      const remainingLaunchBudget = Math.max(0, refreshed.maxAttempts - refreshed.launchedCount);
+      const draftFailureCount = this.draftFailureCounts.get(jobId) || 0;
+      const draftBudgetExhausted = remainingLaunchBudget >= 0 && draftFailureCount > remainingLaunchBudget;
+      if (
+        this.activeAttempts.size === 0
+        && refreshed.successCount < refreshed.need
+        && (refreshed.launchedCount >= refreshed.maxAttempts || draftBudgetExhausted)
+      ) {
+        const failed = this.db.completeJob(jobId, false, refreshed.lastError || "chatgpt attempts exhausted");
+        this.clearJobRuntimeState(job.id);
         this.emit("job.updated", { site: this.site, job: failed });
         this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
         return;
@@ -403,7 +496,7 @@ export class ChatGptJobScheduler {
     }
   }
 
-  private async spawnAttempt(job: JobRecord, attempt: JobAttemptRecord, payload: ChatGptJobPayload, outputDir: string): Promise<void> {
+  private async spawnAttempt(job: JobRecord, attempt: JobAttemptRecord, payload: ChatGptAttemptDraft, outputDir: string): Promise<void> {
     await mkdir(outputDir, { recursive: true });
     const settings = this.getSettings();
     const portLeases = await reserveMihomoPortLeases();
@@ -428,7 +521,7 @@ export class ChatGptJobScheduler {
       ...buildAttemptSpawnOptions(this.repoRoot, {
         env: {
           ...process.env,
-          RUN_MODE: "headed",
+          RUN_MODE: job.runMode,
           CHATGPT_JOB_EMAIL: payload.email,
           CHATGPT_JOB_PASSWORD: payload.password,
           CHATGPT_JOB_NICKNAME: payload.nickname,
@@ -580,9 +673,9 @@ export class ChatGptJobScheduler {
         ? "chatgpt_refresh_token_missing"
         : workerErrorCode
           ? workerErrorCode
-        : code == null
-          ? "process_exit"
-          : `exit_${code}`;
+          : code == null
+            ? "process_exit"
+            : `exit_${code}`;
     this.failAttempt(jobId, attemptId, {
       errorCode,
       errorMessage: message,

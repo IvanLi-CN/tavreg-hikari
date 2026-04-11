@@ -32,8 +32,7 @@ import type {
   ChatGptCredentialQuery,
   ChatGptCredentialSort,
   ChatGptCredentialsPayload,
-  ChatGptDraft,
-  ChatGptDraftPayload,
+  ChatGptJobDraft,
   ApiKeyExportPayload,
   ApiKeysPayload,
   ApiKeyQuery,
@@ -57,8 +56,14 @@ import type {
   ProxyCheckScope,
   ProxyPayload,
   ProxySettingsUpdate,
+  RunModeAvailability,
 } from "@/lib/app-types";
 import { jobToDraft, normalizeJobDraft } from "@/lib/job-draft";
+import {
+  clampRunModeToAvailability,
+  createPendingRunModeAvailability,
+  resolvePendingRunModeAvailabilityFallback,
+} from "@/lib/run-mode";
 import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
@@ -181,6 +186,7 @@ function createIdleJobSnapshot(site: JobSite): JobSnapshot {
     recentAttempts: [],
     eligibleCount: 0,
     autoExtractState: null,
+    runModeAvailability: createPendingRunModeAvailability(),
     cooldown: null,
   };
 }
@@ -189,8 +195,14 @@ export function App() {
   const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
-  const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
+  const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -323,6 +335,7 @@ export function App() {
   });
   const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
+  const [chatGptJobDraftTouched, setChatGptJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -349,7 +362,6 @@ export function App() {
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
-  const [chatGptDraftBusy, setChatGptDraftBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
 
@@ -390,19 +402,6 @@ export function App() {
       return;
     }
     setJob(snapshot);
-  };
-  const refreshChatGptDraft = async (requestedEmail?: string) => {
-    try {
-      setChatGptDraftBusy(true);
-      const params = new URLSearchParams();
-      if (requestedEmail?.trim()) {
-        params.set("email", requestedEmail.trim());
-      }
-      const payload = await api<ChatGptDraftPayload>(`/api/chatgpt/draft${params.size > 0 ? `?${params.toString()}` : ""}`);
-      setChatGptDraft(payload.draft);
-    } finally {
-      setChatGptDraftBusy(false);
-    }
   };
   const refreshChatGptCredentials = async (
     nextQuery = chatGptCredentialQueryRef.current,
@@ -552,20 +551,25 @@ export function App() {
     return payload.credential;
   };
 
-  const handleChatGptDraftChange = (patch: Partial<ChatGptDraft>) => {
-    setChatGptDraft((current) => (current ? { ...current, ...patch } : current));
+  const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
+    setChatGptJobDraftTouched(true);
+    setChatGptJobDraft((current) => {
+      const requestedRunMode = patch.runMode === "headless" || patch.runMode === "headed" ? patch.runMode : current.runMode;
+      const runMode = clampRunModeToAvailability(requestedRunMode, chatGptJob.runModeAvailability);
+      const need = Math.max(1, Math.trunc(patch.need ?? current.need));
+      const parallel = Math.max(1, Math.trunc(patch.parallel ?? current.parallel));
+      const requestedMaxAttempts = Math.max(1, Math.trunc(patch.maxAttempts ?? current.maxAttempts));
+      const maxAttempts = requestedMaxAttempts >= need ? requestedMaxAttempts : Math.max(need, Math.ceil(need * 1.5));
+      return {
+        runMode,
+        need,
+        parallel,
+        maxAttempts,
+      };
+    });
   };
 
-  const handleChatGptRegenerateDraft = async () => {
-    try {
-      setError(null);
-      await refreshChatGptDraft();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop") => {
+  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop", draft?: ChatGptJobDraft) => {
     try {
       setChatGptJobBusy(true);
       setError(null);
@@ -574,14 +578,11 @@ export function App() {
         action,
       };
       if (action === "start") {
-        if (!chatGptDraft) {
-          throw new Error("chatgpt draft is not ready");
-        }
-        body.email = chatGptDraft.email;
-        body.password = chatGptDraft.password;
-        body.nickname = chatGptDraft.nickname;
-        body.birthDate = chatGptDraft.birthDate;
-        body.mailboxId = chatGptDraft.mailboxId;
+        const nextJobDraft = draft || chatGptJobDraft;
+        body.runMode = clampRunModeToAvailability(nextJobDraft.runMode, chatGptJob.runModeAvailability);
+        body.need = nextJobDraft.need;
+        body.parallel = nextJobDraft.parallel;
+        body.maxAttempts = nextJobDraft.maxAttempts;
       }
       if (action === "force_stop") {
         body.confirmForceStop = true;
@@ -590,6 +591,7 @@ export function App() {
         method: "POST",
         body: JSON.stringify(body),
       });
+      setChatGptJobDraftTouched(false);
       await Promise.all([
         refreshJob("chatgpt"),
         refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current),
@@ -598,6 +600,19 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setChatGptJobBusy(false);
+    }
+  };
+
+  const handleRevealChatGptCredential = async (credentialId: number) => {
+    try {
+      setChatGptCredentialBusy(true);
+      setError(null);
+      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
+      setRevealedChatGptCredential(payload.credential);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptCredentialBusy(false);
     }
   };
 
@@ -711,7 +726,6 @@ export function App() {
     void Promise.all([
       refreshJob("tavily"),
       refreshJob("chatgpt"),
-      refreshChatGptDraft(),
       refreshChatGptCredentials(),
       refreshAccounts(),
       refreshApiKeys(),
@@ -722,6 +736,14 @@ export function App() {
       refreshMicrosoftGraphSettings(),
       refreshMailboxes(),
     ]).catch((err) => {
+      setJob((current) => ({
+        ...current,
+        runModeAvailability: resolvePendingRunModeAvailabilityFallback(current.runModeAvailability),
+      }));
+      setChatGptJob((current) => ({
+        ...current,
+        runModeAvailability: resolvePendingRunModeAvailabilityFallback(current.runModeAvailability),
+      }));
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
@@ -729,7 +751,7 @@ export function App() {
   useEffect(() => {
     if (job.job || !proxies || !extractorSettings || jobDraftTouched) return;
     setJobDraft(normalizeJobDraft({
-      runMode: proxies.settings.defaultRunMode,
+      runMode: clampRunModeToAvailability(proxies.settings.defaultRunMode, job.runModeAvailability),
       need: proxies.settings.defaultNeed,
       parallel: proxies.settings.defaultParallel,
       maxAttempts: proxies.settings.defaultMaxAttempts,
@@ -738,12 +760,43 @@ export function App() {
       autoExtractMaxWaitSec: extractorSettings.defaultAutoExtractMaxWaitSec,
       autoExtractAccountType: extractorSettings.defaultAutoExtractAccountType,
     }));
-  }, [extractorSettings, job.job, jobDraftTouched, proxies]);
+  }, [extractorSettings, job.job, job.runModeAvailability, jobDraftTouched, proxies]);
 
   useEffect(() => {
     if (!job.job || jobDraftTouched) return;
-    setJobDraft(jobToDraft(job.job));
-  }, [job.job, jobDraftTouched]);
+    const nextJob = job.job;
+    setJobDraft({
+      ...jobToDraft(nextJob),
+      runMode: clampRunModeToAvailability(nextJob.runMode, job.runModeAvailability),
+    });
+  }, [job.job, job.runModeAvailability, jobDraftTouched]);
+
+  useEffect(() => {
+    if (!chatGptJob.job) return;
+    setChatGptJobDraft({
+      runMode: clampRunModeToAvailability(chatGptJob.job.runMode, chatGptJob.runModeAvailability),
+      need: chatGptJob.job.need,
+      parallel: chatGptJob.job.parallel,
+      maxAttempts: chatGptJob.job.maxAttempts,
+    });
+    setChatGptJobDraftTouched(false);
+  }, [chatGptJob.job, chatGptJob.runModeAvailability]);
+
+  useEffect(() => {
+    if (chatGptJob.job || chatGptJobDraftTouched) return;
+    const preferredRunMode = clampRunModeToAvailability("headed", chatGptJob.runModeAvailability);
+    setChatGptJobDraft((current) => (current.runMode === preferredRunMode ? current : { ...current, runMode: preferredRunMode }));
+  }, [chatGptJob.job, chatGptJob.runModeAvailability, chatGptJobDraftTouched]);
+
+  useEffect(() => {
+    if (job.runModeAvailability.headed || jobDraft.runMode !== "headed") return;
+    setJobDraft((current) => ({ ...current, runMode: "headless" }));
+  }, [job.runModeAvailability.headed, jobDraft.runMode]);
+
+  useEffect(() => {
+    if (chatGptJob.runModeAvailability.headed || chatGptJobDraft.runMode !== "headed") return;
+    setChatGptJobDraft((current) => ({ ...current, runMode: "headless" }));
+  }, [chatGptJob.runModeAvailability.headed, chatGptJobDraft.runMode]);
 
   useEffect(() => {
     if (!extractorSettings || extractorRunDraftTouched) return;
@@ -1044,24 +1097,40 @@ export function App() {
 
   const updateJobDraft = (patch: Partial<JobDraft>) => {
     setJobDraftTouched(true);
-    setJobDraft((current) => normalizeJobDraft({ ...current, ...patch }));
+    setJobDraft((current) =>
+      normalizeJobDraft({
+        ...current,
+        ...patch,
+        runMode: clampRunModeToAvailability(
+          patch.runMode === "headless" || patch.runMode === "headed" ? patch.runMode : current.runMode,
+          job.runModeAvailability,
+        ),
+      }),
+    );
   };
 
   const handleJobAction = async (action: JobControlAction, options?: JobControlOptions) => {
     try {
       setError(null);
       const draft = options?.draft || jobDraft;
+      const normalizedDraft = {
+        ...draft,
+        runMode: clampRunModeToAvailability(draft.runMode, job.runModeAvailability),
+      };
       const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify({
           site: "tavily",
           action,
           ...(options?.confirmForceStop ? { confirmForceStop: true } : {}),
-          ...draft,
+          ...normalizedDraft,
         }),
       });
       if (payload.job) {
-        setJobDraft(jobToDraft(payload.job));
+        setJobDraft({
+          ...jobToDraft(payload.job),
+          runMode: clampRunModeToAvailability(payload.job.runMode, job.runModeAvailability),
+        });
         setJobDraftTouched(false);
       }
       await refreshJob("tavily");
@@ -1572,6 +1641,7 @@ export function App() {
           job={job}
           events={events}
           jobDraft={jobDraft}
+          runModeAvailability={job.runModeAvailability}
           extractorAvailability={
             extractorSettings?.availability || {
               zhanghaoya: false,
@@ -1587,13 +1657,12 @@ export function App() {
 
       {activePage === "chatgpt" ? (
         <ChatGptView
-          draft={chatGptDraft}
+          jobDraft={chatGptJobDraft}
           job={chatGptJob}
-          draftBusy={chatGptDraftBusy}
+          runModeAvailability={chatGptJob.runModeAvailability}
           jobBusy={chatGptJobBusy}
-          onDraftChange={handleChatGptDraftChange}
-          onRegenerateDraft={handleChatGptRegenerateDraft}
-          onStart={() => handleChatGptJobAction("start")}
+          onJobDraftChange={handleChatGptJobDraftChange}
+          onStart={(draft) => handleChatGptJobAction("start", draft)}
           onStop={() => handleChatGptJobAction("stop")}
           onForceStop={() => handleChatGptJobAction("force_stop")}
         />

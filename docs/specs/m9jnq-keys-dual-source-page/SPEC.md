@@ -56,7 +56,7 @@
 - `Keys > Tavily` 必须复用现有 API key 查询、勾选与导出能力，不得回退。
 - `Keys > ChatGPT` 必须使用标准 keys 列表骨架，支持多选、批量导出、搜索、有效期筛选与时间字段排序。
 - `Keys > ChatGPT` 行内操作必须收敛为 `复制` / `下载`，且页面不得展示明文详情或 reveal/解锁按钮。
-- `/chatgpt` 页面必须收敛为草稿输入、启动/停止与任务态，不再重复展示凭据列表。
+- `/chatgpt` 页面必须收敛为批量控制、启动/停止与任务态，不再重复展示凭据列表。
 
 ### SHOULD
 
@@ -76,7 +76,7 @@
 - 用户在 `Tavily` tab 中继续使用现有查询、跨分页勾选与导出 API key。
 - 用户切换到 `ChatGPT` tab 后，看到最近凭据列表，可按邮箱/账号 ID 搜索、按有效期筛选，并按创建时间或过期时间排序。
 - 用户可对 ChatGPT 记录执行当前页全选、多选批量导出，以及单行 `复制` / `下载` JSON；页面本身只展示邮箱、账号 ID 与时间字段，不展示明文。
-- 用户在 `/chatgpt` 页面只处理草稿与运行态；任务成功后数据仍刷新到共享的 ChatGPT credentials 状态，随后可在 `Keys > ChatGPT` 查看。
+- 用户在 `/chatgpt` 页面只处理批量控制与运行态；任务成功后数据仍刷新到共享的 ChatGPT credentials 状态，随后可在 `Keys > ChatGPT` 查看。
 
 ### Edge cases / errors
 
@@ -109,7 +109,7 @@ None
 
 - Given 用户打开 `/chatgpt`
   When 页面渲染完成
-  Then 只显示草稿输入、按钮、当前任务与 attempts，不再重复显示凭据列表。
+  Then 只显示批量控制、按钮、当前任务与 attempts，不再重复显示凭据列表。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -130,7 +130,7 @@ None
 
 - Stories to add/update: `AppShell`、`KeysView`、`ChatGptView`、必要时 `ChatGptCredentialsView`。
 - Docs pages / state galleries to add/update: 依仓库现有 autodocs 生成 Keys 页与回归页面说明。
-- `play` / interaction coverage to add/update: Keys 页切换到 ChatGPT tab、ChatGPT 列表批量导出与时间列排序；ChatGPT 页草稿编辑回归。
+- `play` / interaction coverage to add/update: Keys 页切换到 ChatGPT tab、ChatGPT 列表批量导出与时间列排序；ChatGPT 页批量控件回归。
 - Visual regression baseline changes (if any): none。
 
 ### Quality checks
@@ -168,6 +168,18 @@ None
   state: `keys chatgpt tab`
   evidence_note: 验证 ChatGPT keys 已迁移到 Keys 页内，使用标准列表骨架提供搜索、有效期筛选、时间排序、多选导出与行内 `复制` / `下载` 操作，且页面不展示明文详情。
   ![Keys ChatGPT tab](./assets/keys-chatgpt-tab.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/ChatGptView/BatchReady`
+  state: `chatgpt route ready`
+  evidence_note: 验证 `/chatgpt` 页面已收敛为批量控制与任务态，不再重复展示凭据区块；生成结果统一引导到 `Keys > ChatGPT`。
+  ![ChatGPT route ready](./assets/chatgpt-view-batch-ready.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/ChatGptView/BatchRunning`
+  state: `chatgpt route running`
+  evidence_note: 验证运行态只保留预算、attempt 与错误摘要；右侧 reveal / export 凭据功能不再出现在 `/chatgpt` 页面。
+  ![ChatGPT route running](./assets/chatgpt-view-batch-running.png)
 
 ## 资产晋升（Asset promotion）
 

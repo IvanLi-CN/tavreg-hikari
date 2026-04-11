@@ -14,6 +14,7 @@ import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.j
 import {
   AppDatabase,
   normalizeAccountExtractorAccountType,
+  normalizeJobMaxAttempts,
   type AccountExtractorProvider,
   type AppSettings,
   type ChatGptCredentialRecord,
@@ -50,6 +51,7 @@ import { createExclusiveRunner } from "./exclusive-runner.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { ChatGptJobScheduler } from "./chatgpt-scheduler.js";
+import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
@@ -195,16 +197,7 @@ async function ensureSavedProofMailbox(input: {
   };
 }
 
-function normalizeBirthDate(value: unknown): string | null {
-  const raw = String(value || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
-  const time = Date.parse(`${raw}T00:00:00.000Z`);
-  if (!Number.isFinite(time)) return null;
-  if (raw < "1990-01-01" || raw > "2005-12-31") return null;
-  return raw;
-}
-
-async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
+async function buildChatGptDraft(): Promise<{
   email: string;
   password: string;
   nickname: string;
@@ -217,22 +210,14 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
     throw new Error("cfmail_api_key_missing");
   }
   const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
-  const normalizedEmail = String(requestedEmail || "").trim().toLowerCase();
-  const mailbox = normalizedEmail
-    ? await ensureCfMailMailbox({
-        baseUrl,
-        apiKey,
-        address: normalizedEmail,
-        httpJson: serverHttpJson,
-      })
-    : await provisionCfMailMailbox({
-        baseUrl,
-        apiKey,
-        httpJson: serverHttpJson,
-        localPart: randomMailboxSegment("mail"),
-        subdomain: randomMailboxSegment("box"),
-        rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
-      });
+  const mailbox = await provisionCfMailMailbox({
+    baseUrl,
+    apiKey,
+    httpJson: serverHttpJson,
+    localPart: randomMailboxSegment("mail"),
+    subdomain: randomMailboxSegment("box"),
+    rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
+  });
   return {
     email: mailbox.address,
     password: randomPassword(),
@@ -665,6 +650,7 @@ type SiteScheduler = {
 };
 
 function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
+  const runModeAvailability = detectBrowserRunModeAvailability();
   const job = db.getCurrentJob(site);
   if (!job) {
     return {
@@ -674,6 +660,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       recentAttempts: [],
       eligibleCount: 0,
       autoExtractState: null,
+      runModeAvailability,
       cooldown: scheduler.getCooldownSnapshot?.() ?? null,
     };
   }
@@ -687,27 +674,9 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
       .map((row) => serializeAttemptForApi(db, row)),
     eligibleCount: site === "tavily" ? db.countEligibleAccounts(job.id) : 0,
     autoExtractState: scheduler.getAutoExtractSnapshot(job.id),
+    runModeAvailability,
     cooldown: scheduler.getCooldownSnapshot?.() ?? null,
   };
-}
-
-function normalizeChatGptEmail(value: unknown): string | null {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return null;
-  const parts = splitEmailAddress(normalized);
-  if (!parts?.local || !parts.domain) return null;
-  return normalized;
-}
-
-function normalizeChatGptPassword(value: unknown): string | null {
-  const normalized = String(value || "");
-  return normalized.trim().length >= 8 ? normalized : null;
-}
-
-function normalizeChatGptNickname(value: unknown): string | null {
-  const normalized = String(value || "").trim();
-  if (!normalized) return null;
-  return normalized.slice(0, 64);
 }
 
 function randomPassword(length = 18): string {
@@ -1313,7 +1282,9 @@ async function main(): Promise<void> {
       }
     },
   });
-  const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast);
+  const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast, {
+    createAttemptDraft: () => buildChatGptDraft(),
+  });
   const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
 
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
@@ -1736,19 +1707,6 @@ async function main(): Promise<void> {
         return json(serializeJobSnapshot(site, db, getSchedulerBySite(site)));
       }
 
-      if (pathname === "/api/chatgpt/draft" && req.method === "GET") {
-        try {
-          const requestedEmail = url.searchParams.get("email");
-          const draft = await buildChatGptDraft(requestedEmail);
-          return json({
-            ok: true,
-            draft,
-          });
-        } catch (error) {
-          return badRequest(error instanceof Error ? error.message : String(error), 409);
-        }
-      }
-
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
         const limit = Math.max(1, Math.min(100, toInt(url.searchParams.get("limit") || undefined, 20)));
         const sortBy = (url.searchParams.get("sortBy") as "createdAt" | "expiresAt" | null) || "createdAt";
@@ -2140,38 +2098,30 @@ async function main(): Promise<void> {
         const scheduler = getSchedulerBySite(site);
         try {
           if (action === "start") {
+            const runModeAvailability = detectBrowserRunModeAvailability();
             if (site === "chatgpt") {
-              const email = normalizeChatGptEmail(body?.email);
-              const password = normalizeChatGptPassword(body?.password);
-              const nickname = normalizeChatGptNickname(body?.nickname);
-              const birthDate = normalizeBirthDate(body?.birthDate);
-              if (!email) {
-                return badRequest("chatgpt email is required");
+              const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
+              if (explicitRunMode) {
+                assertRunModeAvailable(explicitRunMode, runModeAvailability);
               }
-              if (!password) {
-                return badRequest("chatgpt password must be at least 8 characters");
-              }
-              if (!nickname) {
-                return badRequest("chatgpt nickname is required");
-              }
-              if (!birthDate) {
-                return badRequest("birthDate must be between 1990-01-01 and 2005-12-31");
-              }
-              const proofMailbox = await ensureSavedProofMailbox({
-                address: email,
-                mailboxId: typeof body?.mailboxId === "string" ? body.mailboxId : null,
-              });
+              const runMode = explicitRunMode || clampRunModeToAvailability("headed", runModeAvailability);
+              const need = toOptionalPositiveInt(body?.need) ?? 1;
+              const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
+              const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
               const job = await chatgptScheduler.startJob({
-                email,
-                password,
-                nickname,
-                birthDate,
-                mailboxId: proofMailbox.mailboxId,
+                runMode,
+                need,
+                parallel,
+                maxAttempts,
               });
               return json({ ok: true, job });
             }
             const settings = readSettings();
-            const requestedRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : settings.defaultRunMode;
+            const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
+            if (explicitRunMode) {
+              assertRunModeAvailable(explicitRunMode, runModeAvailability);
+            }
+            const requestedRunMode = explicitRunMode || clampRunModeToAvailability(settings.defaultRunMode, runModeAvailability);
             const job = await tavilyScheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),

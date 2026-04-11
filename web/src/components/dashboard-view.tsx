@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { AccountExtractorProvider, EventRecord, JobControlAction, JobControlOptions, JobDraft, JobSnapshot } from "@/lib/app-types";
+import type { AccountExtractorProvider, EventRecord, JobControlAction, JobControlOptions, JobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { normalizeJobDraft } from "@/lib/job-draft";
 import {
@@ -23,6 +23,7 @@ import {
   resolvePrimaryJobLabel,
   resolveStopHint,
 } from "@/lib/job-controls";
+import { isRunModeAvailabilityPending } from "@/lib/run-mode";
 
 const EXTRACTOR_PROVIDER_OPTIONS = [
   { provider: "zhanghaoya", label: "账号鸭" },
@@ -72,6 +73,7 @@ export function DashboardView({
   job,
   events,
   jobDraft,
+  runModeAvailability,
   extractorAvailability,
   onJobDraftChange,
   onJobAction,
@@ -79,6 +81,7 @@ export function DashboardView({
   job: JobSnapshot;
   events: EventRecord[];
   jobDraft: JobDraft;
+  runModeAvailability: RunModeAvailability;
   extractorAvailability: {
     zhanghaoya: boolean;
     shanyouxiang: boolean;
@@ -133,6 +136,8 @@ export function DashboardView({
   const primaryAction = resolvePrimaryJobAction(currentStatus);
   const primaryLabel = resolvePrimaryJobLabel(currentStatus);
   const primaryDisabled = primaryJobActionDisabled(currentStatus);
+  const runModeAvailabilityPending = isRunModeAvailabilityPending(runModeAvailability);
+  const primaryActionDisabled = primaryDisabled || (primaryAction === "start" && runModeAvailabilityPending);
   const stopHint = resolveStopHint(currentStatus);
 
   return (
@@ -157,12 +162,16 @@ export function DashboardView({
           <CardContent className="space-y-4">
             <div className="grid gap-3 lg:grid-cols-4">
               <Field label="Run Mode">
-                <Select value={jobDraft.runMode} onValueChange={(value) => onJobDraftChange({ runMode: value as JobDraft["runMode"] })}>
+                <Select
+                  value={jobDraft.runMode}
+                  onValueChange={(value) => onJobDraftChange({ runMode: value as JobDraft["runMode"] })}
+                  disabled={runModeAvailabilityPending}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder="选择模式" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="headed">headed</SelectItem>
+                    {runModeAvailability.headed ? <SelectItem value="headed">headed</SelectItem> : null}
                     <SelectItem value="headless">headless</SelectItem>
                   </SelectContent>
                 </Select>
@@ -187,6 +196,15 @@ export function DashboardView({
                 />
               </Field>
             </div>
+            {runModeAvailabilityPending ? (
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                正在检测当前环境的浏览器能力，检测完成后才会开放启动。
+              </div>
+            ) : !runModeAvailability.headed ? (
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                当前环境仅支持 <span className="font-medium text-slate-200">headless</span>。{runModeAvailability.headedReason || "有头浏览器不可用。"}
+              </div>
+            ) : null}
             <div className="rounded-[24px] border border-cyan-400/18 bg-cyan-400/[0.04] p-4">
               <div className="flex min-w-0 flex-wrap items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -316,7 +334,7 @@ export function DashboardView({
                   if (!primaryAction) return;
                   handleJobActionClick(primaryAction);
                 }}
-                disabled={primaryDisabled}
+                disabled={primaryActionDisabled}
               >
                 {primaryLabel}
               </Button>

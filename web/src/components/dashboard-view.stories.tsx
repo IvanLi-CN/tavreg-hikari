@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { DashboardView } from "@/components/dashboard-view";
-import type { JobDraft } from "@/lib/app-types";
+import type { JobDraft, RunModeAvailability } from "@/lib/app-types";
 import { normalizeJobDraft } from "@/lib/job-draft";
 import { sampleEvents, sampleExtractorSettings, sampleJob } from "@/stories/fixtures";
 
@@ -15,6 +15,18 @@ const defaultDraft: JobDraft = {
   autoExtractQuantity: 1,
   autoExtractMaxWaitSec: 60,
   autoExtractAccountType: "outlook",
+};
+
+const defaultRunModeAvailability: RunModeAvailability = {
+  headed: true,
+  headless: true,
+  headedReason: null,
+};
+
+const headlessOnlyAvailability: RunModeAvailability = {
+  headed: false,
+  headless: true,
+  headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
 };
 
 function buildJob(status: NonNullable<typeof sampleJob.job>["status"]) {
@@ -54,6 +66,7 @@ export const Running: Story = {
     job: sampleJob,
     events: sampleEvents,
     jobDraft: defaultDraft,
+    runModeAvailability: defaultRunModeAvailability,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
@@ -66,6 +79,7 @@ export const Running: Story = {
           job={sampleJob}
           events={sampleEvents}
           jobDraft={draft}
+          runModeAvailability={defaultRunModeAvailability}
           extractorAvailability={sampleExtractorSettings.availability}
           onJobDraftChange={(patch) => setDraft((current) => normalizeJobDraft({ ...current, ...patch }))}
           onJobAction={() => undefined}
@@ -80,7 +94,7 @@ export const Running: Story = {
 
 export const Empty: Story = {
   args: {
-    job: { site: "tavily", job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, autoExtractState: null },
+    job: { site: "tavily", job: null, activeAttempts: [], recentAttempts: [], eligibleCount: 0, autoExtractState: null, runModeAvailability: defaultRunModeAvailability },
     events: [],
     jobDraft: {
       runMode: "headless",
@@ -92,9 +106,18 @@ export const Empty: Story = {
       autoExtractMaxWaitSec: 60,
       autoExtractAccountType: "outlook",
     },
+    runModeAvailability: defaultRunModeAvailability,
     extractorAvailability: { zhanghaoya: false, shanyouxiang: true, shankeyun: true, hotmail666: false },
     onJobDraftChange: fn(),
     onJobAction: fn(),
+  },
+};
+
+export const EmptyHeadlessOnly: Story = {
+  args: {
+    ...Empty.args,
+    job: { ...(Empty.args?.job as any), runModeAvailability: headlessOnlyAvailability },
+    runModeAvailability: headlessOnlyAvailability,
   },
 };
 
@@ -171,6 +194,7 @@ export const OverflowGuard: Story = {
       autoExtractAccountType: "outlook",
     },
     extractorAvailability: sampleExtractorSettings.availability,
+    runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -241,6 +265,7 @@ export const ActiveAttemptsNoWrap: Story = {
       autoExtractAccountType: "outlook",
     },
     extractorAvailability: sampleExtractorSettings.availability,
+    runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -280,6 +305,7 @@ export const FourSourceCompact: Story = {
       shankeyun: true,
       hotmail666: true,
     },
+    runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -306,6 +332,7 @@ export const AccountTypeSelectorPlay: Story = {
       shankeyun: true,
       hotmail666: true,
     },
+    runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -323,6 +350,7 @@ export const AccountTypeSelectorPlay: Story = {
           }}
           events={sampleEvents}
           jobDraft={draft}
+          runModeAvailability={defaultRunModeAvailability}
           extractorAvailability={args.extractorAvailability}
           onJobDraftChange={(patch) => {
             setDraft((current) => normalizeJobDraft({ ...current, ...patch }));
@@ -352,6 +380,7 @@ export const ControlPlay: Story = {
     job: sampleJob,
     events: sampleEvents,
     jobDraft: defaultDraft,
+    runModeAvailability: defaultRunModeAvailability,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
@@ -380,6 +409,7 @@ export const BufferedNumberFlowPlay: Story = {
     job: sampleJob,
     events: sampleEvents,
     jobDraft: defaultDraft,
+    runModeAvailability: defaultRunModeAvailability,
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
@@ -393,6 +423,7 @@ export const BufferedNumberFlowPlay: Story = {
           job={sampleJob}
           events={sampleEvents}
           jobDraft={draft}
+          runModeAvailability={defaultRunModeAvailability}
           extractorAvailability={sampleExtractorSettings.availability}
           onJobDraftChange={(patch) => {
             setDraft((current) => normalizeJobDraft({ ...current, ...patch }));
@@ -436,5 +467,24 @@ export const BufferedNumberFlowPlay: Story = {
     await userEvent.type(maxAttemptsInput, "1");
     await userEvent.tab();
     await expect(maxAttemptsInput).toHaveValue("18");
+  },
+};
+
+export const HeadlessOnlyRunModePlay: Story = {
+  args: {
+    job: { ...sampleJob, runModeAvailability: headlessOnlyAvailability },
+    events: sampleEvents,
+    jobDraft: { ...defaultDraft, runMode: "headless" },
+    runModeAvailability: headlessOnlyAvailability,
+    extractorAvailability: sampleExtractorSettings.availability,
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText(/当前环境仅支持/)).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
+    await expect(within(document.body).queryByRole("option", { name: "headed" })).toBeNull();
+    await expect(within(document.body).getByRole("option", { name: "headless" })).toBeInTheDocument();
   },
 };
