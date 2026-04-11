@@ -410,10 +410,20 @@ export class ChatGptJobScheduler {
             draft = normalizedDraft;
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
-            const failed = this.db.completeJob(job.id, false, `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`);
-            this.emit("job.updated", { site: this.site, job: failed });
-            this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
-            return;
+            const lastError = `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`;
+            if (this.activeAttempts.size > 0) {
+              const next = this.db.updateJobState(job.id, {
+                lastError,
+                maxAttempts: launchIndex,
+              });
+              this.emit("job.updated", { site: this.site, job: next });
+            } else {
+              const failed = this.db.completeJob(job.id, false, lastError);
+              this.emit("job.updated", { site: this.site, job: failed });
+              this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
+              return;
+            }
+            break;
           }
           const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
           const attempt = this.db.createAttempt(job.id, {
@@ -436,7 +446,7 @@ export class ChatGptJobScheduler {
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
       if (this.activeAttempts.size === 0 && refreshed.launchedCount >= refreshed.maxAttempts && refreshed.successCount < refreshed.need) {
-        const failed = this.db.completeJob(jobId, false, "chatgpt attempts exhausted");
+        const failed = this.db.completeJob(jobId, false, refreshed.lastError || "chatgpt attempts exhausted");
         this.emit("job.updated", { site: this.site, job: failed });
         this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
         return;

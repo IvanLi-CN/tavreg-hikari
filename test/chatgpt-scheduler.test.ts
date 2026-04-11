@@ -218,3 +218,59 @@ test("chatgpt scheduler only provisions drafts for launched attempts", async () 
   await scheduler.shutdown();
   appDb.close();
 });
+
+test("chatgpt scheduler waits for active attempts to drain before finalizing draft generation failures", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      draftCalls += 1;
+      if (draftCalls === 1) {
+        return createDraft(draftCalls);
+      }
+      throw new Error("cfmail_temporarily_unavailable");
+    },
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: null,
+      stopRequested: null,
+    });
+    setTimeout(() => {
+      appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+        email: draft.email,
+        accountId: `acc-${attempt.id}`,
+        accessToken: `access-${attempt.id}`,
+        refreshToken: `refresh-${attempt.id}`,
+        idToken: `id-${attempt.id}`,
+        expiresAt: null,
+        credentialJson: JSON.stringify({ email: draft.email }),
+      });
+      (scheduler as any).activeAttempts.delete(attempt.id);
+    }, 50);
+  };
+
+  const next = await scheduler.startJob({
+    runMode: "headless",
+    need: 2,
+    parallel: 2,
+    maxAttempts: 3,
+  });
+
+  for (let index = 0; index < 80; index += 1) {
+    const current = appDb.getJob(next.id);
+    if (current?.status === "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const failed = appDb.getJob(next.id);
+  expect(failed?.status).toBe("failed");
+  expect(failed?.successCount).toBe(1);
+  expect(failed?.launchedCount).toBe(1);
+  expect(failed?.lastError).toBe("chatgpt attempt draft failed at attempt #2: cfmail_temporarily_unavailable");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
