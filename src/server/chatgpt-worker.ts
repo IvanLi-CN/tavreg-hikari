@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMailMessageSummary } from "../cfmail-api.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
-import { launchBrowserWithEngine, launchNativeChromeCdp, loadConfig } from "../main.js";
+import { launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
 
 const OAUTH_ISSUER = "https://auth.openai.com";
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -30,6 +30,22 @@ interface WorkerPayload {
   nickname: string;
   birthDate: string;
   mailboxId: string;
+}
+
+type WorkerRunMode = AppConfig["runMode"];
+
+interface ChatGptWorkerLaunchDeps {
+  launchNativeChromeCdp: typeof launchNativeChromeCdp;
+  launchBrowserWithEngine: typeof launchBrowserWithEngine;
+}
+
+interface ChatGptWorkerBrowserSession {
+  browser: any;
+  context: any;
+  page: any;
+  nativeChromeStop: (() => Promise<void>) | null;
+  browserMode: "chrome-native-cdp" | "browser-engine";
+  profileDir?: string;
 }
 
 interface CallbackResult {
@@ -168,6 +184,88 @@ async function writeFailureArtifacts(outputDir: string, page: any, failureStage:
       fullPage: true,
     }).catch(() => {});
   }
+}
+
+export async function launchChatGptWorkerBrowser(
+  cfg: AppConfig,
+  proxyServer: string,
+  deps: ChatGptWorkerLaunchDeps = {
+    launchNativeChromeCdp,
+    launchBrowserWithEngine,
+  },
+): Promise<ChatGptWorkerBrowserSession> {
+  if (cfg.browserEngine === "chrome" && cfg.chromeNativeAutomation) {
+    const launched = await deps.launchNativeChromeCdp(
+      cfg,
+      cfg.runMode,
+      proxyServer,
+      "en-US",
+      "en-US,en;q=0.9",
+      undefined,
+      undefined,
+      ["about:blank"],
+    );
+    const context = launched.context;
+    const existingPages = typeof context.pages === "function" ? context.pages() : [];
+    const page = existingPages.find((item: any) => item && typeof item.url === "function") || await context.newPage();
+    return {
+      browser: launched.browser,
+      context,
+      page,
+      nativeChromeStop: launched.stop,
+      browserMode: "chrome-native-cdp",
+      profileDir: launched.details.profileDir,
+    };
+  }
+
+  const browser = await deps.launchBrowserWithEngine(cfg.browserEngine, cfg, cfg.runMode, proxyServer, "en-US", "");
+  const context = await browser.newContext({
+    locale: "en-US",
+    viewport: { width: 1440, height: 960 },
+    screen: { width: 1440, height: 960 },
+  });
+  const page = await context.newPage();
+  return {
+    browser,
+    context,
+    page,
+    nativeChromeStop: null,
+    browserMode: "browser-engine",
+  };
+}
+
+export function buildChatGptWorkerResult(input: {
+  mode: WorkerRunMode;
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  accountId: string;
+  expiresAt: string | null;
+  tokenPayload: Record<string, unknown>;
+  idTokenPayload: Record<string, unknown>;
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+  notes: string[];
+}): Record<string, unknown> {
+  return {
+    mode: input.mode,
+    email: input.email,
+    password: input.password,
+    nickname: input.nickname,
+    birthDate: input.birthDate,
+    credentials: {
+      access_token: input.accessToken,
+      refresh_token: input.refreshToken,
+      id_token: input.idToken,
+      account_id: input.accountId,
+      expires_at: input.expiresAt,
+      token_type: typeof input.tokenPayload.token_type === "string" ? input.tokenPayload.token_type : null,
+      exp: typeof input.idTokenPayload.exp === "number" ? input.idTokenPayload.exp : null,
+    },
+    notes: input.notes,
+  };
 }
 
 async function httpJson<T = unknown>(method: string, url: string, options?: { headers?: Record<string, string>; body?: unknown }): Promise<T> {
@@ -1462,54 +1560,32 @@ async function run(): Promise<void> {
     }
 
     await writeStageMarker(outputDir, "bootstrap:browser_launching");
-    if (cfg.browserEngine === "chrome" && cfg.chromeNativeAutomation) {
-      const launched = await launchNativeChromeCdp(
-        cfg,
-        cfg.runMode,
-        mihomo.proxyServer,
-        "en-US",
-        "en-US,en;q=0.9",
-        undefined,
-        undefined,
-        ["about:blank"],
-      );
-      browser = launched.browser;
-      context = launched.context;
-      nativeChromeStop = launched.stop;
+    const launchedBrowser = await launchChatGptWorkerBrowser(cfg, mihomo.proxyServer);
+    browser = launchedBrowser.browser;
+    context = launchedBrowser.context;
+    page = launchedBrowser.page;
+    nativeChromeStop = launchedBrowser.nativeChromeStop;
+    if (launchedBrowser.browserMode === "chrome-native-cdp") {
       log("browser launched (native chrome cdp)");
-      log(`browser profile dir=${launched.details.profileDir}`);
+      log(`browser profile dir=${launchedBrowser.profileDir}`);
       await writeStageMarker(outputDir, "bootstrap:browser_launched", {
-        browserMode: "chrome-native-cdp",
-        profileDir: launched.details.profileDir,
-      });
-      const existingPages = typeof context.pages === "function" ? context.pages() : [];
-      page = existingPages.find((item: any) => item && typeof item.url === "function") || null;
-      if (!page) {
-        page = await context.newPage();
-      }
-      log("browser context created");
-      await writeStageMarker(outputDir, "bootstrap:context_created", {
-        browserMode: "chrome-native-cdp",
-      });
-      log("browser page created");
-      await writeStageMarker(outputDir, "bootstrap:page_created", {
-        browserMode: "chrome-native-cdp",
+        browserMode: launchedBrowser.browserMode,
+        profileDir: launchedBrowser.profileDir || null,
       });
     } else {
-      browser = await launchBrowserWithEngine(cfg.browserEngine, cfg, cfg.runMode, mihomo.proxyServer, "en-US", "");
       log("browser launched");
-      await writeStageMarker(outputDir, "bootstrap:browser_launched");
-      context = await browser.newContext({
-        locale: "en-US",
-        viewport: { width: 1440, height: 960 },
-        screen: { width: 1440, height: 960 },
+      await writeStageMarker(outputDir, "bootstrap:browser_launched", {
+        browserMode: launchedBrowser.browserMode,
       });
-      log("browser context created");
-      await writeStageMarker(outputDir, "bootstrap:context_created");
-      page = await context.newPage();
-      log("browser page created");
-      await writeStageMarker(outputDir, "bootstrap:page_created");
     }
+    log("browser context created");
+    await writeStageMarker(outputDir, "bootstrap:context_created", {
+      browserMode: launchedBrowser.browserMode,
+    });
+    log("browser page created");
+    await writeStageMarker(outputDir, "bootstrap:page_created", {
+      browserMode: launchedBrowser.browserMode,
+    });
 
 	    let authorizeUrl = buildAuthorizeUrl({ state: callbackState, codeChallenge: challenge });
 	    let callbackFromObservedUrl: CallbackResult | null = null;
@@ -2138,26 +2214,24 @@ async function run(): Promise<void> {
           ? new Date(idTokenPayload.exp * 1000).toISOString()
           : null;
 
-    await writeJson(`${outputDir}/result.json`, {
+    await writeJson(`${outputDir}/result.json`, buildChatGptWorkerResult({
       mode: cfg.runMode,
       email,
       password: payload.password,
       nickname: payload.nickname,
       birthDate: payload.birthDate,
-      credentials: {
-        access_token: accessToken,
-        refresh_token: refreshToken,
-        id_token: idToken,
-        account_id: accountId,
-        expires_at: expiresAt,
-        token_type: typeof tokenPayload.token_type === "string" ? tokenPayload.token_type : null,
-        exp: typeof idTokenPayload.exp === "number" ? idTokenPayload.exp : null,
-      },
+      accountId,
+      expiresAt,
+      tokenPayload: tokenPayload as Record<string, unknown>,
+      idTokenPayload: idTokenPayload as Record<string, unknown>,
+      accessToken,
+      refreshToken,
+      idToken,
       notes: [
         `mailbox=${payload.mailboxId}`,
         `proxy=${args.proxyNode || (await mihomo.getGroupSelection().catch(() => null)) || "default"}`,
       ],
-    });
+    }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeFailureArtifacts(outputDir, page, failureStage);
@@ -2178,8 +2252,10 @@ async function run(): Promise<void> {
   }
 }
 
-void run().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
-  process.exitCode = 1;
-});
+if (import.meta.main) {
+  void run().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exitCode = 1;
+  });
+}
