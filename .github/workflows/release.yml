@@ -85,6 +85,7 @@ jobs:
             exit 1
           fi
 
+          echo "RELEASE_REQUESTED_SHA=${target_sha}"
           echo "target_sha=${target_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Validate manual backfill target passed CI Main
@@ -151,6 +152,15 @@ jobs:
             --main-ref "origin/main" \
             --upper-bound "${REQUESTED_SHA}" \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Log resolved release target
+        if: steps.pending-target.outputs.target_sha != ''
+        shell: bash
+        env:
+          TARGET_SHA: ${{ steps.pending-target.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          echo "RELEASE_TARGET_SHA=${TARGET_SHA}"
 
       - name: Load immutable release snapshot
         if: steps.pending-target.outputs.target_sha != ''
