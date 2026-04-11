@@ -202,7 +202,7 @@ function resolveChatGptProxyNode(
 export class ChatGptJobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
-  private readonly seededDrafts = new Map<number, ChatGptAttemptDraft[]>();
+  private readonly draftFailureCounts = new Map<number, number>();
   private loopPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private readonly site: JobSite;
@@ -305,24 +305,16 @@ export class ChatGptJobScheduler {
       maxAttempts: normalizedMaxAttempts,
       payloadJson: {},
     });
-    try {
-      const generatedDraft = await this.createAttemptDraft();
-      const normalizedDraft = normalizeDraft(generatedDraft);
-      if (!normalizedDraft) {
-        throw new Error("chatgpt_attempt_draft_invalid");
-      }
-      this.seededDrafts.set(job.id, [normalizedDraft]);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      const failed = this.db.completeJob(job.id, false, `chatgpt attempt draft failed at attempt #1: ${reason}`);
-      this.emit("job.updated", { site: this.site, job: failed });
-      this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
-      throw new Error(failed.lastError || reason);
+    const startupLaunch = await this.dispatchAttempt(job, { persistFailureOnDraftError: false });
+    if (!startupLaunch.launched && startupLaunch.fatal) {
+      this.db.deleteJob(job.id);
+      throw new Error(startupLaunch.error || "chatgpt attempt draft failed at attempt #1");
     }
-    this.emit("job.updated", { site: this.site, job });
+    const current = this.db.getJob(job.id) || job;
+    this.emit("job.updated", { site: this.site, job: current });
     this.emit("toast", { level: "info", message: `chatgpt job #${job.id} started` });
     this.ensureLoop(job.id);
-    return job;
+    return current;
   }
 
   stopCurrentJob(): JobRecord {
@@ -383,6 +375,64 @@ export class ChatGptJobScheduler {
     });
   }
 
+  private clearJobRuntimeState(jobId: number): void {
+    this.draftFailureCounts.delete(jobId);
+  }
+
+  private async dispatchAttempt(
+    job: JobRecord,
+    options?: { persistFailureOnDraftError?: boolean },
+  ): Promise<{ launched: boolean; fatal: boolean; error?: string }> {
+    const currentJob = this.db.getJob(job.id) || job;
+    const launchIndex = currentJob.launchedCount;
+    let draft: ChatGptAttemptDraft;
+    try {
+      const generatedDraft = await this.createAttemptDraft();
+      const normalizedDraft = normalizeDraft(generatedDraft);
+      if (!normalizedDraft) {
+        throw new Error("chatgpt_attempt_draft_invalid");
+      }
+      draft = normalizedDraft;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const lastError = `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`;
+      if (options?.persistFailureOnDraftError === false) {
+        return { launched: false, fatal: true, error: lastError };
+      }
+      if (currentJob.launchedCount > 0 && this.activeAttempts.size === 0) {
+        this.draftFailureCounts.set(job.id, (this.draftFailureCounts.get(job.id) || 0) + 1);
+      }
+      if (this.activeAttempts.size > 0 || currentJob.launchedCount > 0) {
+        const next = this.db.updateJobState(job.id, { lastError });
+        this.emit("job.updated", { site: this.site, job: next });
+        return { launched: false, fatal: false, error: lastError };
+      }
+      const failed = this.db.completeJob(job.id, false, lastError);
+      this.emit("job.updated", { site: this.site, job: failed });
+      this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
+      return { launched: false, fatal: true, error: failed.lastError || lastError };
+    }
+
+    this.draftFailureCounts.delete(job.id);
+
+    const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
+    const attempt = this.db.createAttempt(job.id, {
+      accountEmail: draft.email,
+      outputDir,
+    });
+    try {
+      await this.spawnAttempt(currentJob, attempt, draft, outputDir);
+      this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
+      this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
+    } catch (error) {
+      this.failAttempt(job.id, attempt.id, {
+        errorCode: "launch_setup_failed",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return { launched: true, fatal: false };
+  }
+
   private async runLoop(jobId: number): Promise<void> {
     while (!this.shuttingDown) {
       const job = this.db.getJob(jobId);
@@ -392,6 +442,7 @@ export class ChatGptJobScheduler {
       if (isStopInProgressStatus(job.status)) {
         if (this.activeAttempts.size === 0) {
           const stopped = this.db.stopJob(job.id);
+          this.clearJobRuntimeState(job.id);
           this.emit("job.updated", { site: this.site, job: stopped });
           this.emit("toast", { level: "info", message: `chatgpt job #${job.id} stopped` });
           return;
@@ -403,6 +454,7 @@ export class ChatGptJobScheduler {
       if (job.successCount >= job.need) {
         if (this.activeAttempts.size === 0) {
           const completed = this.db.completeJob(job.id, true);
+          this.clearJobRuntimeState(job.id);
           this.emit("job.updated", { site: this.site, job: completed });
           this.emit("toast", { level: "success", message: `chatgpt job #${job.id} completed` });
           return;
@@ -414,59 +466,28 @@ export class ChatGptJobScheduler {
       const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
       if (launchCapacity > 0) {
         for (let slot = 0; slot < launchCapacity; slot += 1) {
-          const launchIndex = this.db.getJob(job.id)?.launchedCount ?? job.launchedCount;
-          let draft: ChatGptAttemptDraft;
-          try {
-            const seeded = this.seededDrafts.get(job.id);
-            if (seeded && seeded.length > 0) {
-              draft = seeded.shift()!;
-              if (seeded.length === 0) {
-                this.seededDrafts.delete(job.id);
-              }
-            } else {
-              const generatedDraft = await this.createAttemptDraft();
-              const normalizedDraft = normalizeDraft(generatedDraft);
-              if (!normalizedDraft) {
-                throw new Error("chatgpt_attempt_draft_invalid");
-              }
-              draft = normalizedDraft;
-            }
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error);
-            const lastError = `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`;
-            if (this.activeAttempts.size > 0) {
-              const next = this.db.updateJobState(job.id, { lastError });
-              this.emit("job.updated", { site: this.site, job: next });
-            } else {
-              const failed = this.db.completeJob(job.id, false, lastError);
-              this.emit("job.updated", { site: this.site, job: failed });
-              this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
+          const launch = await this.dispatchAttempt(job);
+          if (!launch.launched) {
+            if (launch.fatal) {
               return;
             }
             break;
-          }
-          const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
-          const attempt = this.db.createAttempt(job.id, {
-            accountEmail: draft.email,
-            outputDir,
-          });
-          try {
-            await this.spawnAttempt(job, attempt, draft, outputDir);
-            this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
-            this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
-          } catch (error) {
-            this.failAttempt(job.id, attempt.id, {
-              errorCode: "launch_setup_failed",
-              errorMessage: error instanceof Error ? error.message : String(error),
-            });
           }
         }
       }
 
       const refreshed = this.db.getJob(jobId);
       if (!refreshed) return;
-      if (this.activeAttempts.size === 0 && refreshed.launchedCount >= refreshed.maxAttempts && refreshed.successCount < refreshed.need) {
+      const remainingLaunchBudget = Math.max(0, refreshed.maxAttempts - refreshed.launchedCount);
+      const draftFailureCount = this.draftFailureCounts.get(jobId) || 0;
+      const draftBudgetExhausted = remainingLaunchBudget >= 0 && draftFailureCount > remainingLaunchBudget;
+      if (
+        this.activeAttempts.size === 0
+        && refreshed.successCount < refreshed.need
+        && (refreshed.launchedCount >= refreshed.maxAttempts || draftBudgetExhausted)
+      ) {
         const failed = this.db.completeJob(jobId, false, refreshed.lastError || "chatgpt attempts exhausted");
+        this.clearJobRuntimeState(job.id);
         this.emit("job.updated", { site: this.site, job: failed });
         this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
         return;

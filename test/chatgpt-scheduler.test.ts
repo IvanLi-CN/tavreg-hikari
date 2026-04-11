@@ -116,6 +116,7 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
     createAttemptDraft: async () => createDraft(1),
   });
   (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async () => undefined;
 
   const job = appDb.createJob({
     site: "chatgpt",
@@ -164,6 +165,7 @@ test("chatgpt scheduler starts without pre-provisioned drafts in payload", async
     createAttemptDraft: async () => createDraft(++generatedDrafts),
   });
   (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async () => undefined;
 
   const next = await scheduler.startJob({
     runMode: "headless",
@@ -202,8 +204,7 @@ test("chatgpt scheduler surfaces first-attempt draft provisioning failures durin
   ).rejects.toThrow("chatgpt attempt draft failed at attempt #1: cfmail_api_unavailable");
 
   const current = appDb.getCurrentJob("chatgpt");
-  expect(current?.status).toBe("failed");
-  expect(current?.lastError).toBe("chatgpt attempt draft failed at attempt #1: cfmail_api_unavailable");
+  expect(current).toBeNull();
 
   await scheduler.shutdown();
   appDb.close();
@@ -303,6 +304,165 @@ test("chatgpt scheduler retries draft generation after transient failures while 
   expect(completed?.launchedCount).toBe(2);
   expect(completed?.maxAttempts).toBe(3);
   expect(draftCalls).toBe(3);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler keeps retry budget after transient draft failures between sequential attempts", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      draftCalls += 1;
+      if (draftCalls === 2) {
+        throw new Error("cfmail_temporarily_unavailable");
+      }
+      return createDraft(draftCalls);
+    },
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    setTimeout(() => {
+      appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+        email: draft.email,
+        accountId: `acc-${attempt.id}`,
+        accessToken: `access-${attempt.id}`,
+        refreshToken: `refresh-${attempt.id}`,
+        idToken: `id-${attempt.id}`,
+        expiresAt: null,
+        credentialJson: JSON.stringify({ email: draft.email }),
+      });
+    }, 20);
+  };
+
+  const next = await scheduler.startJob({
+    runMode: "headless",
+    need: 2,
+    parallel: 1,
+    maxAttempts: 3,
+  });
+
+  for (let index = 0; index < 120; index += 1) {
+    const current = appDb.getJob(next.id);
+    if (current?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const completed = appDb.getJob(next.id);
+  expect(completed?.status).toBe("completed");
+  expect(completed?.successCount).toBe(2);
+  expect(completed?.launchedCount).toBe(2);
+  expect(completed?.maxAttempts).toBe(3);
+  expect(draftCalls).toBe(3);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler does not consume the last retry window while another attempt is still active", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      draftCalls += 1;
+      if (draftCalls === 3) {
+        throw new Error("cfmail_temporarily_unavailable");
+      }
+      return createDraft(draftCalls);
+    },
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: null,
+      stopRequested: null,
+    });
+    const delay = attempt.id === 1 ? 20 : attempt.id === 2 ? 120 : 20;
+    setTimeout(() => {
+      appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+        email: draft.email,
+        accountId: `acc-${attempt.id}`,
+        accessToken: `access-${attempt.id}`,
+        refreshToken: `refresh-${attempt.id}`,
+        idToken: `id-${attempt.id}`,
+        expiresAt: null,
+        credentialJson: JSON.stringify({ email: draft.email }),
+      });
+      (scheduler as any).activeAttempts.delete(attempt.id);
+    }, delay);
+  };
+
+  const next = await scheduler.startJob({
+    runMode: "headless",
+    need: 3,
+    parallel: 2,
+    maxAttempts: 3,
+  });
+
+  for (let index = 0; index < 200; index += 1) {
+    const current = appDb.getJob(next.id);
+    if (current?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const completed = appDb.getJob(next.id);
+  expect(completed?.status).toBe("completed");
+  expect(completed?.successCount).toBe(3);
+  expect(completed?.launchedCount).toBe(3);
+  expect(draftCalls).toBe(4);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler fails once draft-generation errors exhaust the remaining launch budget", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      draftCalls += 1;
+      if (draftCalls >= 2) {
+        throw new Error("cfmail_temporarily_unavailable");
+      }
+      return createDraft(draftCalls);
+    },
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    setTimeout(() => {
+      appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+        email: draft.email,
+        accountId: `acc-${attempt.id}`,
+        accessToken: `access-${attempt.id}`,
+        refreshToken: `refresh-${attempt.id}`,
+        idToken: `id-${attempt.id}`,
+        expiresAt: null,
+        credentialJson: JSON.stringify({ email: draft.email }),
+      });
+    }, 20);
+  };
+
+  const next = await scheduler.startJob({
+    runMode: "headless",
+    need: 2,
+    parallel: 1,
+    maxAttempts: 3,
+  });
+
+  for (let index = 0; index < 160; index += 1) {
+    const current = appDb.getJob(next.id);
+    if (current?.status === "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const failed = appDb.getJob(next.id);
+  expect(failed?.status).toBe("failed");
+  expect(failed?.successCount).toBe(1);
+  expect(failed?.launchedCount).toBe(1);
+  expect(failed?.lastError).toBe("chatgpt attempt draft failed at attempt #2: cfmail_temporarily_unavailable");
+  expect(draftCalls).toBe(4);
 
   await scheduler.shutdown();
   appDb.close();

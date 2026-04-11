@@ -9,6 +9,7 @@ import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import type { ChatGptJobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+import { isRunModeAvailabilityPending } from "@/lib/run-mode";
 
 function Field(props: { label: string; children: ReactNode }) {
   return (
@@ -61,7 +62,8 @@ export function ChatGptView({
   const maxAttemptsRef = useRef<BufferedNumberInputHandle>(null);
   const status = job.job?.status || "idle";
   const cooldown = job.cooldown?.active ? job.cooldown : null;
-  const canStart = (!job.job || ["completed", "failed", "stopped"].includes(status)) && !cooldown;
+  const runModeAvailabilityPending = isRunModeAvailabilityPending(runModeAvailability);
+  const canStart = (!job.job || ["completed", "failed", "stopped"].includes(status)) && !cooldown && !runModeAvailabilityPending;
   const canStop = status === "running";
   const canForceStop = ["running", "stopping", "force_stopping"].includes(status);
   const jobConfigLocked = Boolean(job.job && !["completed", "failed", "stopped"].includes(status));
@@ -114,7 +116,7 @@ export function ChatGptView({
                 <Select
                   value={jobDraft.runMode}
                   onValueChange={(value) => onJobDraftChange({ runMode: value as ChatGptJobDraft["runMode"] })}
-                  disabled={jobConfigLocked}
+                  disabled={jobConfigLocked || runModeAvailabilityPending}
                 >
                   <SelectTrigger aria-label="Run Mode">
                     <SelectValue placeholder="选择模式" />
@@ -160,7 +162,11 @@ export function ChatGptView({
               <Badge variant="neutral">max attempts: {effectiveMaxAttempts}</Badge>
               <span>{effectiveRunMode === "headless" ? "当前将以无头浏览器模式批量运行" : "当前将以有头浏览器模式批量运行"}</span>
             </div>
-            {!runModeAvailability.headed ? (
+            {runModeAvailabilityPending ? (
+              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+                正在检测当前环境的浏览器能力，稍后才能开始任务。
+              </div>
+            ) : !runModeAvailability.headed ? (
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
                 当前环境仅支持 <span className="font-medium text-slate-200">headless</span>。{runModeAvailability.headedReason || "有头浏览器不可用。"}
               </div>

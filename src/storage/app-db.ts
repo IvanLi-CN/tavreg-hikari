@@ -3831,6 +3831,12 @@ export class AppDatabase {
     });
   }
 
+  deleteJob(jobId: number): void {
+    this.db.query("DELETE FROM chatgpt_credentials WHERE job_id = ?").run(jobId);
+    this.db.query("DELETE FROM job_attempts WHERE job_id = ?").run(jobId);
+    this.db.query("DELETE FROM jobs WHERE id = ?").run(jobId);
+  }
+
   stopJob(jobId: number): JobRecord {
     return this.updateJobState(jobId, {
       status: "stopped",
