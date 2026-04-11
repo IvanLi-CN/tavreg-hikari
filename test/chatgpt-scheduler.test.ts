@@ -112,7 +112,9 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
 
 test("chatgpt scheduler allows starts after cooldown window expires", async () => {
   const { appDb } = await createTempDb();
-  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
   (scheduler as any).ensureLoop = () => undefined;
 
   const job = appDb.createJob({
@@ -157,7 +159,10 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
 
 test("chatgpt scheduler starts without pre-provisioned drafts in payload", async () => {
   const { appDb } = await createTempDb();
-  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  let generatedDrafts = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(++generatedDrafts),
+  });
   (scheduler as any).ensureLoop = () => undefined;
 
   const next = await scheduler.startJob({
@@ -172,6 +177,33 @@ test("chatgpt scheduler starts without pre-provisioned drafts in payload", async
   expect(next.parallel).toBe(2);
   expect(next.maxAttempts).toBe(5);
   expect(next.payloadJson).toEqual({});
+  expect(generatedDrafts).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler surfaces first-attempt draft provisioning failures during start", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      throw new Error("cfmail_api_unavailable");
+    },
+  });
+  (scheduler as any).ensureLoop = () => undefined;
+
+  await expect(
+    scheduler.startJob({
+      runMode: "headless",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+    }),
+  ).rejects.toThrow("chatgpt attempt draft failed at attempt #1: cfmail_api_unavailable");
+
+  const current = appDb.getCurrentJob("chatgpt");
+  expect(current?.status).toBe("failed");
+  expect(current?.lastError).toBe("chatgpt attempt draft failed at attempt #1: cfmail_api_unavailable");
 
   await scheduler.shutdown();
   appDb.close();
@@ -219,16 +251,16 @@ test("chatgpt scheduler only provisions drafts for launched attempts", async () 
   appDb.close();
 });
 
-test("chatgpt scheduler waits for active attempts to drain before finalizing draft generation failures", async () => {
+test("chatgpt scheduler retries draft generation after transient failures while attempts are still active", async () => {
   const { appDb } = await createTempDb();
   let draftCalls = 0;
   const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
     createAttemptDraft: async () => {
       draftCalls += 1;
-      if (draftCalls === 1) {
-        return createDraft(draftCalls);
+      if (draftCalls === 2) {
+        throw new Error("cfmail_temporarily_unavailable");
       }
-      throw new Error("cfmail_temporarily_unavailable");
+      return createDraft(draftCalls);
     },
   });
 
@@ -261,15 +293,16 @@ test("chatgpt scheduler waits for active attempts to drain before finalizing dra
 
   for (let index = 0; index < 80; index += 1) {
     const current = appDb.getJob(next.id);
-    if (current?.status === "failed") break;
+    if (current?.status === "completed") break;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 
-  const failed = appDb.getJob(next.id);
-  expect(failed?.status).toBe("failed");
-  expect(failed?.successCount).toBe(1);
-  expect(failed?.launchedCount).toBe(1);
-  expect(failed?.lastError).toBe("chatgpt attempt draft failed at attempt #2: cfmail_temporarily_unavailable");
+  const completed = appDb.getJob(next.id);
+  expect(completed?.status).toBe("completed");
+  expect(completed?.successCount).toBe(2);
+  expect(completed?.launchedCount).toBe(2);
+  expect(completed?.maxAttempts).toBe(3);
+  expect(draftCalls).toBe(3);
 
   await scheduler.shutdown();
   appDb.close();
