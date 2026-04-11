@@ -197,16 +197,7 @@ async function ensureSavedProofMailbox(input: {
   };
 }
 
-function normalizeBirthDate(value: unknown): string | null {
-  const raw = String(value || "").trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null;
-  const time = Date.parse(`${raw}T00:00:00.000Z`);
-  if (!Number.isFinite(time)) return null;
-  if (raw < "1990-01-01" || raw > "2005-12-31") return null;
-  return raw;
-}
-
-async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
+async function buildChatGptDraft(): Promise<{
   email: string;
   password: string;
   nickname: string;
@@ -219,22 +210,14 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
     throw new Error("cfmail_api_key_missing");
   }
   const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
-  const normalizedEmail = String(requestedEmail || "").trim().toLowerCase();
-  const mailbox = normalizedEmail
-    ? await ensureCfMailMailbox({
-        baseUrl,
-        apiKey,
-        address: normalizedEmail,
-        httpJson: serverHttpJson,
-      })
-    : await provisionCfMailMailbox({
-        baseUrl,
-        apiKey,
-        httpJson: serverHttpJson,
-        localPart: randomMailboxSegment("mail"),
-        subdomain: randomMailboxSegment("box"),
-        rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
-      });
+  const mailbox = await provisionCfMailMailbox({
+    baseUrl,
+    apiKey,
+    httpJson: serverHttpJson,
+    localPart: randomMailboxSegment("mail"),
+    subdomain: randomMailboxSegment("box"),
+    rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
+  });
   return {
     email: mailbox.address,
     password: randomPassword(),
@@ -1722,19 +1705,6 @@ async function main(): Promise<void> {
       if (pathname === "/api/jobs/current" && req.method === "GET") {
         const site = parseJobSite(url.searchParams.get("site"));
         return json(serializeJobSnapshot(site, db, getSchedulerBySite(site)));
-      }
-
-      if (pathname === "/api/chatgpt/draft" && req.method === "GET") {
-        try {
-          const requestedEmail = url.searchParams.get("email");
-          const draft = await buildChatGptDraft(requestedEmail);
-          return json({
-            ok: true,
-            draft,
-          });
-        } catch (error) {
-          return badRequest(error instanceof Error ? error.message : String(error), 409);
-        }
       }
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
