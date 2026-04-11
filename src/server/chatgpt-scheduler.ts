@@ -33,10 +33,6 @@ interface ChatGptAttemptDraft {
   mailboxId: string;
 }
 
-interface ChatGptJobPayload {
-  drafts: ChatGptAttemptDraft[];
-}
-
 interface ChatGptWorkerResult {
   mode: "headed" | "headless";
   email: string;
@@ -128,17 +124,6 @@ function normalizeDraft(input: unknown): ChatGptAttemptDraft | null {
   };
 }
 
-function parsePayload(job: Pick<JobRecord, "payloadJson">): ChatGptJobPayload {
-  const payload = job.payloadJson || {};
-  const drafts = Array.isArray(payload.drafts)
-    ? payload.drafts.map((item) => normalizeDraft(item)).filter((item): item is ChatGptAttemptDraft => Boolean(item))
-    : [];
-  if (drafts.length === 0) {
-    throw new Error("chatgpt_job_payload_invalid");
-  }
-  return { drafts };
-}
-
 function resolveCredentialExpiry(result: NonNullable<ChatGptWorkerResult["credentials"]>): string | null {
   if (typeof result.expires_at === "string" && result.expires_at.trim()) {
     return result.expires_at.trim();
@@ -219,14 +204,26 @@ export class ChatGptJobScheduler {
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
   private loopPromise: Promise<void> | null = null;
   private shuttingDown = false;
+  private readonly site: JobSite;
+  private readonly createAttemptDraft: () => Promise<ChatGptAttemptDraft>;
 
   constructor(
     private readonly db: AppDatabase,
     private readonly repoRoot: string,
     private readonly getSettings: () => AppSettings,
     private readonly publish: (event: ServerEvent) => void,
-    private readonly site: JobSite = "chatgpt",
-  ) {}
+    options?: {
+      site?: JobSite;
+      createAttemptDraft?: () => Promise<ChatGptAttemptDraft>;
+    },
+  ) {
+    this.site = options?.site || "chatgpt";
+    this.createAttemptDraft =
+      options?.createAttemptDraft
+      || (async (): Promise<ChatGptAttemptDraft> => {
+        throw new Error("chatgpt_attempt_draft_factory_missing");
+      });
+  }
 
   currentJob(): JobRecord | null {
     return this.db.getCurrentJob(this.site);
@@ -286,7 +283,6 @@ export class ChatGptJobScheduler {
     need: number;
     parallel: number;
     maxAttempts: number;
-    drafts: ChatGptAttemptDraft[];
   }): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
@@ -299,22 +295,14 @@ export class ChatGptJobScheduler {
     const normalizedNeed = Math.max(1, Math.trunc(input.need));
     const normalizedParallel = Math.max(1, Math.trunc(input.parallel));
     const normalizedMaxAttempts = normalizeJobMaxAttempts(normalizedNeed, input.maxAttempts);
-    const normalizedDrafts = input.drafts
-      .map((draft) => normalizeDraft(draft))
-      .filter((draft): draft is ChatGptAttemptDraft => Boolean(draft));
     const runMode = input.runMode === "headless" ? "headless" : "headed";
-    if (normalizedDrafts.length < normalizedMaxAttempts) {
-      throw new Error(`chatgpt_drafts_insufficient:${normalizedDrafts.length}/${normalizedMaxAttempts}`);
-    }
     const job = this.db.createJob({
       site: this.site,
       runMode,
       need: normalizedNeed,
       parallel: normalizedParallel,
       maxAttempts: normalizedMaxAttempts,
-      payloadJson: {
-        drafts: normalizedDrafts.slice(0, normalizedMaxAttempts),
-      },
+      payloadJson: {},
     });
     this.emit("job.updated", { site: this.site, job });
     this.emit("toast", { level: "info", message: `chatgpt job #${job.id} started` });
@@ -410,12 +398,19 @@ export class ChatGptJobScheduler {
 
       const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
       if (launchCapacity > 0) {
-        const payload = parsePayload(job);
-        let launchIndex = job.launchedCount;
         for (let slot = 0; slot < launchCapacity; slot += 1) {
-          const draft = payload.drafts[launchIndex];
-          if (!draft) {
-            const failed = this.db.completeJob(job.id, false, `chatgpt job payload exhausted at attempt #${launchIndex + 1}`);
+          const launchIndex = this.db.getJob(job.id)?.launchedCount ?? job.launchedCount;
+          let draft: ChatGptAttemptDraft;
+          try {
+            const generatedDraft = await this.createAttemptDraft();
+            const normalizedDraft = normalizeDraft(generatedDraft);
+            if (!normalizedDraft) {
+              throw new Error("chatgpt_attempt_draft_invalid");
+            }
+            draft = normalizedDraft;
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            const failed = this.db.completeJob(job.id, false, `chatgpt attempt draft failed at attempt #${launchIndex + 1}: ${reason}`);
             this.emit("job.updated", { site: this.site, job: failed });
             this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
             return;
@@ -435,7 +430,6 @@ export class ChatGptJobScheduler {
               errorMessage: error instanceof Error ? error.message : String(error),
             });
           }
-          launchIndex += 1;
         }
       }
 

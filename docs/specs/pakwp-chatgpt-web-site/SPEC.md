@@ -18,7 +18,7 @@
 
 - 把现有主流程重命名为 `Tavily`，新增并列 `ChatGPT` 顶层页与站点化路由。
 - 将 job / attempt / scheduler / HTTP API 收敛为 `site=tavily|chatgpt` 的多站点模型，并允许两个站点各自维护 current job。
-- 为 ChatGPT 提供批量任务控制面，并在启动时由服务端为每个 attempt 自动生成完整注册资料。
+- 为 ChatGPT 提供批量任务控制面，并在每个 attempt 实际派发时由服务端自动生成完整注册资料。
 - 为 ChatGPT 增加批量可配置、有头浏览器优先的 worker 流程，并把结果提升为完整凭据包持久化与可视化展示。
 
 ### Non-goals
@@ -46,10 +46,10 @@
 
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
 - ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，并明确说明 attempt 资料由服务端自动生成。
-- ChatGPT 仍固定使用 `runMode=headed`，但 `need / parallel / maxAttempts` 必须允许由前端显式配置。
+- ChatGPT 必须支持 `runMode=headed|headless` 显式配置；当当前运行环境不支持有头浏览器时，界面不得错误提供 `headed` 选项，后端也必须拒绝显式 `headed` 启动。
 - ChatGPT 每个 attempt 的邮箱必须由服务端通过 cf-mail provision/ensure 生成，且每个 attempt 都要拿到独立资料。
 - ChatGPT 成功结果必须包含 `access_token / refresh_token / id_token / account_id / email / exp(expires_at)`；缺少 `refresh_token` 视为失败。
-- 当 ChatGPT 批量任务启动时，服务端必须为每个 attempt 生成新的 cf-mail 邮箱、密码、昵称与生日，避免跨 attempt 共享资料。
+- 当 ChatGPT 批量任务派发 attempt 时，服务端必须为该 attempt 生成新的 cf-mail 邮箱、密码、昵称与生日，避免跨 attempt 共享资料，也不得为未实际派发的预算预占邮箱。
 
 ### SHOULD
 
@@ -63,7 +63,7 @@
 
 - 用户进入 `/chatgpt` 时，前端展示批量控制与自动生成说明，不暴露单次 attempt 的邮箱 / 密码 / 昵称 / 出生日期输入框。
 - 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，并携带 `need / parallel / maxAttempts`。
-- 后端在固定 headed 模式下创建 ChatGPT job，并在启动时为每个 attempt 预生成独立的 cf-mail 邮箱、随机密码、随机昵称与 `1990-01-01` 至 `2005-12-31` 之间的生日。
+- 后端按当前请求与环境能力创建 ChatGPT job，并在每个 attempt 实际启动前生成独立的 cf-mail 邮箱、随机密码、随机昵称与 `1990-01-01` 至 `2005-12-31` 之间的生日。
 - 调度器按 `site` 分流：Tavily 继续沿用现有 worker；ChatGPT 走独立 runtime，产出完整凭据后写入 `chatgpt_credentials` 并把 attempt 标记成功。
 - 用户在 ChatGPT 页查看最近凭据时，只看到掩码值；显式 reveal/export 时再读取完整凭据 JSON。
 
@@ -106,9 +106,9 @@
   When 最终没有拿到 `refresh_token`
   Then attempt 标记失败并记录明确 failure code，不得误标成功。
 
-- Given 用户把 ChatGPT job 目标设为 `need=3 / parallel=2 / maxAttempts=5`
+- Given 用户把 ChatGPT job 目标设为 `runMode=headed / need=3 / parallel=2 / maxAttempts=5`
   When 启动任务
-  Then 服务端会以 headed 模式并发拉起最多 2 个 attempt，直到成功数达到 3 或尝试预算耗尽。
+  Then 在当前环境支持有头浏览器时，服务端会以 headed 模式并发拉起最多 2 个 attempt，直到成功数达到 3 或尝试预算耗尽。
 
 - Given ChatGPT worker 成功拿到完整凭据
   When 用户在 ChatGPT 页查看最近结果

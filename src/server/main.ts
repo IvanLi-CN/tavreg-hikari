@@ -245,35 +245,6 @@ async function buildChatGptDraft(requestedEmail?: string | null): Promise<{
   };
 }
 
-async function buildChatGptJobDrafts(input: {
-  maxAttempts: number;
-}): Promise<Array<{
-  email: string;
-  password: string;
-  nickname: string;
-  birthDate: string;
-  mailboxId: string;
-}>> {
-  const drafts: Array<{
-    email: string;
-    password: string;
-    nickname: string;
-    birthDate: string;
-    mailboxId: string;
-  }> = [];
-  for (let index = 0; index < input.maxAttempts; index += 1) {
-    const generated = await buildChatGptDraft();
-    drafts.push({
-      email: generated.email,
-      password: generated.password,
-      nickname: generated.nickname,
-      birthDate: generated.birthDate,
-      mailboxId: generated.mailboxId,
-    });
-  }
-  return drafts;
-}
-
 function parseBool(value: string | null): boolean | undefined {
   if (value == null) return undefined;
   if (["1", "true", "yes", "on"].includes(value.toLowerCase())) return true;
@@ -723,25 +694,6 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
     runModeAvailability,
     cooldown: scheduler.getCooldownSnapshot?.() ?? null,
   };
-}
-
-function normalizeChatGptEmail(value: unknown): string | null {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (!normalized) return null;
-  const parts = splitEmailAddress(normalized);
-  if (!parts?.local || !parts.domain) return null;
-  return normalized;
-}
-
-function normalizeChatGptPassword(value: unknown): string | null {
-  const normalized = String(value || "");
-  return normalized.trim().length >= 8 ? normalized : null;
-}
-
-function normalizeChatGptNickname(value: unknown): string | null {
-  const normalized = String(value || "").trim();
-  if (!normalized) return null;
-  return normalized.slice(0, 64);
 }
 
 function randomPassword(length = 18): string {
@@ -1347,7 +1299,9 @@ async function main(): Promise<void> {
       }
     },
   });
-  const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast);
+  const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast, {
+    createAttemptDraft: () => buildChatGptDraft(),
+  });
   const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
 
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
@@ -2184,15 +2138,11 @@ async function main(): Promise<void> {
               const need = toOptionalPositiveInt(body?.need) ?? 1;
               const parallel = toOptionalPositiveInt(body?.parallel) ?? 1;
               const maxAttempts = normalizeJobMaxAttempts(need, toOptionalPositiveInt(body?.maxAttempts) ?? 1);
-              const drafts = await buildChatGptJobDrafts({
-                maxAttempts,
-              });
               const job = await chatgptScheduler.startJob({
                 runMode,
                 need,
                 parallel,
                 maxAttempts,
-                drafts,
               });
               return json({ ok: true, job });
             }

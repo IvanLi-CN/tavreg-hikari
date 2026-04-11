@@ -42,11 +42,12 @@
   - `action: start|pause|resume|stop|force_stop|update_limits`
   - Tavily: 继续接受现有 `runMode/need/parallel/maxAttempts/autoExtract*`
   - ChatGPT:
+    - `runMode?: headed|headless`
     - `need`
     - `parallel`
     - `maxAttempts`
-    - 服务端固定忽略外部 `runMode`，统一按 headed 执行
-    - 服务端会在启动时为每个 attempt 自动生成独立的 cf-mail 邮箱、密码、昵称与生日资料
+    - 当前环境不支持有头浏览器时，服务端必须拒绝显式 `runMode=headed`
+    - 服务端只会在 attempt 实际派发时为该次尝试生成独立的 cf-mail 邮箱、密码、昵称与生日资料，不会为未启动的预算预生成邮箱
 
 ### 响应（Response）
 

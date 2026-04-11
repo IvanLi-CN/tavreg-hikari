@@ -77,9 +77,7 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
     need: 1,
     parallel: 1,
     maxAttempts: 1,
-    payloadJson: {
-      drafts: [createDraft(1)],
-    },
+    payloadJson: {},
   });
   const attempt = appDb.createAttempt(job.id, {
     accountEmail: "mailbox@example.com",
@@ -105,7 +103,6 @@ test("chatgpt scheduler blocks fresh starts during auth challenge cooldown", asy
       need: 1,
       parallel: 1,
       maxAttempts: 1,
-      drafts: [createDraft(2)],
     }),
   ).rejects.toThrow(/retry after/i);
 
@@ -124,9 +121,7 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
     need: 1,
     parallel: 1,
     maxAttempts: 1,
-    payloadJson: {
-      drafts: [createDraft(1)],
-    },
+    payloadJson: {},
   });
   const attempt = appDb.createAttempt(job.id, {
     accountEmail: "mailbox@example.com",
@@ -149,7 +144,6 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
     need: 2,
     parallel: 2,
     maxAttempts: 3,
-    drafts: [createDraft(2), createDraft(3), createDraft(4)],
   });
   expect(next.site).toBe("chatgpt");
   expect(next.status).toBe("running");
@@ -161,7 +155,7 @@ test("chatgpt scheduler allows starts after cooldown window expires", async () =
   appDb.close();
 });
 
-test("chatgpt scheduler stores batch drafts inside payload", async () => {
+test("chatgpt scheduler starts without pre-provisioned drafts in payload", async () => {
   const { appDb } = await createTempDb();
   const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
   (scheduler as any).ensureLoop = () => undefined;
@@ -171,21 +165,55 @@ test("chatgpt scheduler stores batch drafts inside payload", async () => {
     need: 3,
     parallel: 2,
     maxAttempts: 5,
-    drafts: [createDraft(1), createDraft(2), createDraft(3), createDraft(4), createDraft(5)],
   });
 
   expect(next.runMode).toBe("headless");
   expect(next.need).toBe(3);
   expect(next.parallel).toBe(2);
   expect(next.maxAttempts).toBe(5);
-  expect(Array.isArray(next.payloadJson.drafts)).toBe(true);
-  expect((next.payloadJson.drafts as Array<Record<string, unknown>>).map((draft) => draft.email)).toEqual([
-    "draft-1@example.com",
-    "draft-2@example.com",
-    "draft-3@example.com",
-    "draft-4@example.com",
-    "draft-5@example.com",
-  ]);
+  expect(next.payloadJson).toEqual({});
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler only provisions drafts for launched attempts", async () => {
+  const { appDb } = await createTempDb();
+  let generatedDrafts = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(++generatedDrafts),
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+      email: draft.email,
+      accountId: `acc-${attempt.id}`,
+      accessToken: `access-${attempt.id}`,
+      refreshToken: `refresh-${attempt.id}`,
+      idToken: `id-${attempt.id}`,
+      expiresAt: null,
+      credentialJson: JSON.stringify({ email: draft.email }),
+    });
+  };
+
+  const next = await scheduler.startJob({
+    runMode: "headless",
+    need: 3,
+    parallel: 2,
+    maxAttempts: 5,
+  });
+
+  for (let index = 0; index < 40; index += 1) {
+    const current = appDb.getJob(next.id);
+    if (current?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const completed = appDb.getJob(next.id);
+  expect(completed?.status).toBe("completed");
+  expect(completed?.successCount).toBe(3);
+  expect(completed?.launchedCount).toBe(3);
+  expect(generatedDrafts).toBe(3);
 
   await scheduler.shutdown();
   appDb.close();
