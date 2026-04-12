@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.5.0",
+  "base_stable_version": "0.4.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-12T14:56:27Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.5.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "791f371d19ce8897b1e97eb70014166285e56b9e",
+  "pr_number": 35,
+  "pr_title": "feat: improve default mailbox generation",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.5.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.5.0",
+  "target_sha": "365124a2b6384b90e680e13aef046c2a903a9b54",
+  "type_label": "type:minor"
+}
