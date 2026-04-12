@@ -6,9 +6,9 @@ import process from "node:process";
 import {
   ensureCfMailMailbox,
   normalizeCfMailBaseUrl,
-  provisionCfMailMailbox,
   type CfMailHttpJson,
 } from "../cfmail-api.js";
+import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
 import {
@@ -81,8 +81,6 @@ const OUTPUT_ROOT = path.join(REPO_ROOT, "output");
 const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json");
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
-const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "example.test").trim() || "example.test";
-
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -91,11 +89,6 @@ function toInt(value: string | undefined, fallback: number): number {
 
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-function randomMailboxSegment(prefix: string): string {
-  const suffix = Math.random().toString(16).slice(2, 10).padEnd(8, "0").slice(0, 8);
-  return `${prefix}-${suffix}`;
 }
 
 function json(data: unknown, init?: ResponseInit): Response {
@@ -194,37 +187,6 @@ async function ensureSavedProofMailbox(input: {
     provider: "cfmail",
     address,
     mailboxId: ensured.id || hintedMailboxId,
-  };
-}
-
-async function buildChatGptDraft(): Promise<{
-  email: string;
-  password: string;
-  nickname: string;
-  birthDate: string;
-  mailboxId: string;
-  generatedAt: string;
-}> {
-  const apiKey = (process.env.CFMAIL_API_KEY || "").trim();
-  if (!apiKey) {
-    throw new Error("cfmail_api_key_missing");
-  }
-  const baseUrl = normalizeCfMailBaseUrl(process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test");
-  const mailbox = await provisionCfMailMailbox({
-    baseUrl,
-    apiKey,
-    httpJson: serverHttpJson,
-    localPart: randomMailboxSegment("mail"),
-    subdomain: randomMailboxSegment("box"),
-    rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
-  });
-  return {
-    email: mailbox.address,
-    password: randomPassword(),
-    nickname: randomNickname(),
-    birthDate: randomBirthDate(),
-    mailboxId: mailbox.id,
-    generatedAt: nowIso(),
   };
 }
 
@@ -1283,7 +1245,16 @@ async function main(): Promise<void> {
     },
   });
   const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast, {
-    createAttemptDraft: () => buildChatGptDraft(),
+    createAttemptDraft: () =>
+      buildChatGptDraft({
+        apiKey: (process.env.CFMAIL_API_KEY || "").trim(),
+        baseUrl: process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test",
+        httpJson: serverHttpJson,
+        createPassword: randomPassword,
+        createNickname: randomNickname,
+        createBirthDate: randomBirthDate,
+        nowIso,
+      }),
   });
   const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
 

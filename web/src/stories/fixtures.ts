@@ -575,7 +575,7 @@ export const sampleApiKeys: ApiKeysPayload = {
 };
 
 export const sampleChatGptDraft: ChatGptDraft = {
-  email: "nova123@mail.example.test",
+  email: "nova-demo318@alpha.example.test",
   password: "Pw8$hikariDemo19",
   nickname: "Nova318",
   birthDate: "1998-07-14",

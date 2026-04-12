@@ -23,6 +23,7 @@ import {
   provisionCfMailMailbox,
   resolveCfMailMailbox,
 } from "./cfmail-api.js";
+import { generateRealisticMailboxLocalPart } from "./mailbox-address.js";
 import {
   MICROSOFT_PASSWORD_SUBMIT_LIMIT,
   classifyMicrosoftFlowInterrupt,
@@ -1325,52 +1326,6 @@ function randomPassword(): string {
   return "Aa1!SecurePass97";
 }
 
-function pickRandom<T>(values: T[]): T {
-  return values[randomInt(0, values.length)]!;
-}
-
-const MAILBOX_NAME_PREFIXES = [
-  "alex",
-  "sam",
-  "jordan",
-  "taylor",
-  "kai",
-  "mika",
-  "ren",
-  "haru",
-  "noa",
-  "niko",
-  "rei",
-  "yuna",
-  "mina",
-  "leo",
-  "luna",
-];
-
-const MAILBOX_NAME_SUFFIXES = [
-  "lin",
-  "park",
-  "chen",
-  "wong",
-  "tan",
-  "mori",
-  "sato",
-  "kato",
-  "ito",
-  "kim",
-  "li",
-  "ng",
-  "choi",
-  "song",
-];
-
-function randomMailboxLocalPart(): string {
-  const sep = pickRandom(["", "", ".", "_"]);
-  const digits = String(randomInt(10, 9999));
-  const raw = `${pickRandom(MAILBOX_NAME_PREFIXES)}${sep}${pickRandom(MAILBOX_NAME_SUFFIXES)}${digits}`;
-  return raw.replace(/[^a-z0-9._-]/gi, "").toLowerCase();
-}
-
 function sanitizeCaptchaText(value: string): string {
   return (value || "").replace(/[^A-Za-z0-9]/g, "").trim();
 }
@@ -2511,7 +2466,7 @@ async function createDuckmailSession(cfg: AppConfig, proxyUrl?: string): Promise
   let createdOk = false;
   const createAttempts = 5;
   for (let attempt = 1; attempt <= createAttempts; attempt += 1) {
-    address = `${randomMailboxLocalPart()}@${pickedDomain}`;
+    address = `${generateRealisticMailboxLocalPart()}@${pickedDomain}`;
     try {
       const created = await httpJson<JsonRecord>("POST", `${baseUrl}/accounts`, {
         headers: { ...headers, "Content-Type": "application/json" },
