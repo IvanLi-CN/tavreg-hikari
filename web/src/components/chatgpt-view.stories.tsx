@@ -37,7 +37,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 104,
       accountId: null,
-      accountEmail: "mail-a72f3d18@box-3189a6b1.ivanli.asia",
+      accountEmail: "nova-demo318@alpha.example.test",
       status: "running",
       stage: "otp_verify",
       proxyNode: "Tokyo-01",
@@ -50,7 +50,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 105,
       accountId: null,
-      accountEmail: "mail-c4917e0b@box-4df1be91.ivanli.asia",
+      accountEmail: "echo-demo204@bravo.example.test",
       status: "running",
       stage: "consent_submit",
       proxyNode: "Singapore-03",
@@ -65,7 +65,7 @@ const sampleJob: JobSnapshot = {
     {
       id: 103,
       accountId: null,
-      accountEmail: "mail-0cb2f761@box-90ce7a14.ivanli.asia",
+      accountEmail: "rio-demo77@charlie.example.test",
       status: "failed",
       stage: "failed",
       proxyNode: "Tokyo-02",
