@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 已实现待评审
+- Status: 已完成
 - Created: 2026-04-12
 - Last: 2026-04-12
 
@@ -19,7 +19,7 @@
 - 将 ChatGPT 默认草稿改为优先使用 CF Mail provider 自动生成的随机邮箱。
 - 为 ChatGPT fallback 与 DuckMail 共用一套更自然的 local-part 生成器。
 - 保持现有 draft / job payload / DB 字段、DuckMail domain 选择与冲突重试链路不变。
-- 更新 Storybook 示例与视觉证据，确保当前 Attempt 卡片不再展示 `mail-<hex>@box-<hex>` 风格邮箱。
+- 更新 Storybook 示例与演示 fixture，确保当前 Attempt 卡片不再展示 `mail-<hex>@box-<hex>` 风格邮箱。
 
 ### Non-goals
 
@@ -33,7 +33,7 @@
 
 - `/src/server/main.ts` 的 ChatGPT draft 生成入口。
 - `/src/main.ts` 的 DuckMail local-part 生成入口。
-- 与邮箱生成相关的共享工具、单元测试、ChatGPT Storybook 示例与视觉证据。
+- 与邮箱生成相关的共享工具、单元测试与 ChatGPT Storybook 示例。
 
 ### Out of scope
 
@@ -48,7 +48,7 @@
 - 当 provider-managed 创建因不支持自动生成或返回不可用记录而失败时，系统必须自动回退到共享的真人风格 local-part 方案；若当前 CF Mail 部署额外要求 caller-supplied `subdomain`，则 fallback 还必须补一个人类可读的 subdomain。
 - DuckMail 创建地址时必须复用同一套真人风格 local-part 规则，且保留现有 domain 选择、地址冲突重试和 token 获取流程。
 - 新的 local-part 必须保持小写 ASCII，并遵守当前 CF Mail provider 的 caller-supplied local-part 约束：整体风格固定为“名字 + 姓氏/别名 + 2~4 位数字”，必要时仅允许单个 `-` 作为连接，不得再出现 `mail-`、`box-` 或长 hex slug。
-- ChatGPT 相关 Storybook 示例、演示 fixture 与视觉证据必须体现新的邮箱风格。
+- ChatGPT 相关 Storybook 示例与演示 fixture 必须体现新的邮箱风格。
 
 ### SHOULD
 
@@ -104,7 +104,7 @@ None
 
 - 默认邮箱收敛范围已锁定为 ChatGPT draft + DuckMail 自拼入口。
 - 无需新增 API / DB / env 配置的约束已锁定，且 `CHATGPT_CFMAIL_ROOT_DOMAIN` 必须从 ChatGPT draft 路径彻底移除。
-- Storybook 已存在，视觉证据默认以 Storybook 为首选来源。
+- Storybook 已存在，可用于稳定展示 ChatGPT 运行态示例。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -112,7 +112,7 @@ None
 
 - Unit tests: 邮箱生成工具、ChatGPT provider-first / fallback draft 逻辑。
 - Integration tests: 复用现有 Bun 测试覆盖，确保未破坏调度器与 CF Mail 封装。
-- E2E tests (if applicable): 无新增 live E2E 要求，以 Storybook 视觉证据替代。
+- E2E tests (if applicable): 无新增 live E2E 要求。
 
 ### UI / Storybook (if applicable)
 
@@ -128,21 +128,6 @@ None
 
 - `docs/specs/README.md`: 新增本 spec，并在实现完成后回写状态与备注。
 
-## 计划资产（Plan assets）
-
-- Directory: `docs/specs/55uxa-provider-first-default-mailboxes/assets/`
-- In-plan references: `![...](./assets/<file>.png)`
-- Visual evidence source: maintain `## Visual Evidence` in this spec when owner-facing or PR-facing screenshots are needed.
-
-## Visual Evidence
-
-- Evidence SHA: `local working tree`
-- source_type: `storybook_canvas`
-  story_id_or_title: `views-chatgptview--batch-running`
-  state: `chatgpt batch running`
-  evidence_note: 验证 ChatGPT 运行态 Attempt 卡片与最近失败记录已经改成更自然且与 CF Mail caller-supplied local-part 约束对齐的邮箱风格，同时视觉证据只使用 `example.test` 下的 demo 地址，不暴露真实邮箱。
-  ![ChatGPT running attempts with realistic mailbox addresses](./assets/chatgpt-view-batch-running.png)
-
 ## 资产晋升（Asset promotion）
 
 None
@@ -152,7 +137,7 @@ None
 - [x] M1: ChatGPT draft 生成改为 provider-first，并具备 fallback
 - [x] M2: DuckMail 接入共享真人风格 local-part 生成器
 - [x] M3: 补齐邮箱生成相关单元测试与 Storybook 示例数据
-- [x] M4: 产出视觉证据并完成本地验证 / review proof
+- [x] M4: 完成本地验证 / review proof / spec 收口
 
 ## 方案概述（Approach, high-level）
 
@@ -169,11 +154,12 @@ None
 ## 变更记录（Change log）
 
 - 2026-04-12: 创建 spec，冻结 provider-first + 真人风格兜底的默认邮箱生成改造范围。
-- 2026-04-12: ChatGPT draft 改为 provider-first，DuckMail 切换到共享真人风格 local-part，并补齐 Storybook 视觉证据。
+- 2026-04-12: ChatGPT draft 改为 provider-first，DuckMail 切换到共享真人风格 local-part，并同步更新 Storybook 示例。
 - 2026-04-12: ChatGPT fallback 补充兼容“subdomain required”类型部署，必要时自动生成人类可读 subdomain。
 - 2026-04-12: 根据 live CF Mail 验证结果移除 `CHATGPT_CFMAIL_ROOT_DOMAIN` 依赖，provider-first 与 fallback 均改为让 provider 自行选择可用 domain。
 - 2026-04-12: 根据 live CF Mail 的 local-part 校验规则收紧 fallback 生成器，改为 provider-compatible 的真人风格地址。
-- 2026-04-12: 本地 typecheck / test / Storybook / review proof 已通过，进入待评审阶段。
+- 2026-04-12: 主人确认本任务不要求视觉证据，移除 spec 证据资产，仅保留 Storybook 示例与验证记录。
+- 2026-04-12: 本地 typecheck / test / Storybook / review proof 已通过，任务完成。
 
 ## 参考（References）
 
