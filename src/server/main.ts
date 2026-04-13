@@ -18,6 +18,7 @@ import {
   type AccountExtractorProvider,
   type AppSettings,
   type ChatGptCredentialRecord,
+  type GrokApiKeyRecord,
   type JobAttemptRecord,
   type JobSite,
   type MicrosoftMailboxRecord,
@@ -52,8 +53,9 @@ import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { ChatGptJobScheduler } from "./chatgpt-scheduler.js";
 import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
+import { GrokJobScheduler } from "./grok-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
-import { buildApiKeyExportContent } from "./api-key-export.js";
+import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
 import {
   assertMicrosoftGraphSettings,
@@ -81,6 +83,7 @@ const OUTPUT_ROOT = path.join(REPO_ROOT, "output");
 const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json");
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
+const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -602,7 +605,9 @@ function broadcastAccountAction(
 }
 
 function parseJobSite(value: string | null | undefined): JobSite {
-  return value === "chatgpt" ? "chatgpt" : "tavily";
+  if (value === "chatgpt") return "chatgpt";
+  if (value === "grok") return "grok";
+  return "tavily";
 }
 
 type SiteScheduler = {
@@ -685,6 +690,31 @@ function serializeChatGptCredential(row: ChatGptCredentialRecord, includeSecrets
           refreshToken: row.refreshToken,
           idToken: row.idToken,
           credentialJson: row.credentialJson,
+        }
+      : {}),
+  };
+}
+
+function serializeGrokApiKey(row: GrokApiKeyRecord, includeSecret = false) {
+  return {
+    id: row.id,
+    jobId: row.jobId,
+    attemptId: row.attemptId,
+    email: row.email,
+    password: row.password,
+    sso: row.sso,
+    ssoRw: row.ssoRw,
+    status: row.status,
+    extractedIp: row.extractedIp,
+    extractedAt: row.extractedAt,
+    lastVerifiedAt: row.lastVerifiedAt,
+    createdAt: row.createdAt,
+    birthDate: row.birthDate,
+    checkoutUrl: row.checkoutUrl,
+    hasCfClearance: Boolean(row.cfClearance),
+    ...(includeSecret
+      ? {
+          cfClearance: row.cfClearance,
         }
       : {}),
   };
@@ -1244,19 +1274,25 @@ async function main(): Promise<void> {
       }
     },
   });
+  const grokScheduler = new GrokJobScheduler(db, REPO_ROOT, readSettings, broadcast);
   const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast, {
     createAttemptDraft: () =>
       buildChatGptDraft({
         apiKey: (process.env.CFMAIL_API_KEY || "").trim(),
         baseUrl: process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test",
         httpJson: serverHttpJson,
+        rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
         createPassword: randomPassword,
         createNickname: randomNickname,
         createBirthDate: randomBirthDate,
         nowIso,
       }),
   });
-  const getSchedulerBySite = (site: JobSite) => (site === "chatgpt" ? chatgptScheduler : tavilyScheduler);
+  const getSchedulerBySite = (site: JobSite) => {
+    if (site === "chatgpt") return chatgptScheduler;
+    if (site === "grok") return grokScheduler;
+    return tavilyScheduler;
+  };
 
   for (const accountId of db.listPendingBrowserSessionAccountIds()) {
     queueAccountSessionBootstrap(accountId, { reason: "auto" });
@@ -1671,6 +1707,73 @@ async function main(): Promise<void> {
           items,
           content: buildApiKeyExportContent(items),
         });
+      }
+
+      if ((pathname === "/api/grok/keys" || pathname === "/api/grok/accounts") && req.method === "GET") {
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const data = db.listGrokApiKeys({
+          q: url.searchParams.get("q") || undefined,
+          status: url.searchParams.get("status") || undefined,
+          sortBy: (url.searchParams.get("sortBy") as "extractedAt" | "lastVerifiedAt" | null) || undefined,
+          sortDir: (url.searchParams.get("sortDir") as "desc" | "asc" | null) || undefined,
+          page,
+          pageSize,
+        });
+        return json({
+          ok: true,
+          total: data.total,
+          page,
+          pageSize,
+          summary: data.summary,
+          rows: data.rows.map((row) => serializeGrokApiKey(row)),
+        });
+      }
+
+      if ((pathname === "/api/grok/keys/export" || pathname === "/api/grok/accounts/export") && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: number[] } | null;
+        const ids = Array.isArray(body?.ids)
+          ? Array.from(new Set(body.ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)))
+          : [];
+        if (ids.length === 0) {
+          return badRequest("grok account ids are required");
+        }
+        const items = db.listGrokApiKeysForExport(ids).map((row) => ({
+          id: row.id,
+          email: row.email,
+          password: row.password,
+          sso: row.sso,
+          ssoRw: row.ssoRw,
+          cfClearance: row.cfClearance,
+          checkoutUrl: row.checkoutUrl,
+          birthDate: row.birthDate,
+        }));
+        return json({
+          ok: true,
+          items,
+          content: buildGrokSsoExportContent(items),
+        });
+      }
+
+      const grokApiKeyDetailMatch = pathname.match(/^\/api\/grok\/(?:keys|accounts)\/(\d+)$/);
+      if (grokApiKeyDetailMatch && req.method === "GET") {
+        const keyId = Number.parseInt(grokApiKeyDetailMatch[1] || "", 10);
+        if (!Number.isInteger(keyId) || keyId < 1) {
+          return badRequest("invalid grok account id");
+        }
+        const key = db.getGrokApiKey(keyId);
+        if (!key) {
+          return badRequest(`grok account not found: ${keyId}`, 404);
+        }
+        const includeSecret = parseBool(url.searchParams.get("includeSecret")) === true;
+        return json({
+          ok: true,
+          key: serializeGrokApiKey(key, includeSecret),
+        });
+      }
+
+      if (pathname === "/favicon.ico" && req.method === "GET") {
+        return Response.redirect(new URL("/favicon.svg", req.url), 302);
       }
 
       if (pathname === "/api/jobs/current" && req.method === "GET") {
@@ -2093,6 +2196,15 @@ async function main(): Promise<void> {
               assertRunModeAvailable(explicitRunMode, runModeAvailability);
             }
             const requestedRunMode = explicitRunMode || clampRunModeToAvailability(settings.defaultRunMode, runModeAvailability);
+            if (site === "grok") {
+              const job = await grokScheduler.startJob({
+                runMode: requestedRunMode,
+                need: Math.max(1, Number(body?.need || settings.defaultNeed)),
+                parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
+                maxAttempts: Math.max(1, Number(body?.maxAttempts || settings.defaultMaxAttempts)),
+              });
+              return json({ ok: true, job });
+            }
             const job = await tavilyScheduler.startJob({
               runMode: requestedRunMode,
               need: Math.max(1, Number(body?.need || settings.defaultNeed)),
@@ -2114,13 +2226,13 @@ async function main(): Promise<void> {
             if (site === "chatgpt") {
               return badRequest("pause is not supported for ChatGPT jobs");
             }
-            return json({ ok: true, job: tavilyScheduler.pauseCurrentJob() });
+            return json({ ok: true, job: site === "grok" ? grokScheduler.pauseCurrentJob() : tavilyScheduler.pauseCurrentJob() });
           }
           if (action === "resume") {
             if (site === "chatgpt") {
               return badRequest("resume is not supported for ChatGPT jobs");
             }
-            return json({ ok: true, job: tavilyScheduler.resumeCurrentJob() });
+            return json({ ok: true, job: site === "grok" ? grokScheduler.resumeCurrentJob() : tavilyScheduler.resumeCurrentJob() });
           }
           if (action === "stop") {
             return json({ ok: true, job: scheduler.stopCurrentJob() });
@@ -2134,6 +2246,14 @@ async function main(): Promise<void> {
           if (action === "update_limits") {
             if (site === "chatgpt") {
               return badRequest("update_limits is not supported for ChatGPT jobs");
+            }
+            if (site === "grok") {
+              const job = grokScheduler.updateCurrentJobLimits({
+                parallel: body?.parallel == null ? undefined : Number(body.parallel),
+                need: body?.need == null ? undefined : Number(body.need),
+                maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
+              });
+              return json({ ok: true, job });
             }
             const job = tavilyScheduler.updateCurrentJobLimits({
               parallel: body?.parallel == null ? undefined : Number(body.parallel),
@@ -2340,7 +2460,7 @@ async function main(): Promise<void> {
   void runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
 
   const shutdown = async () => {
-    await Promise.all([tavilyScheduler.shutdown(), chatgptScheduler.shutdown()]).catch(() => {});
+    await Promise.all([tavilyScheduler.shutdown(), grokScheduler.shutdown(), chatgptScheduler.shutdown()]).catch(() => {});
     db.close();
     process.exit(0);
   };

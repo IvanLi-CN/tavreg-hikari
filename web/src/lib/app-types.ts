@@ -1,5 +1,5 @@
-export type PageKey = "tavily" | "chatgpt" | "accounts" | "mailboxes" | "keys" | "proxies";
-export type JobSite = "tavily" | "chatgpt";
+export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "mailboxes" | "keys" | "proxies";
+export type JobSite = "tavily" | "grok" | "chatgpt";
 export type SortDir = "desc" | "asc";
 
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
@@ -242,6 +242,27 @@ export type ApiKeyRecord = {
 
 export type ApiKeySortBy = "extractedAt" | "lastVerifiedAt";
 
+export type GrokApiKeyRecord = {
+  id: number;
+  jobId: number;
+  attemptId: number;
+  email: string;
+  password: string;
+  sso: string;
+  ssoRw?: string | null;
+  status: string;
+  extractedIp: string | null;
+  extractedAt: string;
+  lastVerifiedAt: string | null;
+  createdAt: string;
+  birthDate?: string | null;
+  checkoutUrl?: string | null;
+  hasCfClearance?: boolean;
+  cfClearance?: string | null;
+};
+
+export type GrokApiKeySortBy = "extractedAt" | "lastVerifiedAt";
+
 export type ApiKeysPayload = {
   rows: ApiKeyRecord[];
   total: number;
@@ -263,6 +284,40 @@ export type ApiKeyExportItem = {
 export type ApiKeyExportPayload = {
   items: ApiKeyExportItem[];
   content: string;
+};
+
+export type GrokApiKeyExportItem = {
+  id: number;
+  email: string;
+  password: string;
+  sso: string;
+  ssoRw?: string | null;
+  cfClearance?: string | null;
+  checkoutUrl?: string | null;
+  birthDate?: string | null;
+};
+
+export type GrokApiKeyExportPayload = {
+  ok: true;
+  items: GrokApiKeyExportItem[];
+  content: string;
+};
+
+export type GrokApiKeysPayload = {
+  ok: true;
+  rows: GrokApiKeyRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: {
+    active: number;
+    revoked: number;
+  };
+};
+
+export type GrokApiKeyDetailPayload = {
+  ok: true;
+  key: GrokApiKeyRecord;
 };
 
 export type AttemptRecord = {
@@ -628,6 +683,15 @@ export type ApiKeyQuery = {
   status: string;
   groupName: string;
   sortBy: ApiKeySortBy;
+  sortDir: SortDir;
+  page: number;
+  pageSize: number;
+};
+
+export type GrokApiKeyQuery = {
+  q: string;
+  status: string;
+  sortBy: GrokApiKeySortBy;
   sortDir: SortDir;
   page: number;
   pageSize: number;

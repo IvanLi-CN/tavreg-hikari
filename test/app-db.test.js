@@ -3369,3 +3369,133 @@ describe("scheduler runtime spec", () => {
     appDb.close();
   });
 });
+
+describe("AppDatabase grok api keys", () => {
+  test("completes grok attempts into dedicated grok_api_keys rows", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({
+      site: "grok",
+      runMode: "headed",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+      payloadJson: {},
+    });
+    const attempt = appDb.createAttempt(job.id, {
+      accountEmail: "grok-one@mail.example.test",
+      outputDir: path.join(process.cwd(), "tmp-grok-attempt-1"),
+    });
+
+    const result = appDb.completeGrokAttemptSuccess(job.id, attempt.id, {
+      email: "grok-one@mail.example.test",
+      password: "Passw0rd!123456",
+      sso: "sso-demo-token-1234567890",
+      ssoRw: "sso-rw-demo-token-1234567890",
+      cfClearance: "cf_clearance_demo",
+      checkoutUrl: "https://checkout.example.test/demo",
+      birthDate: "1995-06-18T16:00:00.000Z",
+      extractedIp: "203.0.113.24",
+      runId: "grok-run-1",
+      proxyNode: "Tokyo-01",
+      proxyIp: "203.0.113.24",
+    });
+
+    expect(result.job.site).toBe("grok");
+    expect(result.job.successCount).toBe(1);
+    expect(result.attempt.accountEmail).toBe("grok-one@mail.example.test");
+    expect(result.key.email).toBe("grok-one@mail.example.test");
+    expect(result.key.password).toBe("Passw0rd!123456");
+    expect(result.key.ssoPrefix).toBe("sso-demo-tok");
+    expect(result.key.ssoRw).toBe("sso-rw-demo-token-1234567890");
+    expect(result.key.cfClearance).toBe("cf_clearance_demo");
+    expect(result.key.checkoutUrl).toBe("https://checkout.example.test/demo");
+    expect(result.key.birthDate).toBe("1995-06-18T16:00:00.000Z");
+
+    const listed = appDb.listGrokApiKeys({ page: 1, pageSize: 10 });
+    expect(listed.total).toBe(1);
+    expect(listed.summary.active).toBe(1);
+    expect(listed.rows[0]).toMatchObject({
+      attemptId: attempt.id,
+      extractedIp: "203.0.113.24",
+      status: "active",
+      sso: "sso-demo-token-1234567890",
+      ssoRw: "sso-rw-demo-token-1234567890",
+      cfClearance: "cf_clearance_demo",
+      checkoutUrl: "https://checkout.example.test/demo",
+      birthDate: "1995-06-18T16:00:00.000Z",
+    });
+
+    const exported = appDb.listGrokApiKeysForExport([result.key.id]);
+    expect(exported).toHaveLength(1);
+    expect(exported[0]).toMatchObject({
+      id: result.key.id,
+      password: "Passw0rd!123456",
+      sso: "sso-demo-token-1234567890",
+      ssoRw: "sso-rw-demo-token-1234567890",
+      cfClearance: "cf_clearance_demo",
+      checkoutUrl: "https://checkout.example.test/demo",
+      birthDate: "1995-06-18T16:00:00.000Z",
+    });
+
+    appDb.close();
+  });
+
+  test("recordGrokApiKey reuses rows when attempt or api_key already exists", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({
+      site: "grok",
+      runMode: "headed",
+      need: 2,
+      parallel: 1,
+      maxAttempts: 2,
+      payloadJson: {},
+    });
+    const attempt = appDb.createAttempt(job.id, {
+      accountEmail: "first@mail.example.test",
+      outputDir: path.join(process.cwd(), "tmp-grok-attempt-2"),
+    });
+
+    const first = appDb.recordGrokApiKey({
+      jobId: job.id,
+      attemptId: attempt.id,
+      email: "first@mail.example.test",
+      password: "SharedPass!01",
+      sso: "sso-shared-token-abcdef",
+      ssoRw: "sso-rw-shared-token-abcdef",
+      cfClearance: "cf_clearance_one",
+      checkoutUrl: "https://checkout.example.test/one",
+      birthDate: "1994-06-18T16:00:00.000Z",
+      extractedIp: "198.51.100.10",
+      lastVerifiedAt: "2026-04-10T03:01:00.000Z",
+    });
+    const second = appDb.recordGrokApiKey({
+      jobId: job.id,
+      attemptId: attempt.id,
+      email: "second@mail.example.test",
+      password: "SharedPass!02",
+      sso: "sso-shared-token-abcdef",
+      ssoRw: "sso-rw-shared-token-updated",
+      cfClearance: "cf_clearance_two",
+      checkoutUrl: "https://checkout.example.test/two",
+      birthDate: "1993-06-18T16:00:00.000Z",
+      extractedIp: "198.51.100.11",
+      lastVerifiedAt: "2026-04-10T03:03:00.000Z",
+    });
+
+    expect(second.id).toBe(first.id);
+    const stored = appDb.getGrokApiKey(first.id);
+    expect(stored).toMatchObject({
+      email: "second@mail.example.test",
+      password: "SharedPass!02",
+      extractedIp: "198.51.100.11",
+      sso: "sso-shared-token-abcdef",
+      ssoRw: "sso-rw-shared-token-updated",
+      cfClearance: "cf_clearance_two",
+      checkoutUrl: "https://checkout.example.test/two",
+      birthDate: "1993-06-18T16:00:00.000Z",
+    });
+    expect(appDb.listGrokApiKeys({ page: 1, pageSize: 10 }).total).toBe(1);
+
+    appDb.close();
+  });
+});

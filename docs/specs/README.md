@@ -25,5 +25,6 @@
 | wht6n | 微软账号持久会话、代理复用与 Profile 落库改造 | 已实现 | `wht6n-persistent-account-browser-sessions/SPEC.md` | 2026-03-31 | 账号级 session bootstrap、proxy reuse、profile path 落库与账号页视觉证据 |
 | 3jg3v | 提号器 Outlook/Hotmail/不限 类型全链路支持 | 已完成 | `3jg3v-extractor-account-type-switch/SPEC.md` | 2026-04-04 | 提号器、自动补号与号源请求参数统一支持 `outlook \| hotmail \| unlimited`，含 Storybook 证据 |
 | pakwp | ChatGPT 站点接入现有 Web 管理台 | 已实现 | `pakwp-chatgpt-web-site/SPEC.md` | 2026-04-05 | 多站点 current job、ChatGPT 页面、完整凭据入库 |
+| 3hrx4 | Grok 第三站点接入现有 Web 管理台 | 已实现 | `3hrx4-grok-web-site/SPEC.md` | 2026-04-10 | 第三站点路由、Grok scheduler/worker、独立 keys tab 与导出 |
 | m9jnq | Keys 页双数据源收敛：Tavily / ChatGPT 双 Tabs | 已完成 | `m9jnq-keys-dual-source-page/SPEC.md` | 2026-04-09 | 统一 Keys 导航与双 tabs，接管 pakwp / 2dkks 的旧 UI 口径 |
 | 55uxa | 默认邮箱生成收敛：provider-first + 真人风格兜底 | 已完成 | `55uxa-provider-first-default-mailboxes/SPEC.md` | 2026-04-12 | ChatGPT draft provider-first、DuckMail 共用真人风格 local-part，移除 `CHATGPT_CFMAIL_ROOT_DOMAIN` 依赖 |

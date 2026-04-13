@@ -3,6 +3,7 @@ import { AccountsView } from "@/components/accounts-view";
 import { AppShell } from "@/components/app-shell";
 import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
+import { GrokView } from "@/components/grok-view";
 import { KeysView } from "@/components/keys-view";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { MailboxesView } from "@/components/mailboxes-view";
@@ -33,6 +34,11 @@ import type {
   ChatGptCredentialSort,
   ChatGptCredentialsPayload,
   ChatGptJobDraft,
+  ChatGptDraft,
+  ChatGptDraftPayload,
+  GrokApiKeyExportPayload,
+  GrokApiKeyQuery,
+  GrokApiKeysPayload,
   ApiKeyExportPayload,
   ApiKeysPayload,
   ApiKeyQuery,
@@ -65,6 +71,7 @@ import {
   resolvePendingRunModeAvailabilityFallback,
 } from "@/lib/run-mode";
 import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
+import { shouldLoadChatGptDraft } from "@/lib/chatgpt-draft-load";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -194,7 +201,9 @@ function createIdleJobSnapshot(site: JobSite): JobSnapshot {
 export function App() {
   const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
+  const [grokJob, setGrokJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("grok"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
+  const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
   const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
     runMode: "headed",
     need: 1,
@@ -203,6 +212,14 @@ export function App() {
   });
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
   const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
+  const [grokApiKeys, setGrokApiKeys] = useState<GrokApiKeysPayload>({
+    ok: true,
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: 20,
+    summary: { active: 0, revoked: 0 },
+  });
   const [accounts, setAccounts] = useState<AccountsPayload>({
     rows: [],
     total: 0,
@@ -285,9 +302,20 @@ export function App() {
   const [importPreviewOpen, setImportPreviewOpen] = useState(false);
   const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [selectedApiKeyIds, setSelectedApiKeyIds] = useState<number[]>([]);
+  const [selectedGrokApiKeyIds, setSelectedGrokApiKeyIds] = useState<number[]>([]);
   const [selectedChatGptCredentialIds, setSelectedChatGptCredentialIds] = useState<number[]>([]);
   const [revealedPasswordsById, setRevealedPasswordsById] = useState<Record<number, string>>({});
   const [jobDraft, setJobDraft] = useState<JobDraft>({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 5,
+    autoExtractSources: [],
+    autoExtractQuantity: 1,
+    autoExtractMaxWaitSec: 60,
+    autoExtractAccountType: "outlook",
+  });
+  const [grokJobDraft, setGrokJobDraft] = useState<JobDraft>({
     runMode: "headed",
     need: 1,
     parallel: 1,
@@ -318,6 +346,14 @@ export function App() {
     page: 1,
     pageSize: 20,
   });
+  const [grokApiKeyQuery, setGrokApiKeyQuery] = useState<GrokApiKeyQuery>({
+    q: "",
+    status: "",
+    sortBy: "extractedAt",
+    sortDir: "desc",
+    page: 1,
+    pageSize: 20,
+  });
   const [chatGptCredentialQuery, setChatGptCredentialQuery] = useState<ChatGptCredentialQuery>({
     q: "",
     expiryStatus: "",
@@ -342,6 +378,9 @@ export function App() {
   const [apiKeyExportOpen, setApiKeyExportOpen] = useState(false);
   const [apiKeyExportContent, setApiKeyExportContent] = useState("");
   const [apiKeyExportBusy, setApiKeyExportBusy] = useState(false);
+  const [grokApiKeyExportOpen, setGrokApiKeyExportOpen] = useState(false);
+  const [grokApiKeyExportContent, setGrokApiKeyExportContent] = useState("");
+  const [grokApiKeyExportBusy, setGrokApiKeyExportBusy] = useState(false);
   const [chatGptExportOpen, setChatGptExportOpen] = useState(false);
   const [chatGptExportContent, setChatGptExportContent] = useState("");
   const [chatGptExportBusy, setChatGptExportBusy] = useState(false);
@@ -362,6 +401,8 @@ export function App() {
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
+  const [chatGptDraftBusy, setChatGptDraftBusy] = useState(false);
+  const [grokJobBusy, setGrokJobBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
 
@@ -381,6 +422,7 @@ export function App() {
   );
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
+  const grokApiKeyQueryRef = useRef(grokApiKeyQuery);
   const chatGptCredentialQueryRef = useRef(chatGptCredentialQuery);
   const chatGptCredentialSortRef = useRef(chatGptCredentialSort);
   const extractorHistoryQueryRef = useRef(extractorHistoryQuery);
@@ -401,7 +443,24 @@ export function App() {
       setChatGptJob(snapshot);
       return;
     }
+    if (site === "grok") {
+      setGrokJob(snapshot);
+      return;
+    }
     setJob(snapshot);
+  };
+  const refreshChatGptDraft = async (requestedEmail?: string) => {
+    try {
+      setChatGptDraftBusy(true);
+      const params = new URLSearchParams();
+      if (requestedEmail?.trim()) {
+        params.set("email", requestedEmail.trim());
+      }
+      const payload = await api<ChatGptDraftPayload>(`/api/chatgpt/draft${params.size > 0 ? `?${params.toString()}` : ""}`);
+      setChatGptDraft(payload.draft);
+    } finally {
+      setChatGptDraftBusy(false);
+    }
   };
   const refreshChatGptCredentials = async (
     nextQuery = chatGptCredentialQueryRef.current,
@@ -459,6 +518,21 @@ export function App() {
       return;
     }
     setApiKeys(payload);
+  };
+  const refreshGrokApiKeys = async (nextQuery = grokApiKeyQueryRef.current) => {
+    const params = new URLSearchParams();
+    if (nextQuery.q) params.set("q", nextQuery.q);
+    if (nextQuery.status) params.set("status", nextQuery.status);
+    params.set("sortBy", nextQuery.sortBy);
+    params.set("sortDir", nextQuery.sortDir);
+    params.set("page", String(nextQuery.page));
+    params.set("pageSize", String(nextQuery.pageSize));
+    const payload = await api<GrokApiKeysPayload>(`/api/grok/keys?${params.toString()}`);
+    if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
+      setGrokApiKeyQuery((current) => ({ ...current, page: current.page - 1 }));
+      return;
+    }
+    setGrokApiKeys(payload);
   };
   const refreshProxies = async () => {
     const payload = await api<ProxyPayload>("/api/proxies");
@@ -725,10 +799,12 @@ export function App() {
   useEffect(() => {
     void Promise.all([
       refreshJob("tavily"),
+      refreshJob("grok"),
       refreshJob("chatgpt"),
       refreshChatGptCredentials(),
       refreshAccounts(),
       refreshApiKeys(),
+      refreshGrokApiKeys(),
       refreshProxies(),
       refreshExtractorSettings(),
       refreshExtractorRuntime(),
@@ -747,6 +823,13 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
+
+  useEffect(() => {
+    if (!shouldLoadChatGptDraft({ activePage, draft: chatGptDraft, busy: chatGptDraftBusy })) return;
+    void refreshChatGptDraft().catch((err) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, [activePage, chatGptDraft, chatGptDraftBusy]);
 
   useEffect(() => {
     if (job.job || !proxies || !extractorSettings || jobDraftTouched) return;
@@ -799,6 +882,34 @@ export function App() {
   }, [chatGptJob.runModeAvailability.headed, chatGptJobDraft.runMode]);
 
   useEffect(() => {
+    const currentJob = grokJob.job;
+    if (currentJob) {
+      setGrokJobDraft((current) =>
+        normalizeJobDraft({
+          ...current,
+          runMode: currentJob.runMode,
+          need: currentJob.need,
+          parallel: currentJob.parallel,
+          maxAttempts: currentJob.maxAttempts,
+          autoExtractSources: [],
+        }),
+      );
+      return;
+    }
+    if (!proxies) return;
+    setGrokJobDraft((current) =>
+      normalizeJobDraft({
+        ...current,
+        runMode: proxies.settings.defaultRunMode,
+        need: proxies.settings.defaultNeed,
+        parallel: proxies.settings.defaultParallel,
+        maxAttempts: proxies.settings.defaultMaxAttempts,
+        autoExtractSources: [],
+      }),
+    );
+  }, [grokJob.job, proxies]);
+
+  useEffect(() => {
     if (!extractorSettings || extractorRunDraftTouched) return;
     setExtractorRunDraft({
       sources: extractorSettings.defaultAutoExtractSources,
@@ -815,6 +926,10 @@ export function App() {
   useEffect(() => {
     apiKeyQueryRef.current = apiKeyQuery;
   }, [apiKeyQuery]);
+
+  useEffect(() => {
+    grokApiKeyQueryRef.current = grokApiKeyQuery;
+  }, [grokApiKeyQuery]);
 
   useEffect(() => {
     chatGptCredentialQueryRef.current = chatGptCredentialQuery;
@@ -846,7 +961,8 @@ export function App() {
       const next = JSON.parse(event.data) as EventRecord;
       setEvents((current) => [next, ...current].slice(0, 60));
       if (next.type === "job.updated" || next.type === "attempt.updated") {
-        void Promise.all([refreshJob("tavily"), refreshJob("chatgpt")]);
+        void Promise.all([refreshJob("tavily"), refreshJob("grok"), refreshJob("chatgpt")]);
+        void refreshGrokApiKeys(grokApiKeyQueryRef.current);
         void refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current);
       }
       if (next.type === "account.updated") {
@@ -957,8 +1073,17 @@ export function App() {
   }, [apiKeyQuery]);
 
   useEffect(() => {
+    void refreshGrokApiKeys(grokApiKeyQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [grokApiKeyQuery]);
+
+  useEffect(() => {
     void refreshChatGptCredentials(chatGptCredentialQuery, chatGptCredentialSort).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [chatGptCredentialQuery, chatGptCredentialSort]);
+
+  useEffect(() => {
+    const existingIds = new Set(grokApiKeys.rows.map((row) => row.id));
+    setSelectedGrokApiKeyIds((current) => current.filter((id) => existingIds.has(id)));
+  }, [grokApiKeys]);
 
   useEffect(() => {
     const existingIds = new Set(chatGptCredentials.map((row) => row.id));
@@ -1136,6 +1261,31 @@ export function App() {
       await refreshJob("tavily");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleGrokJobAction = async (action: JobControlAction, options?: JobControlOptions) => {
+    try {
+      setGrokJobBusy(true);
+      setError(null);
+      const draft = options?.draft || grokJobDraft;
+      await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
+        method: "POST",
+        body: JSON.stringify({
+          site: "grok",
+          action,
+          ...(options?.confirmForceStop ? { confirmForceStop: true } : {}),
+          runMode: draft.runMode,
+          need: draft.need,
+          parallel: draft.parallel,
+          maxAttempts: draft.maxAttempts,
+        }),
+      });
+      await refreshJob("grok");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGrokJobBusy(false);
     }
   };
 
@@ -1363,6 +1513,81 @@ export function App() {
     anchor.remove();
     window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
   };
+
+  const handleToggleGrokApiKeySelection = (apiKeyId: number, checked: boolean) => {
+    setSelectedGrokApiKeyIds((current) => (checked ? mergeIds(current, [apiKeyId]) : current.filter((id) => id !== apiKeyId)));
+  };
+
+  const handleToggleGrokApiKeyPageSelection = (checked: boolean) => {
+    const currentPageApiKeyIds = grokApiKeys.rows.map((row) => row.id);
+    if (checked) {
+      setSelectedGrokApiKeyIds((current) => mergeIds(current, currentPageApiKeyIds));
+      return;
+    }
+    setSelectedGrokApiKeyIds((current) => current.filter((id) => !currentPageApiKeyIds.includes(id)));
+  };
+
+  const handleOpenGrokApiKeyExport = async () => {
+    if (selectedGrokApiKeyIds.length === 0) return;
+    try {
+      setGrokApiKeyExportBusy(true);
+      setError(null);
+      const payload = await api<GrokApiKeyExportPayload>("/api/grok/keys/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedGrokApiKeyIds }),
+      });
+      if (payload.items.length === 0) {
+        setError("选中的 Grok API key 已不存在");
+        return;
+      }
+      setGrokApiKeyExportContent(payload.content);
+      setGrokApiKeyExportOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setGrokApiKeyExportBusy(false);
+    }
+  };
+
+  const handleCopyGrokApiKeyExport = async () => {
+    if (!grokApiKeyExportContent) return;
+    try {
+      setError(null);
+      await navigator.clipboard.writeText(grokApiKeyExportContent);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const resolveGrokCopyField = async (apiKeyId: number, field: "email" | "password" | "sso") => {
+    const payload = await api<GrokApiKeyExportPayload>("/api/grok/keys/export", {
+      method: "POST",
+      body: JSON.stringify({ ids: [apiKeyId] }),
+    });
+    const item = payload.items[0];
+    if (!item) {
+      throw new Error("选中的 Grok 记录已不存在");
+    }
+    const value = field === "email" ? item.email : field === "password" ? item.password : item.sso;
+    if (!value?.trim()) {
+      throw new Error(`当前记录没有可复制的${field === "email" ? "邮箱" : field === "password" ? "密码" : "SSO"}`);
+    }
+    return value;
+  };
+
+  const handleSaveGrokApiKeyExport = () => {
+    if (!grokApiKeyExportContent) return;
+    const blob = new Blob([grokApiKeyExportContent], { type: "text/plain;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `grok-${buildApiKeyExportFilename()}`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
+  };
+
   const handleSaveProofMailbox = async (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => {
     try {
       setBatchBusy(true);
@@ -1655,6 +1880,24 @@ export function App() {
         />
       ) : null}
 
+      {activePage === "grok" ? (
+        <GrokView
+          job={grokJob}
+          jobDraft={grokJobDraft}
+          jobBusy={grokJobBusy}
+          onJobDraftChange={(patch) =>
+            setGrokJobDraft((current) =>
+              normalizeJobDraft({
+                ...current,
+                ...patch,
+                autoExtractSources: [],
+              }),
+            )
+          }
+          onJobAction={handleGrokJobAction}
+        />
+      ) : null}
+
       {activePage === "chatgpt" ? (
         <ChatGptView
           jobDraft={chatGptJobDraft}
@@ -1789,6 +2032,31 @@ export function App() {
             onExportOpenChange: setApiKeyExportOpen,
             onCopyExport: handleCopyApiKeyExport,
             onSaveExport: handleSaveApiKeyExport,
+          }}
+          grok={{
+            apiKeys: grokApiKeys,
+            query: grokApiKeyQuery,
+            selectedIds: selectedGrokApiKeyIds,
+            exportOpen: grokApiKeyExportOpen,
+            exportContent: grokApiKeyExportContent,
+            exportBusy: grokApiKeyExportBusy,
+            onQueryChange: setGrokApiKeyQuery,
+            onToggleSelection: handleToggleGrokApiKeySelection,
+            onTogglePageSelection: handleToggleGrokApiKeyPageSelection,
+            onClearSelection: () => setSelectedGrokApiKeyIds([]),
+            onOpenExport: handleOpenGrokApiKeyExport,
+            onExportOpenChange: setGrokApiKeyExportOpen,
+            onCopyExport: handleCopyGrokApiKeyExport,
+            onSaveExport: handleSaveGrokApiKeyExport,
+            onResolveCopyField: async (apiKeyId, field) => {
+              try {
+                setError(null);
+                return await resolveGrokCopyField(apiKeyId, field);
+              } catch (err) {
+                setError(err instanceof Error ? err.message : String(err));
+                throw err;
+              }
+            },
           }}
           chatgpt={{
             credentials: chatGptCredentials,

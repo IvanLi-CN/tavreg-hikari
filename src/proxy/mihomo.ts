@@ -1246,7 +1246,9 @@ async function waitForApi(
       throw new Error(`mihomo_process_exited:${child.exitCode}${suffix}`);
     }
     try {
-      const resp = await fetch(`${apiBaseUrl}/version`);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1_500);
+      const resp = await fetch(`${apiBaseUrl}/version`, { signal: controller.signal }).finally(() => clearTimeout(timer));
       if (resp.ok) return;
     } catch {
       // ignore
@@ -1448,6 +1450,13 @@ export async function startMihomo(cfg: MihomoConfig): Promise<ProxyController> {
   };
 
   const setGroupProxy = async (name: string): Promise<void> => {
+    if (name === "DIRECT" && cfg.groupName !== routeGroupName) {
+      await ensureRouteGroupSelection(apiBaseUrl, routeGroupName, "DIRECT");
+      return;
+    }
+    if (cfg.groupName !== routeGroupName) {
+      await ensureRouteGroupSelection(apiBaseUrl, routeGroupName, cfg.groupName);
+    }
     await httpJson("PUT", `${apiBaseUrl}/proxies/${encodeURIComponent(cfg.groupName)}`, { name }, 10_000);
   };
 

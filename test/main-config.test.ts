@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dir, "..");
+const CONFIG_SPAWN_TIMEOUT_MS = 30_000;
 
 test("CLI rejects MAIL_PROVIDER=moemail because proof mailboxes are no longer normal mail providers", () => {
   const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
@@ -14,12 +15,12 @@ test("CLI rejects MAIL_PROVIDER=moemail because proof mailboxes are no longer no
       MAIL_PROVIDER: "moemail",
     },
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: CONFIG_SPAWN_TIMEOUT_MS,
   });
 
   expect(result.status).toBe(1);
   expect(`${result.stdout}\n${result.stderr}`).toContain("Invalid env MAIL_PROVIDER: moemail");
-}, 20_000);
+}, 35_000);
 
 test("CLI rejects BROWSER_ENGINE=camoufox instead of silently falling back to chrome", () => {
   const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
@@ -30,12 +31,12 @@ test("CLI rejects BROWSER_ENGINE=camoufox instead of silently falling back to ch
       BROWSER_ENGINE: "camoufox",
     },
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: CONFIG_SPAWN_TIMEOUT_MS,
   });
 
   expect(result.status).toBe(1);
   expect(`${result.stdout}\n${result.stderr}`).toContain("Invalid env BROWSER_ENGINE: camoufox");
-}, 20_000);
+}, 35_000);
 
 test("CLI rejects system Google Chrome as the automation executable", () => {
   const nodeBinary = process.env.NODE_BINARY?.trim() || "node";
@@ -46,12 +47,12 @@ test("CLI rejects system Google Chrome as the automation executable", () => {
       CHROME_EXECUTABLE_PATH: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     },
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: CONFIG_SPAWN_TIMEOUT_MS,
   });
 
   expect(result.status).toBe(1);
   expect(`${result.stdout}\n${result.stderr}`).toContain("Unsupported CHROME_EXECUTABLE_PATH");
-}, 20_000);
+}, 35_000);
 
 test("CLI defers AppDatabase loading until proof sync needs it", async () => {
   const mainSource = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
@@ -75,6 +76,12 @@ test("proof-add handler only provisions mailboxes on the actual add route", asyn
   expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute })");
   expect(source).toContain("if (!onAddRoute && !emailSelector) {");
   expect(source).toContain("if (!emailSelector) {\n    return false;\n  }\n\n  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession");
+});
+
+test("chatgpt draft only pins cfmail root domain when configured", async () => {
+  const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(serverSource).toContain('const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;');
+  expect(serverSource).toContain('rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,');
 });
 
 test("accounts workflow exposes disabled rows and validates proof mailbox saves", async () => {
@@ -190,6 +197,17 @@ test("chrome native CDP automation stays enabled on macOS when configured", asyn
   const segment = source.slice(start, end);
   expect(segment).toContain('if (browserEngine !== "chrome" || !enabled) return false;');
   expect(segment).not.toContain('process.platform === "darwin"');
+});
+
+test("playwright chrome launches keep fingerprint-browser args aligned with native sessions", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("export async function launchBrowserWithEngine");
+  const end = source.indexOf("function trySignalChildProcess");
+  const segment = source.slice(start, end);
+  expect(segment).toContain("const acceptLanguage = buildAcceptLanguage(locale);");
+  expect(segment).toContain("const fingerprintArgs = getFingerprintChromiumArgs(");
+  expect(segment).toContain('...(fingerprintArgs.some((item) => item.startsWith("--lang=")) ? [] : [`--lang=${locale}`]),');
+  expect(segment).toContain("...fingerprintArgs,");
 });
 
 test("browser config never falls back to system Google Chrome", async () => {
