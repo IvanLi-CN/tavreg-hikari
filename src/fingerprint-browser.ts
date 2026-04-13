@@ -122,9 +122,32 @@ function isOfficialFingerprintBrowserInstall(executablePath: string): boolean {
   return false;
 }
 
-export function resolveExplicitChromeExecutablePath(raw: string | undefined | null): string | undefined {
+export function resolveExplicitChromeExecutablePath(raw: string | undefined | null, startDir = process.cwd()): string | undefined {
   const trimmed = String(raw || "").trim();
-  return trimmed ? trimmed : undefined;
+  if (trimmed) return trimmed;
+  return resolveDefaultFingerprintBrowserExecutablePath(startDir);
+}
+
+function resolveDefaultFingerprintBrowserExecutablePath(startDir = process.cwd()): string | undefined {
+  const candidates = [
+    [".tools", "Chromium.app", "Contents", "MacOS", "Chromium"],
+    [".tools", "fingerprint-browser", "linux", "chrome"],
+  ] as const;
+  let currentDir = path.resolve(startDir);
+  while (true) {
+    for (const segments of candidates) {
+      const executablePath = path.join(currentDir, ...segments);
+      if (isOfficialFingerprintBrowserInstall(executablePath)) {
+        return executablePath;
+      }
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir) {
+      break;
+    }
+    currentDir = parentDir;
+  }
+  return undefined;
 }
 
 export function isFingerprintChromiumExecutable(executablePath: string | undefined | null): boolean {

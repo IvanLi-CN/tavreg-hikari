@@ -64,7 +64,7 @@ export type AccountStatus =
   | "skipped_has_key"
   | "disabled";
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
-export type JobSite = "tavily" | "chatgpt";
+export type JobSite = "tavily" | "grok" | "chatgpt";
 export type AttemptStatus = "running" | "succeeded" | "failed" | "stopped";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "cfmail";
@@ -264,6 +264,25 @@ export interface ChatGptCredentialRecord {
   idToken: string;
   expiresAt: string | null;
   credentialJson: string;
+  createdAt: string;
+}
+
+export interface GrokApiKeyRecord {
+  id: number;
+  jobId: number;
+  attemptId: number;
+  email: string;
+  password: string;
+  sso: string;
+  ssoRw: string | null;
+  cfClearance: string | null;
+  checkoutUrl: string | null;
+  birthDate: string | null;
+  ssoPrefix: string;
+  status: ApiKeyStatus;
+  extractedIp: string | null;
+  extractedAt: string;
+  lastVerifiedAt: string | null;
   createdAt: string;
 }
 
@@ -620,6 +639,14 @@ function resolveChatGptCredentialOrderClause(sortBy?: string, sortDir?: string):
   return `ORDER BY created_at ${direction}, id ${direction}`;
 }
 
+function resolveGrokApiKeyListOrderClause(sortBy?: string, sortDir?: string): string {
+  const direction = normalizeOrderDirection(sortDir);
+  if (sortBy === "lastVerifiedAt") {
+    return `ORDER BY CASE WHEN last_verified_at IS NULL THEN 1 ELSE 0 END ASC, last_verified_at ${direction}, id ${direction}`;
+  }
+  return `ORDER BY extracted_at ${direction}, id ${direction}`;
+}
+
 function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
   return {
     id: Number(row.id),
@@ -815,6 +842,27 @@ function mapChatGptCredentialRow(row: Record<string, unknown>): ChatGptCredentia
     idToken: String(row.id_token || ""),
     expiresAt: row.expires_at == null ? null : String(row.expires_at),
     credentialJson: String(row.credential_json || "{}"),
+    createdAt: String(row.created_at || ""),
+  };
+}
+
+function mapGrokApiKeyRow(row: Record<string, unknown>): GrokApiKeyRecord {
+  return {
+    id: Number(row.id),
+    jobId: Number(row.job_id),
+    attemptId: Number(row.attempt_id),
+    email: String(row.email || ""),
+    password: String(row.password || ""),
+    sso: String(row.api_key || ""),
+    ssoRw: row.sso_rw == null ? null : String(row.sso_rw),
+    cfClearance: row.cf_clearance == null ? null : String(row.cf_clearance),
+    checkoutUrl: row.checkout_url == null ? null : String(row.checkout_url),
+    birthDate: row.birth_date == null ? null : String(row.birth_date),
+    ssoPrefix: String(row.api_key_prefix || ""),
+    status: String(row.status || "unknown") as ApiKeyStatus,
+    extractedIp: row.extracted_ip == null ? null : String(row.extracted_ip),
+    extractedAt: String(row.extracted_at || ""),
+    lastVerifiedAt: row.last_verified_at == null ? null : String(row.last_verified_at),
     createdAt: String(row.created_at || ""),
   };
 }
@@ -1071,6 +1119,25 @@ export class AppDatabase {
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
       );
 
+      CREATE TABLE IF NOT EXISTS grok_api_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        attempt_id INTEGER NOT NULL UNIQUE REFERENCES job_attempts(id) ON DELETE CASCADE,
+        email TEXT NOT NULL,
+        password TEXT NOT NULL DEFAULT '',
+        api_key TEXT NOT NULL UNIQUE,
+        sso_rw TEXT,
+        cf_clearance TEXT,
+        checkout_url TEXT,
+        birth_date TEXT,
+        api_key_prefix TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        extracted_ip TEXT,
+        extracted_at TEXT NOT NULL,
+        last_verified_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      );
+
       CREATE TABLE IF NOT EXISTS proxy_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         node_name TEXT NOT NULL UNIQUE,
@@ -1198,6 +1265,7 @@ export class AppDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS chatgpt_credentials_created_idx ON chatgpt_credentials(created_at DESC);
+      CREATE INDEX IF NOT EXISTS grok_api_keys_extracted_idx ON grok_api_keys(extracted_at DESC);
     `);
 
     const signupTaskTableExists = this.hasSignupTasksTable();
@@ -1266,6 +1334,39 @@ export class AppDatabase {
     const apiKeyColumns = new Set(apiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!apiKeyColumns.has("extracted_ip")) {
       this.db.exec("ALTER TABLE api_keys ADD COLUMN extracted_ip TEXT;");
+    }
+    const grokApiKeyTableInfo = this.db.query("PRAGMA table_info(grok_api_keys);").all() as Array<Record<string, unknown>>;
+    const grokApiKeyColumns = new Set(grokApiKeyTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (grokApiKeyTableInfo.length > 0) {
+      if (!grokApiKeyColumns.has("password")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN password TEXT NOT NULL DEFAULT '';");
+      }
+      if (!grokApiKeyColumns.has("sso_rw")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN sso_rw TEXT;");
+      }
+      if (!grokApiKeyColumns.has("cf_clearance")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN cf_clearance TEXT;");
+      }
+      if (!grokApiKeyColumns.has("checkout_url")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN checkout_url TEXT;");
+      }
+      if (!grokApiKeyColumns.has("birth_date")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN birth_date TEXT;");
+      }
+      if (!grokApiKeyColumns.has("extracted_ip")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN extracted_ip TEXT;");
+      }
+      if (!grokApiKeyColumns.has("extracted_at")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN extracted_at TEXT;");
+        this.db.exec("UPDATE grok_api_keys SET extracted_at = COALESCE(extracted_at, created_at);");
+      }
+      if (!grokApiKeyColumns.has("last_verified_at")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN last_verified_at TEXT;");
+      }
+      if (!grokApiKeyColumns.has("created_at")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN created_at TEXT;");
+        this.db.exec("UPDATE grok_api_keys SET created_at = COALESCE(created_at, extracted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));");
+      }
     }
     const mailboxTableInfo = this.db.query("PRAGMA table_info(microsoft_mailboxes);").all() as Array<Record<string, unknown>>;
     const mailboxColumns = new Set(mailboxTableInfo.map((item) => String(item.name || "").toLowerCase()));
@@ -1347,6 +1448,9 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_proof_mailbox ON microsoft_accounts(proof_mailbox_address, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_source ON microsoft_accounts(account_source, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_attempt ON grok_api_keys(attempt_id);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_job_extracted ON grok_api_keys(job_id, extracted_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_email_extracted ON grok_api_keys(email, extracted_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_attempts_job_status ON job_attempts(job_id, status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_checks_node_checked ON proxy_checks(node_name, checked_at DESC);");
@@ -2084,6 +2188,86 @@ export class AppDatabase {
     }
     const byId = new Map(rows.map((row) => [Number(row.id), mapApiKeyRow(row)]));
     return uniqueIds.map((id) => byId.get(id)).filter((row): row is ApiKeyRecord => Boolean(row));
+  }
+
+  listGrokApiKeys(filters: {
+    q?: string;
+    status?: string;
+    sortBy?: "extractedAt" | "lastVerifiedAt";
+    sortDir?: "desc" | "asc";
+    page?: number;
+    pageSize?: number;
+  }): { rows: GrokApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
+    const page = Math.max(1, filters.page || 1);
+    const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filters.q?.trim()) {
+      const pattern = `%${filters.q.trim().toLowerCase()}%`;
+      where.push("(LOWER(email) LIKE ? OR LOWER(sso) LIKE ? OR LOWER(COALESCE(extracted_ip, '')) LIKE ?)");
+      params.push(pattern, pattern, pattern);
+    }
+    if (filters.status?.trim()) {
+      where.push("status = ?");
+      params.push(filters.status.trim());
+    }
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const summaryRow = this.db
+      .query(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_count,
+          SUM(CASE WHEN status = 'revoked' THEN 1 ELSE 0 END) AS revoked_count
+        FROM grok_api_keys
+        ${whereSql}
+      `)
+      .get(...(params as any[])) as { total?: number; active_count?: number; revoked_count?: number } | null;
+    const orderClause = resolveGrokApiKeyListOrderClause(filters.sortBy, filters.sortDir);
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM grok_api_keys
+        ${whereSql}
+        ${orderClause}
+        LIMIT ? OFFSET ?
+      `)
+      .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
+    return {
+      rows: rows.map(mapGrokApiKeyRow),
+      total: Number(summaryRow?.total || 0),
+      summary: {
+        active: Number(summaryRow?.active_count || 0),
+        revoked: Number(summaryRow?.revoked_count || 0),
+      },
+    };
+  }
+
+  listGrokApiKeysForExport(ids: number[]): GrokApiKeyRecord[] {
+    const uniqueIds = Array.from(new Set(ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)));
+    if (uniqueIds.length === 0) return [];
+    const rows: Record<string, unknown>[] = [];
+    const chunkSize = 500;
+    for (let offset = 0; offset < uniqueIds.length; offset += chunkSize) {
+      const chunk = uniqueIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const chunkRows = this.db
+        .query(`
+          SELECT *
+          FROM grok_api_keys
+          WHERE id IN (${placeholders})
+        `)
+        .all(...chunk) as Record<string, unknown>[];
+      rows.push(...chunkRows);
+    }
+    const byId = new Map(rows.map((row) => [Number(row.id), mapGrokApiKeyRow(row)]));
+    return uniqueIds.map((id) => byId.get(id)).filter((row): row is GrokApiKeyRecord => Boolean(row));
+  }
+
+  getGrokApiKey(keyId: number): GrokApiKeyRecord | null {
+    const row = this.db
+      .query("SELECT * FROM grok_api_keys WHERE id = ?")
+      .get(keyId) as Record<string, unknown> | null;
+    return row ? mapGrokApiKeyRow(row) : null;
   }
 
   createJob(input: {
@@ -3127,17 +3311,26 @@ export class AppDatabase {
     return mapAttemptRow(row);
   }
 
-  updateAttempt(attemptId: number, patch: Partial<Pick<JobAttemptRecord, "runId" | "stage" | "proxyNode" | "proxyIp" | "errorCode" | "errorMessage" | "status" | "completedAt" | "durationMs">>): JobAttemptRecord {
+  updateAttempt(
+    attemptId: number,
+    patch: Partial<
+      Pick<
+        JobAttemptRecord,
+        "accountEmail" | "runId" | "stage" | "proxyNode" | "proxyIp" | "errorCode" | "errorMessage" | "status" | "completedAt" | "durationMs"
+      >
+    >,
+  ): JobAttemptRecord {
     const current = this.getAttempt(attemptId);
     if (!current) throw new Error(`attempt not found: ${attemptId}`);
     const next = { ...current, ...patch };
     this.db
       .query(`
         UPDATE job_attempts
-        SET run_id = ?, stage = ?, proxy_node = ?, proxy_ip = ?, error_code = ?, error_message = ?, status = ?, completed_at = ?, duration_ms = ?
+        SET account_email = ?, run_id = ?, stage = ?, proxy_node = ?, proxy_ip = ?, error_code = ?, error_message = ?, status = ?, completed_at = ?, duration_ms = ?
         WHERE id = ?
       `)
       .run(
+        next.accountEmail,
         next.runId,
         next.stage,
         next.proxyNode,
@@ -3567,6 +3760,97 @@ export class AppDatabase {
     return mapChatGptCredentialRow(row);
   }
 
+  recordGrokApiKey(input: {
+    jobId: number;
+    attemptId: number;
+    email: string;
+    password: string;
+    sso: string;
+    ssoRw?: string | null;
+    cfClearance?: string | null;
+    checkoutUrl?: string | null;
+    birthDate?: string | null;
+    extractedIp?: string | null;
+    lastVerifiedAt?: string | null;
+  }): GrokApiKeyRecord {
+    const now = nowIso();
+    const sso = input.sso.trim();
+    const prefix = sso.slice(0, Math.min(sso.length, 12));
+    const normalizedEmail = input.email.trim().toLowerCase();
+    const normalizedPassword = input.password.trim();
+    const normalizedSsoRw = input.ssoRw == null ? null : String(input.ssoRw).trim() || null;
+    const normalizedCfClearance = input.cfClearance == null ? null : String(input.cfClearance).trim() || null;
+    const normalizedCheckoutUrl = input.checkoutUrl == null ? null : String(input.checkoutUrl).trim() || null;
+    const normalizedBirthDate = input.birthDate == null ? null : String(input.birthDate).trim() || null;
+    const normalizedExtractedIp = input.extractedIp == null ? null : String(input.extractedIp).trim() || null;
+    const previous = this.db
+      .query("SELECT id FROM grok_api_keys WHERE attempt_id = ? OR api_key = ? ORDER BY id DESC LIMIT 1")
+      .get(input.attemptId, sso) as { id?: number } | null;
+    let row: Record<string, unknown>;
+    if (previous?.id) {
+      row = this.db
+        .query(`
+          UPDATE grok_api_keys
+          SET job_id = ?,
+              attempt_id = ?,
+              email = ?,
+              password = ?,
+              api_key = ?,
+              sso_rw = ?,
+              cf_clearance = ?,
+              checkout_url = ?,
+              birth_date = ?,
+              api_key_prefix = ?,
+              status = 'active',
+              extracted_ip = COALESCE(?, extracted_ip),
+              extracted_at = ?,
+              last_verified_at = ?
+          WHERE id = ?
+          RETURNING *
+        `)
+        .get(
+          input.jobId,
+          input.attemptId,
+          normalizedEmail,
+          normalizedPassword,
+          sso,
+          normalizedSsoRw,
+          normalizedCfClearance,
+          normalizedCheckoutUrl,
+          normalizedBirthDate,
+          prefix,
+          normalizedExtractedIp,
+          now,
+          input.lastVerifiedAt ?? now,
+          previous.id,
+        ) as Record<string, unknown>;
+    } else {
+      row = this.db
+        .query(`
+          INSERT INTO grok_api_keys (
+            job_id, attempt_id, email, password, api_key, sso_rw, cf_clearance, checkout_url, birth_date, api_key_prefix, status, extracted_ip, extracted_at, last_verified_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          RETURNING *
+        `)
+        .get(
+          input.jobId,
+          input.attemptId,
+          normalizedEmail,
+          normalizedPassword,
+          sso,
+          normalizedSsoRw,
+          normalizedCfClearance,
+          normalizedCheckoutUrl,
+          normalizedBirthDate,
+          prefix,
+          normalizedExtractedIp,
+          now,
+          input.lastVerifiedAt ?? now,
+        ) as Record<string, unknown>;
+    }
+    return mapGrokApiKeyRow(row);
+  }
+
   listChatGptCredentials(filters?: {
     limit?: number;
     sortBy?: "createdAt" | "expiresAt";
@@ -3656,6 +3940,75 @@ export class AppDatabase {
           : currentJob.status,
     });
     return { job, attempt, credential };
+  }
+
+  completeGrokAttemptSuccess(
+    jobId: number,
+    attemptId: number,
+    input: {
+      email: string;
+      password: string;
+      sso: string;
+      ssoRw?: string | null;
+      cfClearance?: string | null;
+      checkoutUrl?: string | null;
+      birthDate?: string | null;
+      extractedIp?: string | null;
+      runId?: string | null;
+      proxyNode?: string | null;
+      proxyIp?: string | null;
+    },
+  ): { job: JobRecord; attempt: JobAttemptRecord; key: GrokApiKeyRecord } {
+    const now = nowIso();
+    const currentJob = this.getJob(jobId);
+    if (!currentJob) throw new Error(`job not found: ${jobId}`);
+    const currentAttempt = this.getAttempt(attemptId);
+    if (!currentAttempt) throw new Error(`attempt not found: ${attemptId}`);
+    const durationMs = Math.max(0, Date.parse(now) - Date.parse(currentAttempt.startedAt));
+    const attempt = this.updateAttempt(attemptId, {
+      status: "succeeded",
+      stage: "completed",
+      completedAt: now,
+      durationMs,
+      accountEmail: input.email.trim().toLowerCase(),
+      runId: input.runId ?? currentAttempt.runId,
+      proxyNode: input.proxyNode ?? currentAttempt.proxyNode,
+      proxyIp: input.proxyIp ?? currentAttempt.proxyIp,
+    });
+    if (attempt.proxyNode) {
+      this.touchProxyLease(attempt.proxyNode, {
+        status: "ok",
+        egressIp: input.extractedIp ?? attempt.proxyIp,
+        leasedAt: now,
+      });
+    }
+    const key = this.recordGrokApiKey({
+      jobId,
+      attemptId,
+      email: input.email,
+      password: input.password,
+      sso: input.sso,
+      ssoRw: input.ssoRw ?? null,
+      cfClearance: input.cfClearance ?? null,
+      checkoutUrl: input.checkoutUrl ?? null,
+      birthDate: input.birthDate ?? null,
+      extractedIp: input.extractedIp ?? attempt.proxyIp,
+      lastVerifiedAt: now,
+    });
+    const job = this.updateJobState(jobId, {
+      successCount: currentJob.successCount + 1,
+      status: shouldPreserveManualStopStatus(currentJob.status)
+        ? currentJob.status
+        : shouldEnterCompleting({
+            need: currentJob.need,
+            successCount: currentJob.successCount + 1,
+            maxAttempts: currentJob.maxAttempts,
+            launchedCount: currentJob.launchedCount,
+          })
+          ? "completing"
+          : currentJob.status,
+    });
+    return { job, attempt, key };
   }
 
   markAccountDirectSuccess(accountId: number): void {

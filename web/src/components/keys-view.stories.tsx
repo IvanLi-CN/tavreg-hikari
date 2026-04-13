@@ -3,16 +3,29 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { AppShell } from "@/components/app-shell";
 import { KeysView } from "@/components/keys-view";
-import type { ApiKeyQuery, ApiKeysPayload, ChatGptCredentialQuery, ChatGptCredentialRecord, ChatGptCredentialSort } from "@/lib/app-types";
+import type {
+  ApiKeyQuery,
+  ApiKeysPayload,
+  ChatGptCredentialQuery,
+  ChatGptCredentialRecord,
+  ChatGptCredentialSort,
+  GrokApiKeyQuery,
+  GrokApiKeysPayload,
+} from "@/lib/app-types";
 import {
   sampleApiKeys,
   sampleChatGptCredentials,
+  sampleGrokApiKeys,
 } from "@/stories/fixtures";
 
 const fixedNowMs = Date.parse("2026-04-10T03:00:00.000Z");
 
 function createDefaultQuery(): ApiKeyQuery {
   return { q: "", status: "", groupName: "", sortBy: "extractedAt", sortDir: "desc", page: 1, pageSize: 20 };
+}
+
+function createGrokDefaultQuery(): GrokApiKeyQuery {
+  return { q: "", status: "", sortBy: "extractedAt", sortDir: "desc", page: 1, pageSize: 20 };
 }
 
 const defaultCredentialSort: ChatGptCredentialSort = {
@@ -30,11 +43,24 @@ const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | 
   2: { apiKey: "tvly-real-key-b", extractedIp: null },
 };
 
+const grokExportFixtureById: Record<number, { email: string; password: string; sso: string }> = {
+  11: { email: "grok-1697@mail.example.test", password: "Pw-demo-1697", sso: "sso_live_demo_a" },
+  12: { email: "grok-1601@mail.example.test", password: "Pw-demo-1601", sso: "sso_live_demo_b" },
+};
+
 function buildExportContent(selectedIds: number[]): string {
   return selectedIds
     .map((id) => exportFixtureById[id])
     .filter((item): item is { apiKey: string; extractedIp: string | null } => Boolean(item))
     .map((item) => `${item.apiKey} | ${item.extractedIp || ""}`)
+    .join("\n");
+}
+
+function buildGrokExportContent(selectedIds: number[]): string {
+  return selectedIds
+    .map((id) => grokExportFixtureById[id])
+    .filter((item): item is { email: string; password: string; sso: string } => Boolean(item))
+    .map((item) => item.sso)
     .join("\n");
 }
 
@@ -95,6 +121,35 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
   };
 }
 
+function applyGrokQuery(source: GrokApiKeysPayload, query: GrokApiKeyQuery): GrokApiKeysPayload {
+  const pattern = query.q.trim().toLowerCase();
+  const filteredRows = source.rows.filter((row) => {
+    if (query.status && row.status !== query.status) return false;
+    if (!pattern) return true;
+    return [row.email, row.sso, row.extractedIp || ""].some((value) => value.toLowerCase().includes(pattern));
+  });
+  const sortedRows = [...filteredRows].sort((left, right) => {
+    const primary =
+      query.sortBy === "lastVerifiedAt"
+        ? compareNullableTime(left.lastVerifiedAt, right.lastVerifiedAt, query.sortDir)
+        : compareNullableTime(left.extractedAt, right.extractedAt, query.sortDir);
+    if (primary !== 0) return primary;
+    return query.sortDir === "asc" ? left.id - right.id : right.id - left.id;
+  });
+  const start = (query.page - 1) * query.pageSize;
+  return {
+    ...source,
+    rows: sortedRows.slice(start, start + query.pageSize),
+    total: sortedRows.length,
+    page: query.page,
+    pageSize: query.pageSize,
+    summary: {
+      active: filteredRows.filter((row) => row.status === "active").length,
+      revoked: filteredRows.filter((row) => row.status !== "active").length,
+    },
+  };
+}
+
 function sortCredentials(rows: ChatGptCredentialRecord[], sort: ChatGptCredentialSort): ChatGptCredentialRecord[] {
   return [...rows].sort((left, right) => {
     const primary =
@@ -125,22 +180,29 @@ function applyCredentialQuery(rows: ChatGptCredentialRecord[], query: ChatGptCre
 
 function KeysStorySurface(props: {
   apiKeys?: ApiKeysPayload;
+  grokApiKeys?: GrokApiKeysPayload;
   credentials?: ChatGptCredentialRecord[];
-  defaultTab?: "tavily" | "chatgpt";
+  defaultTab?: "tavily" | "grok" | "chatgpt";
 }) {
   const sourceApiKeys = props.apiKeys || sampleApiKeys;
+  const sourceGrokApiKeys = props.grokApiKeys || sampleGrokApiKeys;
   const sourceCredentials = props.credentials || sampleChatGptCredentials;
   const [query, setQuery] = useState<ApiKeyQuery>(createDefaultQuery());
+  const [grokQuery, setGrokQuery] = useState<GrokApiKeyQuery>(createGrokDefaultQuery());
   const [credentialQuery, setCredentialQuery] = useState<ChatGptCredentialQuery>(defaultCredentialQuery);
   const [credentialSort, setCredentialSort] = useState<ChatGptCredentialSort>(defaultCredentialSort);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [selectedGrokIds, setSelectedGrokIds] = useState<number[]>([]);
   const [selectedChatGptIds, setSelectedChatGptIds] = useState<number[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
+  const [grokExportOpen, setGrokExportOpen] = useState(false);
   const [chatGptExportOpen, setChatGptExportOpen] = useState(false);
   const apiKeys = useMemo(() => applyQuery(sourceApiKeys, query), [query, sourceApiKeys]);
+  const grokApiKeys = useMemo(() => applyGrokQuery(sourceGrokApiKeys, grokQuery), [grokQuery, sourceGrokApiKeys]);
   const filteredCredentials = useMemo(() => applyCredentialQuery(sourceCredentials, credentialQuery), [credentialQuery, sourceCredentials]);
   const credentials = useMemo(() => sortCredentials(filteredCredentials, credentialSort), [credentialSort, filteredCredentials]);
   const exportContent = useMemo(() => buildExportContent(selectedIds), [selectedIds]);
+  const grokExportContent = useMemo(() => buildGrokExportContent(selectedGrokIds), [selectedGrokIds]);
   const chatGptExportContent = useMemo(() => buildChatGptExportContent(selectedChatGptIds), [selectedChatGptIds]);
 
   return (
@@ -163,6 +225,28 @@ function KeysStorySurface(props: {
         onExportOpenChange: setExportOpen,
         onCopyExport: () => undefined,
         onSaveExport: () => undefined,
+      }}
+      grok={{
+        apiKeys: grokApiKeys,
+        query: grokQuery,
+        selectedIds: selectedGrokIds,
+        exportOpen: grokExportOpen,
+        exportContent: grokExportContent,
+        exportBusy: false,
+        onQueryChange: setGrokQuery,
+        onToggleSelection: (apiKeyId, checked) =>
+          setSelectedGrokIds((current) => (checked ? Array.from(new Set([...current, apiKeyId])) : current.filter((id) => id !== apiKeyId))),
+        onTogglePageSelection: (checked) => setSelectedGrokIds(checked ? grokApiKeys.rows.map((row) => row.id) : []),
+        onClearSelection: () => setSelectedGrokIds([]),
+        onOpenExport: () => setGrokExportOpen(true),
+        onExportOpenChange: setGrokExportOpen,
+        onCopyExport: () => undefined,
+        onSaveExport: () => undefined,
+        onResolveCopyField: async (apiKeyId, field) => {
+          const item = grokExportFixtureById[apiKeyId];
+          if (!item) return "";
+          return field === "email" ? item.email : field === "password" ? item.password : item.sso;
+        },
       }}
       chatgpt={{
         credentials,
@@ -192,8 +276,9 @@ function KeysStorySurface(props: {
 
 function IntegratedKeysStorySurface(props: {
   apiKeys?: ApiKeysPayload;
+  grokApiKeys?: GrokApiKeysPayload;
   credentials?: ChatGptCredentialRecord[];
-  defaultTab?: "tavily" | "chatgpt";
+  defaultTab?: "tavily" | "grok" | "chatgpt";
 }) {
   return (
     <AppShell activePage="keys" error={null} onNavigate={() => undefined}>
@@ -236,6 +321,23 @@ export const Default: Story = {
       onCopyExport: fn(),
       onSaveExport: fn(),
     },
+    grok: {
+      apiKeys: sampleGrokApiKeys,
+      query: createGrokDefaultQuery(),
+      selectedIds: [],
+      exportOpen: false,
+      exportContent: "",
+      exportBusy: false,
+      onQueryChange: fn(),
+      onToggleSelection: fn(),
+      onTogglePageSelection: fn(),
+      onClearSelection: fn(),
+      onOpenExport: fn(),
+      onExportOpenChange: fn(),
+      onCopyExport: fn(),
+      onSaveExport: fn(),
+      onResolveCopyField: fn(async () => ""),
+    },
     chatgpt: {
       credentials: sortCredentials(sampleChatGptCredentials, defaultCredentialSort),
       query: defaultCredentialQuery,
@@ -266,6 +368,11 @@ export const ChatGptTab: Story = {
   render: () => <KeysStorySurface defaultTab="chatgpt" />,
 };
 
+export const GrokTab: Story = {
+  args: Default.args,
+  render: () => <KeysStorySurface defaultTab="grok" />,
+};
+
 export const IntegratedTavily: Story = {
   args: Default.args,
   render: () => <IntegratedKeysStorySurface />,
@@ -274,6 +381,11 @@ export const IntegratedTavily: Story = {
 export const IntegratedChatGpt: Story = {
   args: Default.args,
   render: () => <IntegratedKeysStorySurface defaultTab="chatgpt" />,
+};
+
+export const IntegratedGrok: Story = {
+  args: Default.args,
+  render: () => <IntegratedKeysStorySurface defaultTab="grok" />,
 };
 
 export const EmptyChatGpt: Story = {

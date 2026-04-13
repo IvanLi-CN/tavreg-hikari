@@ -76,6 +76,9 @@ export const NavigationPlay: Story = {
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
+    await expect(canvas.getByRole("tab", { name: "Grok" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("tab", { name: "Grok" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("grok");
     await expect(canvas.getByRole("tab", { name: "Keys" })).toBeInTheDocument();
     await userEvent.click(canvas.getByRole("tab", { name: "Keys" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("keys");

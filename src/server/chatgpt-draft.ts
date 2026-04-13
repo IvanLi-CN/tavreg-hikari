@@ -26,6 +26,7 @@ export interface BuildChatGptDraftOptions {
   baseUrl: string;
   httpJson: CfMailHttpJson;
   proxyUrl?: string;
+  rootDomain?: string;
   createPassword: () => string;
   createNickname: () => string;
   createBirthDate: () => string;
@@ -33,18 +34,19 @@ export interface BuildChatGptDraftOptions {
 }
 
 async function provisionProviderManagedMailbox(
-  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl">,
+  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl" | "rootDomain">,
 ): Promise<CfMailMailboxRecord> {
   return await provisionCfMailMailbox({
     baseUrl: options.baseUrl,
     apiKey: options.apiKey,
     httpJson: options.httpJson,
     proxyUrl: options.proxyUrl,
+    rootDomain: options.rootDomain,
   });
 }
 
 async function provisionMailboxWithRealisticLocalPart(
-  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl">,
+  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl" | "rootDomain">,
 ): Promise<CfMailMailboxRecord> {
   const maxAttempts = 5;
   let lastError: unknown = null;
@@ -58,6 +60,7 @@ async function provisionMailboxWithRealisticLocalPart(
         proxyUrl: options.proxyUrl,
         localPart: generateRealisticMailboxLocalPart(),
         subdomain: includeSubdomain ? generateRealisticMailboxSubdomain() : undefined,
+        rootDomain: options.rootDomain,
       });
     } catch (error) {
       lastError = error;
@@ -74,7 +77,7 @@ async function provisionMailboxWithRealisticLocalPart(
 }
 
 async function provisionChatGptMailbox(
-  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl">,
+  options: Pick<BuildChatGptDraftOptions, "apiKey" | "baseUrl" | "httpJson" | "proxyUrl" | "rootDomain">,
 ): Promise<CfMailMailboxRecord> {
   try {
     return await provisionProviderManagedMailbox(options);
@@ -97,6 +100,7 @@ export async function buildChatGptDraft(options: BuildChatGptDraftOptions): Prom
     baseUrl,
     httpJson: options.httpJson,
     proxyUrl: options.proxyUrl,
+    rootDomain: options.rootDomain?.trim() || undefined,
   });
   return {
     email: mailbox.address,

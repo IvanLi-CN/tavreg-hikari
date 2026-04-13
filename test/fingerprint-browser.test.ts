@@ -72,9 +72,20 @@ async function writeExecutable(executablePath: string, content = "#!/bin/sh\nexi
 }
 
 test("resolves only explicit fingerprint browser paths", () => {
-  expect(resolveExplicitChromeExecutablePath(undefined)).toBeUndefined();
-  expect(resolveExplicitChromeExecutablePath("   ")).toBeUndefined();
+  expect(resolveExplicitChromeExecutablePath(undefined, "/tmp/no-fingerprint-browser")).toBeUndefined();
+  expect(resolveExplicitChromeExecutablePath("   ", "/tmp/no-fingerprint-browser")).toBeUndefined();
   expect(resolveExplicitChromeExecutablePath(" /opt/fingerprint-browser/chrome ")).toBe("/opt/fingerprint-browser/chrome");
+});
+
+test("detects the default repo-local fingerprint browser install when env is unset", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fingerprint-default-root-"));
+  const installRoot = path.join(root, ".tools");
+  const binaryRelativePath = "Chromium.app/Contents/MacOS/Chromium";
+  const executablePath = path.join(installRoot, binaryRelativePath);
+  const binarySha256 = await writeExecutable(executablePath);
+  await writeMacInstallMarker(installRoot, binaryRelativePath, binarySha256);
+
+  expect(resolveExplicitChromeExecutablePath(undefined, path.join(root, "nested", "dir"))).toBe(executablePath);
 });
 
 test("accepts official fingerprint browser installs only when installer markers match", async () => {

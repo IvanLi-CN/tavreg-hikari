@@ -149,7 +149,7 @@ export interface AppConfig {
   taskLedger: TaskLedgerConfig;
 }
 
-interface MailboxSession {
+export interface MailboxSession {
   provider: MailboxSessionProvider;
   baseUrl: string;
   address: string;
@@ -366,7 +366,7 @@ interface PreparedSignupTask {
   ipEmailOrdinal: number;
 }
 
-interface BrowserIdentityProfile {
+export interface BrowserIdentityProfile {
   userAgent: string;
   navigatorPlatform: string;
   cdpPlatform: string;
@@ -2286,7 +2286,7 @@ function extractVerificationLinkFromPayload(payload: unknown, allowlist: string[
   return null;
 }
 
-function extractEmailCodeFromPayload(payload: unknown): string | null {
+export function extractEmailCodeFromPayload(payload: unknown): string | null {
   const texts: string[] = [];
   collectStrings(payload, texts);
   const seen = new Set<string>();
@@ -2298,16 +2298,22 @@ function extractEmailCodeFromPayload(payload: unknown): string | null {
       .replaceAll("\\u003d", "=")
       .replaceAll("\\u0026", "&")
       .replace(/\s+/g, " ");
-    const matches = Array.from(normalized.matchAll(/\b(\d{6})\b/g));
-    for (const match of matches) {
-      const code = match[1];
-      if (!code || seen.has(code)) continue;
-      seen.add(code);
-      const start = Math.max(0, (match.index || 0) - 64);
-      const end = Math.min(normalized.length, (match.index || 0) + code.length + 64);
-      const context = normalized.slice(start, end);
-      if (/(code|otp|one-time|one time|verification|verify|login|sign in|identity)/i.test(context)) {
-        return code;
+    const patterns = [
+      /\b(\d{6})\b/g,
+      /\b([A-Z0-9]{3})-([A-Z0-9]{3})\b/gi,
+    ];
+    for (const pattern of patterns) {
+      const matches = Array.from(normalized.matchAll(pattern));
+      for (const match of matches) {
+        const code = match.length >= 3 ? `${match[1] || ""}${match[2] || ""}`.toUpperCase() : (match[1] || "").trim();
+        if (!code || seen.has(code)) continue;
+        seen.add(code);
+        const start = Math.max(0, (match.index || 0) - 64);
+        const end = Math.min(normalized.length, (match.index || 0) + match[0].length + 64);
+        const context = normalized.slice(start, end);
+        if (/(code|otp|one-time|one time|verification|verify|login|sign in|identity)/i.test(context)) {
+          return code;
+        }
       }
     }
   }
@@ -2622,7 +2628,10 @@ async function createVmailSession(cfg: AppConfig, proxyUrl?: string): Promise<Ma
   throw lastError || new Error("vmail mailbox create failed");
 }
 
-async function createGptmailSession(cfg: AppConfig, proxyUrl?: string): Promise<MailboxSession> {
+async function createGptmailSession(
+  cfg: AppConfig,
+  proxyUrl?: string,
+): Promise<MailboxSession> {
   const baseUrl = normalizeGptmailBaseUrl(cfg.gptmailBaseUrl);
   let landingHtml = "";
   let gmSid = "";
@@ -2679,7 +2688,11 @@ async function createGptmailSession(cfg: AppConfig, proxyUrl?: string): Promise<
   };
 }
 
-async function createMailboxSession(cfg: AppConfig, blockedDomains: ReadonlySet<string>, proxyUrl?: string): Promise<MailboxSession> {
+export async function createMailboxSession(
+  cfg: AppConfig,
+  blockedDomains: ReadonlySet<string>,
+  proxyUrl?: string,
+): Promise<MailboxSession> {
   const createRawSession = async (): Promise<MailboxSession> => {
     if (cfg.mailProvider === "gptmail") {
       return await createGptmailSession(cfg, proxyUrl);
@@ -3082,7 +3095,7 @@ async function waitForVerificationLink(
   return null;
 }
 
-async function waitForEmailCode(
+export async function waitForEmailCode(
   mailbox: MailboxSession,
   timeoutMs: number,
   pollMs: number,
@@ -7228,7 +7241,7 @@ async function createCdpSession(target: any): Promise<any | null> {
   }
 }
 
-async function dispatchMouseClickViaCdp(page: any, x: number, y: number): Promise<void> {
+export async function dispatchMouseClickViaCdp(page: any, x: number, y: number): Promise<void> {
   const pageCdp = await createCdpSession(page);
   if (!pageCdp) {
     throw new Error("cdp_session_unavailable");
@@ -7260,6 +7273,16 @@ async function dispatchMouseClickViaCdp(page: any, x: number, y: number): Promis
   }
   await pageCdp
     .send("Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
+      buttons: 0,
+    })
+    .catch(() => {});
+  await page.waitForTimeout(randomInt(120, 260));
+  await pageCdp
+    .send("Input.dispatchMouseEvent", {
       type: "mousePressed",
       x,
       y,
@@ -7281,7 +7304,7 @@ async function dispatchMouseClickViaCdp(page: any, x: number, y: number): Promis
     .catch(() => {});
 }
 
-async function dispatchEnterViaCdp(page: any): Promise<void> {
+export async function dispatchEnterViaCdp(page: any): Promise<void> {
   const pageCdp = await createCdpSession(page);
   if (!pageCdp) {
     throw new Error("cdp_session_unavailable");
@@ -7818,11 +7841,11 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
     ];
     for (const selector of frameSelectors) {
       try {
-        const locator = challengeFrame.locator(selector).first();
-        if ((await locator.count()) === 0) continue;
-        await locator.click({ timeout: 2_000, force: true });
-        await page.waitForTimeout(randomInt(400, 900));
-        const afterFrameClick = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
+      const locator = challengeFrame.locator(selector).first();
+      if ((await locator.count()) === 0) continue;
+      await locator.click({ timeout: 2_000, force: true });
+      await page.waitForTimeout(randomInt(400, 900));
+      const afterFrameClick = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
         if (afterFrameClick?.checkboxChecked === true) {
           log(`${formKind} managed challenge checkbox checked via frame locator (${selector})`);
           return true;
@@ -7853,41 +7876,48 @@ async function tryActivateManagedChallenge(page: any, formKind: "signup" | "logi
     if (!cdpSnapshot?.iframeBox || !cdpSnapshot?.checkboxBox) {
       return false;
     }
-    const offsetCenterX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
-    const offsetCenterY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
-    if (Number.isFinite(offsetCenterX) && Number.isFinite(offsetCenterY)) {
-      await clickAt(offsetCenterX, offsetCenterY);
-      await page.waitForTimeout(randomInt(400, 900));
+
+    const checkboxHotspotX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + Math.min(
+      Math.max(12, cdpSnapshot.checkboxBox.height * 0.45),
+      Math.max(18, cdpSnapshot.checkboxBox.width * 0.16),
+    );
+    const checkboxHotspotY =
+      cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
+    const iframeHotspotX = cdpSnapshot.iframeBox.x + Math.min(28, Math.max(18, cdpSnapshot.iframeBox.width * 0.08));
+    const iframeHotspotY = cdpSnapshot.iframeBox.y + cdpSnapshot.iframeBox.height / 2;
+    const rowCenterX = cdpSnapshot.iframeBox.x + cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
+    const rowCenterY = cdpSnapshot.iframeBox.y + cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
+
+    const candidates = [
+      { label: "checkbox-hotspot", x: checkboxHotspotX, y: checkboxHotspotY },
+      { label: "iframe-hotspot", x: iframeHotspotX, y: iframeHotspotY },
+      { label: "row-center", x: rowCenterX, y: rowCenterY },
+    ].filter((candidate) => Number.isFinite(candidate.x) && Number.isFinite(candidate.y));
+
+    for (const candidate of candidates) {
+      await clickAt(candidate.x, candidate.y);
+      await page.waitForTimeout(randomInt(650, 1300));
       const afterClickSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
       if (afterClickSnapshot?.checkboxChecked === true) {
-        log(`${formKind} managed challenge checkbox checked via cdp`);
+        log(`${formKind} managed challenge checkbox checked via cdp (${candidate.label})`);
         return true;
       }
-      if (afterClickSnapshot?.hasCheckbox) {
-        const directCenterX = cdpSnapshot.checkboxBox.x + cdpSnapshot.checkboxBox.width / 2;
-        const directCenterY = cdpSnapshot.checkboxBox.y + cdpSnapshot.checkboxBox.height / 2;
-        if (Number.isFinite(directCenterX) && Number.isFinite(directCenterY)) {
-          await clickAt(directCenterX, directCenterY);
-          await page.waitForTimeout(randomInt(400, 900));
-          const afterDirectClickSnapshot = await collectManagedChallengeCdpSnapshot(page).catch(() => null);
-          if (afterDirectClickSnapshot?.checkboxChecked === true) {
-            log(`${formKind} managed challenge checkbox checked via cdp direct-box click`);
-            return true;
-          }
-        }
+      if (!afterClickSnapshot?.hasCheckbox && afterClickSnapshot?.successVisible) {
+        log(`${formKind} managed challenge success visible via cdp (${candidate.label})`);
+        return true;
       }
       log(
-        `${formKind} managed challenge checkbox activated via cdp (checkbox=${
+        `${formKind} managed challenge checkbox activated via cdp (${candidate.label}, checkbox=${
           afterClickSnapshot?.hasCheckbox ? 1 : 0
         }, checked=${Boolean(afterClickSnapshot?.checkboxChecked) ? 1 : 0})`,
       );
-      return true;
     }
+    return true;
   }
   return false;
 }
 
-async function ensureManagedChallengeTokenBeforeSubmit(
+export async function ensureManagedChallengeTokenBeforeSubmit(
   page: any,
   formKind: "signup" | "login",
 ): Promise<{ status: "token_ready" | "timeout" | "rejected"; snapshot: AuthChallengeSnapshot | null; rejection?: string }> {
@@ -9730,7 +9760,7 @@ function normalizePlatformVersion(raw: string, fallback = "0.0.0"): string {
   return /^\d+\.\d+\.\d+$/.test(normalized) ? normalized : fallback;
 }
 
-function buildBrowserIdentityProfile(locale: string, browserVersion: string): BrowserIdentityProfile {
+export function buildBrowserIdentityProfile(locale: string, browserVersion: string): BrowserIdentityProfile {
   const normalizedLocale = locale || "en-US";
   const langPrefix = (normalizedLocale.split("-")[0] || "en").toLowerCase();
   const fallbackRegion = normalizedLocale.split("-")[1] || "US";
@@ -9907,7 +9937,7 @@ async function applyPageIdentityOverrides(
   }
 }
 
-async function applyBrowserIdentityToContext(
+export async function applyBrowserIdentityToContext(
   context: any,
   identity: BrowserIdentityProfile,
   timezoneId?: string,
@@ -9948,43 +9978,60 @@ async function applyBrowserIdentityToContext(
         defineReadonly("maxTouchPoints", profile.maxTouchPoints);
         defineReadonly("pdfViewerEnabled", true);
 
-        const pdfMimeType = {
-          type: "application/pdf",
-          suffixes: "pdf",
-          description: "Portable Document Format",
-          enabledPlugin: null as any,
-        };
-        const pdfPlugin = {
-          name: "Chrome PDF Viewer",
-          filename: "internal-pdf-viewer",
-          description: "Portable Document Format",
-          0: pdfMimeType,
-          length: 1,
-          item: (index: number) => (index === 0 ? pdfMimeType : null),
-          namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
-        };
-        pdfMimeType.enabledPlugin = pdfPlugin;
-        const plugins = {
-          0: pdfPlugin,
-          length: 1,
-          item: (index: number) => (index === 0 ? pdfPlugin : null),
-          namedItem: (name: string) => (name === pdfPlugin.name ? pdfPlugin : null),
-          refresh: () => undefined,
-          [Symbol.iterator]: function* () {
-            yield pdfPlugin;
-          },
-        };
-        const mimeTypes = {
-          0: pdfMimeType,
-          length: 1,
-          item: (index: number) => (index === 0 ? pdfMimeType : null),
-          namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
-          [Symbol.iterator]: function* () {
-            yield pdfMimeType;
-          },
-        };
-        defineReadonly("plugins", plugins);
-        defineReadonly("mimeTypes", mimeTypes);
+        const nativePlugins = navigator.plugins;
+        const nativeMimeTypes = navigator.mimeTypes;
+        const nativePluginsLooksUsable =
+          typeof nativePlugins?.length === "number"
+          && nativePlugins.length > 0
+          && Object.prototype.toString.call(nativePlugins) === "[object PluginArray]";
+        const nativeMimeTypesLooksUsable =
+          typeof nativeMimeTypes?.length === "number"
+          && nativeMimeTypes.length > 0
+          && Object.prototype.toString.call(nativeMimeTypes) === "[object MimeTypeArray]";
+
+        if (!nativePluginsLooksUsable || !nativeMimeTypesLooksUsable) {
+          const pdfMimeType = {
+            type: "application/pdf",
+            suffixes: "pdf",
+            description: "Portable Document Format",
+            enabledPlugin: null as any,
+          };
+          const pdfPlugin = {
+            name: "Chrome PDF Viewer",
+            filename: "internal-pdf-viewer",
+            description: "Portable Document Format",
+            0: pdfMimeType,
+            length: 1,
+            item: (index: number) => (index === 0 ? pdfMimeType : null),
+            namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
+          };
+          pdfMimeType.enabledPlugin = pdfPlugin;
+          const plugins = {
+            0: pdfPlugin,
+            length: 1,
+            item: (index: number) => (index === 0 ? pdfPlugin : null),
+            namedItem: (name: string) => (name === pdfPlugin.name ? pdfPlugin : null),
+            refresh: () => undefined,
+            [Symbol.iterator]: function* () {
+              yield pdfPlugin;
+            },
+          };
+          const mimeTypes = {
+            0: pdfMimeType,
+            length: 1,
+            item: (index: number) => (index === 0 ? pdfMimeType : null),
+            namedItem: (name: string) => (name === pdfMimeType.type ? pdfMimeType : null),
+            [Symbol.iterator]: function* () {
+              yield pdfMimeType;
+            },
+          };
+          if (!nativePluginsLooksUsable) {
+            defineReadonly("plugins", plugins);
+          }
+          if (!nativeMimeTypesLooksUsable) {
+            defineReadonly("mimeTypes", mimeTypes);
+          }
+        }
 
         const patchWebgl = (Ctor: any): void => {
           if (!Ctor?.prototype?.getParameter) return;
@@ -10028,12 +10075,21 @@ export async function launchBrowserWithEngine(
   locale: string,
   _geoIp: string,
 ): Promise<Browser> {
+  const acceptLanguage = buildAcceptLanguage(locale);
+  const fingerprintArgs = getFingerprintChromiumArgs(
+    cfg.chromeExecutablePath,
+    cfg.chromeProfileDir,
+    proxyServer?.trim() || "direct",
+    locale,
+    acceptLanguage,
+  );
   const options: LaunchOptions = {
     headless: mode === "headless",
     slowMo: Math.max(0, cfg.slowMoMs),
     ignoreDefaultArgs: ["--enable-automation"],
     args: [
-      `--lang=${locale}`,
+      ...(fingerprintArgs.some((item) => item.startsWith("--lang=")) ? [] : [`--lang=${locale}`]),
+      ...fingerprintArgs,
       ...(mode === "headed" && cfg.chromeAutoOpenDevtools ? ["--auto-open-devtools-for-tabs"] : []),
       ...getChromePasskeyDisableArgs(),
       ...getChromeVisualArgs(),
@@ -10612,7 +10668,7 @@ export async function launchChromePersistent(
   throw lastError || new Error("failed to launch chrome persistent context");
 }
 
-async function configureNativeChromePage(
+export async function configureNativeChromePage(
   context: any,
   page: any,
   identity: BrowserIdentityProfile,
@@ -10725,7 +10781,7 @@ async function launchNativeChromeInspect(
   };
 }
 
-async function applyEngineStealth(
+export async function applyEngineStealth(
   context: any,
   engine: BrowserEngine,
   locale: string,

@@ -8,6 +8,7 @@ export function normalizeAppPath(pathname: string): string {
 
 export function getPageFromPathname(pathname: string): PageKey {
   const normalized = normalizeAppPath(pathname);
+  if (normalized === "/grok") return "grok";
   if (normalized === "/chatgpt") return "chatgpt";
   if (normalized === "/tavily" || normalized === "/dashboard") return "tavily";
   if (normalized === "/accounts") return "accounts";
