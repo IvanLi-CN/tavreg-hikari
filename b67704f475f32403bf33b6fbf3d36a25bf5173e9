@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.6.0",
+  "base_stable_version": "0.5.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-13T11:17:23Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.6.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "076a6bf6dc54de1071ae2897c950348f0cbb6b96",
+  "pr_number": 36,
+  "pr_title": "feat: add Grok web admin flow",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.6.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.6.0",
+  "target_sha": "b67704f475f32403bf33b6fbf3d36a25bf5173e9",
+  "type_label": "type:minor"
+}
