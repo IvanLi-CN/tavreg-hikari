@@ -377,25 +377,11 @@ export type JobSnapshot = {
   };
 };
 
-export type ChatGptDraft = {
-  email: string;
-  password: string;
-  nickname: string;
-  birthDate: string;
-  mailboxId: string;
-  generatedAt: string;
-};
-
 export type ChatGptJobDraft = {
   runMode: "headed" | "headless";
   need: number;
   parallel: number;
   maxAttempts: number;
-};
-
-export type ChatGptDraftPayload = {
-  ok: true;
-  draft: ChatGptDraft;
 };
 
 export type ChatGptCredentialRecord = {

@@ -1915,6 +1915,20 @@ async function main(): Promise<void> {
         });
       }
 
+      if (pathname === "/api/chatgpt/attempt-draft" && req.method === "POST") {
+        const draft = await buildChatGptDraft({
+          apiKey: (process.env.CFMAIL_API_KEY || "").trim(),
+          baseUrl: process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test",
+          httpJson: serverHttpJson,
+          rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN,
+          createPassword: randomPassword,
+          createNickname: randomNickname,
+          createBirthDate: randomBirthDate,
+          nowIso,
+        });
+        return json({ ok: true, draft });
+      }
+
       const chatgptCredentialDetailMatch = pathname.match(/^\/api\/chatgpt\/credentials\/(\d+)$/);
       if (chatgptCredentialDetailMatch && req.method === "GET") {
         const credentialId = Number.parseInt(chatgptCredentialDetailMatch[1] || "", 10);

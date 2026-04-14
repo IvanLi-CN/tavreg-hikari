@@ -58,6 +58,30 @@ export const KeysActive: Story = {
   },
 };
 
+export const ChatGptActiveCleanState: Story = {
+  args: {
+    activePage: "chatgpt",
+    error: null,
+    onNavigate: fn(),
+    children: null,
+  },
+  render: (args) => {
+    const [page, setPage] = useState<PageKey>(args.activePage);
+    return (
+      <AppShell {...args} activePage={page} onNavigate={setPage}>
+        <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
+          {page} content
+        </div>
+      </AppShell>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("tab", { name: "ChatGPT", selected: true })).toBeInTheDocument();
+    await expect(canvas.queryByRole("alert")).toBeNull();
+  },
+};
+
 export const NavigationPlay: Story = {
   args: {
     activePage: "tavily",
