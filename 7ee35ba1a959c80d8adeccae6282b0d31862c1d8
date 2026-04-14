@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.6.1",
+  "base_stable_version": "0.6.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-14T04:16:36Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.6.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "de3e8028914aff86a07845c1c1e461c70c2fa48a",
+  "pr_number": 37,
+  "pr_title": "fix(chatgpt): accept trusted linux fingerprint browsers",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.6.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.6.1",
+  "target_sha": "7ee35ba1a959c80d8adeccae6282b0d31862c1d8",
+  "type_label": "type:patch"
+}
