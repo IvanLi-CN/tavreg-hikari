@@ -813,6 +813,21 @@ export const sampleProxies: ProxyPayload = {
     defaultParallel: 2,
     defaultMaxAttempts: 9,
   },
+  checkState: {
+    runId: null,
+    status: "idle",
+    scope: null,
+    concurrency: 5,
+    total: 0,
+    completed: 0,
+    succeeded: 0,
+    failed: 0,
+    activeWorkers: 0,
+    currentNodeNames: [],
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+  },
   nodes: [
     {
       id: 1,

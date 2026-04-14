@@ -15,6 +15,13 @@ function normalizeProxyStatus(status: string | null | undefined): string {
   return String(status || "").trim().toLowerCase();
 }
 
+function getProxyCheckStatusMeta(status: string) {
+  if (status === "running") return { label: "检查中", tone: "text-sky-300" };
+  if (status === "completed") return { label: "已完成", tone: "text-emerald-300" };
+  if (status === "failed") return { label: "检查失败", tone: "text-rose-300" };
+  return { label: "空闲", tone: "text-slate-300" };
+}
+
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-2">
@@ -65,6 +72,9 @@ export function ProxiesView({
   const healthyCount = proxies.nodes.filter((node) => ["ok", "succeeded", "running"].includes(normalizeProxyStatus(node.lastStatus))).length;
   const checkedCount = proxies.nodes.filter((node) => Boolean(node.lastCheckedAt)).length;
   const recentlyLeasedNode = [...proxies.nodes].filter((node) => Boolean(node.lastLeasedAt)).sort((left, right) => Date.parse(right.lastLeasedAt || "") - Date.parse(left.lastLeasedAt || ""))[0] || null;
+  const checkState = proxies.checkState;
+  const checkBusy = checkState.status === "running";
+  const checkStatusMeta = getProxyCheckStatusMeta(checkState.status);
 
   return (
     <section className="grid gap-4 xl:grid-cols-[0.88fr_1.12fr]">
@@ -122,7 +132,7 @@ export function ProxiesView({
               </Field>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={handleSaveClick}>保存并同步</Button>
+              <Button onClick={handleSaveClick} disabled={checkBusy}>保存并同步</Button>
               <Select value={proxyCheckScope} onValueChange={(value) => onProxyCheckScopeChange(value as ProxyCheckScope)}>
                 <SelectTrigger className="w-[11rem]">
                   <SelectValue />
@@ -131,7 +141,55 @@ export function ProxiesView({
                   <SelectItem value="all">全部节点</SelectItem>
                 </SelectContent>
               </Select>
-              <Button variant="outline" onClick={onCheckScope}>执行检查</Button>
+              <Button variant="outline" onClick={onCheckScope} disabled={checkBusy}>执行检查</Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>检查进度</CardTitle>
+            <CardDescription>代理页通过 SSE 接收实时进度；检查期间会锁定保存与重复检查入口。</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4 text-sm text-slate-300">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-slate-500">当前状态</span>
+                <span className={checkStatusMeta.tone}>{checkStatusMeta.label}</span>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-2xl border border-white/8 bg-slate-950/40 px-3 py-2">
+                  <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">进度</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{checkState.completed}/{checkState.total}</div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-slate-950/40 px-3 py-2">
+                  <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">并发</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{checkState.activeWorkers}/{checkState.concurrency}</div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-slate-950/40 px-3 py-2">
+                  <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">成功 / 失败</div>
+                  <div className="mt-1 text-lg font-semibold text-white">{checkState.succeeded} / {checkState.failed}</div>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-slate-950/40 px-3 py-2">
+                  <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">开始时间</div>
+                  <div className="mt-1 text-sm text-white">{formatDate(checkState.startedAt)}</div>
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-slate-500">当前活跃节点</div>
+                <div className="mt-1 text-sm text-white">
+                  {checkState.currentNodeNames.length > 0 ? checkState.currentNodeNames.join("、") : "—"}
+                </div>
+              </div>
+              <div className="mt-3">
+                <div className="text-slate-500">完成时间</div>
+                <div className="mt-1 text-sm text-white">{formatDate(checkState.finishedAt)}</div>
+              </div>
+              {checkState.error ? (
+                <div className="mt-3 rounded-2xl border border-rose-400/20 bg-rose-500/[0.08] px-3 py-2 text-sm text-rose-100">
+                  最近错误：{checkState.error}
+                </div>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -196,7 +254,7 @@ export function ProxiesView({
                       </div>
                     </dl>
                     <div className="mt-4 flex flex-wrap gap-2">
-                      <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
+                      <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)} disabled={checkBusy}>检查</Button>
                     </div>
                   </article>
                 ))}
@@ -225,7 +283,7 @@ export function ProxiesView({
                         <TableCell>{node.success24h}</TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-2">
-                            <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
+                            <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)} disabled={checkBusy}>检查</Button>
                           </div>
                         </TableCell>
                       </TableRow>

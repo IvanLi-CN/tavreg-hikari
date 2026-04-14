@@ -60,6 +60,7 @@ import type {
   PageKey,
   JobSite,
   ProxyCheckScope,
+  ProxyCheckState,
   ProxyPayload,
   ProxySettingsUpdate,
   RunModeAvailability,
@@ -534,6 +535,16 @@ export function App() {
     const payload = await api<ProxyPayload>("/api/proxies");
     setProxies(payload);
   };
+  const applyProxyEventPayload = (payload: { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"] }) => {
+    setProxies((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        nodes: Array.isArray(payload.nodes) ? payload.nodes : current.nodes,
+        checkState: payload.checkState || current.checkState,
+      };
+    });
+  };
   const refreshExtractorSettings = async () => {
     const payload = await api<AccountExtractorSettingsPayload>("/api/account-extractors/settings");
     setExtractorSettings(payload.settings);
@@ -975,7 +986,7 @@ export function App() {
       if ((next.type === "job.updated" || next.type === "account.updated") && activePageRef.current === "accounts") {
         void refreshExtractorHistory(extractorHistoryQueryRef.current);
       }
-      if (next.type === "proxy.updated" || next.type === "proxy.check.completed") {
+      if (next.type === "proxy.updated" && activePageRef.current !== "proxies") {
         void refreshProxies();
       }
     };
@@ -1027,6 +1038,36 @@ export function App() {
     return () => {
       source.close();
       setExtractorSseState("closed");
+    };
+  }, [activePage]);
+
+  useEffect(() => {
+    if (activePage !== "proxies") {
+      return;
+    }
+    const source = new EventSource("/api/proxies/events");
+    source.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as EventRecord;
+        if (
+          next.type === "proxy.updated"
+          || next.type === "proxy.check.state"
+          || next.type === "proxy.check.started"
+          || next.type === "proxy.check.progress"
+          || next.type === "proxy.check.completed"
+          || next.type === "proxy.check.failed"
+        ) {
+          applyProxyEventPayload(next.payload as { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"] });
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    source.onerror = () => {
+      // keep the last rendered proxy snapshot instead of forcing a blocking reload loop
+    };
+    return () => {
+      source.close();
     };
   }, [activePage]);
 
@@ -1339,11 +1380,11 @@ export function App() {
     if (!proxies && !settingsOverride) return;
     try {
       setError(null);
-      await api("/api/proxies/settings", {
+      const payload = await api<ProxyPayload>("/api/proxies/settings", {
         method: "POST",
         body: JSON.stringify(settingsOverride || (proxies ? pickProxySettingsUpdate(proxies.settings) : undefined)),
       });
-      await refreshProxies();
+      setProxies(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1352,10 +1393,11 @@ export function App() {
   const handleProxyCheck = async () => {
     try {
       setError(null);
-      await api("/api/proxies/check", {
+      const payload = await api<{ ok: true; accepted: boolean; checkState: ProxyCheckState }>("/api/proxies/check", {
         method: "POST",
         body: JSON.stringify({ scope: proxyCheckScope }),
       });
+      applyProxyEventPayload({ checkState: payload.checkState });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -1364,10 +1406,11 @@ export function App() {
   const handleCheckSingleNode = async (nodeName: string) => {
     try {
       setError(null);
-      await api("/api/proxies/check", {
+      const payload = await api<{ ok: true; accepted: boolean; checkState: ProxyCheckState }>("/api/proxies/check", {
         method: "POST",
         body: JSON.stringify({ scope: "node", nodeName }),
       });
+      applyProxyEventPayload({ checkState: payload.checkState });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

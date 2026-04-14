@@ -5,6 +5,20 @@ import { ProxiesView } from "@/components/proxies-view";
 import { pickProxySettingsUpdate, type ProxyCheckScope, type ProxyPayload, type ProxySettingsUpdate } from "@/lib/app-types";
 import { sampleProxies } from "@/stories/fixtures";
 
+function withCheckState(
+  overrides: Partial<ProxyPayload["checkState"]>,
+  extra?: Partial<ProxyPayload>,
+): ProxyPayload {
+  return {
+    ...sampleProxies,
+    ...extra,
+    checkState: {
+      ...sampleProxies.checkState,
+      ...overrides,
+    },
+  };
+}
+
 const meta = {
   title: "Views/ProxiesView",
   component: ProxiesView,
@@ -64,6 +78,86 @@ export const ActionsPlay: Story = {
     await expect(args.onCheckScope).toHaveBeenCalled();
     await userEvent.click(canvas.getAllByRole("button", { name: "检查" })[0]!);
     await expect(args.onCheckNode).toHaveBeenCalled();
+  },
+};
+
+export const Running: Story = {
+  args: {
+    proxies: withCheckState({
+      runId: "run-proxy-001",
+      status: "running",
+      scope: "all",
+      concurrency: 5,
+      total: 12,
+      completed: 7,
+      succeeded: 6,
+      failed: 1,
+      activeWorkers: 5,
+      currentNodeNames: ["Tokyo-01", "Seoul-02", "Osaka-03", "Singapore-04", "Frankfurt-05"],
+      startedAt: "2026-04-15T09:20:00.000Z",
+    }),
+    proxyCheckScope: "all",
+    onProxyCheckScopeChange: fn(),
+    onProxySettingsChange: fn(),
+    onSaveProxySettings: fn(),
+    onCheckScope: fn(),
+    onCheckNode: fn(),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "保存并同步" })).toBeDisabled();
+    await expect(canvas.getByRole("button", { name: "执行检查" })).toBeDisabled();
+    await expect(canvas.getAllByRole("button", { name: "检查" })[0]).toBeDisabled();
+    await expect(canvas.getByText("7/12")).toBeInTheDocument();
+  },
+};
+
+export const CompletedWithFailures: Story = {
+  args: {
+    proxies: withCheckState({
+      runId: "run-proxy-002",
+      status: "completed",
+      scope: "all",
+      concurrency: 5,
+      total: 12,
+      completed: 12,
+      succeeded: 10,
+      failed: 2,
+      activeWorkers: 0,
+      currentNodeNames: [],
+      startedAt: "2026-04-15T09:20:00.000Z",
+      finishedAt: "2026-04-15T09:23:12.000Z",
+    }),
+    proxyCheckScope: "all",
+    onProxyCheckScopeChange: fn(),
+    onProxySettingsChange: fn(),
+    onSaveProxySettings: fn(),
+    onCheckScope: fn(),
+    onCheckNode: fn(),
+  },
+};
+
+export const FailedState: Story = {
+  args: {
+    proxies: withCheckState({
+      runId: "run-proxy-003",
+      status: "failed",
+      scope: "all",
+      concurrency: 5,
+      total: 0,
+      completed: 0,
+      succeeded: 0,
+      failed: 0,
+      error: "mihomo_release_failed:403",
+      startedAt: "2026-04-15T09:30:00.000Z",
+      finishedAt: "2026-04-15T09:30:03.000Z",
+    }),
+    proxyCheckScope: "all",
+    onProxyCheckScopeChange: fn(),
+    onProxySettingsChange: fn(),
+    onSaveProxySettings: fn(),
+    onCheckScope: fn(),
+    onCheckNode: fn(),
   },
 };
 
