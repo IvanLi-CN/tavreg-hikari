@@ -6,6 +6,7 @@ import { URL } from "node:url";
 import process from "node:process";
 import { promisify } from "node:util";
 import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMailMessageSummary } from "../cfmail-api.js";
+import { assertUsableFingerprintChromiumExecutablePath } from "../fingerprint-browser.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
 import { launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
@@ -64,10 +65,13 @@ function log(message: string): void {
   console.log(`[chatgpt-worker] ${message}`);
 }
 
-function isRepoProvidedChromium(executablePath: string | undefined): boolean {
-  const normalized = String(executablePath || "").trim();
-  if (!normalized) return false;
-  return normalized.includes(`${path.sep}.tools${path.sep}Chromium.app${path.sep}Contents${path.sep}MacOS${path.sep}Chromium`);
+export function assertTrustedChatGptWorkerChromiumExecutable(executablePath: string | undefined): string {
+  try {
+    return assertUsableFingerprintChromiumExecutablePath(executablePath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`chatgpt_browser_not_project_provided:${message}`);
+  }
 }
 
 function isPrimaryAuthSurface(url: string): boolean {
@@ -1513,16 +1517,14 @@ async function run(): Promise<void> {
   });
   log(`worker bootstrap start email=${payload.email} mailbox=${payload.mailboxId}`);
   const cfg = loadConfig();
-  if (!isRepoProvidedChromium(cfg.chromeExecutablePath)) {
-    throw new Error(`chatgpt_browser_not_project_provided:${cfg.chromeExecutablePath || "missing"}`);
-  }
+  const chromeExecutablePath = assertTrustedChatGptWorkerChromiumExecutable(cfg.chromeExecutablePath);
   await writeStageMarker(outputDir, "bootstrap:config_loaded", {
     browserEngine: cfg.browserEngine,
     hasChromeExecutablePath: Boolean(cfg.chromeExecutablePath),
-    chromeExecutablePath: cfg.chromeExecutablePath || null,
+    chromeExecutablePath,
     runMode: cfg.runMode,
   });
-  log(`browser executable path=${cfg.chromeExecutablePath}`);
+  log(`browser executable path=${chromeExecutablePath}`);
   let callbackState = createState();
   let { verifier, challenge } = createPkcePair();
   const callbackStateRef = { current: callbackState };

@@ -125,6 +125,21 @@ test("accepts custom linux install roots emitted by the official installer", asy
   expect(isFingerprintChromiumExecutable(path.join(installRoot, "144.0.7559.132", "chrome"))).toBe(true);
 });
 
+test("accepts opt-style linux install roots emitted by the official installer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "fingerprint-opt-root-"));
+  const installRoot = path.join(root, "opt", "fingerprint-browser");
+  const binaryContent = "#!/bin/sh\nexit 0\n";
+  const binarySha256 = await writeExecutable(path.join(installRoot, "144.0.7559.132", "chrome"), binaryContent);
+  await symlink("144.0.7559.132/chrome", path.join(installRoot, "chrome"));
+  await writeLinuxInstallMarker(installRoot, "chrome", binarySha256);
+  await writeLinuxInstallMarker(path.join(installRoot, "144.0.7559.132"), "chrome", binarySha256);
+
+  expect(isFingerprintChromiumExecutable(path.join(installRoot, "chrome"))).toBe(true);
+  expect(assertUsableFingerprintChromiumExecutablePath(path.join(installRoot, "chrome"))).toBe(
+    path.resolve(path.join(installRoot, "chrome")),
+  );
+});
+
 test("rejects unrelated chrome wrappers under an installer root", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "fingerprint-wrapper-root-"));
   const installRoot = path.join(root, "custom-browser-root");
