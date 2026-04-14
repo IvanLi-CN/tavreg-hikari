@@ -10,7 +10,13 @@ import {
 } from "../cfmail-api.js";
 import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { startMihomo } from "../proxy/mihomo.js";
-import { checkAllNodes, checkNode, type NodeCheckResult } from "../proxy/check.js";
+import {
+  createMihomoNodeCheckRunner,
+  createProxyCheckCoordinator,
+  resolveProxyCheckConcurrency,
+  type ProxyCheckScope,
+  type ProxyCheckState,
+} from "./proxy-check-coordinator.js";
 import {
   AppDatabase,
   normalizeAccountExtractorAccountType,
@@ -762,6 +768,40 @@ async function syncProxyInventory(db: AppDatabase, settings: AppSettings) {
   return { nodes: db.listProxyNodes() };
 }
 
+function recordProxyCheckResult(db: AppDatabase, result: {
+  name: string;
+  ok: boolean;
+  latencyMs?: number | null;
+  geo?: { ip?: string; country?: string; region?: string; city?: string; org?: string };
+  error?: string;
+}): void {
+  db.recordProxyCheck({
+    nodeName: String(result.name),
+    status: result.ok ? "ok" : "fail",
+    latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
+    egressIp: result.geo?.ip || null,
+    country: result.geo?.country || null,
+    region: result.geo?.region || null,
+    city: result.geo?.city || null,
+    org: result.geo?.org || null,
+    error: typeof result.error === "string" ? result.error : null,
+  });
+}
+
+function serializeProxyPayload(input: {
+  settings: AppSettings;
+  nodes: ReturnType<AppDatabase["listProxyNodes"]>;
+  checkState: ProxyCheckState;
+  syncError?: string | null;
+}) {
+  return {
+    settings: input.settings,
+    nodes: input.nodes,
+    checkState: input.checkState,
+    syncError: input.syncError ?? null,
+  };
+}
+
 async function serveStatic(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const targetPath = resolveStaticAssetPath(WEB_DIST_DIR, url.pathname);
@@ -1172,11 +1212,38 @@ async function main(): Promise<void> {
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const clients = new Set<any>();
   const accountEventSubscribers = new Set<(event: ServerEvent) => void>();
+  const proxyEventSubscribers = new Set<(event: ServerEvent) => void>();
   const sseEncoder = new TextEncoder();
   const runExclusiveProxyOp = createExclusiveRunner();
   const runExclusiveMailboxOauth = createExclusiveRunner();
   const sessionBootstrapQueuedIds = new Set<number>();
   const sessionBootstrapPendingForceIds = new Set<number>();
+  let latestProxySyncError: string | null = null;
+  const proxyCheckCoordinator = createProxyCheckCoordinator({
+    defaultConcurrency: resolveProxyCheckConcurrency(process.env.PROXY_CHECK_CONCURRENCY, 5),
+    readSettings,
+    resolveNodeNames: async ({ settings, scope, nodeName }) => {
+      if (scope === "node") {
+        return [String(nodeName || "").trim()].filter(Boolean);
+      }
+      const inventory = await runExclusiveProxyOp(() => fetchProxyInventory(settings));
+      db.upsertProxyInventory(inventory.nodeNames);
+      latestProxySyncError = null;
+      return inventory.nodeNames;
+    },
+    createWorker: createMihomoNodeCheckRunner({
+      repoRoot: REPO_ROOT,
+      outputRoot: OUTPUT_ROOT,
+      ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
+    }),
+    recordResult: (result) => {
+      recordProxyCheckResult(db, result);
+    },
+    listNodes: () => db.listProxyNodes(),
+    publish: (event) => {
+      broadcast(event);
+    },
+  });
   const broadcast = (event: ServerEvent) => {
     const message = toEventMessage(event);
     for (const ws of clients) {
@@ -1184,6 +1251,11 @@ async function main(): Promise<void> {
     }
     for (const subscriber of accountEventSubscribers) {
       subscriber(event);
+    }
+    if (event.type.startsWith("proxy.")) {
+      for (const subscriber of proxyEventSubscribers) {
+        subscriber(event);
+      }
     }
   };
   const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean; reason?: "auto" | "manual" }): boolean => {
@@ -1368,6 +1440,58 @@ async function main(): Promise<void> {
               sendEvent({
                 type: "extractor.updated",
                 payload: { runtime: accountExtractorRuntime.getSnapshot() },
+                timestamp: nowIso(),
+              });
+            },
+            cancel() {
+              cleanup();
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "content-type": "text/event-stream; charset=utf-8",
+              "cache-control": "no-cache, no-transform",
+              connection: "keep-alive",
+              "x-accel-buffering": "no",
+            },
+          });
+        }
+
+        if (pathname === "/api/proxies/events" && req.method === "GET") {
+          let cleanup = () => {};
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              let closed = false;
+              const write = (chunk: string) => {
+                if (closed) return;
+                controller.enqueue(sseEncoder.encode(chunk));
+              };
+              const sendEvent = (event: ServerEvent) => {
+                write(toSseEventMessage(event));
+              };
+              const heartbeat = setInterval(() => {
+                write(`: ping ${Date.now()}\n\n`);
+              }, 15_000);
+              const closeStream = () => {
+                if (closed) return;
+                closed = true;
+                clearInterval(heartbeat);
+                proxyEventSubscribers.delete(sendEvent);
+                req.signal.removeEventListener("abort", closeStream);
+                try {
+                  controller.close();
+                } catch {}
+              };
+              cleanup = closeStream;
+              proxyEventSubscribers.add(sendEvent);
+              req.signal.addEventListener("abort", closeStream, { once: true });
+              write(": connected\n\n");
+              sendEvent({
+                type: "proxy.check.state",
+                payload: {
+                  checkState: proxyCheckCoordinator.getState(),
+                  nodes: db.listProxyNodes(),
+                },
                 timestamp: nowIso(),
               });
             },
@@ -2288,33 +2412,24 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/proxies" && req.method === "GET") {
         const settings = readSettings();
-        if (!settings.subscriptionUrl.trim()) {
-          return json({
+        const nodes = settings.subscriptionUrl.trim() ? db.listProxyNodes() : [];
+        return json(
+          serializeProxyPayload({
             settings,
-            nodes: [],
-            syncError: null,
-          });
-        }
-        try {
-          const inventory = await runExclusiveProxyOp(() => syncProxyInventory(db, settings));
-          return json({
-            settings,
-            nodes: inventory.nodes,
-            syncError: null,
-          });
-        } catch (error) {
-          return json({
-            settings,
-            nodes: db.listProxyNodes(),
-            syncError: error instanceof Error ? error.message : String(error),
-          });
-        }
+            nodes,
+            checkState: proxyCheckCoordinator.getState(),
+            syncError: latestProxySyncError,
+          }),
+        );
       }
 
       if (pathname === "/api/proxies/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as Record<string, unknown> | null;
         if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
           return badRequest("proxy settings payload must be a JSON object");
+        }
+        if (proxyCheckCoordinator.isRunning()) {
+          return badRequest("proxy check is running; wait until it finishes before saving settings", 409);
         }
         const unexpectedProxySettingsKeys = listUnexpectedProxySettingsKeys(body);
         if (unexpectedProxySettingsKeys.length > 0) {
@@ -2323,92 +2438,58 @@ async function main(): Promise<void> {
         const current = readSettings();
         const optimisticNext = buildNextProxySettings(current, body as Partial<ProxySettingsUpdate> | null);
         if (!optimisticNext.subscriptionUrl.trim()) {
+          latestProxySyncError = null;
           db.setSettings(optimisticNext);
           db.upsertProxyInventory([]);
-          return json({
-            ok: true,
-            settings: optimisticNext,
-            nodes: [],
-            syncError: null,
-          });
+          return json(
+            serializeProxyPayload({
+              settings: optimisticNext,
+              nodes: [],
+              checkState: proxyCheckCoordinator.getState(),
+              syncError: null,
+            }),
+          );
         }
-        const { settings: next, result: inventory } = await runExclusiveProxyOp(() =>
-          validateProxySettingsBeforePersist({
-            current,
-            input: body as Partial<ProxySettingsUpdate> | null,
-            sync: fetchProxyInventory,
-            persist: (validatedSettings) => db.setSettings(validatedSettings),
-          }),
-        );
-        db.upsertProxyInventory(inventory.nodeNames);
-        return json({ ok: true, settings: next, nodes: db.listProxyNodes(), syncError: null });
+        try {
+          const { settings: next, result: inventory } = await runExclusiveProxyOp(() =>
+            validateProxySettingsBeforePersist({
+              current,
+              input: body as Partial<ProxySettingsUpdate> | null,
+              sync: fetchProxyInventory,
+              persist: (validatedSettings) => db.setSettings(validatedSettings),
+            }),
+          );
+          latestProxySyncError = null;
+          db.upsertProxyInventory(inventory.nodeNames);
+          return json(
+            serializeProxyPayload({
+              settings: next,
+              nodes: db.listProxyNodes(),
+              checkState: proxyCheckCoordinator.getState(),
+              syncError: null,
+            }),
+          );
+        } catch (error) {
+          latestProxySyncError = error instanceof Error ? error.message : String(error);
+          throw error;
+        }
       }
 
       if (pathname === "/api/proxies/check" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
-        const settings = readSettings();
-        const { response, event } = await runExclusiveProxyOp(async () => {
-          const controller = await createProxyController(settings);
-          let response: Response | null = null;
-          let event: ServerEvent | null = null;
-          try {
-            let results: NodeCheckResult[] = [];
-            if (!body?.scope || body.scope === "all") {
-              results = await checkAllNodes(controller, {
-                checkUrl: settings.checkUrl,
-                timeoutMs: settings.timeoutMs,
-                maxLatencyMs: settings.maxLatencyMs,
-                ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
-              });
-            } else if (body?.scope === "node") {
-              const targetNode = String(body.nodeName || "").trim();
-              if (!targetNode) {
-                response = badRequest("nodeName is required when scope=node");
-              } else {
-                results = [
-                  await checkNode(controller, targetNode, {
-                    checkUrl: settings.checkUrl,
-                    timeoutMs: settings.timeoutMs,
-                    maxLatencyMs: settings.maxLatencyMs,
-                    ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
-                  }),
-                ];
-              }
-            } else {
-              response = badRequest(`unsupported proxy check scope: ${String(body.scope)}`);
-            }
-            if (!response) {
-              for (const result of results) {
-                db.recordProxyCheck({
-                  nodeName: String(result.name),
-                  status: result.ok ? "ok" : "fail",
-                  latencyMs: typeof result.latencyMs === "number" ? result.latencyMs : null,
-                  egressIp: result.geo?.ip || null,
-                  country: result.geo?.country || null,
-                  region: result.geo?.region || null,
-                  city: result.geo?.city || null,
-                  org: result.geo?.org || null,
-                  error: typeof result.error === "string" ? result.error : null,
-                });
-              }
-              const nodes = db.listProxyNodes();
-              const payload = { ok: true, results, nodes };
-              event = {
-                type: "proxy.check.completed",
-                payload,
-                timestamp: nowIso(),
-              };
-              response = json(payload);
-            }
-          } finally {
-            await controller.stop().catch(() => {});
-          }
-          return { response, event };
-        });
-        if (event) {
-          broadcast(event);
+        const scope = body?.scope === "node" ? "node" : body?.scope == null || body.scope === "all" ? "all" : null;
+        if (!scope) {
+          return badRequest(`unsupported proxy check scope: ${String(body?.scope)}`);
         }
-        return response || badRequest("proxy check failed");
+        const started = await proxyCheckCoordinator.startCheck({
+          scope: scope as ProxyCheckScope,
+          nodeName: body?.nodeName,
+        });
+        return json({
+          ok: true,
+          accepted: started.accepted,
+          checkState: started.checkState,
+        });
       }
 
         return await serveStatic(req);
@@ -2425,7 +2506,21 @@ async function main(): Promise<void> {
 
   console.log(`Tavreg Hikari web admin ready at http://${server.hostname}:${server.port}`);
 
-  void runExclusiveProxyOp(() => syncProxyInventory(db, defaults)).catch(() => {});
+  void runExclusiveProxyOp(() => syncProxyInventory(db, defaults))
+    .then((inventory) => {
+      latestProxySyncError = null;
+      broadcast({
+        type: "proxy.updated",
+        payload: {
+          nodes: inventory.nodes,
+          checkState: proxyCheckCoordinator.getState(),
+        },
+        timestamp: nowIso(),
+      });
+    })
+    .catch((error) => {
+      latestProxySyncError = error instanceof Error ? error.message : String(error);
+    });
 
   const shutdown = async () => {
     await Promise.all([tavilyScheduler.shutdown(), grokScheduler.shutdown(), chatgptScheduler.shutdown()]).catch(() => {});

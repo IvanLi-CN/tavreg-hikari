@@ -507,9 +507,28 @@ export type ProxyNode = {
   success24h: number;
 };
 
+export type ProxyCheckStatus = "idle" | "running" | "completed" | "failed";
+
+export type ProxyCheckState = {
+  runId: string | null;
+  status: ProxyCheckStatus;
+  scope: "all" | "node" | null;
+  concurrency: number;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  activeWorkers: number;
+  currentNodeNames: string[];
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
+};
+
 export type ProxyPayload = {
   settings: ProxySettings;
   nodes: ProxyNode[];
+  checkState: ProxyCheckState;
   syncError?: string | null;
 };
 
