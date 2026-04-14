@@ -15,6 +15,12 @@ import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { createGrokMailbox, rememberGrokBlockedMailbox } from "./grok-mail-service.js";
 import { pickAutoProxyNode } from "./proxy-node-allocation.js";
+import {
+  getMailboxProviderCooldownSnapshot,
+  isMailboxProviderCooldownErrorCode,
+  resolveMailboxProviderIdentity,
+  type MailboxProviderCooldownSnapshot,
+} from "./mailbox-provider-guard.js";
 
 interface ActiveAttempt {
   child: ChildProcessWithoutNullStreams;
@@ -45,8 +51,23 @@ interface StoredMailboxSession {
   address?: string | null;
 }
 
+export interface GrokStartCooldownState {
+  active: boolean;
+  until: string;
+  sourceAttemptId: number | null;
+  sourceJobId: number | null;
+  sourceErrorCode: string;
+  reason: string;
+}
+
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function parseIsoToMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -121,6 +142,25 @@ export class GrokJobScheduler {
     return null;
   }
 
+  getCooldownSnapshot(): GrokStartCooldownState | null {
+    const identity = resolveMailboxProviderIdentity({
+      provider: "cfmail",
+      baseUrl: process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test",
+      credential: process.env.CFMAIL_API_KEY || "",
+    });
+    if (!identity) return null;
+    const snapshot = getMailboxProviderCooldownSnapshot(identity);
+    if (!snapshot?.active) return null;
+    return {
+      active: true,
+      until: snapshot.until,
+      sourceAttemptId: null,
+      sourceJobId: null,
+      sourceErrorCode: snapshot.sourceErrorCode,
+      reason: snapshot.reason,
+    };
+  }
+
   async startJob(input: {
     runMode: "headed" | "headless";
     need: number;
@@ -130,6 +170,10 @@ export class GrokJobScheduler {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
       throw new Error("configure a Mihomo subscription before starting a Grok job");
+    }
+    const cooldown = this.getCooldownSnapshot();
+    if (cooldown?.active) {
+      throw new Error(`${cooldown.reason}; retry after ${cooldown.until}`);
     }
     const need = Math.max(1, Number.isFinite(input.need) ? Math.trunc(input.need) : 1);
     const parallel = Math.max(1, Number.isFinite(input.parallel) ? Math.trunc(input.parallel) : 1);
@@ -307,6 +351,14 @@ export class GrokJobScheduler {
         continue;
       }
 
+      const cooldown = this.getCooldownSnapshot();
+      if (cooldown?.active) {
+        const untilMs = parseIsoToMs(cooldown.until);
+        const waitMs = untilMs == null ? 1000 : Math.max(250, Math.min(5000, untilMs - Date.now()));
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+
       const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
       if (launchCapacity > 0) {
         for (let index = 0; index < launchCapacity; index += 1) {
@@ -324,10 +376,14 @@ export class GrokJobScheduler {
           try {
             await this.spawnAttempt(job, attempt, outputDir);
           } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
             this.failAttempt(job.id, attempt.id, {
-              errorCode: "launch_setup_failed",
-              errorMessage: error instanceof Error ? error.message : String(error),
+              errorCode: isMailboxProviderCooldownErrorCode(errorMessage) ? errorMessage : "launch_setup_failed",
+              errorMessage,
             });
+            if (isMailboxProviderCooldownErrorCode(errorMessage)) {
+              break;
+            }
           }
         }
         this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });

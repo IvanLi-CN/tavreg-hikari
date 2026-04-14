@@ -5,6 +5,11 @@ import path from "node:path";
 
 import { GrokJobScheduler } from "../src/server/grok-scheduler";
 import { AppDatabase, type AppSettings } from "../src/storage/app-db";
+import {
+  resetMailboxProviderGuardStateForTests,
+  resolveMailboxProviderIdentity,
+  setMailboxProviderCooldownForTests,
+} from "../src/server/mailbox-provider-guard";
 
 const tempDirs: string[] = [];
 
@@ -49,6 +54,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -121,6 +127,41 @@ test("grok scheduler state changes do not mutate other site jobs", async () => {
   scheduler.forceStopCurrentJob(true);
   expect(appDb.getCurrentJob("grok")?.status).toBe("force_stopping");
   expect(appDb.getCurrentJob("tavily")?.status).toBe("running");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok scheduler does not create a launch storm while mailbox cooldown is active", async () => {
+  const { appDb } = await createTempDb();
+  process.env.CFMAIL_BASE_URL = "https://api.cfm.example.test";
+  process.env.CFMAIL_API_KEY = "cf_key_test";
+  const identity = resolveMailboxProviderIdentity({
+    provider: "cfmail",
+    baseUrl: process.env.CFMAIL_BASE_URL,
+    credential: process.env.CFMAIL_API_KEY,
+  });
+  expect(identity).not.toBeNull();
+
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).spawnAttempt = async () => {
+    setMailboxProviderCooldownForTests(identity!, "mailbox_rate_limited", new Date(Date.now() + 800).toISOString());
+    throw new Error("mailbox_rate_limited");
+  };
+
+  const job = await scheduler.startJob({
+    runMode: "headless",
+    need: 5,
+    parallel: 5,
+    maxAttempts: 5,
+  });
+
+  await Bun.sleep(250);
+
+  const attempts = appDb.listAttempts(job.id, false);
+  expect(attempts).toHaveLength(1);
+  expect(attempts[0]?.errorCode).toBe("mailbox_rate_limited");
+  expect(scheduler.getCooldownSnapshot()?.sourceErrorCode).toBe("mailbox_rate_limited");
 
   await scheduler.shutdown();
   appDb.close();

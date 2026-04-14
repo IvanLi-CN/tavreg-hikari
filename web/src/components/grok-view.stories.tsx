@@ -106,3 +106,30 @@ export const Failed: Story = {
     job: buildJob("failed"),
   },
 };
+
+export const MailboxCooldown: Story = {
+  args: {
+    ...Idle.args,
+    job: {
+      site: "grok",
+      job: null,
+      activeAttempts: [],
+      recentAttempts: [],
+      eligibleCount: 0,
+      autoExtractState: null,
+      runModeAvailability: {
+        headed: true,
+        headless: true,
+        headedReason: null,
+      },
+      cooldown: {
+        active: true,
+        until: "2026-04-14T07:41:28.000Z",
+        sourceAttemptId: null,
+        sourceJobId: null,
+        sourceErrorCode: "mailbox_rate_limited",
+        reason: "recent mailbox provider rate limit detected",
+      },
+    },
+  },
+};

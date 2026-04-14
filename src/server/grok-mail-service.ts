@@ -8,6 +8,10 @@ import {
   type CfMailHttpJson,
 } from "../cfmail-api.js";
 import { extractEmailCodeFromPayload, loadConfig, type AppConfig, type MailboxSession } from "../main.js";
+import {
+  resolveMailboxProviderIdentity,
+  withMailboxProviderProvisioningGuard,
+} from "./mailbox-provider-guard.js";
 
 export type GrokMailProvider = "cfmail";
 export type GrokMailbox = MailboxSession & { provider: "cfmail" };
@@ -155,24 +159,32 @@ export async function createGrokMailbox(input?: {
   blockedDomains?: ReadonlySet<string> | string[];
 }): Promise<GrokMailbox> {
   const cfg = input?.cfg || loadConfig();
-  if (!cfg.cfmailApiKey) {
+  const apiKey = String(cfg.cfmailApiKey || "").trim();
+  if (!apiKey) {
     throw new Error("cfmail_api_key_missing");
   }
   const blockedDomains = normalizeBlockedDomains(cfg, input?.blockedDomains);
   const preferredRootDomains = await resolvePreferredRootDomains(cfg, input?.proxyUrl, blockedDomains);
   const maxAttempts = Math.max(4, preferredRootDomains.length * 2 || 0);
   let lastBlockedDomain: string | null = null;
+  const baseUrl = normalizeCfMailBaseUrl(cfg.cfmailBaseUrl);
+  const identity = resolveMailboxProviderIdentity({
+    provider: "cfmail",
+    baseUrl,
+    credential: apiKey,
+  });
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const preferredRootDomain = preferredRootDomains.length > 0 ? preferredRootDomains[attempt % preferredRootDomains.length] : undefined;
-    const mailbox = await provisionCfMailMailbox({
-      baseUrl: normalizeCfMailBaseUrl(cfg.cfmailBaseUrl),
-      apiKey: cfg.cfmailApiKey,
-      httpJson,
-      proxyUrl: input?.proxyUrl,
-      localPart: randomMailboxSegment("grok"),
-      subdomain: randomMailboxSegment("box"),
-      rootDomain: preferredRootDomain || undefined,
-    });
+    const mailbox = await withMailboxProviderProvisioningGuard(identity, async () =>
+      provisionCfMailMailbox({
+        baseUrl,
+        apiKey,
+        httpJson,
+        proxyUrl: input?.proxyUrl,
+        localPart: randomMailboxSegment("grok"),
+        subdomain: randomMailboxSegment("box"),
+        rootDomain: preferredRootDomain || undefined,
+      }));
     const domain = normalizeDomain(mailbox.address);
     if (!domain || !blockedDomains.has(domain)) {
       return buildMailboxSession(cfg, mailbox);

@@ -370,8 +370,8 @@ export type JobSnapshot = {
   cooldown?: null | {
     active: boolean;
     until: string;
-    sourceAttemptId: number;
-    sourceJobId: number;
+    sourceAttemptId: number | null;
+    sourceJobId: number | null;
     sourceErrorCode: string;
     reason: string;
   };

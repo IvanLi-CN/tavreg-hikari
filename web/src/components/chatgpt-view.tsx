@@ -38,6 +38,11 @@ function statusTone(status: string): "default" | "good" | "warn" | "bad" {
   return "default";
 }
 
+function describeCooldownReason(reason: string | null | undefined): string {
+  const normalized = String(reason || "").trim();
+  return normalized || "检测到共享邮箱 provider 冷却中。";
+}
+
 export function ChatGptView({
   jobDraft,
   job,
@@ -176,7 +181,7 @@ export function ChatGptView({
             </div>
             {cooldown ? (
               <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
-                检测到最近一次授权链触发了 challenge。请等到 {formatDate(cooldown.until)} 之后再重新开始。
+                {describeCooldownReason(cooldown.reason)} 请等到 {formatDate(cooldown.until)} 之后再重新开始。
               </div>
             ) : null}
             {job.job?.lastError ? (

@@ -5,6 +5,11 @@ import path from "node:path";
 
 import { ChatGptJobScheduler } from "../src/server/chatgpt-scheduler";
 import { AppDatabase, type AppSettings } from "../src/storage/app-db";
+import {
+  resetMailboxProviderGuardStateForTests,
+  resolveMailboxProviderIdentity,
+  setMailboxProviderCooldownForTests,
+} from "../src/server/mailbox-provider-guard";
 
 const tempDirs: string[] = [];
 
@@ -59,6 +64,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -205,6 +211,37 @@ test("chatgpt scheduler surfaces first-attempt draft provisioning failures durin
 
   const current = appDb.getCurrentJob("chatgpt");
   expect(current).toBeNull();
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler blocks fresh starts during mailbox provider cooldown", async () => {
+  const { appDb } = await createTempDb();
+  process.env.CFMAIL_BASE_URL = "https://api.cfm.example.test";
+  process.env.CFMAIL_API_KEY = "cf_key_test";
+  const identity = resolveMailboxProviderIdentity({
+    provider: "cfmail",
+    baseUrl: process.env.CFMAIL_BASE_URL,
+    credential: process.env.CFMAIL_API_KEY,
+  });
+  expect(identity).not.toBeNull();
+  setMailboxProviderCooldownForTests(identity!, "mailbox_rate_limited", new Date(Date.now() + 60_000).toISOString());
+
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+
+  await expect(
+    scheduler.startJob({
+      runMode: "headless",
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+    }),
+  ).rejects.toThrow(/retry after/i);
+
+  expect(scheduler.getCooldownSnapshot()?.sourceErrorCode).toBe("mailbox_rate_limited");
 
   await scheduler.shutdown();
   appDb.close();
