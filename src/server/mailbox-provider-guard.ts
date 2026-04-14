@@ -29,6 +29,7 @@ export interface MailboxProviderCooldownSnapshot {
 interface GuardState {
   cooldownUntilMs: number;
   cooldownCode: MailboxProviderCooldownCode | null;
+  nextProvisionAllowedAtMs: number;
   pending: Promise<void> | null;
 }
 
@@ -39,8 +40,25 @@ const MAILBOX_PROVIDER_COOLDOWN_MS: Record<MailboxProviderCooldownCode, number> 
   mailbox_provider_unavailable: 60_000,
 };
 
+const DEFAULT_MAILBOX_PROVIDER_MIN_INTERVAL_MS = process.env.NODE_ENV === "production" ? 5_000 : 0;
+
 function nowMs(): number {
   return Date.now();
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveMailboxProviderMinIntervalMs(): number {
+  const raw = Number.parseInt(String(process.env.MAILBOX_PROVIDER_MIN_INTERVAL_MS || "").trim(), 10);
+  if (Number.isFinite(raw) && raw >= 0) {
+    return raw;
+  }
+  return DEFAULT_MAILBOX_PROVIDER_MIN_INTERVAL_MS;
 }
 
 function getGuardState(key: string): GuardState {
@@ -49,6 +67,7 @@ function getGuardState(key: string): GuardState {
   const next: GuardState = {
     cooldownUntilMs: 0,
     cooldownCode: null,
+    nextProvisionAllowedAtMs: 0,
     pending: null,
   };
   mailboxProviderStates.set(key, next);
@@ -181,6 +200,14 @@ export async function withMailboxProviderProvisioningGuard<T>(
     }
     throw new Error(cooldown.sourceErrorCode);
   }
+
+  const minIntervalMs = resolveMailboxProviderMinIntervalMs();
+  const currentMs = nowMs();
+  const waitMs = Math.max(0, state.nextProvisionAllowedAtMs - currentMs);
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  state.nextProvisionAllowedAtMs = nowMs() + minIntervalMs;
 
   try {
     return await operation();
