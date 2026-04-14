@@ -48,6 +48,41 @@ describe("mailbox provider guard", () => {
     expect(timeline).toEqual(["first:start", "first:end", "second:start", "second:end"]);
   });
 
+  test("paces provisioning calls for the same provider identity", async () => {
+    const previousInterval = process.env.MAILBOX_PROVIDER_MIN_INTERVAL_MS;
+    process.env.MAILBOX_PROVIDER_MIN_INTERVAL_MS = "40";
+    try {
+      const identity = resolveMailboxProviderIdentity({
+        provider: "cfmail",
+        baseUrl: "https://api.cfm.example.test",
+        credential: "cf_key_test",
+      });
+      expect(identity).not.toBeNull();
+
+      const starts: number[] = [];
+      const first = withMailboxProviderProvisioningGuard(identity, async () => {
+        starts.push(Date.now());
+        await Bun.sleep(10);
+        return "first";
+      });
+      const second = withMailboxProviderProvisioningGuard(identity, async () => {
+        starts.push(Date.now());
+        return "second";
+      });
+
+      await expect(Promise.all([first, second])).resolves.toEqual(["first", "second"]);
+      expect(starts).toHaveLength(2);
+      const [firstStart, secondStart] = starts as [number, number];
+      expect(secondStart - firstStart).toBeGreaterThanOrEqual(35);
+    } finally {
+      if (previousInterval == null) {
+        delete process.env.MAILBOX_PROVIDER_MIN_INTERVAL_MS;
+      } else {
+        process.env.MAILBOX_PROVIDER_MIN_INTERVAL_MS = previousInterval;
+      }
+    }
+  });
+
   test("shared cooldown state is visible across all users of the same provider identity", async () => {
     const identity = resolveMailboxProviderIdentity({
       provider: "cfmail",
