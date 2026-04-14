@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 进行中
+- Status: 已完成
 - Created: 2026-04-14
 - Last: 2026-04-14
 
@@ -99,7 +99,7 @@
 
 - [x] M1: 补充 shared mailbox provider 启动节流实现
 - [x] M2: 覆盖节流回归测试并通过 targeted validation
-- [ ] M3: 完成 PR 收口
+- [x] M3: 完成 PR 收口
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
@@ -115,3 +115,4 @@
 
 - 2026-04-14: 创建 spec，冻结共享 mailbox provider 启动节流范围。
 - 2026-04-14: shared guard 增加 production 默认最小启动间隔，并补齐节流回归测试与 targeted validation。
+- 2026-04-14: PR 收口完成，targeted validation / review proof / CI checks 均通过。

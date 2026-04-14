@@ -6,7 +6,7 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
-| s76pf | 共享 mailbox provider 启动节流 | 进行中 | `s76pf-mailbox-provider-start-pacing/SPEC.md` | 2026-04-14 | 共享 guard 增加最小启动间隔，压平 ChatGPT / Grok 的 mailbox provisioning 启动波峰 |
+| s76pf | 共享 mailbox provider 启动节流 | 已完成 | `s76pf-mailbox-provider-start-pacing/SPEC.md` | 2026-04-14 | PR #41；共享 guard 增加最小启动间隔，压平 ChatGPT / Grok 的 mailbox provisioning 启动波峰 |
 | vyg62 | Release 失败 Telegram 告警接入 | 进行中 | `vyg62-release-failure-telegram-alerts/SPEC.md` | 2026-04-11 | release notifier wrapper、SHA 标记、Telegram smoke test |
 | k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 进行中 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-08 | 显式 `CHROME_EXECUTABLE_PATH`、跨平台安装脚本、Docker 内置指纹浏览器、CI/Release/branch rules |
 | r6h9s | 主流程停止控制重构 | 进行中 | `r6h9s-job-stop-controls/SPEC.md` | 2026-03-28 | stop / force-stop、统一主按钮、Storybook 视觉证据 |
