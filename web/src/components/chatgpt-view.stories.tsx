@@ -157,6 +157,29 @@ export const BatchReadyHeadlessOnly: Story = {
   },
 };
 
+export const MailboxCooldown: Story = {
+  args: {
+    ...BatchReady.args,
+    job: {
+      site: "chatgpt",
+      job: null,
+      activeAttempts: [],
+      recentAttempts: [],
+      eligibleCount: 0,
+      autoExtractState: null,
+      runModeAvailability: sampleJob.runModeAvailability,
+      cooldown: {
+        active: true,
+        until: "2026-04-14T07:41:28.000Z",
+        sourceAttemptId: null,
+        sourceJobId: null,
+        sourceErrorCode: "mailbox_rate_limited",
+        reason: "recent mailbox provider rate limit detected",
+      },
+    },
+  },
+};
+
 export const InteractiveBatchControls: Story = {
   args: {
     ...BatchRunning.args,

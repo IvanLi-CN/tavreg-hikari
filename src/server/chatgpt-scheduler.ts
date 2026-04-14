@@ -17,6 +17,12 @@ import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { pickAutoProxyNode } from "./proxy-node-allocation.js";
+import {
+  formatMailboxProviderCooldownReason,
+  getMailboxProviderCooldownSnapshot,
+  resolveMailboxProviderIdentity,
+  type MailboxProviderCooldownSnapshot,
+} from "./mailbox-provider-guard.js";
 
 interface ActiveAttempt {
   child: ChildProcessWithoutNullStreams;
@@ -55,8 +61,8 @@ interface ChatGptWorkerResult {
 export interface ChatGptStartCooldownState {
   active: boolean;
   until: string;
-  sourceAttemptId: number;
-  sourceJobId: number;
+  sourceAttemptId: number | null;
+  sourceJobId: number | null;
   sourceErrorCode: string;
   reason: string;
 }
@@ -152,6 +158,12 @@ function formatChatGptCooldownReason(errorCode: string): string {
     default:
       return "recent auth risk detected";
   }
+}
+
+function parseIsoToMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function attemptOutputShowsAuthChallenge(attempt: Pick<JobAttemptRecord, "outputDir">): boolean {
@@ -252,31 +264,56 @@ export class ChatGptJobScheduler {
   }
 
   getCooldownSnapshot(): ChatGptStartCooldownState | null {
+    const mailboxCooldown = this.getMailboxProviderCooldownSnapshot();
     const job = this.db.getCurrentJob(this.site);
-    if (!job) return null;
-    const attempt = this.db.listAttempts(job.id, false).find((item) => {
-      const errorCode = String(item.errorCode || "").trim().toLowerCase();
-      return CHATGPT_START_COOLDOWN_ERROR_CODES.has(errorCode) || attemptOutputShowsAuthChallenge(item);
+    let authCooldown: ChatGptStartCooldownState | null = null;
+    if (job) {
+      const attempt = this.db.listAttempts(job.id, false).find((item) => {
+        const errorCode = String(item.errorCode || "").trim().toLowerCase();
+        return CHATGPT_START_COOLDOWN_ERROR_CODES.has(errorCode) || attemptOutputShowsAuthChallenge(item);
+      });
+      if (attempt?.completedAt) {
+        const completedAtMs = Date.parse(attempt.completedAt);
+        if (Number.isFinite(completedAtMs)) {
+          const untilMs = completedAtMs + CHATGPT_START_COOLDOWN_MS;
+          if (untilMs > Date.now()) {
+            const sourceErrorCode = String(attempt.errorCode || "").trim().toLowerCase() || "chatgpt_auth_challenge_detected";
+            authCooldown = {
+              active: true,
+              until: new Date(untilMs).toISOString(),
+              sourceAttemptId: attempt.id,
+              sourceJobId: job.id,
+              sourceErrorCode,
+              reason: formatChatGptCooldownReason(sourceErrorCode),
+            };
+          }
+        }
+      }
+    }
+    const authUntilMs = parseIsoToMs(authCooldown?.until);
+    const mailboxUntilMs = parseIsoToMs(mailboxCooldown?.until);
+    if (authUntilMs != null && mailboxUntilMs != null) {
+      return mailboxUntilMs > authUntilMs ? mailboxCooldown : authCooldown;
+    }
+    return authCooldown || mailboxCooldown;
+  }
+
+  private getMailboxProviderCooldownSnapshot(): MailboxProviderCooldownSnapshot | null {
+    const identity = resolveMailboxProviderIdentity({
+      provider: "cfmail",
+      baseUrl: process.env.CFMAIL_BASE_URL || "https://api.cfm.example.test",
+      credential: process.env.CFMAIL_API_KEY || "",
     });
-    if (!attempt?.completedAt) {
-      return null;
-    }
-    const completedAtMs = Date.parse(attempt.completedAt);
-    if (!Number.isFinite(completedAtMs)) {
-      return null;
-    }
-    const untilMs = completedAtMs + CHATGPT_START_COOLDOWN_MS;
-    if (untilMs <= Date.now()) {
-      return null;
-    }
-    const sourceErrorCode = String(attempt.errorCode || "").trim().toLowerCase() || "chatgpt_auth_challenge_detected";
+    if (!identity) return null;
+    const snapshot = getMailboxProviderCooldownSnapshot(identity);
+    if (!snapshot?.active) return null;
     return {
       active: true,
-      until: new Date(untilMs).toISOString(),
-      sourceAttemptId: attempt.id,
-      sourceJobId: job.id,
-      sourceErrorCode,
-      reason: formatChatGptCooldownReason(sourceErrorCode),
+      until: snapshot.until,
+      sourceAttemptId: null,
+      sourceJobId: null,
+      sourceErrorCode: snapshot.sourceErrorCode,
+      reason: snapshot.reason || formatMailboxProviderCooldownReason(snapshot.sourceErrorCode),
     };
   }
 
@@ -461,6 +498,14 @@ export class ChatGptJobScheduler {
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
+
+      const cooldown = this.getCooldownSnapshot();
+      if (cooldown?.active) {
+        const untilMs = parseIsoToMs(cooldown.until);
+        const waitMs = untilMs == null ? 1000 : Math.max(250, Math.min(5000, untilMs - Date.now()));
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
       }
 

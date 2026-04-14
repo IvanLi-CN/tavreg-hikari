@@ -35,6 +35,11 @@ function summarizeAttempt(attempt: JobSnapshot["activeAttempts"][number] | JobSn
   return [attempt.stage, attempt.proxyNode, attempt.proxyIp, attempt.errorCode].filter(Boolean).join(" · ") || "等待浏览器输出";
 }
 
+function describeCooldownReason(reason: string | null | undefined): string {
+  const normalized = String(reason || "").trim();
+  return normalized || "检测到共享邮箱 provider 冷却中。";
+}
+
 export function GrokView({
   job,
   jobDraft,
@@ -74,9 +79,10 @@ export function GrokView({
   };
 
   const currentStatus = job.job?.status ?? null;
+  const cooldown = job.cooldown?.active ? job.cooldown : null;
   const primaryAction = resolvePrimaryJobAction(currentStatus);
   const primaryLabel = resolvePrimaryJobLabel(currentStatus);
-  const primaryDisabled = primaryJobActionDisabled(currentStatus);
+  const primaryDisabled = primaryJobActionDisabled(currentStatus) || (primaryAction === "start" && Boolean(cooldown));
   const stopHint = resolveStopHint(currentStatus);
 
   return (
@@ -157,6 +163,11 @@ export function GrokView({
             {stopHint ? (
               <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
                 {stopHint}
+              </div>
+            ) : null}
+            {cooldown ? (
+              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
+                {describeCooldownReason(cooldown.reason)} 请等到 {formatDate(cooldown.until)} 之后再重新开始。
               </div>
             ) : null}
             {job.job?.lastError ? (

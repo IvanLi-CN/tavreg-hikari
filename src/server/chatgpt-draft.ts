@@ -11,6 +11,10 @@ import {
   shouldFallbackCfMailProviderManagedMailbox,
   shouldRetryCfMailFallbackWithSubdomain,
 } from "../mailbox-address.js";
+import {
+  resolveMailboxProviderIdentity,
+  withMailboxProviderProvisioningGuard,
+} from "./mailbox-provider-guard.js";
 
 export interface ChatGptDraftRecord {
   email: string;
@@ -95,13 +99,19 @@ export async function buildChatGptDraft(options: BuildChatGptDraftOptions): Prom
     throw new Error("cfmail_api_key_missing");
   }
   const baseUrl = normalizeCfMailBaseUrl(options.baseUrl);
-  const mailbox = await provisionChatGptMailbox({
-    apiKey,
+  const identity = resolveMailboxProviderIdentity({
+    provider: "cfmail",
     baseUrl,
-    httpJson: options.httpJson,
-    proxyUrl: options.proxyUrl,
-    rootDomain: options.rootDomain?.trim() || undefined,
+    credential: apiKey,
   });
+  const mailbox = await withMailboxProviderProvisioningGuard(identity, async () =>
+    provisionChatGptMailbox({
+      apiKey,
+      baseUrl,
+      httpJson: options.httpJson,
+      proxyUrl: options.proxyUrl,
+      rootDomain: options.rootDomain?.trim() || undefined,
+    }));
   return {
     email: mailbox.address,
     password: options.createPassword(),
