@@ -1,7 +1,51 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { chmod, mkdtemp, mkdir, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import type { AppConfig } from "../src/main.js";
-import { buildChatGptWorkerResult, launchChatGptWorkerBrowser } from "../src/server/chatgpt-worker.js";
+import {
+  assertTrustedChatGptWorkerChromiumExecutable,
+  buildChatGptWorkerResult,
+  launchChatGptWorkerBrowser,
+} from "../src/server/chatgpt-worker.js";
+
+function sha256Text(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function writeExecutable(executablePath: string, content = "#!/bin/sh\nexit 0\n") {
+  await mkdir(path.dirname(executablePath), { recursive: true });
+  await writeFile(executablePath, content, "utf8");
+  await chmod(executablePath, 0o755);
+  return sha256Text(content);
+}
+
+async function writeLinuxInstallMarker(
+  markerRoot: string,
+  binaryRelativePath: string,
+  binarySha256: string,
+  version = "144.0.7559.132",
+) {
+  await mkdir(markerRoot, { recursive: true });
+  await writeFile(
+    path.join(markerRoot, ".fingerprint-browser-install.json"),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        installer: "install-fingerprint-browser.sh",
+        platform: "linux",
+        version,
+        binaryRelativePath,
+        binarySha256,
+      },
+      null,
+      2,
+    ) + "\n",
+    "utf8",
+  );
+}
 
 function createWorkerConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -186,4 +230,24 @@ test("chatgpt worker result payload keeps configured run mode", () => {
     },
     notes: ["mailbox=mbx_demo", "proxy=default"],
   });
+});
+
+test("chatgpt worker accepts official linux fingerprint browser installs", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "chatgpt-worker-linux-browser-"));
+  const installRoot = path.join(root, "opt", "fingerprint-browser");
+  const versionDir = path.join(installRoot, "144.0.7559.132");
+  const binarySha256 = await writeExecutable(path.join(versionDir, "chrome"));
+  await symlink("144.0.7559.132/chrome", path.join(installRoot, "chrome"));
+  await writeLinuxInstallMarker(installRoot, "chrome", binarySha256);
+  await writeLinuxInstallMarker(versionDir, "chrome", binarySha256);
+
+  expect(assertTrustedChatGptWorkerChromiumExecutable(path.join(installRoot, "chrome"))).toBe(
+    path.join(installRoot, "chrome"),
+  );
+});
+
+test("chatgpt worker keeps browser gate prefix for untrusted browser paths", () => {
+  expect(() => assertTrustedChatGptWorkerChromiumExecutable("/tmp/fingerprint-chrome")).toThrow(
+    "chatgpt_browser_not_project_provided:",
+  );
 });
