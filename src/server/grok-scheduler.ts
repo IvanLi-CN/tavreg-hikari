@@ -11,9 +11,10 @@ import {
   type JobSite,
   type ProxyNodeRecord,
 } from "../storage/app-db.js";
-import { buildAttemptSpawnOptions, resolveAttemptProxyNode, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
+import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { createGrokMailbox, rememberGrokBlockedMailbox } from "./grok-mail-service.js";
+import { pickAutoProxyNode } from "./proxy-node-allocation.js";
 
 interface ActiveAttempt {
   child: ChildProcessWithoutNullStreams;
@@ -370,17 +371,20 @@ export class GrokJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const selectedProxyNode = resolveAttemptProxyNode(this.db);
+    const selectedProxy = pickAutoProxyNode({
+      nodes: this.db.listProxyNodes(),
+      activeAttempts: this.activeAttemptRows(),
+    });
     this.db.updateAttempt(attempt.id, {
       accountEmail: mailbox.address.toLowerCase(),
     });
-    const proxyRecord = resolveProxyRecord(this.db, selectedProxyNode);
-    if (selectedProxyNode) {
+    const proxyRecord = resolveProxyRecord(this.db, selectedProxy?.nodeName);
+    if (selectedProxy?.nodeName) {
       this.db.updateAttempt(attempt.id, {
-        proxyNode: selectedProxyNode,
+        proxyNode: selectedProxy.nodeName,
         proxyIp: proxyRecord?.lastEgressIp ?? null,
       });
-      this.db.touchProxyLease(selectedProxyNode, {
+      this.db.touchProxyLease(selectedProxy.nodeName, {
         leasedAt: nowIso(),
         egressIp: proxyRecord?.lastEgressIp ?? null,
       });
@@ -389,8 +393,8 @@ export class GrokJobScheduler {
       runtime.command === "bun"
         ? ["run", "src/server/grok-worker.ts"]
         : ["--import", "tsx", "src/server/grok-worker.ts"];
-    if (selectedProxyNode?.trim()) {
-      args.push("--proxy-node", selectedProxyNode.trim());
+    if (selectedProxy?.nodeName.trim()) {
+      args.push("--proxy-node", selectedProxy.nodeName.trim());
     }
     const child = spawn(runtime.command, args, {
       ...buildAttemptSpawnOptions(this.repoRoot, {

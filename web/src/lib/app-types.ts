@@ -495,7 +495,6 @@ export function pickProxySettingsUpdate(settings: ProxySettings): ProxySettingsU
 export type ProxyNode = {
   id: number;
   nodeName: string;
-  isSelected: boolean;
   lastStatus: string | null;
   lastLatencyMs: number | null;
   lastEgressIp: string | null;
@@ -504,14 +503,12 @@ export type ProxyNode = {
   lastCity: string | null;
   lastOrg: string | null;
   lastCheckedAt: string | null;
-  lastSelectedAt: string | null;
   lastLeasedAt: string | null;
   success24h: number;
 };
 
 export type ProxyPayload = {
   settings: ProxySettings;
-  selectedName: string | null;
   nodes: ProxyNode[];
   syncError?: string | null;
 };
@@ -697,4 +694,4 @@ export type GrokApiKeyQuery = {
   pageSize: number;
 };
 
-export type ProxyCheckScope = "current" | "all";
+export type ProxyCheckScope = "all";

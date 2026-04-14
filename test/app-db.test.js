@@ -17,10 +17,10 @@ import {
   buildAttemptSpawnOptions,
   pickWorkerRuntime,
   resolvePendingBrowserSessionWait,
-  resolveAttemptProxyNode,
   resolveReusableAttemptProxyNode,
   resolveWorkerRuntime,
 } from "../src/server/scheduler.ts";
+import { pickAutoProxyNode } from "../src/server/proxy-node-allocation.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
@@ -1223,20 +1223,6 @@ describe("AppDatabase account import", () => {
     });
 
     reopened.close();
-  });
-
-  test("clears stale pinned proxy names when inventory drops them", async () => {
-    const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["JP1", "US1"], "JP1");
-    appDb.setPinnedProxyName("JP1");
-
-    expect(appDb.getPinnedProxyName()).toBe("JP1");
-
-    appDb.upsertProxyInventory(["US1"], "US1");
-
-    expect(appDb.getPinnedProxyName()).toBeNull();
-
-    appDb.close();
   });
 
   test("stores extractor source fields and local extract history", async () => {
@@ -2626,12 +2612,11 @@ describe("scheduler helpers", () => {
 describe("proxy aggregation", () => {
   test("lists proxy nodes on a fresh database without signup_tasks", async () => {
     const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["node-a"], "node-a");
+    appDb.upsertProxyInventory(["node-a"]);
 
     expect(appDb.listProxyNodes()).toEqual([
       expect.objectContaining({
         nodeName: "node-a",
-        isSelected: true,
         success24h: 0,
       }),
     ]);
@@ -2643,7 +2628,7 @@ describe("proxy aggregation", () => {
     const { dbPath, appDb } = await createTempDb();
     appDb.importAccounts([{ email: "proxy@example.test", password: "proxy-pass" }]);
     const accountId = appDb.listAccounts({ page: 1, pageSize: 10 }).rows[0].id;
-    appDb.upsertProxyInventory(["node-a"], "node-a");
+    appDb.upsertProxyInventory(["node-a"]);
     const ledger = await TaskLedger.open({
       enabled: true,
       dbPath,
@@ -2686,13 +2671,12 @@ describe("proxy aggregation", () => {
 
   test("drops stale proxy nodes when subscription inventory changes", async () => {
     const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["node-a", "node-b"], "node-a");
-    appDb.upsertProxyInventory(["node-b"], "node-b");
+    appDb.upsertProxyInventory(["node-a", "node-b"]);
+    appDb.upsertProxyInventory(["node-b"]);
 
     expect(appDb.listProxyNodes()).toEqual([
       expect.objectContaining({
         nodeName: "node-b",
-        isSelected: true,
       }),
     ]);
 
@@ -2701,11 +2685,10 @@ describe("proxy aggregation", () => {
 
   test("clears cached proxy nodes when inventory is disabled", async () => {
     const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["node-a", "node-b"], "node-a");
-    appDb.upsertProxyInventory([], null);
+    appDb.upsertProxyInventory(["node-a", "node-b"]);
+    appDb.upsertProxyInventory([]);
 
     expect(appDb.listProxyNodes()).toEqual([]);
-    expect(appDb.getSelectedProxyName()).toBeNull();
 
     appDb.close();
   });
@@ -2714,7 +2697,7 @@ describe("proxy aggregation", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-reuse@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02", "Seoul-01"], "Tokyo-01");
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02", "Seoul-01"]);
     appDb.touchProxyLease("Seoul-01", {
       status: "ok",
       egressIp: "2.2.2.2",
@@ -2762,7 +2745,7 @@ describe("proxy aggregation", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-unverified@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-01");
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"]);
     markBrowserSessionReady(appDb, accountId, {
       proxyIp: "3.3.3.3",
       proxyRegion: "Tokyo",
@@ -2786,7 +2769,7 @@ describe("proxy aggregation", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-region@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
-    appDb.upsertProxyInventory(["Osaka-01"], "Osaka-01");
+    appDb.upsertProxyInventory(["Osaka-01"]);
     markBrowserSessionReady(appDb, accountId, {
       proxyNode: "Tokyo-01",
       proxyIp: "3.3.3.3",
@@ -2823,7 +2806,7 @@ describe("proxy aggregation", () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-health@example.test", password: "proxy-pass" }]);
     const accountId = imported.affectedIds[0];
-    appDb.upsertProxyInventory(["Tokyo-01"], "Tokyo-01");
+    appDb.upsertProxyInventory(["Tokyo-01"]);
     appDb.touchProxyLease("Tokyo-01", {
       status: "ok",
       egressIp: "1.1.1.1",
@@ -2847,7 +2830,12 @@ describe("proxy aggregation", () => {
     });
 
     expect(appDb.getProxyNode("Tokyo-01")?.lastStatus).toBe("ok");
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
+    expect(
+      pickAutoProxyNode({
+        nodes: appDb.listProxyNodes(),
+        activeAttempts: [],
+      })?.nodeName,
+    ).toBe("Tokyo-01");
 
     appDb.close();
   });
@@ -3295,47 +3283,6 @@ describe("scheduler runtime spec", () => {
     expect(runtime.env.INSPECT_CHROME_PROFILE_DIR).toBe("/tmp/tavreg/job-9/attempt-22/chrome-inspect-profile");
   });
 
-  test("only forwards pinned proxy nodes that still exist in inventory", async () => {
-    const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
-
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
-
-    appDb.setPinnedProxyName("Tokyo-01");
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-01");
-
-    appDb.upsertProxyInventory(["Tokyo-02"], "Tokyo-02");
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
-
-    appDb.close();
-  });
-
-  test("falls back to the selected proxy node when no pinned override exists", async () => {
-    const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
-
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
-
-    appDb.close();
-  });
-
-  test("stops forcing a selected proxy node after it is marked failed", async () => {
-    const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
-
-    expect(resolveAttemptProxyNode(appDb)).toBe("Tokyo-02");
-
-    appDb.recordProxyCheck({
-      nodeName: "Tokyo-02",
-      status: "failed",
-      error: "net::ERR_CONNECTION_CLOSED",
-    });
-
-    expect(resolveAttemptProxyNode(appDb)).toBeNull();
-
-    appDb.close();
-  });
-
   test("launch proxy reuse only follows account-level reusable selection", () => {
     expect(
       resolveReusableAttemptProxyNode(
@@ -3355,16 +3302,106 @@ describe("scheduler runtime spec", () => {
     ).toBe("Tokyo-01");
   });
 
-  test("does not force a selected proxy node while it is still in a non-healthy running state", async () => {
+  test("auto proxy allocation spreads across distinct healthy nodes before reuse", () => {
+    const nodes = Array.from({ length: 10 }, (_, index) => ({
+      id: index + 1,
+      nodeName: `Tokyo-${String(index + 1).padStart(2, "0")}`,
+      lastStatus: "ok",
+      lastLatencyMs: 100 + index,
+      lastEgressIp: `10.0.0.${index + 1}`,
+      lastCountry: "JP",
+      lastRegion: "Tokyo",
+      lastCity: "Tokyo",
+      lastOrg: null,
+      lastCheckedAt: "2026-04-14T00:00:00.000Z",
+      lastLeasedAt: `2026-04-0${(index % 9) + 1}T00:00:00.000Z`,
+      success24h: 0,
+    }));
+
+    const allocated = [];
+    const activeAttempts = [];
+    for (let index = 0; index < 10; index += 1) {
+      const next = pickAutoProxyNode({ nodes, activeAttempts });
+      expect(next).toBeTruthy();
+      allocated.push(next.nodeName);
+      activeAttempts.push({ proxyNode: next.nodeName, proxyIp: next.lastEgressIp });
+    }
+
+    expect(new Set(allocated).size).toBe(10);
+  });
+
+  test("auto proxy allocation avoids duplicate egress ip until capacity is exhausted", () => {
+    const nodes = [
+      { id: 1, nodeName: "Tokyo-01", lastStatus: "ok", lastLatencyMs: 100, lastEgressIp: "1.1.1.1", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-01T00:00:00.000Z", success24h: 0 },
+      { id: 2, nodeName: "Tokyo-02", lastStatus: "ok", lastLatencyMs: 110, lastEgressIp: "1.1.1.1", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-02T00:00:00.000Z", success24h: 0 },
+      { id: 3, nodeName: "Osaka-01", lastStatus: "ok", lastLatencyMs: 120, lastEgressIp: "2.2.2.2", lastCountry: "JP", lastRegion: "Osaka", lastCity: "Osaka", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-03T00:00:00.000Z", success24h: 0 },
+    ];
+
+    const first = pickAutoProxyNode({ nodes, activeAttempts: [] });
+    expect(first?.nodeName).toBe("Tokyo-01");
+    const second = pickAutoProxyNode({
+      nodes,
+      activeAttempts: [{ proxyNode: first?.nodeName || null, proxyIp: first?.lastEgressIp || null }],
+    });
+
+    expect(second?.nodeName).toBe("Osaka-01");
+  });
+
+  test("auto proxy allocation skips failed nodes and falls back to untested nodes", () => {
+    const nodes = [
+      { id: 1, nodeName: "Tokyo-01", lastStatus: "failed", lastLatencyMs: 100, lastEgressIp: "1.1.1.1", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-01T00:00:00.000Z", success24h: 0 },
+      { id: 2, nodeName: "Seoul-01", lastStatus: "", lastLatencyMs: null, lastEgressIp: null, lastCountry: null, lastRegion: null, lastCity: null, lastOrg: null, lastCheckedAt: null, lastLeasedAt: null, success24h: 0 },
+    ];
+
+    expect(pickAutoProxyNode({ nodes, activeAttempts: [] })?.nodeName).toBe("Seoul-01");
+  });
+
+  test("chatgpt-style policy keeps hong kong nodes excluded", () => {
+    const nodes = [
+      { id: 1, nodeName: "香港-hy2", lastStatus: "ok", lastLatencyMs: 100, lastEgressIp: "1.1.1.1", lastCountry: "HK", lastRegion: "Hong Kong", lastCity: "Hong Kong", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-01T00:00:00.000Z", success24h: 0 },
+      { id: 2, nodeName: "Tokyo-01", lastStatus: "ok", lastLatencyMs: 110, lastEgressIp: "2.2.2.2", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-02T00:00:00.000Z", success24h: 0 },
+    ];
+
+    expect(
+      pickAutoProxyNode({
+        nodes,
+        activeAttempts: [],
+        policy: {
+          allowNode: (node) => !/香港|hong\s*kong|\bhk\b/i.test(node.nodeName),
+        },
+      })?.nodeName,
+    ).toBe("Tokyo-01");
+  });
+
+  test("auto proxy allocation reuses least recently leased node when capacity is exhausted", () => {
+    const nodes = [
+      { id: 1, nodeName: "Tokyo-01", lastStatus: "ok", lastLatencyMs: 100, lastEgressIp: "1.1.1.1", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-01T00:00:00.000Z", success24h: 0 },
+      { id: 2, nodeName: "Tokyo-02", lastStatus: "ok", lastLatencyMs: 110, lastEgressIp: "2.2.2.2", lastCountry: "JP", lastRegion: "Tokyo", lastCity: "Tokyo", lastOrg: null, lastCheckedAt: null, lastLeasedAt: "2026-04-02T00:00:00.000Z", success24h: 0 },
+    ];
+
+    const activeAttempts = [
+      { proxyNode: "Tokyo-01", proxyIp: "1.1.1.1" },
+      { proxyNode: "Tokyo-02", proxyIp: "2.2.2.2" },
+    ];
+
+    expect(pickAutoProxyNode({ nodes, activeAttempts })?.nodeName).toBe("Tokyo-01");
+  });
+
+  test("auto proxy allocation can skip running node when another idle healthy node exists", async () => {
     const { appDb } = await createTempDb();
-    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"], "Tokyo-02");
+    appDb.upsertProxyInventory(["Tokyo-01", "Tokyo-02"]);
 
     appDb.recordProxyCheck({
       nodeName: "Tokyo-02",
       status: "running",
     });
 
-    expect(resolveAttemptProxyNode(appDb)).toBeNull();
+    expect(
+      pickAutoProxyNode({
+        nodes: appDb.listProxyNodes(),
+        activeAttempts: [{ proxyNode: "Tokyo-02", proxyIp: null }],
+      })?.nodeName,
+    ).toBe("Tokyo-01");
 
     appDb.close();
   });

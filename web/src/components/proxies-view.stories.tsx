@@ -12,7 +12,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "代理页，包含订阅设置、当前状态和节点列表。",
+        component: "代理页，包含订阅设置、库存摘要与节点诊断列表；业务任务默认自动轮换代理节点。",
       },
     },
   },
@@ -24,28 +24,24 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {
   args: {
     proxies: sampleProxies,
-    selectedProxy: sampleProxies.nodes[0] || null,
-    proxyCheckScope: "current",
+    proxyCheckScope: "all",
     onProxyCheckScopeChange: fn(),
     onProxySettingsChange: fn(),
     onSaveProxySettings: fn(),
     onCheckScope: fn(),
-    onSelectNode: fn(),
     onCheckNode: fn(),
   },
   render: () => {
     const [payload, setPayload] = useState<ProxyPayload>(sampleProxies);
-    const [scope, setScope] = useState<ProxyCheckScope>("current");
+    const [scope, setScope] = useState<ProxyCheckScope>("all");
     return (
       <ProxiesView
         proxies={payload}
-        selectedProxy={payload.nodes.find((node) => node.isSelected) || null}
         proxyCheckScope={scope}
         onProxyCheckScopeChange={setScope}
         onProxySettingsChange={(key, value) => setPayload((current) => ({ ...current, settings: { ...current.settings, [key]: value } }))}
         onSaveProxySettings={() => undefined}
         onCheckScope={() => undefined}
-        onSelectNode={() => undefined}
         onCheckNode={() => undefined}
       />
     );
@@ -55,45 +51,40 @@ export const Default: Story = {
 export const ActionsPlay: Story = {
   args: {
     proxies: sampleProxies,
-    selectedProxy: sampleProxies.nodes[0] || null,
-    proxyCheckScope: "current",
+    proxyCheckScope: "all",
     onProxyCheckScopeChange: fn(),
     onProxySettingsChange: fn(),
     onSaveProxySettings: fn(),
     onCheckScope: fn(),
-    onSelectNode: fn(),
     onCheckNode: fn(),
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: "执行检查" }));
     await expect(args.onCheckScope).toHaveBeenCalled();
-    await userEvent.click(canvas.getByRole("button", { name: "切换" }));
-    await expect(args.onSelectNode).toHaveBeenCalled();
+    await userEvent.click(canvas.getAllByRole("button", { name: "检查" })[0]!);
+    await expect(args.onCheckNode).toHaveBeenCalled();
   },
 };
 
 export const BufferedSettingsPlay: Story = {
   args: {
     proxies: sampleProxies,
-    selectedProxy: sampleProxies.nodes[0] || null,
-    proxyCheckScope: "current",
+    proxyCheckScope: "all",
     onProxyCheckScopeChange: fn(),
     onProxySettingsChange: fn(),
     onSaveProxySettings: fn(),
     onCheckScope: fn(),
-    onSelectNode: fn(),
     onCheckNode: fn(),
   },
   render: (args) => {
     const [payload, setPayload] = useState<ProxyPayload>(sampleProxies);
-    const [scope, setScope] = useState<ProxyCheckScope>("current");
+    const [scope, setScope] = useState<ProxyCheckScope>("all");
     const [savedPayload, setSavedPayload] = useState<ProxySettingsUpdate | null>(null);
     return (
       <>
         <ProxiesView
           proxies={payload}
-          selectedProxy={payload.nodes.find((node) => node.isSelected) || null}
           proxyCheckScope={scope}
           onProxyCheckScopeChange={(nextScope) => {
             setScope(nextScope);
@@ -109,7 +100,6 @@ export const BufferedSettingsPlay: Story = {
             args.onSaveProxySettings(nextPayload);
           }}
           onCheckScope={args.onCheckScope}
-          onSelectNode={args.onSelectNode}
           onCheckNode={args.onCheckNode}
         />
         <pre data-testid="proxy-settings-debug" className="sr-only">

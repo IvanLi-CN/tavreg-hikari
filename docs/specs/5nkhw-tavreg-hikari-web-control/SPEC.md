@@ -27,7 +27,7 @@
 
 - 不支持公网部署与多用户权限控制。
 - 不支持 Google/GitHub/LinkedIn 等其他第三方登录提供商。
-- 不实现代理节点的手工增删改，只处理 Mihomo 订阅配置与节点同步/选择/检查。
+- 不实现代理节点的手工增删改，只处理 Mihomo 订阅配置、节点同步、自动分配与检查。
 - 不抓取 Tavily 配额、套餐、usage 等更深层账号信息。
 
 ## 技术选型
@@ -130,15 +130,15 @@
 
 - `id`
 - `node_name`（唯一）
-- `is_selected`
 - `last_status`
 - `last_latency_ms`
 - `last_egress_ip`
 - `last_country`
+- `last_region`
 - `last_city`
 - `last_org`
 - `last_checked_at`
-- `last_selected_at`
+- `last_leased_at`
 
 ### proxy_checks
 
@@ -171,7 +171,7 @@
 - `GET /api/proxies`
 - `POST /api/proxies/settings`
 - `POST /api/proxies/check`
-- `POST /api/proxies/select`
+- `POST /api/proxies/check` supports `scope=all|node`; no manual node switch API exists.
 - `GET /api/jobs/current`
 - `POST /api/jobs/current/control`
 - `GET /api/events/ws`
@@ -218,8 +218,8 @@
 ### 代理页
 
 - 支持更新 Mihomo 订阅参数并立即同步节点列表
-- 支持检查当前节点、全部节点或单个节点
-- 节点状态展示需要包含：当前状态、延迟、出口 IP、地理信息、24h 成功数
+- 支持检查全部节点或单个节点
+- 节点状态展示需要包含：当前状态、延迟、出口 IP、地理信息、24h 成功数；业务任务始终自动分配节点，不提供手工切换入口
 
 ## 验收标准（Acceptance Criteria）
 
@@ -234,6 +234,7 @@
 - Given 主流程页包含长 JSON 日志、长邮箱或较窄视口，When 页面渲染完成，Then 内容仍保持在 shell 宽度内，且只允许卡片或表格自身出现内部滚动。
 - Given 任务成功完成 Microsoft 登录与 Tavily Home 流程，When 成功提取 API key，Then 账号状态、API key 记录、job attempt 与 `signup_tasks` 都正确关联更新。
 - Given 用户打开代理页并执行节点检查，When 检查完成，Then 界面显示节点延迟、出口 IP、地理信息和检查结果。
+- Given ChatGPT / Grok / Tavily 存在多个健康代理节点，When 任务以并发方式启动，Then 调度器优先分散节点与出口 IP，并且不会读取任何全局选中节点状态。
 - Given 当前实现完成，When 执行 `bun run typecheck`、`bun test` 与前端构建，Then 全部通过。
 
 ## Visual Evidence
@@ -241,6 +242,7 @@
 ![Dashboard buffered number input](./assets/dashboard-buffered-number.png)
 
 ![Proxies buffered number input](./assets/proxies-buffered-number.png)
+
 
 ![Accounts imported time descending sort](./assets/accounts-sort-imported-desc.png)
 

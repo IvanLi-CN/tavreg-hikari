@@ -369,7 +369,7 @@ export function App() {
     page: 1,
     pageSize: 10,
   });
-  const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("current");
+  const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("all");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [chatGptJobDraftTouched, setChatGptJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -412,10 +412,6 @@ export function App() {
   const mailboxSelectionRef = useRef<number | null>(null);
   const autoSyncedMailboxIdsRef = useRef<number[]>([]);
 
-  const selectedProxy = useMemo(
-    () => proxies?.nodes.find((node) => node.isSelected) || null,
-    [proxies],
-  );
   const selectedMailbox = useMemo(
     () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
     [mailboxes, selectedMailboxId],
@@ -1365,19 +1361,6 @@ export function App() {
     }
   };
 
-  const handleSelectNode = async (nodeName: string) => {
-    try {
-      setError(null);
-      await api("/api/proxies/select", {
-        method: "POST",
-        body: JSON.stringify({ nodeName }),
-      });
-      await refreshProxies();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
   const handleCheckSingleNode = async (nodeName: string) => {
     try {
       setError(null);
@@ -2085,13 +2068,11 @@ export function App() {
       {activePage === "proxies" && proxies ? (
         <ProxiesView
           proxies={proxies}
-          selectedProxy={selectedProxy}
           proxyCheckScope={proxyCheckScope}
           onProxyCheckScopeChange={setProxyCheckScope}
           onProxySettingsChange={updateProxySettings}
           onSaveProxySettings={handleSaveProxySettings}
           onCheckScope={handleProxyCheck}
-          onSelectNode={handleSelectNode}
           onCheckNode={handleCheckSingleNode}
         />
       ) : null}

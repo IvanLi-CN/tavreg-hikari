@@ -328,24 +328,6 @@ function maskLocalSecret(secret: string): string | null {
   return `${value.slice(0, 4)}${"*".repeat(Math.max(4, value.length - 8))}${value.slice(-4)}`;
 }
 
-export function resolveAttemptProxyNode(
-  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "getProxyNodeLastStatus" | "hasProxyNode">,
-): string | null {
-  const pinnedProxyNode = db.getPinnedProxyName();
-  if (pinnedProxyNode) {
-    return db.hasProxyNode(pinnedProxyNode) ? pinnedProxyNode : null;
-  }
-  const selectedProxyNode = db.getSelectedProxyName();
-  if (!selectedProxyNode) {
-    return null;
-  }
-  const selectedProxyStatus = db.getProxyNodeLastStatus(selectedProxyNode)?.trim().toLowerCase();
-  if (selectedProxyStatus && selectedProxyStatus !== "ok" && selectedProxyStatus !== "succeeded") {
-    return null;
-  }
-  return db.hasProxyNode(selectedProxyNode) ? selectedProxyNode : null;
-}
-
 export function buildAttemptRuntimeSpec(input: {
   job: Pick<JobRecord, "id" | "runMode">;
   account: Pick<

@@ -289,7 +289,6 @@ export interface GrokApiKeyRecord {
 export interface ProxyNodeRecord {
   id: number;
   nodeName: string;
-  isSelected: boolean;
   lastStatus: string | null;
   lastLatencyMs: number | null;
   lastEgressIp: string | null;
@@ -298,7 +297,6 @@ export interface ProxyNodeRecord {
   lastCity: string | null;
   lastOrg: string | null;
   lastCheckedAt: string | null;
-  lastSelectedAt: string | null;
   lastLeasedAt: string | null;
   success24h: number;
 }
@@ -376,7 +374,6 @@ interface SettingsRow {
   value_json: string;
 }
 
-const PINNED_PROXY_NODE_SETTING_KEY = "pinnedProxyNodeName";
 const HARD_ACCOUNT_SKIP_REASONS = new Set<AccountSkipReason>([
   "microsoft_password_incorrect",
   "microsoft_account_locked",
@@ -871,7 +868,6 @@ function mapProxyNodeRow(row: Record<string, unknown>): ProxyNodeRecord {
   return {
     id: Number(row.id),
     nodeName: String(row.node_name),
-    isSelected: asBoolean(row.is_selected),
     lastStatus: row.last_status == null ? null : String(row.last_status),
     lastLatencyMs: row.last_latency_ms == null ? null : Number(row.last_latency_ms),
     lastEgressIp: row.last_egress_ip == null ? null : String(row.last_egress_ip),
@@ -880,7 +876,6 @@ function mapProxyNodeRow(row: Record<string, unknown>): ProxyNodeRecord {
     lastCity: row.last_city == null ? null : String(row.last_city),
     lastOrg: row.last_org == null ? null : String(row.last_org),
     lastCheckedAt: row.last_checked_at == null ? null : String(row.last_checked_at),
-    lastSelectedAt: row.last_selected_at == null ? null : String(row.last_selected_at),
     lastLeasedAt: row.last_leased_at == null ? null : String(row.last_leased_at),
     success24h: Number(row.success24h || 0),
   };
@@ -1465,6 +1460,8 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_browser_sessions_status_updated ON account_browser_sessions(status, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_browser_sessions_proxy_ip_updated ON account_browser_sessions(proxy_ip, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_nodes_status_region_lease ON proxy_nodes(last_status, last_region, last_leased_at, node_name);");
+    this.db.query("DELETE FROM app_settings WHERE key = 'pinnedProxyNodeName'").run();
+    this.db.query("UPDATE proxy_nodes SET is_selected = 0, last_selected_at = NULL WHERE COALESCE(is_selected, 0) != 0 OR last_selected_at IS NOT NULL").run();
     if (signupTaskTableExists) {
       this.db.exec("CREATE INDEX IF NOT EXISTS idx_signup_tasks_job_account ON signup_tasks(job_id, account_id, started_at DESC);");
     }
@@ -1570,20 +1567,18 @@ export class AppDatabase {
     if (!(await fileExists(legacyPath))) return 0;
 
     const raw = await readFile(legacyPath, "utf8");
-    const parsed = parseJson<{ nodes?: Record<string, Record<string, unknown>>; recentSelected?: string[] }>(raw, {});
+    const parsed = parseJson<{ nodes?: Record<string, Record<string, unknown>> }>(raw, {});
     const nodes = parsed.nodes || {};
-    const selected = Array.isArray(parsed.recentSelected) ? String(parsed.recentSelected[0] || "") : "";
     let imported = 0;
 
     this.db.exec("BEGIN IMMEDIATE;");
     try {
       const stmt = this.db.query(`
         INSERT INTO proxy_nodes (
-          node_name, is_selected, last_status, last_latency_ms, last_egress_ip,
-          last_country, last_region, last_city, last_org, last_checked_at, last_selected_at, last_leased_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          node_name, last_status, last_latency_ms, last_egress_ip,
+          last_country, last_region, last_city, last_org, last_checked_at, last_leased_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_name) DO UPDATE SET
-          is_selected = excluded.is_selected,
           last_status = excluded.last_status,
           last_latency_ms = excluded.last_latency_ms,
           last_egress_ip = excluded.last_egress_ip,
@@ -1592,14 +1587,12 @@ export class AppDatabase {
           last_city = excluded.last_city,
           last_org = excluded.last_org,
           last_checked_at = excluded.last_checked_at,
-          last_selected_at = excluded.last_selected_at,
           last_leased_at = excluded.last_leased_at
       `);
       for (const [name, payload] of Object.entries(nodes)) {
         const geo = payload.lastGeo as Record<string, unknown> | undefined;
         stmt.run(
           name,
-          name === selected ? 1 : 0,
           payload.lastOutcome ? String(payload.lastOutcome) : null,
           payload.lastLatencyMs == null ? null : Number(payload.lastLatencyMs),
           payload.lastIp ? String(payload.lastIp) : geo?.ip ? String(geo.ip) : null,
@@ -1608,7 +1601,6 @@ export class AppDatabase {
           geo?.city ? String(geo.city) : null,
           geo?.org ? String(geo.org) : null,
           payload.lastCheckedAt ? String(payload.lastCheckedAt) : null,
-          payload.lastUsedAt ? String(payload.lastUsedAt) : null,
           payload.lastUsedAt ? String(payload.lastUsedAt) : null,
         );
         imported += 1;
@@ -4282,7 +4274,7 @@ export class AppDatabase {
                   AND COALESCE(s.completed_at, s.started_at) >= ?
               ), 0) AS success24h
             FROM proxy_nodes p
-            ORDER BY p.is_selected DESC, p.node_name ASC
+            ORDER BY p.node_name COLLATE NOCASE ASC
           `)
           .all(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()) as Record<string, unknown>[])
       : (this.db
@@ -4291,24 +4283,18 @@ export class AppDatabase {
               p.*,
               0 AS success24h
             FROM proxy_nodes p
-            ORDER BY p.is_selected DESC, p.node_name ASC
+            ORDER BY p.node_name COLLATE NOCASE ASC
           `)
           .all() as Record<string, unknown>[]);
     return rows.map(mapProxyNodeRow);
   }
 
-  upsertProxyInventory(nodes: string[], selectedName?: string | null): void {
-    const now = nowIso();
+  upsertProxyInventory(nodes: string[]): void {
     const normalizedNodes = [...new Set(nodes.map((name) => name.trim()).filter(Boolean))];
-    const normalizedSelectedName =
-      typeof selectedName === "string" && normalizedNodes.includes(selectedName.trim()) ? selectedName.trim() : null;
-    const pinnedProxyName = this.getPinnedProxyName();
     const stmt = this.db.query(`
-      INSERT INTO proxy_nodes (node_name, is_selected, last_selected_at)
-      VALUES (?, ?, ?)
-      ON CONFLICT(node_name) DO UPDATE SET
-        is_selected = excluded.is_selected,
-        last_selected_at = CASE WHEN excluded.is_selected = 1 THEN excluded.last_selected_at ELSE proxy_nodes.last_selected_at END
+      INSERT INTO proxy_nodes (node_name)
+      VALUES (?)
+      ON CONFLICT(node_name) DO NOTHING
     `);
     this.db.exec("BEGIN IMMEDIATE;");
     try {
@@ -4318,61 +4304,14 @@ export class AppDatabase {
       } else {
         this.db.query("DELETE FROM proxy_nodes").run();
       }
-      this.db.query("UPDATE proxy_nodes SET is_selected = 0").run();
       for (const name of normalizedNodes) {
-        stmt.run(name, name === normalizedSelectedName ? 1 : 0, name === normalizedSelectedName ? now : null);
-      }
-      if (pinnedProxyName && !normalizedNodes.includes(pinnedProxyName)) {
-        this.db.query("DELETE FROM app_settings WHERE key = ?").run(PINNED_PROXY_NODE_SETTING_KEY);
+        stmt.run(name);
       }
       this.db.exec("COMMIT;");
     } catch (error) {
       this.db.exec("ROLLBACK;");
       throw error;
     }
-  }
-
-  setSelectedProxy(nodeName: string): void {
-    const now = nowIso();
-    this.db.exec("BEGIN IMMEDIATE;");
-    try {
-      this.db.query("UPDATE proxy_nodes SET is_selected = 0").run();
-      this.db.query("UPDATE proxy_nodes SET is_selected = 1, last_selected_at = ? WHERE node_name = ?").run(now, nodeName);
-      this.db.exec("COMMIT;");
-    } catch (error) {
-      this.db.exec("ROLLBACK;");
-      throw error;
-    }
-  }
-
-  clearSelectedProxy(): void {
-    this.db.exec("UPDATE proxy_nodes SET is_selected = 0");
-  }
-
-  getPinnedProxyName(): string | null {
-    const row = this.db.query("SELECT value_json FROM app_settings WHERE key = ?").get(PINNED_PROXY_NODE_SETTING_KEY) as
-      | { value_json?: string }
-      | null;
-    const value = parseJson<string | null>(row?.value_json ?? "null", null);
-    return typeof value === "string" && value.trim() ? value.trim() : null;
-  }
-
-  setPinnedProxyName(nodeName: string | null): void {
-    const normalized = typeof nodeName === "string" ? nodeName.trim() : "";
-    if (!normalized) {
-      this.db.query("DELETE FROM app_settings WHERE key = ?").run(PINNED_PROXY_NODE_SETTING_KEY);
-      return;
-    }
-    const now = nowIso();
-    this.db
-      .query(`
-        INSERT INTO app_settings (key, value_json, updated_at)
-        VALUES (?, ?, ?)
-        ON CONFLICT(key) DO UPDATE SET
-          value_json = excluded.value_json,
-          updated_at = excluded.updated_at
-      `)
-      .run(PINNED_PROXY_NODE_SETTING_KEY, JSON.stringify(normalized), now);
   }
 
   recordProxyCheck(input: {
@@ -4409,8 +4348,8 @@ export class AppDatabase {
       this.db
         .query(`
           INSERT INTO proxy_nodes (
-            node_name, is_selected, last_status, last_latency_ms, last_egress_ip, last_country, last_region, last_city, last_org, last_checked_at, last_selected_at
-          ) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            node_name, last_status, last_latency_ms, last_egress_ip, last_country, last_region, last_city, last_org, last_checked_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(node_name) DO UPDATE SET
             last_status = excluded.last_status,
             last_latency_ms = excluded.last_latency_ms,
@@ -4439,26 +4378,4 @@ export class AppDatabase {
     }
   }
 
-  getSelectedProxyName(): string | null {
-    const row = this.db
-      .query("SELECT node_name FROM proxy_nodes WHERE is_selected = 1 ORDER BY last_selected_at DESC LIMIT 1")
-      .get() as { node_name?: string } | null;
-    return row?.node_name || null;
-  }
-
-  getProxyNodeLastStatus(nodeName: string): string | null {
-    const normalized = nodeName.trim();
-    if (!normalized) return null;
-    const row = this.db
-      .query("SELECT last_status FROM proxy_nodes WHERE node_name = ? LIMIT 1")
-      .get(normalized) as { last_status?: string | null } | null;
-    return row?.last_status == null ? null : String(row.last_status);
-  }
-
-  hasProxyNode(nodeName: string): boolean {
-    const normalized = nodeName.trim();
-    if (!normalized) return false;
-    const row = this.db.query("SELECT 1 AS present FROM proxy_nodes WHERE node_name = ? LIMIT 1").get(normalized) as { present?: number } | null;
-    return row?.present === 1;
-  }
 }
