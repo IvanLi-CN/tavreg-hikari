@@ -11,6 +11,10 @@ import { StatusBadge } from "@/components/status-badge";
 import { pickProxySettingsUpdate, type ProxyCheckScope, type ProxyNode, type ProxyPayload, type ProxySettingsUpdate } from "@/lib/app-types";
 import { formatDate, formatLocation } from "@/lib/format";
 
+function normalizeProxyStatus(status: string | null | undefined): string {
+  return String(status || "").trim().toLowerCase();
+}
+
 function Field(props: { label: string; children: React.ReactNode }) {
   return (
     <label className="flex min-w-0 flex-1 flex-col gap-2">
@@ -22,23 +26,19 @@ function Field(props: { label: string; children: React.ReactNode }) {
 
 export function ProxiesView({
   proxies,
-  selectedProxy,
   proxyCheckScope,
   onProxyCheckScopeChange,
   onProxySettingsChange,
   onSaveProxySettings,
   onCheckScope,
-  onSelectNode,
   onCheckNode,
 }: {
   proxies: ProxyPayload;
-  selectedProxy: ProxyNode | null;
   proxyCheckScope: ProxyCheckScope;
   onProxyCheckScopeChange: (scope: ProxyCheckScope) => void;
   onProxySettingsChange: <K extends keyof ProxySettingsUpdate>(key: K, value: ProxySettingsUpdate[K]) => void;
   onSaveProxySettings: (settings?: ProxySettingsUpdate) => void;
   onCheckScope: () => void;
-  onSelectNode: (nodeName: string) => void;
   onCheckNode: (nodeName: string) => void;
 }) {
   const timeoutRef = useRef<BufferedNumberInputHandle>(null);
@@ -61,6 +61,10 @@ export function ProxiesView({
     });
     onSaveProxySettings(committedSettings);
   };
+
+  const healthyCount = proxies.nodes.filter((node) => ["ok", "succeeded", "running"].includes(normalizeProxyStatus(node.lastStatus))).length;
+  const checkedCount = proxies.nodes.filter((node) => Boolean(node.lastCheckedAt)).length;
+  const recentlyLeasedNode = [...proxies.nodes].filter((node) => Boolean(node.lastLeasedAt)).sort((left, right) => Date.parse(right.lastLeasedAt || "") - Date.parse(left.lastLeasedAt || ""))[0] || null;
 
   return (
     <section className="grid gap-4 xl:grid-cols-[0.88fr_1.12fr]">
@@ -124,7 +128,6 @@ export function ProxiesView({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="current">当前节点</SelectItem>
                   <SelectItem value="all">全部节点</SelectItem>
                 </SelectContent>
               </Select>
@@ -135,21 +138,21 @@ export function ProxiesView({
 
         <Card>
           <CardHeader>
-            <CardTitle>当前状态</CardTitle>
-            <CardDescription>同步出口 IP、节点延迟与 24 小时成功提取数。</CardDescription>
+            <CardTitle>库存摘要</CardTitle>
+            <CardDescription>业务任务会自动选择健康节点，并优先避开并发重复节点与出口 IP。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-4 sm:grid-cols-2">
-              <MetricCard label="当前节点" value={proxies.selectedName || "未选择"} />
               <MetricCard label="节点总数" value={proxies.nodes.length} />
-              <MetricCard label="当前延迟" value={selectedProxy?.lastLatencyMs == null ? "—" : `${selectedProxy.lastLatencyMs}ms`} />
-              <MetricCard label="当前出口 IP" value={selectedProxy?.lastEgressIp || "—"} />
+              <MetricCard label="健康节点" value={healthyCount} />
+              <MetricCard label="已检查节点" value={checkedCount} />
+              <MetricCard label="最近租约" value={recentlyLeasedNode?.nodeName || "—"} />
             </div>
             <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4 text-sm text-slate-300">
-              <div>状态: <span className="ml-2 inline-flex"><StatusBadge status={selectedProxy?.lastStatus} /></span></div>
-              <div className="mt-3">地区: {selectedProxy ? formatLocation(selectedProxy) : "—"}</div>
-              <div className="mt-3">最后检查: {formatDate(selectedProxy?.lastCheckedAt)}</div>
-              <div className="mt-3">24h 成功提取: {selectedProxy?.success24h ?? 0}</div>
+              <div>自动调度: <span className="ml-2 text-emerald-300">已启用</span></div>
+              <div className="mt-3">最近租约时间: {formatDate(recentlyLeasedNode?.lastLeasedAt)}</div>
+              <div className="mt-3">最近租约地区: {recentlyLeasedNode ? formatLocation(recentlyLeasedNode) : "—"}</div>
+              <div className="mt-3">24h 成功总数: {proxies.nodes.reduce((sum, node) => sum + node.success24h, 0)}</div>
             </div>
           </CardContent>
         </Card>
@@ -158,7 +161,7 @@ export function ProxiesView({
       <Card>
         <CardHeader>
           <CardTitle>节点列表</CardTitle>
-          <CardDescription>可以切换当前节点，也可以单独检查某一个节点。</CardDescription>
+          <CardDescription>仅保留库存与诊断能力；业务任务不会读取任何手动切换状态。</CardDescription>
         </CardHeader>
         <CardContent>
           {proxies.nodes.length === 0 ? (
@@ -171,10 +174,7 @@ export function ProxiesView({
                 {proxies.nodes.map((node) => (
                   <article key={node.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="font-medium text-white">{node.nodeName}</div>
-                        {node.isSelected ? <div className="mt-1 text-xs text-cyan-300">当前选中</div> : null}
-                      </div>
+                      <div className="font-medium text-white">{node.nodeName}</div>
                       <StatusBadge status={node.lastStatus} />
                     </div>
                     <dl className="mt-4 grid gap-3 text-sm text-slate-300">
@@ -196,7 +196,6 @@ export function ProxiesView({
                       </div>
                     </dl>
                     <div className="mt-4 flex flex-wrap gap-2">
-                      <Button variant="secondary" size="sm" onClick={() => onSelectNode(node.nodeName)}>切换</Button>
                       <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
                     </div>
                   </article>
@@ -218,10 +217,7 @@ export function ProxiesView({
                   <TableBody>
                     {proxies.nodes.map((node) => (
                       <TableRow key={node.id}>
-                        <TableCell>
-                          <div className="font-medium text-white">{node.nodeName}</div>
-                          {node.isSelected ? <div className="mt-1 text-xs text-cyan-300">当前选中</div> : null}
-                        </TableCell>
+                        <TableCell><div className="font-medium text-white">{node.nodeName}</div></TableCell>
                         <TableCell><StatusBadge status={node.lastStatus} /></TableCell>
                         <TableCell>{node.lastLatencyMs == null ? "—" : `${node.lastLatencyMs}ms`}</TableCell>
                         <TableCell>{node.lastEgressIp || "—"}</TableCell>
@@ -229,7 +225,6 @@ export function ProxiesView({
                         <TableCell>{node.success24h}</TableCell>
                         <TableCell>
                           <div className="flex flex-wrap gap-2">
-                            <Button variant="secondary" size="sm" onClick={() => onSelectNode(node.nodeName)}>切换</Button>
                             <Button variant="outline" size="sm" onClick={() => onCheckNode(node.nodeName)}>检查</Button>
                           </div>
                         </TableCell>

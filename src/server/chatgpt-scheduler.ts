@@ -15,7 +15,8 @@ import {
 } from "../storage/app-db.js";
 import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
-import { buildAttemptSpawnOptions, resolveAttemptProxyNode, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
+import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
+import { pickAutoProxyNode } from "./proxy-node-allocation.js";
 
 interface ActiveAttempt {
   child: ChildProcessWithoutNullStreams;
@@ -187,16 +188,16 @@ function shouldBlockChatGptProxyAfterFailure(input: { errorCode: string; errorMe
 }
 
 function resolveChatGptProxyNode(
-  db: Pick<AppDatabase, "getPinnedProxyName" | "getSelectedProxyName" | "getProxyNodeLastStatus" | "hasProxyNode" | "listProxyNodes">,
-): string | null {
-  const preferred = resolveAttemptProxyNode(db);
-  if (preferred && !isBlockedChatGptProxyNode(preferred)) {
-    return preferred;
-  }
-  const fallback = db
-    .listProxyNodes()
-    .find((node) => !isBlockedChatGptProxyNode(node.nodeName) && isHealthyChatGptProxyNode(node));
-  return fallback?.nodeName || null;
+  db: Pick<AppDatabase, "listProxyNodes">,
+  activeAttempts: JobAttemptRecord[],
+): ProxyNodeRecord | null {
+  return pickAutoProxyNode({
+    nodes: db.listProxyNodes().filter((node) => isHealthyChatGptProxyNode(node)),
+    activeAttempts,
+    policy: {
+      allowNode: (node) => !isBlockedChatGptProxyNode(node.nodeName),
+    },
+  });
 }
 
 export class ChatGptJobScheduler {
@@ -505,17 +506,20 @@ export class ChatGptJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const selectedProxyNode = resolveChatGptProxyNode(this.db);
-    if (selectedProxyNode) {
-      this.db.updateAttempt(attempt.id, { proxyNode: selectedProxyNode });
-      this.db.touchProxyLease(selectedProxyNode);
+    const selectedProxy = resolveChatGptProxyNode(this.db, this.activeAttemptRows());
+    if (selectedProxy) {
+      this.db.updateAttempt(attempt.id, { proxyNode: selectedProxy.nodeName, proxyIp: selectedProxy.lastEgressIp });
+      this.db.touchProxyLease(selectedProxy.nodeName, {
+        egressIp: selectedProxy.lastEgressIp,
+        leasedAt: nowIso(),
+      });
     }
     const args =
       runtime.command === "bun"
         ? ["run", "src/server/chatgpt-worker.ts"]
         : ["--import", "tsx", "src/server/chatgpt-worker.ts"];
-    if (selectedProxyNode?.trim()) {
-      args.push("--proxy-node", selectedProxyNode.trim());
+    if (selectedProxy?.nodeName.trim()) {
+      args.push("--proxy-node", selectedProxy.nodeName.trim());
     }
     const child = spawn(runtime.command, args, {
       ...buildAttemptSpawnOptions(this.repoRoot, {

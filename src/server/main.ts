@@ -744,13 +744,11 @@ async function createProxyController(settings: AppSettings) {
   });
 }
 
-async function fetchProxyInventory(settings: AppSettings): Promise<{ selected: string | null; nodeNames: string[] }> {
+async function fetchProxyInventory(settings: AppSettings): Promise<{ nodeNames: string[] }> {
   const controller = await createProxyController(settings);
   try {
     const nodes = await controller.listGroupNodes();
-    const selected = await controller.getGroupSelection();
     return {
-      selected,
       nodeNames: nodes.map((item) => item.name),
     };
   } finally {
@@ -760,8 +758,8 @@ async function fetchProxyInventory(settings: AppSettings): Promise<{ selected: s
 
 async function syncProxyInventory(db: AppDatabase, settings: AppSettings) {
   const inventory = await fetchProxyInventory(settings);
-  db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
-  return { selected: inventory.selected, nodes: db.listProxyNodes() };
+  db.upsertProxyInventory(inventory.nodeNames);
+  return { nodes: db.listProxyNodes() };
 }
 
 async function serveStatic(req: Request): Promise<Response> {
@@ -2293,7 +2291,6 @@ async function main(): Promise<void> {
         if (!settings.subscriptionUrl.trim()) {
           return json({
             settings,
-            selectedName: null,
             nodes: [],
             syncError: null,
           });
@@ -2302,16 +2299,12 @@ async function main(): Promise<void> {
           const inventory = await runExclusiveProxyOp(() => syncProxyInventory(db, settings));
           return json({
             settings,
-            selectedName: inventory.selected,
-            pinnedName: db.getPinnedProxyName(),
             nodes: inventory.nodes,
             syncError: null,
           });
         } catch (error) {
           return json({
             settings,
-            selectedName: db.getSelectedProxyName(),
-            pinnedName: db.getPinnedProxyName(),
             nodes: db.listProxyNodes(),
             syncError: error instanceof Error ? error.message : String(error),
           });
@@ -2331,12 +2324,10 @@ async function main(): Promise<void> {
         const optimisticNext = buildNextProxySettings(current, body as Partial<ProxySettingsUpdate> | null);
         if (!optimisticNext.subscriptionUrl.trim()) {
           db.setSettings(optimisticNext);
-          db.upsertProxyInventory([], null);
+          db.upsertProxyInventory([]);
           return json({
             ok: true,
             settings: optimisticNext,
-            selectedName: null,
-            pinnedName: db.getPinnedProxyName(),
             nodes: [],
             syncError: null,
           });
@@ -2349,30 +2340,8 @@ async function main(): Promise<void> {
             persist: (validatedSettings) => db.setSettings(validatedSettings),
           }),
         );
-        db.upsertProxyInventory(inventory.nodeNames, inventory.selected);
-        return json({ ok: true, settings: next, selectedName: inventory.selected, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
-      }
-
-      if (pathname === "/api/proxies/select" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as { nodeName?: string } | null;
-        const nodeName = String(body?.nodeName || "").trim();
-        if (!nodeName) {
-          db.setPinnedProxyName(null);
-          return json({ ok: true, selectedName: db.getSelectedProxyName(), pinnedName: null, nodes: db.listProxyNodes() });
-        }
-        const settings = readSettings();
-        return await runExclusiveProxyOp(async () => {
-          const controller = await createProxyController(settings);
-          try {
-            await controller.setGroupProxy(nodeName);
-            db.setSelectedProxy(nodeName);
-            db.setPinnedProxyName(nodeName);
-            const selected = await controller.getGroupSelection();
-            return json({ ok: true, selectedName: selected || nodeName, pinnedName: db.getPinnedProxyName(), nodes: db.listProxyNodes() });
-          } finally {
-            await controller.stop().catch(() => {});
-          }
-        });
+        db.upsertProxyInventory(inventory.nodeNames);
+        return json({ ok: true, settings: next, nodes: db.listProxyNodes(), syncError: null });
       }
 
       if (pathname === "/api/proxies/check" && req.method === "POST") {
@@ -2384,20 +2353,17 @@ async function main(): Promise<void> {
           let event: ServerEvent | null = null;
           try {
             let results: NodeCheckResult[] = [];
-            if (body?.scope === "all") {
+            if (!body?.scope || body.scope === "all") {
               results = await checkAllNodes(controller, {
                 checkUrl: settings.checkUrl,
                 timeoutMs: settings.timeoutMs,
                 maxLatencyMs: settings.maxLatencyMs,
                 ipinfoToken: (process.env.IPINFO_TOKEN || "").trim() || undefined,
               });
-            } else {
-              const targetNode =
-                body?.scope === "node"
-                  ? String(body.nodeName || "").trim()
-                  : (await controller.getGroupSelection()) || db.getSelectedProxyName() || "";
+            } else if (body?.scope === "node") {
+              const targetNode = String(body.nodeName || "").trim();
               if (!targetNode) {
-                response = badRequest("no proxy node selected");
+                response = badRequest("nodeName is required when scope=node");
               } else {
                 results = [
                   await checkNode(controller, targetNode, {
@@ -2408,6 +2374,8 @@ async function main(): Promise<void> {
                   }),
                 ];
               }
+            } else {
+              response = badRequest(`unsupported proxy check scope: ${String(body.scope)}`);
             }
             if (!response) {
               for (const result of results) {
@@ -2424,7 +2392,7 @@ async function main(): Promise<void> {
                 });
               }
               const nodes = db.listProxyNodes();
-              const payload = { ok: true, results, nodes, selectedName: await controller.getGroupSelection() };
+              const payload = { ok: true, results, nodes };
               event = {
                 type: "proxy.check.completed",
                 payload,
