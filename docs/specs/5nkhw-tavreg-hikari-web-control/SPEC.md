@@ -243,6 +243,8 @@
 
 ![Proxies buffered number input](./assets/proxies-buffered-number.png)
 
+![Proxies auto rotation storybook](./assets/proxies-auto-rotation-storybook.png)
+
 
 ![Accounts imported time descending sort](./assets/accounts-sort-imported-desc.png)
 
