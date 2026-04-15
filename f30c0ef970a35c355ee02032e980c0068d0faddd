@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.10.0",
+  "base_stable_version": "0.9.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-15T17:21:54Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.10.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "0298d3e2f9d83dba2f92ffb13a51af0e7e2a2b48",
+  "pr_number": 45,
+  "pr_title": "feat(accounts): allow inline session proxy switching",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.10.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.10.0",
+  "target_sha": "f30c0ef970a35c355ee02032e980c0068d0faddd",
+  "type_label": "type:minor"
+}
