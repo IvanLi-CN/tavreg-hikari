@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.9.0",
+  "base_stable_version": "0.8.1",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-15T15:04:41Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.9.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "1a2d649d99ba3fe1a5460059e53756e5d210d921",
+  "pr_number": 44,
+  "pr_title": "feat: show full Tavily keys in Keys view",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.9.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.9.0",
+  "target_sha": "6df38293b49652c66fff1fce302451c427e222c9",
+  "type_label": "type:minor"
+}
