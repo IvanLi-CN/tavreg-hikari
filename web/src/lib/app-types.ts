@@ -228,6 +228,11 @@ export type AccountUpdatePayload = {
   account: AccountRecord;
 };
 
+export type AccountSessionRebootstrapRequest = {
+  force?: boolean;
+  proxyNode?: string | null;
+};
+
 export type ApiKeyRecord = {
   id: number;
   accountId: number;

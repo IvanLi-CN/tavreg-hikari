@@ -15,6 +15,7 @@ import type {
   AccountQuery,
   AccountsPayload,
   ExtractorSseState,
+  ProxyPayload,
 } from "@/lib/app-types";
 import {
   sampleAccounts,
@@ -27,6 +28,7 @@ import {
   sampleExtractorRuntimeRunning,
   sampleExtractorRuntimeSucceeded,
   sampleExtractorSettings,
+  sampleProxies,
 } from "@/stories/fixtures";
 
 function createDefaultQuery(): AccountQuery {
@@ -142,6 +144,8 @@ const baseArgs = {
   allCurrentPageSelected: false,
   graphSettingsConfigured: true,
   connectingAccountIds: [],
+  proxyNodes: sampleProxies.nodes,
+  proxyCheckState: sampleProxies.checkState,
   onImportContentChange: fn(),
   onImportGroupChange: fn(),
   onBatchGroupNameChange: fn(),
@@ -156,6 +160,8 @@ const baseArgs = {
   onClearSelection: fn(),
   onConnectAccount: fn(async () => undefined),
   onConnectSelectedAccounts: fn(async () => undefined),
+  onCheckProxyNode: fn(async () => undefined),
+  onSwitchSessionProxy: fn(async () => undefined),
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
   onSaveExtractorSettings: fn(async () => undefined),
@@ -289,6 +295,7 @@ type AccountsStorySurfaceProps = {
   extractorHistory?: AccountExtractorHistoryPayload;
   extractorHistoryQuery?: AccountExtractorHistoryQuery;
   extractorHistoryBusy?: boolean;
+  proxies?: ProxyPayload;
   frameClassName?: string;
   initialSelectedIds?: number[];
   graphSettingsConfigured?: boolean;
@@ -296,6 +303,8 @@ type AccountsStorySurfaceProps = {
   initialDesktopToolsCollapsed?: boolean;
   onConnectAccount?: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
+  onCheckProxyNode?: (nodeName: string) => Promise<void>;
+  onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
@@ -306,6 +315,8 @@ type AccountsStorySurfaceProps = {
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const accounts = props.accounts || sampleAccounts;
   const [extractorSettings, setExtractorSettings] = useState<AccountExtractorSettings>(props.extractorSettings ?? sampleExtractorSettings);
+  const [accountsState, setAccountsState] = useState<AccountsPayload>(accounts);
+  const [proxyState, setProxyState] = useState<ProxyPayload>(props.proxies ?? sampleProxies);
   const extractorHistory = props.extractorHistory || sampleExtractorHistory;
   const [content, setContent] = useState("");
   const [importGroupName, setImportGroupName] = useState("");
@@ -324,8 +335,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
   const [extractorHistoryQuery, setExtractorHistoryQuery] = useState<AccountExtractorHistoryQuery>(
     props.extractorHistoryQuery ?? createDefaultExtractorHistoryQuery(),
   );
-  const visibleAccounts = applyStoryAccountQuery(accounts, query);
-  const batchBootstrapPreview = buildStoryBatchBootstrapPreview(accounts, selectedIds);
+  const visibleAccounts = applyStoryAccountQuery(accountsState, query);
+  const batchBootstrapPreview = buildStoryBatchBootstrapPreview(accountsState, selectedIds);
 
   useEffect(() => {
     if (!props.extractorRunDraft) return;
@@ -336,6 +347,108 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
     if (!props.extractorSettings) return;
     setExtractorSettings(props.extractorSettings);
   }, [props.extractorSettings]);
+
+  useEffect(() => {
+    setAccountsState(accounts);
+  }, [accounts]);
+
+  useEffect(() => {
+    if (!props.proxies) return;
+    setProxyState(props.proxies);
+  }, [props.proxies]);
+
+  const handleStoryCheckProxyNode = props.onCheckProxyNode
+    ?? (async (nodeName: string) => {
+      setProxyState((current) => ({
+        ...current,
+        checkState: {
+          ...current.checkState,
+          status: "running",
+          scope: "node",
+          concurrency: 1,
+          total: 1,
+          completed: 0,
+          succeeded: 0,
+          failed: 0,
+          activeWorkers: 1,
+          currentNodeNames: [nodeName],
+          startedAt: "2026-04-15T12:00:00.000Z",
+          finishedAt: null,
+          error: null,
+        },
+      }));
+      await Promise.resolve();
+      setProxyState((current) => ({
+        ...current,
+        checkState: {
+          ...current.checkState,
+          status: "completed",
+          completed: 1,
+          succeeded: 1,
+          failed: 0,
+          activeWorkers: 0,
+          currentNodeNames: [],
+          finishedAt: "2026-04-15T12:00:03.000Z",
+          error: null,
+        },
+        nodes: current.nodes.map((node) =>
+          node.nodeName === nodeName
+            ? {
+                ...node,
+                lastLatencyMs: 208,
+                lastEgressIp: node.lastEgressIp || "52.11.12.44",
+                lastCheckedAt: "2026-04-15T12:00:03.000Z",
+                lastStatus: "ok",
+              }
+            : node,
+        ),
+      }));
+    });
+
+  const handleStorySwitchSessionProxy = props.onSwitchSessionProxy
+    ?? (async (accountId: number, proxyNode: string) => {
+      const selectedProxy = proxyState.nodes.find((node) => node.nodeName === proxyNode) || null;
+      setAccountsState((current) => ({
+        ...current,
+        rows: current.rows.map((row) =>
+          row.id === accountId
+            ? {
+                ...row,
+                mailboxStatus: "preparing",
+                browserSession: row.browserSession
+                  ? {
+                      ...row.browserSession,
+                      status: "ready",
+                      proxyNode,
+                      proxyIp: selectedProxy?.lastEgressIp || row.browserSession.proxyIp,
+                      proxyCountry: selectedProxy?.lastCountry || row.browserSession.proxyCountry,
+                      proxyRegion: selectedProxy?.lastRegion || row.browserSession.proxyRegion,
+                      proxyCity: selectedProxy?.lastCity || row.browserSession.proxyCity,
+                      updatedAt: "2026-04-15T12:01:00.000Z",
+                    }
+                  : {
+                      id: 9990 + accountId,
+                      status: "ready",
+                      profilePath: `/workspace/output/browser-profiles/accounts/${accountId}/chrome`,
+                      browserEngine: "chrome",
+                      proxyNode,
+                      proxyIp: selectedProxy?.lastEgressIp || null,
+                      proxyCountry: selectedProxy?.lastCountry || null,
+                      proxyRegion: selectedProxy?.lastRegion || null,
+                      proxyCity: selectedProxy?.lastCity || null,
+                      proxyTimezone: null,
+                      lastBootstrappedAt: "2026-04-15T12:01:00.000Z",
+                      lastUsedAt: "2026-04-15T12:01:00.000Z",
+                      lastErrorCode: null,
+                      lastErrorMessage: null,
+                      createdAt: "2026-04-15T12:01:00.000Z",
+                      updatedAt: "2026-04-15T12:01:00.000Z",
+                    },
+              }
+            : row,
+        ),
+      }));
+    });
 
   return (
     <div className={props.frameClassName}>
@@ -371,6 +484,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         allCurrentPageSelected={selectedIds.length > 0 && selectedIds.length === visibleAccounts.rows.length}
         graphSettingsConfigured={props.graphSettingsConfigured ?? true}
         connectingAccountIds={props.connectingAccountIds ?? []}
+        proxyNodes={proxyState.nodes}
+        proxyCheckState={proxyState.checkState}
         onImportContentChange={setContent}
         onImportGroupChange={setImportGroupName}
         onBatchGroupNameChange={setBatchGroupName}
@@ -385,6 +500,8 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onClearSelection={() => setSelectedIds([])}
         onConnectAccount={props.onConnectAccount ?? (async () => undefined)}
         onConnectSelectedAccounts={props.onConnectSelectedAccounts ?? (async () => undefined)}
+        onCheckProxyNode={handleStoryCheckProxyNode}
+        onSwitchSessionProxy={handleStorySwitchSessionProxy}
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={
@@ -1053,6 +1170,58 @@ export const SessionBootstrapCompactCards: Story = {
     await expect(canvas.getByText("Profile")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
+  },
+};
+
+export const SessionProxySwitchDialogPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} frameClassName="mx-auto max-w-[1440px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "账号页 Session Proxy 单元格支持行内编辑，弹窗内展示名称、IP、延迟与测速/选择操作，并可立即切换到新节点。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
+    await expect(within(dialog).getByText("名称")).toBeInTheDocument();
+    await expect(within(dialog).getByText("IP")).toBeInTheDocument();
+    await expect(within(dialog).getByText("延迟")).toBeInTheDocument();
+    await expect(within(dialog).getByText("操作")).toBeInTheDocument();
+    await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
+    await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getAllByRole("button", { name: "测速" })[1]!);
+    await expect(within(dialog).getByText("208 ms")).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole("button", { name: "选择" }));
+    await waitFor(() => {
+      expect(within(document.body).queryByRole("dialog", { name: "更换 Session Proxy" })).not.toBeInTheDocument();
+    });
+    await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
+  },
+};
+
+export const SessionProxySwitchCompactCards: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "375px 卡片态下仍可从 Session Proxy 字段直接打开更换弹窗，不会把卡片布局挤坏。",
+      },
+    },
+  },
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
+    await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
+    await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
   },
 };
 

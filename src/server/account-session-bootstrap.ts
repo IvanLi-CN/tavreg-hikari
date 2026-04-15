@@ -1,6 +1,10 @@
 import type { MicrosoftAccountRecord } from "../storage/app-db.js";
 
 export type AccountBatchBootstrapMode = "pending_only" | "force";
+export type AccountSessionRebootstrapRequest = {
+  force: boolean;
+  proxyNode: string | null;
+};
 export type AccountBatchBootstrapPreviewDecision =
   | "queue"
   | "blocked"
@@ -27,6 +31,47 @@ export function normalizeAccountBatchBootstrapMode(
   fallback: AccountBatchBootstrapMode = "pending_only",
 ): AccountBatchBootstrapMode {
   return value === "force" ? "force" : value === "pending_only" ? "pending_only" : fallback;
+}
+
+export function normalizeAccountSessionRebootstrapRequest(value: unknown): AccountSessionRebootstrapRequest {
+  const body =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const rawProxyNode = body.proxyNode;
+  const proxyNode =
+    typeof rawProxyNode === "string"
+      ? rawProxyNode.trim() || null
+      : rawProxyNode == null
+        ? null
+        : String(rawProxyNode).trim() || null;
+  return {
+    force: body.force !== false,
+    proxyNode,
+  };
+}
+
+export function resolveRequestedSessionProxyNode(
+  requestedProxyNode: string | null | undefined,
+  availableNodeNames: Iterable<string>,
+): { proxyNode: string | null; error: string | null } {
+  const normalized = String(requestedProxyNode || "").trim();
+  if (!normalized) {
+    return { proxyNode: null, error: null };
+  }
+  const matched = Array.from(availableNodeNames)
+    .map((nodeName) => String(nodeName || "").trim())
+    .find((nodeName) => nodeName === normalized);
+  if (!matched) {
+    return {
+      proxyNode: null,
+      error: `代理节点不存在：${normalized}`,
+    };
+  }
+  return {
+    proxyNode: matched,
+    error: null,
+  };
 }
 
 export function getAccountSessionBootstrapBlockMessage(account: BootstrapQueueAccount | null | undefined): string | null {

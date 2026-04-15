@@ -36,8 +36,10 @@ import {
   hasConfiguredMicrosoftGraphBootstrap,
   isLockedAccountRecord,
   normalizeAccountBatchBootstrapMode,
+  normalizeAccountSessionRebootstrapRequest,
   resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  resolveRequestedSessionProxyNode,
   shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
@@ -1026,6 +1028,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   accountId: number;
   readSettings: () => AppSettings;
   broadcast: (event: ServerEvent) => void;
+  requestedProxyNode?: string | null;
 }): Promise<{ mailbox: MicrosoftMailboxRecord; workerResult: MailboxOauthWorkerResult }> {
   const account = input.db.getAccount(input.accountId);
   if (!account) {
@@ -1044,16 +1047,26 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     throw new Error("Microsoft Graph 设置不完整，无法完成账号 bootstrap");
   }
   assertMicrosoftGraphSettings(graphSettings);
-  const proxyNode = input.db.selectReusableProxyNodeForAccount(input.accountId)?.nodeName;
+  const requestedProxyNode = String(input.requestedProxyNode || "").trim() || null;
+  const selectedProxyNode = requestedProxyNode
+    ? input.db.getProxyNode(requestedProxyNode)
+    : input.db.selectReusableProxyNodeForAccount(input.accountId);
+  const proxyNode = selectedProxyNode?.nodeName || null;
   if (!proxyNode) {
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
       errorCode: "proxy_node_unavailable",
-      errorMessage: "当前代理池中没有可复用的健康节点",
+      errorMessage: requestedProxyNode
+        ? `指定代理节点不可用：${requestedProxyNode}`
+        : "当前代理池中没有可复用的健康节点",
     });
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
-    throw new Error("当前代理池中没有可复用的健康节点");
+    throw new Error(
+      requestedProxyNode
+        ? `指定代理节点不可用：${requestedProxyNode}`
+        : "当前代理池中没有可复用的健康节点",
+    );
   }
   const session = input.db.markBrowserSessionBootstrapping(input.accountId, {
     browserEngine: "chrome",
@@ -1218,6 +1231,7 @@ async function main(): Promise<void> {
   const runExclusiveMailboxOauth = createExclusiveRunner();
   const sessionBootstrapQueuedIds = new Set<number>();
   const sessionBootstrapPendingForceIds = new Set<number>();
+  const sessionBootstrapRequestedProxyNodes = new Map<number, string | null>();
   let latestProxySyncError: string | null = null;
   const proxyCheckCoordinator = createProxyCheckCoordinator({
     defaultConcurrency: resolveProxyCheckConcurrency(process.env.PROXY_CHECK_CONCURRENCY, 5),
@@ -1258,11 +1272,12 @@ async function main(): Promise<void> {
       }
     }
   };
-  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean; reason?: "auto" | "manual" }): boolean => {
+  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean; reason?: "auto" | "manual"; proxyNode?: string | null }): boolean => {
     const account = db.getAccount(accountId);
     if (!account || getAccountConnectBlockMessage(account)) {
       return false;
     }
+    const requestedProxyNode = options?.proxyNode !== undefined ? String(options.proxyNode || "").trim() || null : undefined;
     if (
       options?.reason !== "manual"
       && !hasConfiguredMicrosoftGraphBootstrap(readMicrosoftGraphSettings(readSettings()))
@@ -1287,8 +1302,18 @@ async function main(): Promise<void> {
       return false;
     }
     if (queueDisposition === "defer_force") {
+      if (requestedProxyNode) {
+        return false;
+      }
       sessionBootstrapPendingForceIds.add(accountId);
       return true;
+    }
+    if (requestedProxyNode !== undefined) {
+      if (requestedProxyNode) {
+        sessionBootstrapRequestedProxyNodes.set(accountId, requestedProxyNode);
+      } else {
+        sessionBootstrapRequestedProxyNodes.delete(accountId);
+      }
     }
     db.queueBrowserSessionBootstrap(accountId);
     sessionBootstrapQueuedIds.add(accountId);
@@ -1302,17 +1327,24 @@ async function main(): Promise<void> {
         let lastError: unknown = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           try {
+            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
             await authorizeMailboxWithBrowserAutomation({
               db,
               accountId,
               readSettings,
               broadcast,
+              requestedProxyNode,
             });
             lastError = null;
             break;
           } catch (error) {
             lastError = error;
-            if (attempt >= maxAttempts || !shouldRetryAccountBootstrapWithFreshProxy(error)) {
+            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
+            if (
+              attempt >= maxAttempts
+              || requestedProxyNode
+              || !shouldRetryAccountBootstrapWithFreshProxy(error)
+            ) {
               break;
             }
             console.warn(
@@ -1330,7 +1362,13 @@ async function main(): Promise<void> {
       } finally {
         sessionBootstrapQueuedIds.delete(accountId);
         if (sessionBootstrapPendingForceIds.delete(accountId)) {
-          queueAccountSessionBootstrap(accountId, { force: true, reason: "manual" });
+          queueAccountSessionBootstrap(accountId, {
+            force: true,
+            reason: "manual",
+            proxyNode: sessionBootstrapRequestedProxyNodes.get(accountId) ?? null,
+          });
+        } else {
+          sessionBootstrapRequestedProxyNodes.delete(accountId);
         }
       }
     });
@@ -1752,7 +1790,7 @@ async function main(): Promise<void> {
         }
       }
 
-        if (accountSessionRebootstrapMatch && req.method === "POST") {
+      if (accountSessionRebootstrapMatch && req.method === "POST") {
         const accountId = Number.parseInt(accountSessionRebootstrapMatch[1] || "", 10);
         if (!Number.isInteger(accountId) || accountId < 1) {
           return badRequest("invalid account id");
@@ -1766,7 +1804,22 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
+        const rebootstrapRequest = normalizeAccountSessionRebootstrapRequest(body);
+        const proxySelection = resolveRequestedSessionProxyNode(
+          rebootstrapRequest.proxyNode,
+          db.listProxyNodes().map((node) => node.nodeName),
+        );
+        if (proxySelection.error) {
+          return badRequest(proxySelection.error, 404);
+        }
+        if (proxySelection.proxyNode && account.browserSession?.status === "bootstrapping") {
+          return badRequest("账号当前正在 Bootstrap，暂时不能切换 Session Proxy", 409);
+        }
+        const queued = queueAccountSessionBootstrap(accountId, {
+          force: rebootstrapRequest.force,
+          reason: "manual",
+          proxyNode: proxySelection.proxyNode,
+        });
         return json({
           ok: true,
           queued,
@@ -2101,7 +2154,22 @@ async function main(): Promise<void> {
         if (connectBlockMessage) {
           return badRequest(connectBlockMessage, 409);
         }
-        const queued = queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" });
+        const rebootstrapRequest = normalizeAccountSessionRebootstrapRequest(body);
+        const proxySelection = resolveRequestedSessionProxyNode(
+          rebootstrapRequest.proxyNode,
+          db.listProxyNodes().map((node) => node.nodeName),
+        );
+        if (proxySelection.error) {
+          return badRequest(proxySelection.error, 404);
+        }
+        if (proxySelection.proxyNode && account.browserSession?.status === "bootstrapping") {
+          return badRequest("账号当前正在 Bootstrap，暂时不能切换 Session Proxy", 409);
+        }
+        const queued = queueAccountSessionBootstrap(accountId, {
+          force: rebootstrapRequest.force,
+          reason: "manual",
+          proxyNode: proxySelection.proxyNode,
+        });
         return json({
           ok: true,
           queued,

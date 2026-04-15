@@ -4,8 +4,10 @@ import {
   hasConfiguredMicrosoftGraphBootstrap,
   hasSuccessfulAccountBootstrap,
   isLockedAccountRecord,
+  normalizeAccountSessionRebootstrapRequest,
   resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
+  resolveRequestedSessionProxyNode,
   shouldReplayPendingAccountBootstrap,
   shouldForceImportedAccountBootstrap,
   shouldQueueImportedAccountBootstrap,
@@ -96,6 +98,36 @@ describe("account session bootstrap helpers", () => {
     expect(resolveBootstrapQueueDisposition({ alreadyQueued: false, force: false })).toBe("queue");
     expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: false })).toBe("skip");
     expect(resolveBootstrapQueueDisposition({ alreadyQueued: true, force: true })).toBe("defer_force");
+  });
+
+  test("normalizes manual rebootstrap requests with optional proxy override", () => {
+    expect(normalizeAccountSessionRebootstrapRequest(null)).toEqual({
+      force: true,
+      proxyNode: null,
+    });
+    expect(normalizeAccountSessionRebootstrapRequest({ force: false, proxyNode: "  Seoul-02  " })).toEqual({
+      force: false,
+      proxyNode: "Seoul-02",
+    });
+    expect(normalizeAccountSessionRebootstrapRequest({ force: true, proxyNode: "" })).toEqual({
+      force: true,
+      proxyNode: null,
+    });
+  });
+
+  test("validates requested session proxy nodes against current inventory", () => {
+    expect(resolveRequestedSessionProxyNode(null, ["Tokyo-01", "Seoul-02"])).toEqual({
+      proxyNode: null,
+      error: null,
+    });
+    expect(resolveRequestedSessionProxyNode("Seoul-02", ["Tokyo-01", "Seoul-02"])).toEqual({
+      proxyNode: "Seoul-02",
+      error: null,
+    });
+    expect(resolveRequestedSessionProxyNode("Missing-01", ["Tokyo-01", "Seoul-02"])).toEqual({
+      proxyNode: null,
+      error: "代理节点不存在：Missing-01",
+    });
   });
 
   test("blocks rebootstrap for leased, disabled, or locked accounts while keeping linked accounts manually retryable", () => {
