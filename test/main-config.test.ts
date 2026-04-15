@@ -120,8 +120,32 @@ test("manual imports force rebootstrap when the stored password changes", async 
 
 test("manual force bootstrap routes keep in-flight retries queueable instead of returning 409 early", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
-  expect(source).toContain('queueAccountSessionBootstrap(accountId, { force: body?.force !== false, reason: "manual" })');
+  expect(source).toContain("const rebootstrapRequest = normalizeAccountSessionRebootstrapRequest(body);");
+  expect(source).toContain('reason: "manual",');
+  expect(source).toContain("force: rebootstrapRequest.force,");
   expect(source).not.toContain('return badRequest("账号当前正在 Bootstrap", 409);');
+});
+
+test("manual rebootstrap routes accept explicit proxy node overrides and validate them against current inventory", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const bootstrapSource = await readFile(path.join(repoRoot, "src/server/account-session-bootstrap.ts"), "utf8");
+  expect(bootstrapSource).toContain("export function normalizeAccountSessionRebootstrapRequest");
+  expect(bootstrapSource).toContain("export function resolveRequestedSessionProxyNode");
+  expect(source).toContain("requestedProxyNode?: string | null");
+  expect(source).toContain("resolveRequestedSessionProxyNode(");
+  expect(source).toContain("db.listProxyNodes().map((node) => node.nodeName)");
+  expect(source).toContain("proxyNode: proxySelection.proxyNode");
+  expect(source).toContain('账号当前正在 Bootstrap，暂时不能切换 Session Proxy');
+  expect(source).toContain('if (requestedProxyNode) {\n        return false;\n      }\n      sessionBootstrapPendingForceIds.add(accountId);');
+  expect(source).toContain("requestedProxyNode");
+});
+
+test("manual rebootstrap refresh keeps proxy refresh best-effort instead of failing queued bootstraps", async () => {
+  const source = await readFile(path.join(repoRoot, "web/src/App.tsx"), "utf8");
+  expect(source).toContain("const refreshResults = await Promise.allSettled([");
+  expect(source).toContain('console.warn(\n        "[accounts] refreshProxies failed after session rebootstrap queued:",');
+  expect(source).toContain("if (accountRefreshError) {");
+  expect(source).toContain("if (mailboxRefreshError) {");
 });
 
 test("batch bootstrap preview excludes accounts that are already queued in memory", async () => {

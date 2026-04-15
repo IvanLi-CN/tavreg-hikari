@@ -25,6 +25,7 @@ import type {
   AccountExtractorSettingsPayload,
   AccountImportPayload,
   AccountImportPreviewPayload,
+  AccountSessionRebootstrapRequest,
   AccountUpdatePayload,
   AccountQuery,
   AccountsPayload,
@@ -1658,13 +1659,36 @@ export function App() {
     navigate(`/mailboxes?accountId=${accountId}`);
   };
 
-  const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean }) => {
+  const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean; proxyNode?: string | null }) => {
+    const requestBody: AccountSessionRebootstrapRequest = { force: options?.force !== false };
+    if (options?.proxyNode !== undefined) {
+      requestBody.proxyNode = options.proxyNode;
+    }
     const payload = await api<AccountUpdatePayload>(`/api/accounts/${accountId}/session/rebootstrap`, {
       method: "POST",
-      body: JSON.stringify({ force: options?.force !== false }),
+      body: JSON.stringify(requestBody),
     });
     setAccounts((current) => mergeAccountIntoAccountsPayload(current, payload.account));
-    await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
+    const refreshResults = await Promise.allSettled([
+      refreshAccounts(accountQueryRef.current),
+      refreshMailboxes(),
+      refreshProxies(),
+    ]);
+    const accountRefreshError = refreshResults[0].status === "rejected" ? refreshResults[0].reason : null;
+    const mailboxRefreshError = refreshResults[1].status === "rejected" ? refreshResults[1].reason : null;
+    const proxyRefreshError = refreshResults[2].status === "rejected" ? refreshResults[2].reason : null;
+    if (proxyRefreshError) {
+      console.warn(
+        "[accounts] refreshProxies failed after session rebootstrap queued:",
+        proxyRefreshError instanceof Error ? proxyRefreshError.message : String(proxyRefreshError),
+      );
+    }
+    if (accountRefreshError) {
+      throw accountRefreshError;
+    }
+    if (mailboxRefreshError) {
+      throw mailboxRefreshError;
+    }
     return payload;
   };
 
@@ -1676,6 +1700,24 @@ export function App() {
       setConnectingAccountIds([accountId]);
       setError(null);
       await startMailboxConnectionForAccount(accountId, { force: true });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      setConnectingAccountIds([]);
+      setAccountConnectProgress(null);
+      setAccountConnectBusy(false);
+    }
+  };
+
+  const handleSwitchAccountSessionProxy = async (accountId: number, proxyNode: string) => {
+    try {
+      setAccountConnectBusy(true);
+      setAccountConnectProgress({ current: 1, total: 1 });
+      setActiveBatchBootstrapMode(null);
+      setConnectingAccountIds([accountId]);
+      setError(null);
+      await startMailboxConnectionForAccount(accountId, { force: true, proxyNode });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       throw err;
@@ -1944,6 +1986,8 @@ export function App() {
           allCurrentPageSelected={allCurrentPageSelected}
           graphSettingsConfigured={microsoftGraphSettings?.configured ?? false}
           connectingAccountIds={connectingAccountIds}
+          proxyNodes={proxies?.nodes || []}
+          proxyCheckState={proxies?.checkState || null}
           onImportContentChange={setImportContent}
           onImportGroupChange={setImportGroupName}
           onBatchGroupNameChange={setBatchGroupName}
@@ -1961,6 +2005,8 @@ export function App() {
           onClearSelection={() => setSelectedAccountIds([])}
           onConnectAccount={handleConnectAccount}
           onConnectSelectedAccounts={handleConnectSelectedAccounts}
+          onCheckProxyNode={handleCheckSingleNode}
+          onSwitchSessionProxy={handleSwitchAccountSessionProxy}
           onSaveProofMailbox={handleSaveProofMailbox}
           onSaveAvailability={handleSaveAvailability}
           onSaveExtractorSettings={handleSaveExtractorSettings}

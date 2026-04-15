@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, PencilLine, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +36,8 @@ import type {
   AccountsPayload,
   ExtractorSseState,
   MailboxStatus,
+  ProxyCheckState,
+  ProxyNode,
 } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -153,6 +155,37 @@ function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">
   const parts = normalized.split("/").filter(Boolean);
   if (parts.length <= 4) return normalized;
   return `…/${parts.slice(-4).join("/")}`;
+}
+
+function formatProxyLatency(latencyMs: number | null | undefined): string {
+  return latencyMs == null ? "—" : `${Math.max(0, Math.trunc(latencyMs))} ms`;
+}
+
+function SessionProxyCell(props: {
+  account: Pick<AccountRecord, "microsoftEmail" | "browserSession" | "disabledAt" | "skipReason" | "lastErrorCode">;
+  disabled: boolean;
+  onEdit: () => void;
+  align?: "left" | "right";
+}) {
+  return (
+    <div className={cn("flex max-w-full items-center gap-2", props.align === "right" ? "justify-end" : "justify-start")}>
+      <span className={cn("min-w-0 truncate", props.align === "right" ? "text-right" : "text-left")}>
+        {formatBrowserSessionProxy(props.account)}
+      </span>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="h-7 shrink-0 px-2 text-[0.68rem] uppercase tracking-[0.16em] text-cyan-200 hover:text-cyan-100"
+        onClick={props.onEdit}
+        disabled={props.disabled}
+        aria-label={`更换 ${props.account.microsoftEmail} 的 Session Proxy`}
+      >
+        <PencilLine className="size-3.5" aria-hidden="true" />
+        编辑
+      </Button>
+    </div>
+  );
 }
 
 function formatExtractorSourceSummary(sources: AccountExtractorProvider[]): string {
@@ -355,6 +388,8 @@ export function AccountsView({
   allCurrentPageSelected,
   graphSettingsConfigured,
   connectingAccountIds,
+  proxyNodes,
+  proxyCheckState,
   onImportContentChange,
   onImportGroupChange,
   onBatchGroupNameChange,
@@ -369,6 +404,8 @@ export function AccountsView({
   onClearSelection,
   onConnectAccount,
   onConnectSelectedAccounts,
+  onCheckProxyNode,
+  onSwitchSessionProxy,
   onSaveProofMailbox,
   onSaveAvailability,
   onSaveExtractorSettings,
@@ -410,6 +447,8 @@ export function AccountsView({
   allCurrentPageSelected: boolean;
   graphSettingsConfigured: boolean;
   connectingAccountIds: number[];
+  proxyNodes: ProxyNode[];
+  proxyCheckState: ProxyCheckState | null;
   onImportContentChange: (value: string) => void;
   onImportGroupChange: (value: string) => void;
   onBatchGroupNameChange: (value: string) => void;
@@ -424,6 +463,8 @@ export function AccountsView({
   onClearSelection: () => void;
   onConnectAccount: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts: (mode?: AccountBatchBootstrapMode) => Promise<void>;
+  onCheckProxyNode: (nodeName: string) => Promise<void>;
+  onSwitchSessionProxy: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
@@ -445,6 +486,11 @@ export function AccountsView({
   const [availabilityReasonDraft, setAvailabilityReasonDraft] = useState("");
   const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [sessionProxyDialogOpen, setSessionProxyDialogOpen] = useState(false);
+  const [sessionProxyAccount, setSessionProxyAccount] = useState<AccountRecord | null>(null);
+  const [sessionProxyActionError, setSessionProxyActionError] = useState<string | null>(null);
+  const [checkingProxyNodeName, setCheckingProxyNodeName] = useState<string | null>(null);
+  const [selectingProxyNodeName, setSelectingProxyNodeName] = useState<string | null>(null);
   const [extractorDialogOpen, setExtractorDialogOpen] = useState(false);
   const [extractorKeyDrafts, setExtractorKeyDrafts] = useState<Record<AccountExtractorProvider, string>>({
     zhanghaoya: "",
@@ -538,6 +584,7 @@ export function AccountsView({
     queuePasswordCopyFeedbackReset();
   };
   const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "cfmail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
+  const currentSessionProxyNode = sessionProxyAccount?.browserSession?.proxyNode?.trim() || null;
 
   const openProofDialog = (account: AccountRecord) => {
     setEditingAccount(account);
@@ -633,6 +680,60 @@ export function AccountsView({
       setAvailabilityBusy(false);
     }
   };
+
+  const openSessionProxyDialog = (account: AccountRecord) => {
+    setSessionProxyAccount(account);
+    setSessionProxyActionError(null);
+    setCheckingProxyNodeName(null);
+    setSelectingProxyNodeName(null);
+    setSessionProxyDialogOpen(true);
+  };
+
+  const closeSessionProxyDialog = (open: boolean) => {
+    setSessionProxyDialogOpen(open);
+    if (open) return;
+    setSessionProxyAccount(null);
+    setSessionProxyActionError(null);
+    setCheckingProxyNodeName(null);
+    setSelectingProxyNodeName(null);
+  };
+
+  const handleCheckProxyNode = async (nodeName: string) => {
+    try {
+      setCheckingProxyNodeName(nodeName);
+      setSessionProxyActionError(null);
+      await onCheckProxyNode(nodeName);
+    } catch (error) {
+      setSessionProxyActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCheckingProxyNodeName((current) => (current === nodeName ? null : current));
+    }
+  };
+
+  const handleSwitchSessionProxy = async (nodeName: string) => {
+    if (!sessionProxyAccount) return;
+    try {
+      setSelectingProxyNodeName(nodeName);
+      setSessionProxyActionError(null);
+      await onSwitchSessionProxy(sessionProxyAccount.id, nodeName);
+      closeSessionProxyDialog(false);
+    } catch (error) {
+      setSessionProxyActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSelectingProxyNodeName((current) => (current === nodeName ? null : current));
+    }
+  };
+
+  const isSessionProxySwitchBlocked = (
+    account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "browserSession">,
+  ) => isConnectBlockedAccount(account) || account.browserSession?.status === "bootstrapping";
+  const isProxyNodeChecking = (nodeName: string) =>
+    checkingProxyNodeName === nodeName
+    || (
+      proxyCheckState?.status === "running"
+      && Array.isArray(proxyCheckState.currentNodeNames)
+      && proxyCheckState.currentNodeNames.includes(nodeName)
+    );
 
   const openExtractorDialog = () => {
     setExtractorKeyDrafts({
@@ -1179,7 +1280,14 @@ export function AccountsView({
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">Session Proxy</dt>
-                              <dd className="max-w-[18rem] text-right">{formatBrowserSessionProxy(row)}</dd>
+                              <dd className="max-w-[20rem] text-right">
+                                <SessionProxyCell
+                                  account={row}
+                                  align="right"
+                                  disabled={isSessionProxySwitchBlocked(row) || batchBusy || connectBusy}
+                                  onEdit={() => openSessionProxyDialog(row)}
+                                />
+                              </dd>
                             </div>
                             <div className="flex items-center justify-between gap-3">
                               <dt className="text-slate-500">Profile</dt>
@@ -1270,7 +1378,13 @@ export function AccountsView({
                           <TableCell className="min-w-[15rem] break-all text-slate-300">{row.proofMailboxAddress || "—"}</TableCell>
                           <TableCell className="whitespace-nowrap">{row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={row.browserSession?.status || "pending"} /></TableCell>
-                          <TableCell className="min-w-[12rem]">{formatBrowserSessionProxy(row)}</TableCell>
+                          <TableCell className="min-w-[15rem]">
+                            <SessionProxyCell
+                              account={row}
+                              disabled={isSessionProxySwitchBlocked(row) || batchBusy || connectBusy}
+                              onEdit={() => openSessionProxyDialog(row)}
+                            />
+                          </TableCell>
                           <TableCell className="min-w-[14rem] font-mono text-xs text-slate-300">{formatBrowserSessionPath(row)}</TableCell>
                           <TableCell className="whitespace-nowrap"><StatusBadge status={getAccountDisplayStatus(row)} /></TableCell>
                           <TableCell className="whitespace-nowrap">
@@ -1685,6 +1799,108 @@ export function AccountsView({
             </Button>
             <Button onClick={handleSaveExtractorKeys} disabled={extractorSettingsBusy}>
               {extractorSettingsBusy ? "保存中…" : "保存 KEY"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={sessionProxyDialogOpen} onOpenChange={closeSessionProxyDialog}>
+        <DialogContent className="!flex w-[min(96vw,68rem)] max-h-[88vh] max-w-[96vw] !flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>更换 Session Proxy</DialogTitle>
+            <DialogDescription>
+              为当前微软账号指定新的代理节点，并立即重新 Bootstrap 会话。列表展示名称、IP、延迟与可执行操作。
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 px-6 py-2">
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
+              <div className="break-all font-medium text-white">{sessionProxyAccount?.microsoftEmail || "—"}</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-slate-400">
+                <span>当前节点：{currentSessionProxyNode || "未绑定"}</span>
+                <span>·</span>
+                <span>当前代理：{sessionProxyAccount ? formatBrowserSessionProxy(sessionProxyAccount) : "—"}</span>
+              </div>
+              <div className="mt-2 text-slate-500">
+                选择后会立即重新 Bootstrap；如果节点临时异常，会保留失败态供后续重试。
+              </div>
+            </div>
+
+            {proxyNodes.length === 0 ? (
+              <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
+                当前没有可选代理节点，请先去代理节点页同步库存。
+              </div>
+            ) : (
+              <ScrollArea className="rounded-3xl border border-white/8 bg-[#0d1728]/70">
+                <Table className="min-w-[46rem]">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="min-w-[14rem]">名称</TableHead>
+                      <TableHead className="min-w-[12rem]">IP</TableHead>
+                      <TableHead className="min-w-[8rem]">延迟</TableHead>
+                      <TableHead className="min-w-[13rem] text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {proxyNodes.map((node) => {
+                      const checking = isProxyNodeChecking(node.nodeName);
+                      const selecting = selectingProxyNodeName === node.nodeName;
+                      const current = currentSessionProxyNode === node.nodeName;
+                      const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
+                      return (
+                        <TableRow key={node.id}>
+                          <TableCell className="min-w-[14rem]">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium text-white">{node.nodeName}</span>
+                              {current ? <Badge variant="info">当前</Badge> : null}
+                            </div>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-slate-300">{node.lastEgressIp || "—"}</TableCell>
+                          <TableCell className="whitespace-nowrap text-slate-200">
+                            {checking ? "测速中…" : formatProxyLatency(node.lastLatencyMs)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="ml-auto flex w-max items-center justify-end gap-2">
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-8 shrink-0 px-3 text-xs"
+                                onClick={() => void handleCheckProxyNode(node.nodeName)}
+                                disabled={selectingProxyNodeName != null || blocked || checking}
+                              >
+                                {checking ? "测速中…" : "测速"}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant={current ? "secondary" : "default"}
+                                size="sm"
+                                className="h-8 shrink-0 px-3 text-xs"
+                                onClick={() => void handleSwitchSessionProxy(node.nodeName)}
+                                disabled={blocked || checking || selecting || current}
+                              >
+                                {selecting ? "切换中…" : current ? "已选中" : "选择"}
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            )}
+
+            {sessionProxyActionError ? (
+              <div className="rounded-2xl border border-rose-300/18 bg-rose-400/8 px-4 py-3 text-sm text-rose-100">
+                {sessionProxyActionError}
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter className="shrink-0">
+            <Button variant="secondary" onClick={() => closeSessionProxyDialog(false)} disabled={selectingProxyNodeName != null}>
+              关闭
             </Button>
           </DialogFooter>
         </DialogContent>
