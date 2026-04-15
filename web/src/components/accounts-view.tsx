@@ -175,14 +175,14 @@ function SessionProxyCell(props: {
       <Button
         type="button"
         variant="ghost"
-        size="sm"
-        className="h-7 shrink-0 px-2 text-[0.68rem] uppercase tracking-[0.16em] text-cyan-200 hover:text-cyan-100"
+        size="icon"
+        className="size-7 shrink-0 rounded-lg text-cyan-200 hover:text-cyan-100"
         onClick={props.onEdit}
         disabled={props.disabled}
         aria-label={`更换 ${props.account.microsoftEmail} 的 Session Proxy`}
+        title="更换 Session Proxy"
       >
         <PencilLine className="size-3.5" aria-hidden="true" />
-        编辑
       </Button>
     </div>
   );
