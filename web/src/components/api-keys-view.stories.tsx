@@ -146,7 +146,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "Tavily KEY 查询与导出页，列表直接显示完整 KEY，并提供行内复制、账号分组继承、分组筛选、跨分页勾选与导出弹窗交互。",
+        component: "Tavily KEY 查询与导出页，桌面列表使用自适应 KEY 列：宽度足够时尽量展开，宽度不足时对 KEY 末尾做省略号截断，复制按钮始终贴近文本尾部；移动端继续完整展示 KEY，并保留账号分组继承、分组筛选、跨分页勾选与导出弹窗交互。",
       },
     },
   },

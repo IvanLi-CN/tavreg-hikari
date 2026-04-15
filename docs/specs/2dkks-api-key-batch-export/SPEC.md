@@ -104,7 +104,7 @@
 - Given 用户跨两页勾选多条 key，When 返回第一页，Then 已勾选状态仍然保留。
 - Given 当前没有勾选项，When 查看 API Keys 页工具区，Then 导出按钮为禁用态。
 - Given 某个微软账号已经属于分组 `team-a`，When 查看其 API key 记录，Then 该记录显示为 `team-a`，且可通过分组筛选命中。
-- Given 用户进入 Tavily Keys 页，When 查看桌面表格或移动卡片，Then 页面只展示单列 `KEY`，不再出现“Key 前缀 / Key 遮罩”。
+- Given 用户进入 Tavily Keys 页，When 查看桌面表格或移动卡片，Then 页面只展示单列 `KEY`，不再出现“Key 前缀 / Key 遮罩”；桌面端 KEY 列会自动吃满剩余宽度，并在宽度不足时以省略号截断，同时复制按钮始终紧贴在文本尾部。
 - Given 用户点击某条记录的 `KEY` 复制按钮，When 剪贴板可用，Then 完整 key 原文被写入剪贴板，且按钮出现成功反馈。
 - Given 已勾选 key，When 点击导出，Then 打开只读多行文本弹窗，并自动全选文本内容。
 - Given 弹窗已经打开，When 点击复制，Then 剪贴板内容与文本框内容完全一致。
@@ -138,7 +138,7 @@
   submission_gate: approved
   story_id_or_title: `Views/ApiKeysView/Default`
   state: `desktop key column`
-  evidence_note: 验证 Tavily Keys 桌面列表已经收敛为单列 `KEY`，直接显示完整 key 原文，并在文本右侧提供复制按钮。
+  evidence_note: 验证 Tavily Keys 桌面列表已经收敛为单列 `KEY`，列宽会自动吃满剩余空间，key 文本在宽度不足时以省略号截断，复制按钮固定贴近文本尾部。
   image:
   ![API Keys desktop key column](./assets/api-keys-key-column-desktop.png)
 

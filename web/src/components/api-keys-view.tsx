@@ -41,6 +41,7 @@ function SortableApiKeyTimeTableHead(props: {
   label: string;
   column: ApiKeySortBy;
   query: ApiKeyQuery;
+  className?: string;
   onQueryChange: (value: ApiKeyQuery) => void;
 }) {
   const state = resolveApiKeySortState(props.query, props.column);
@@ -51,7 +52,7 @@ function SortableApiKeyTimeTableHead(props: {
       : { ...props.query, sortBy: props.column, sortDir: "desc", page: 1 };
 
   return (
-    <TableHead aria-sort={ariaSort}>
+    <TableHead aria-sort={ariaSort} className={props.className}>
       <button
         type="button"
         className={cn(
@@ -330,7 +331,7 @@ export function ApiKeysView({
                 ))}
               </div>
               <div className="hidden md:block">
-                <Table className="min-w-[920px]">
+                <Table className="min-w-[980px] w-full table-fixed">
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-14">
@@ -340,17 +341,19 @@ export function ApiKeysView({
                           aria-label="select-current-page"
                         />
                       </TableHead>
-                      <TableHead>账号</TableHead>
-                      <TableHead>分组</TableHead>
-                      <TableHead className="min-w-[25rem]">KEY</TableHead>
-                      <TableHead>状态</TableHead>
+                      <TableHead className="w-[20%] min-w-[15rem]">账号</TableHead>
+                      <TableHead className="w-[10rem]">分组</TableHead>
+                      <TableHead>KEY</TableHead>
+                      <TableHead className="w-[9rem]">状态</TableHead>
                       <SortableApiKeyTimeTableHead
+                        className="w-[11rem]"
                         label="提取时间"
                         column="extractedAt"
                         query={query}
                         onQueryChange={onQueryChange}
                       />
                       <SortableApiKeyTimeTableHead
+                        className="w-[11rem]"
                         label="最近验证"
                         column="lastVerifiedAt"
                         query={query}
@@ -370,9 +373,14 @@ export function ApiKeysView({
                         </TableCell>
                         <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
                         <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
-                        <TableCell className="min-w-[25rem]">
-                          <div className="flex items-start gap-2">
-                            <span className="min-w-0 flex-1 break-all font-mono text-[0.92rem] text-slate-100">{row.apiKey}</span>
+                        <TableCell className="min-w-0">
+                          <div className="inline-flex max-w-full items-center gap-2 align-middle">
+                            <span
+                              className="min-w-0 shrink truncate font-mono text-[0.92rem] text-slate-100"
+                              title={row.apiKey}
+                            >
+                              {row.apiKey}
+                            </span>
                             <CopyValueButton
                               status={getCopyStatus(row.id)}
                               ariaLabel={`复制 ${row.microsoftEmail} 的 KEY`}
