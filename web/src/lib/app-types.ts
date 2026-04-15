@@ -238,8 +238,7 @@ export type ApiKeyRecord = {
   accountId: number;
   microsoftEmail: string;
   groupName: string | null;
-  apiKeyMasked: string;
-  apiKeyPrefix: string;
+  apiKey: string;
   status: string;
   extractedAt: string;
   lastVerifiedAt: string | null;

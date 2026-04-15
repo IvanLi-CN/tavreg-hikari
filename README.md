@@ -16,7 +16,7 @@
 - 微软账号页现在会在导入/自动提取后立即为账号创建持久浏览器会话 bootstrap：自动选取代理池 IP、记住登录态、保存 `output/browser-profiles/accounts/<accountId>/chrome`，并在账号列表展示 session 状态、代理/IP 与 profile 路径摘要。
 - 后续 Tavily attempt 会优先复用账号上次成功的代理 IP；若原 IP 不在池中，则按同 region、再按全池健康节点的 LRU 选择代理，并继续复用同一持久 profile。
 - 微软邮箱页：通过 Microsoft Graph OAuth 接入 Inbox，只读显示导入账号对应的收信状态、邮件列表与正文；主工作台固定为三栏收件箱视图，Graph 凭据改到独立设置页维护。
-- API Keys 页：查询已提取的 key 前缀、状态、账号归属与时间信息。
+- API Keys 页：查询已提取的完整 KEY、状态、账号归属与时间信息，并支持行内复制。
 - 代理节点页：修改 Mihomo 订阅设置、同步节点、检查当前节点/全部节点/单节点，并查看出口 IP、地理信息和 24 小时成功提取数量。
 
 ## 运行前准备
