@@ -1,5 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -74,6 +74,58 @@ function SortableApiKeyTimeTableHead(props: {
   );
 }
 
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  if (typeof document === "undefined") {
+    throw new Error("clipboard unavailable");
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  const succeeded = document.execCommand("copy");
+  textarea.remove();
+  if (!succeeded) {
+    throw new Error("clipboard unavailable");
+  }
+}
+
+function CopyValueButton(props: {
+  status: "idle" | "copied" | "failed";
+  ariaLabel: string;
+  onClick: () => void;
+}) {
+  const Icon = props.status === "copied" ? Check : props.status === "failed" ? AlertCircle : Copy;
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className={cn(
+        "size-8 shrink-0 rounded-lg",
+        props.status === "copied"
+          ? "text-emerald-300 hover:text-emerald-200"
+          : props.status === "failed"
+            ? "text-rose-200 hover:text-rose-100"
+            : "text-cyan-200/90 hover:text-cyan-100",
+      )}
+      aria-label={props.ariaLabel}
+      title={props.ariaLabel}
+      onClick={props.onClick}
+    >
+      <Icon className="size-3.5" aria-hidden="true" />
+    </Button>
+  );
+}
+
 export function ApiKeysView({
   apiKeys,
   query,
@@ -108,6 +160,11 @@ export function ApiKeysView({
   onSaveExport: () => void;
 }) {
   const exportTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const copyResetTimerRef = useRef<number | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<{
+    apiKeyId: number | null;
+    status: "idle" | "copied" | "failed";
+  }>({ apiKeyId: null, status: "idle" });
   const pageCount = Math.max(1, Math.ceil(Math.max(1, apiKeys.total) / Math.max(1, query.pageSize)));
   const selectedOnPage = apiKeys.rows.filter((row) => selectedIds.includes(row.id)).length;
   const allCurrentPageSelected = apiKeys.rows.length > 0 && selectedOnPage === apiKeys.rows.length;
@@ -122,6 +179,34 @@ export function ApiKeysView({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [exportContent, exportOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current != null) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
+  }, []);
+
+  function getCopyStatus(apiKeyId: number): "idle" | "copied" | "failed" {
+    return copyFeedback.apiKeyId === apiKeyId ? copyFeedback.status : "idle";
+  }
+
+  async function handleCopyKey(apiKeyId: number, value: string): Promise<void> {
+    if (copyResetTimerRef.current != null) {
+      window.clearTimeout(copyResetTimerRef.current);
+    }
+    try {
+      await copyTextToClipboard(value);
+      setCopyFeedback({ apiKeyId, status: "copied" });
+    } catch {
+      setCopyFeedback({ apiKeyId, status: "failed" });
+    }
+    copyResetTimerRef.current = window.setTimeout(() => {
+      setCopyFeedback((current) => (current.apiKeyId === apiKeyId ? { apiKeyId: null, status: "idle" } : current));
+      copyResetTimerRef.current = null;
+    }, 1600);
+  }
 
   return (
     <>
@@ -159,7 +244,7 @@ export function ApiKeysView({
                 name="api-key-query"
                 value={query.q}
                 onChange={(event) => onQueryChange({ ...query, q: event.target.value, page: 1 })}
-                placeholder="邮箱 / 分组 / 前缀"
+                placeholder="邮箱 / 分组 / KEY"
               />
             </FilterField>
             <FilterField label="状态">
@@ -207,18 +292,24 @@ export function ApiKeysView({
                         onCheckedChange={(checked) => onToggleSelection(row.id, checked === true)}
                         aria-label={`select-${row.microsoftEmail}`}
                       />
-                      <div className="min-w-0 flex-1">
+                      <div className="min-w-0 flex-1 overflow-hidden">
                         <div className="flex items-start justify-between gap-3">
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <div className="break-all text-sm font-medium text-white">{row.microsoftEmail}</div>
-                            <div className="mt-1 text-sm text-slate-400">{row.apiKeyPrefix}</div>
                           </div>
                           <StatusBadge status={row.status} />
                         </div>
                         <dl className="mt-4 grid gap-3 text-sm text-slate-300">
-                          <div className="flex items-center justify-between gap-3">
-                            <dt className="text-slate-500">遮罩</dt>
-                            <dd>{row.apiKeyMasked}</dd>
+                          <div className="grid gap-2 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
+                            <div className="flex items-center justify-between gap-2">
+                              <dt className="text-slate-500">KEY</dt>
+                              <CopyValueButton
+                                status={getCopyStatus(row.id)}
+                                ariaLabel={`复制 ${row.microsoftEmail} 的 KEY`}
+                                onClick={() => void handleCopyKey(row.id, row.apiKey)}
+                              />
+                            </div>
+                            <dd className="min-w-0 break-all font-mono text-[0.92rem] text-slate-100">{row.apiKey}</dd>
                           </div>
                           <div className="flex items-center justify-between gap-3">
                             <dt className="text-slate-500">分组</dt>
@@ -251,8 +342,7 @@ export function ApiKeysView({
                       </TableHead>
                       <TableHead>账号</TableHead>
                       <TableHead>分组</TableHead>
-                      <TableHead>Key 前缀</TableHead>
-                      <TableHead>Key 遮罩</TableHead>
+                      <TableHead className="min-w-[25rem]">KEY</TableHead>
                       <TableHead>状态</TableHead>
                       <SortableApiKeyTimeTableHead
                         label="提取时间"
@@ -280,8 +370,16 @@ export function ApiKeysView({
                         </TableCell>
                         <TableCell className="min-w-[15rem] whitespace-nowrap">{row.microsoftEmail}</TableCell>
                         <TableCell className="whitespace-nowrap">{row.groupName || "—"}</TableCell>
-                        <TableCell>{row.apiKeyPrefix}</TableCell>
-                        <TableCell>{row.apiKeyMasked}</TableCell>
+                        <TableCell className="min-w-[25rem]">
+                          <div className="flex items-start gap-2">
+                            <span className="min-w-0 flex-1 break-all font-mono text-[0.92rem] text-slate-100">{row.apiKey}</span>
+                            <CopyValueButton
+                              status={getCopyStatus(row.id)}
+                              ariaLabel={`复制 ${row.microsoftEmail} 的 KEY`}
+                              onClick={() => void handleCopyKey(row.id, row.apiKey)}
+                            />
+                          </div>
+                        </TableCell>
                         <TableCell><StatusBadge status={row.status} /></TableCell>
                         <TableCell>{formatDate(row.extractedAt)}</TableCell>
                         <TableCell>{formatDate(row.lastVerifiedAt)}</TableCell>

@@ -2115,7 +2115,7 @@ export class AppDatabase {
     const params: unknown[] = [];
     if (filters.q?.trim()) {
       const pattern = `%${filters.q.trim().toLowerCase()}%`;
-      where.push("(LOWER(a.microsoft_email) LIKE ? OR LOWER(k.api_key_prefix) LIKE ? OR LOWER(COALESCE(a.group_name, '')) LIKE ?)");
+      where.push("(LOWER(a.microsoft_email) LIKE ? OR LOWER(k.api_key) LIKE ? OR LOWER(COALESCE(a.group_name, '')) LIKE ?)");
       params.push(pattern, pattern, pattern);
     }
     if (filters.status?.trim()) {

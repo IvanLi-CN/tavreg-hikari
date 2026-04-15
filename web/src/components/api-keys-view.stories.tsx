@@ -30,8 +30,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 301,
       microsoftEmail: "sort.alpha@example.test",
       groupName: "linked",
-      apiKeyMasked: "tvly-****-alpha",
-      apiKeyPrefix: "tvly-alpha",
+      apiKey: "tvly-alpha-live-key",
       status: "active",
       extractedAt: "2026-03-18T09:00:00.000Z",
       lastVerifiedAt: "2026-03-18T09:10:00.000Z",
@@ -41,8 +40,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 302,
       microsoftEmail: "sort.beta@example.test",
       groupName: "ops",
-      apiKeyMasked: "tvly-****-beta",
-      apiKeyPrefix: "tvly-beta",
+      apiKey: "tvly-beta-live-key",
       status: "active",
       extractedAt: "2026-03-18T12:00:00.000Z",
       lastVerifiedAt: "2026-03-18T07:00:00.000Z",
@@ -52,8 +50,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 303,
       microsoftEmail: "sort.gamma@example.test",
       groupName: "ops",
-      apiKeyMasked: "tvly-****-gamma",
-      apiKeyPrefix: "tvly-gamma",
+      apiKey: "tvly-gamma-live-key",
       status: "revoked",
       extractedAt: "2026-03-18T08:00:00.000Z",
       lastVerifiedAt: null,
@@ -82,7 +79,7 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
     if (query.status && row.status !== query.status) return false;
     if (query.groupName && (row.groupName || "") !== query.groupName) return false;
     if (!pattern) return true;
-    return [row.microsoftEmail, row.apiKeyPrefix, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
+    return [row.microsoftEmail, row.apiKey, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
   });
   const sortedRows = [...filteredRows].sort((left, right) => {
     const primary =
@@ -149,7 +146,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "API key 查询与导出页，包含账号分组继承、分组筛选、跨分页勾选、导出弹窗与复制/保存动作的交互面。",
+        component: "Tavily KEY 查询与导出页，列表直接显示完整 KEY，并提供行内复制、账号分组继承、分组筛选、跨分页勾选与导出弹窗交互。",
       },
     },
   },
@@ -246,6 +243,17 @@ export const ActionsOnly: Story = {
     onExportOpenChange: fn(),
     onCopyExport: fn(),
     onSaveExport: fn(),
+  },
+};
+
+export const CopyKeyPlay: Story = {
+  args: baseArgs,
+  render: () => <ApiKeysStorySurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: "复制 beta@example.test 的 KEY" });
+    await userEvent.click(trigger);
+    await expect(trigger.querySelector("svg")).not.toBeNull();
   },
 };
 

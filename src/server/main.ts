@@ -1804,11 +1804,7 @@ async function main(): Promise<void> {
           pageSize,
           summary: data.summary,
           groups: db.listAccountGroups(),
-          rows: data.rows.map((row) => ({
-            ...row,
-            apiKeyMasked: maskSecret(row.apiKey),
-            apiKey: undefined,
-          })),
+          rows: data.rows,
         });
       }
 
