@@ -10,8 +10,8 @@ function createDefaultQuery(): ApiKeyQuery {
 }
 
 const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | null }> = {
-  1: { apiKey: "tvly-real-key-a", extractedIp: "1.2.3.4" },
-  2: { apiKey: "tvly-real-key-b", extractedIp: null },
+  1: { apiKey: sampleApiKeys.rows[0]!.apiKey, extractedIp: "1.2.3.4" },
+  2: { apiKey: sampleApiKeys.rows[1]!.apiKey, extractedIp: null },
 };
 
 function buildExportContent(selectedIds: number[]): string {
@@ -30,8 +30,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 301,
       microsoftEmail: "sort.alpha@example.test",
       groupName: "linked",
-      apiKeyMasked: "tvly-****-alpha",
-      apiKeyPrefix: "tvly-alpha",
+      apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T09:00:00.000Z",
       lastVerifiedAt: "2026-03-18T09:10:00.000Z",
@@ -41,8 +40,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 302,
       microsoftEmail: "sort.beta@example.test",
       groupName: "ops",
-      apiKeyMasked: "tvly-****-beta",
-      apiKeyPrefix: "tvly-beta",
+      apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T12:00:00.000Z",
       lastVerifiedAt: "2026-03-18T07:00:00.000Z",
@@ -52,8 +50,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 303,
       microsoftEmail: "sort.gamma@example.test",
       groupName: "ops",
-      apiKeyMasked: "tvly-****-gamma",
-      apiKeyPrefix: "tvly-gamma",
+      apiKey: "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",
       status: "revoked",
       extractedAt: "2026-03-18T08:00:00.000Z",
       lastVerifiedAt: null,
@@ -82,7 +79,7 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
     if (query.status && row.status !== query.status) return false;
     if (query.groupName && (row.groupName || "") !== query.groupName) return false;
     if (!pattern) return true;
-    return [row.microsoftEmail, row.apiKeyPrefix, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
+    return [row.microsoftEmail, row.apiKey, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
   });
   const sortedRows = [...filteredRows].sort((left, right) => {
     const primary =
@@ -149,7 +146,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "API key 查询与导出页，包含账号分组继承、分组筛选、跨分页勾选、导出弹窗与复制/保存动作的交互面。",
+        component: "Tavily KEY 查询与导出页，桌面列表使用自适应 KEY 列：宽度足够时尽量展开，宽度不足时对 KEY 末尾做省略号截断，复制按钮始终贴近文本尾部；移动端继续完整展示 KEY，并保留账号分组继承、分组筛选、跨分页勾选与导出弹窗交互。",
       },
     },
   },
@@ -224,9 +221,7 @@ export const BatchExportPlay: Story = {
     await userEvent.click(exportButton);
     const dialog = within(document.body).getByRole("dialog", { name: "导出 API Keys" });
     await expect(dialog).toBeInTheDocument();
-    await expect(within(dialog).getByRole("textbox", { name: "api-key-export-content" })).toHaveValue(
-      "tvly-real-key-a | 1.2.3.4\ntvly-real-key-b | ",
-    );
+    await expect(within(dialog).getByRole("textbox", { name: "api-key-export-content" })).toHaveValue(buildExportContent([1, 2]));
   },
 };
 
@@ -246,6 +241,17 @@ export const ActionsOnly: Story = {
     onExportOpenChange: fn(),
     onCopyExport: fn(),
     onSaveExport: fn(),
+  },
+};
+
+export const CopyKeyPlay: Story = {
+  args: baseArgs,
+  render: () => <ApiKeysStorySurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: "复制 beta@example.test 的 KEY" });
+    await userEvent.click(trigger);
+    await expect(trigger.querySelector("svg")).not.toBeNull();
   },
 };
 

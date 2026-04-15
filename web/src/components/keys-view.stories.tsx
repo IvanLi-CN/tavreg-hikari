@@ -39,8 +39,8 @@ const defaultCredentialQuery: ChatGptCredentialQuery = {
 };
 
 const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | null }> = {
-  1: { apiKey: "tvly-real-key-a", extractedIp: "1.2.3.4" },
-  2: { apiKey: "tvly-real-key-b", extractedIp: null },
+  1: { apiKey: sampleApiKeys.rows[0]!.apiKey, extractedIp: "1.2.3.4" },
+  2: { apiKey: sampleApiKeys.rows[1]!.apiKey, extractedIp: null },
 };
 
 const grokExportFixtureById: Record<number, { email: string; password: string; sso: string }> = {
@@ -96,7 +96,7 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
     if (query.status && row.status !== query.status) return false;
     if (query.groupName && (row.groupName || "") !== query.groupName) return false;
     if (!pattern) return true;
-    return [row.microsoftEmail, row.apiKeyPrefix, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
+    return [row.microsoftEmail, row.apiKey, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
   });
   const sortedRows = [...filteredRows].sort((left, right) => {
     const primary =
@@ -294,7 +294,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "统一的 Keys 页，内含 Tavily 与 ChatGPT 两个数据源 tabs。ChatGPT tab 以与 Tavily 相同的列表语义展示 keys 记录，行内只提供复制与下载动作，不在页面展示明文详情。",
+        component: "统一的 Keys 页，内含 Tavily、Grok 与 ChatGPT 三个数据源 tabs。Tavily tab 直接显示完整 KEY 并提供行内复制；ChatGPT tab 仍只提供复制与下载动作，不在页面展示明文详情。",
       },
     },
   },
