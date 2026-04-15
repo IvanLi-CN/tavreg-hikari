@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 BASE_URL = "http://127.0.0.1:4317"
-REPO_ROOT = Path("/Users/ivan/.codex/worktrees/2949/tavreg-hikari")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ROOT = REPO_ROOT / "output" / "web-runs" / f"chatgpt-parallel-{int(time.time())}"
 RUN_ROOT.mkdir(parents=True, exist_ok=True)
 STARTUP_STAGGER_SECONDS = 10
@@ -57,6 +57,17 @@ def api_get(path: str):
         return json.load(response)
 
 
+def api_post(path: str, payload=None):
+    request = urllib.request.Request(
+        f"{BASE_URL}{path}",
+        data=json.dumps(payload or {}).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.load(response)
+
+
 def pick_free_port() -> int:
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -94,7 +105,7 @@ def select_nodes(limit: int):
 
 
 def get_draft():
-    payload = api_get("/api/chatgpt/draft")
+    payload = api_post("/api/chatgpt/attempt-draft")
     return payload["draft"]
 
 

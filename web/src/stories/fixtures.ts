@@ -9,7 +9,6 @@ import type {
   ApiKeyRecord,
   ApiKeysPayload,
   ChatGptCredentialRecord,
-  ChatGptDraft,
   EventRecord,
   GrokApiKeysPayload,
   JobSnapshot,
@@ -689,7 +688,14 @@ export const sampleGrokApiKeys: GrokApiKeysPayload = {
   ],
 };
 
-export const sampleChatGptDraft: ChatGptDraft = {
+export const sampleChatGptDraft: {
+  email: string;
+  password: string;
+  nickname: string;
+  birthDate: string;
+  mailboxId: string;
+  generatedAt: string;
+} = {
   email: "nova-demo318@alpha.example.test",
   password: "Pw8$hikariDemo19",
   nickname: "Nova318",

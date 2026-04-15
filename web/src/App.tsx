@@ -34,8 +34,6 @@ import type {
   ChatGptCredentialSort,
   ChatGptCredentialsPayload,
   ChatGptJobDraft,
-  ChatGptDraft,
-  ChatGptDraftPayload,
   GrokApiKeyExportPayload,
   GrokApiKeyQuery,
   GrokApiKeysPayload,
@@ -72,7 +70,6 @@ import {
   resolvePendingRunModeAvailabilityFallback,
 } from "@/lib/run-mode";
 import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
-import { shouldLoadChatGptDraft } from "@/lib/chatgpt-draft-load";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -204,7 +201,6 @@ export function App() {
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
   const [grokJob, setGrokJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("grok"));
   const [chatGptJob, setChatGptJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("chatgpt"));
-  const [chatGptDraft, setChatGptDraft] = useState<ChatGptDraft | null>(null);
   const [chatGptJobDraft, setChatGptJobDraft] = useState<ChatGptJobDraft>({
     runMode: "headed",
     need: 1,
@@ -402,7 +398,6 @@ export function App() {
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
-  const [chatGptDraftBusy, setChatGptDraftBusy] = useState(false);
   const [grokJobBusy, setGrokJobBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
@@ -445,19 +440,6 @@ export function App() {
       return;
     }
     setJob(snapshot);
-  };
-  const refreshChatGptDraft = async (requestedEmail?: string) => {
-    try {
-      setChatGptDraftBusy(true);
-      const params = new URLSearchParams();
-      if (requestedEmail?.trim()) {
-        params.set("email", requestedEmail.trim());
-      }
-      const payload = await api<ChatGptDraftPayload>(`/api/chatgpt/draft${params.size > 0 ? `?${params.toString()}` : ""}`);
-      setChatGptDraft(payload.draft);
-    } finally {
-      setChatGptDraftBusy(false);
-    }
   };
   const refreshChatGptCredentials = async (
     nextQuery = chatGptCredentialQueryRef.current,
@@ -830,13 +812,6 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, []);
-
-  useEffect(() => {
-    if (!shouldLoadChatGptDraft({ activePage, draft: chatGptDraft, busy: chatGptDraftBusy })) return;
-    void refreshChatGptDraft().catch((err) => {
-      setError(err instanceof Error ? err.message : String(err));
-    });
-  }, [activePage, chatGptDraft, chatGptDraftBusy]);
 
   useEffect(() => {
     if (job.job || !proxies || !extractorSettings || jobDraftTouched) return;
