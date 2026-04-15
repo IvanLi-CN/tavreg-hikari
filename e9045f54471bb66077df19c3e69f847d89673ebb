@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.8.1",
+  "base_stable_version": "0.8.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-15T02:34:01Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.8.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "d02a18a7e7e2676d83248b4d6035b5c8334a9e87",
+  "pr_number": 43,
+  "pr_title": "fix(web): remove stale chatgpt draft preload",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.8.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.8.1",
+  "target_sha": "e9045f54471bb66077df19c3e69f847d89673ebb",
+  "type_label": "type:patch"
+}
