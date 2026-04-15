@@ -39,8 +39,8 @@ const defaultCredentialQuery: ChatGptCredentialQuery = {
 };
 
 const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | null }> = {
-  1: { apiKey: "tvly-real-key-a", extractedIp: "1.2.3.4" },
-  2: { apiKey: "tvly-real-key-b", extractedIp: null },
+  1: { apiKey: sampleApiKeys.rows[0]!.apiKey, extractedIp: "1.2.3.4" },
+  2: { apiKey: sampleApiKeys.rows[1]!.apiKey, extractedIp: null },
 };
 
 const grokExportFixtureById: Record<number, { email: string; password: string; sso: string }> = {

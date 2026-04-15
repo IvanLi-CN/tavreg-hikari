@@ -10,8 +10,8 @@ function createDefaultQuery(): ApiKeyQuery {
 }
 
 const exportFixtureById: Record<number, { apiKey: string; extractedIp: string | null }> = {
-  1: { apiKey: "tvly-real-key-a", extractedIp: "1.2.3.4" },
-  2: { apiKey: "tvly-real-key-b", extractedIp: null },
+  1: { apiKey: sampleApiKeys.rows[0]!.apiKey, extractedIp: "1.2.3.4" },
+  2: { apiKey: sampleApiKeys.rows[1]!.apiKey, extractedIp: null },
 };
 
 function buildExportContent(selectedIds: number[]): string {
@@ -30,7 +30,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 301,
       microsoftEmail: "sort.alpha@example.test",
       groupName: "linked",
-      apiKey: "tvly-alpha-live-key",
+      apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T09:00:00.000Z",
       lastVerifiedAt: "2026-03-18T09:10:00.000Z",
@@ -40,7 +40,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 302,
       microsoftEmail: "sort.beta@example.test",
       groupName: "ops",
-      apiKey: "tvly-beta-live-key",
+      apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T12:00:00.000Z",
       lastVerifiedAt: "2026-03-18T07:00:00.000Z",
@@ -50,7 +50,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       accountId: 303,
       microsoftEmail: "sort.gamma@example.test",
       groupName: "ops",
-      apiKey: "tvly-gamma-live-key",
+      apiKey: "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",
       status: "revoked",
       extractedAt: "2026-03-18T08:00:00.000Z",
       lastVerifiedAt: null,
@@ -221,9 +221,7 @@ export const BatchExportPlay: Story = {
     await userEvent.click(exportButton);
     const dialog = within(document.body).getByRole("dialog", { name: "导出 API Keys" });
     await expect(dialog).toBeInTheDocument();
-    await expect(within(dialog).getByRole("textbox", { name: "api-key-export-content" })).toHaveValue(
-      "tvly-real-key-a | 1.2.3.4\ntvly-real-key-b | ",
-    );
+    await expect(within(dialog).getByRole("textbox", { name: "api-key-export-content" })).toHaveValue(buildExportContent([1, 2]));
   },
 };
 
