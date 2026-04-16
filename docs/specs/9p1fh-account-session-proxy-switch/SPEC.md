@@ -77,8 +77,8 @@
 - capture_scope: `dialog`
 - sensitive_exclusion: `N/A`
 - submission_gate: `pending-owner-approval`
-- story_id_or_title: `Views/AccountsView/SessionBootstrapStates`
-- state: 桌面表格从 `Session Proxy` 行内编辑入口打开更换代理节点对话框，并展示 `名称 / IP / 延迟 / 操作` 四列。
+- story_id_or_title: `Views/AccountsView/Session Proxy Switch Dialog Play`
+- state: 重新打开桌面对话框后，当前节点与当前代理都会回显为刚刚切换到的 `Seoul-02`，且当前行保留 `当前` 标识。
 ![Session Proxy 更换对话框（桌面）](./assets/session-proxy-dialog-desktop.png)
 
 - source_type: `storybook_canvas`
@@ -86,8 +86,8 @@
 - capture_scope: `browser-viewport`
 - sensitive_exclusion: `N/A`
 - submission_gate: `pending-owner-approval`
-- story_id_or_title: `Views/AccountsView/SessionBootstrapStates`
-- state: 选择 `Seoul-02` 后，账号行的 `Session Proxy` 快照更新为新的 `IP · 节点名`，并保留行内编辑入口。
+- story_id_or_title: `Views/AccountsView/Session Proxy Switch Dialog Play`
+- state: 选择 `Seoul-02` 后，账号列表会立即把 `Session Proxy` 单元格更新为新节点名，并清除旧 IP，避免出现旧 `IP · 节点名` 的混合回显。
 ![Session Proxy 切换结果（桌面表格）](./assets/session-proxy-switch-result.png)
 
 - source_type: `storybook_canvas`

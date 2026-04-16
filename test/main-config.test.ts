@@ -148,6 +148,29 @@ test("manual rebootstrap refresh keeps proxy refresh best-effort instead of fail
   expect(source).toContain("if (mailboxRefreshError) {");
 });
 
+
+test("manual proxy switch queue writes a pending proxy snapshot before the async bootstrap starts", async () => {
+  const mainSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const storageSource = await readFile(path.join(repoRoot, "src/storage/app-db.ts"), "utf8");
+
+  expect(mainSource).toContain("db.queueBrowserSessionBootstrap(accountId, {");
+  expect(mainSource).toContain("proxyNode: requestedProxyNode,");
+  expect(mainSource).toContain("clearProxySnapshot: requestedProxyNode != null,");
+  expect(storageSource).toContain("clearProxySnapshot?: boolean;");
+  expect(storageSource).toContain("proxy_ip = CASE WHEN ? THEN NULL ELSE proxy_ip END");
+  expect(storageSource).toContain("proxy_country = CASE WHEN ? THEN NULL ELSE proxy_country END");
+});
+
+test("session proxy dialog derives its current account from the latest rows instead of a stale snapshot", async () => {
+  const source = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
+
+  expect(source).toContain("const [sessionProxyAccountId, setSessionProxyAccountId] = useState<number | null>(null);");
+  expect(source).toContain("const sessionProxyAccount = sessionProxyAccountId == null");
+  expect(source).toContain("accounts.rows.find((row) => row.id === sessionProxyAccountId) || null;");
+  expect(source).toContain("setSessionProxyAccountId(account.id);");
+});
+
+
 test("batch bootstrap preview excludes accounts that are already queued in memory", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   expect(source).toContain("queuedAccountIds?.has(accountId)");
