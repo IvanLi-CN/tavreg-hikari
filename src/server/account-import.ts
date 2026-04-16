@@ -54,6 +54,9 @@ export interface ImportPreviewResult {
 const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const LEADING_BOUNDARY_PATTERN = /^(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)/;
 const TRAILING_BOUNDARY_PATTERN = /(?:\s*(?:[,|:：;；]+|[-—–]{2,})\s*|\s+)$/;
+const MICROSOFT_EMAIL_DOMAIN_PATTERN = /@(outlook|hotmail|live|msn)\.[A-Z0-9.-]+$/i;
+const MICROSOFT_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MICROSOFT_TOKEN_PATTERN = /^M\.[A-Za-z0-9!$*._-]{32,}\$\$$/;
 
 function normalizeLine(rawLine: string): string {
   return rawLine
@@ -69,6 +72,17 @@ function readPasswordAfterEmail(value: string): string {
 
 function readPasswordBeforeEmail(value: string): string {
   return value.trimStart().replace(TRAILING_BOUNDARY_PATTERN, "").trim();
+}
+
+function readMicrosoftMultiSegmentPassword(line: string, email: string): string | null {
+  const parts = line.split(/\s*----\s*/).map((segment) => segment.trim());
+  if (parts.length < 4) return null;
+  if (!MICROSOFT_EMAIL_DOMAIN_PATTERN.test(email)) return null;
+  if ((parts[0] || "").toLowerCase() !== email.toLowerCase()) return null;
+  if (!MICROSOFT_UUID_PATTERN.test(parts[2] || "")) return null;
+  if (!MICROSOFT_TOKEN_PATTERN.test(parts[3] || "")) return null;
+  const password = parts[1] || "";
+  return password || null;
 }
 
 export function parseImportLine(rawLine: string, lineNumber: number): ParsedImportEntry | InvalidImportRow {
@@ -92,8 +106,9 @@ export function parseImportLine(rawLine: string, lineNumber: number): ParsedImpo
 
   const email = emailMatch[0].trim();
   const normalizedEmail = email.toLowerCase();
+  const microsoftMultiSegmentPassword = emailMatch.index === 0 ? readMicrosoftMultiSegmentPassword(normalizedLine, email) : null;
   const before = readPasswordBeforeEmail(normalizedLine.slice(0, emailMatch.index));
-  const after = readPasswordAfterEmail(normalizedLine.slice(emailMatch.index + email.length));
+  const after = microsoftMultiSegmentPassword || readPasswordAfterEmail(normalizedLine.slice(emailMatch.index + email.length));
   const password = after || before;
 
   if (!password) {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildImportPreview, parseImportContent, parseImportLine } from "../src/server/account-import.js";
+import { parseImportLine as parseWebImportLine } from "../web/src/lib/account-import";
 
 describe("parseImportLine", () => {
   test("supports common separators and format correction", () => {
@@ -26,6 +27,73 @@ describe("parseImportLine", () => {
     expect(parseImportLine("password888 ---- sigma@example.test", 1)).toMatchObject({
       email: "sigma@example.test",
       password: "password888",
+    });
+  });
+
+  test("keeps only the first password segment for microsoft dashed payloads", () => {
+    const rawLine =
+      "SusanHoward8543@outlook.com----mqyv3929----9e5f94bc-e8a4-4e73-b8be-63364c29d753----M.C531_BL2.0.U.-abcdefghijklmnopqrstuvwxyz1234567890token$$";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "SusanHoward8543@outlook.com",
+      password: "mqyv3929",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "SusanHoward8543@outlook.com",
+      password: "mqyv3929",
+    });
+  });
+
+  test("supports microsoft consumer mailboxes with multi-level domains", () => {
+    const rawLine =
+      "user@outlook.co.uk----secret123----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-abcdefghijklmnopqrstuvwxyz1234567890token$$";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@outlook.co.uk",
+      password: "secret123",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@outlook.co.uk",
+      password: "secret123",
+    });
+  });
+
+  test("keeps dashed passwords intact when trailing fields do not look like microsoft metadata", () => {
+    const rawLine = "user@example.com----abc----def";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "abc----def",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "abc----def",
+    });
+  });
+
+  test("keeps dashed passwords intact when the suffix is only uuid-like", () => {
+    const rawLine = "user@example.com----secret----123e4567-e89b-12d3-a456-426614174000";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "secret----123e4567-e89b-12d3-a456-426614174000",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "secret----123e4567-e89b-12d3-a456-426614174000",
+    });
+  });
+
+  test("keeps dashed passwords intact when the token-like suffix does not match the microsoft sample shape", () => {
+    const rawLine = "user@example.com----secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$",
     });
   });
 
@@ -59,6 +127,11 @@ describe("parseImportLine", () => {
       rawLine: "alpha@example.test",
       reason: "password_not_found",
     });
+    expect(parseImportLine("alpha@example.test----", 4)).toEqual({
+      lineNumber: 4,
+      rawLine: "alpha@example.test----",
+      reason: "password_not_found",
+    });
   });
 });
 
@@ -67,19 +140,24 @@ describe("parseImportContent", () => {
     const parsed = parseImportContent(`
 alpha@example.test,password123
 beta@example.test----password456
+SusanHoward8543@outlook.com----mqyv3929----9e5f94bc-e8a4-4e73-b8be-63364c29d753----M.C531_BL2.0.U.-abcdefghijklmnopqrstuvwxyz1234567890token$$
 invalid-line
 password789 gamma@example.test
     `);
 
-    expect(parsed.entries).toHaveLength(3);
+    expect(parsed.entries).toHaveLength(4);
     expect(parsed.entries.map((entry) => entry.email)).toEqual([
       "alpha@example.test",
       "beta@example.test",
+      "SusanHoward8543@outlook.com",
       "gamma@example.test",
     ]);
+    expect(parsed.entries.find((entry) => entry.email === "SusanHoward8543@outlook.com")).toMatchObject({
+      password: "mqyv3929",
+    });
     expect(parsed.invalidRows).toEqual([
       {
-        lineNumber: 4,
+        lineNumber: 5,
         rawLine: "invalid-line",
         reason: "email_not_found",
       },
