@@ -1315,7 +1315,11 @@ async function main(): Promise<void> {
         sessionBootstrapRequestedProxyNodes.delete(accountId);
       }
     }
-    db.queueBrowserSessionBootstrap(accountId);
+    db.queueBrowserSessionBootstrap(accountId, {
+      browserEngine: "chrome",
+      proxyNode: requestedProxyNode,
+      clearProxySnapshot: requestedProxyNode !== undefined,
+    });
     sessionBootstrapQueuedIds.add(accountId);
     void runExclusiveMailboxOauth(async () => {
       try {

@@ -103,7 +103,6 @@ describe("account session bootstrap helpers", () => {
   test("normalizes manual rebootstrap requests with optional proxy override", () => {
     expect(normalizeAccountSessionRebootstrapRequest(null)).toEqual({
       force: true,
-      proxyNode: null,
     });
     expect(normalizeAccountSessionRebootstrapRequest({ force: false, proxyNode: "  Seoul-02  " })).toEqual({
       force: false,
@@ -113,9 +112,16 @@ describe("account session bootstrap helpers", () => {
       force: true,
       proxyNode: null,
     });
+    expect(normalizeAccountSessionRebootstrapRequest({ force: false })).toEqual({
+      force: false,
+    });
   });
 
   test("validates requested session proxy nodes against current inventory", () => {
+    expect(resolveRequestedSessionProxyNode(undefined, ["Tokyo-01", "Seoul-02"])).toEqual({
+      proxyNode: undefined,
+      error: null,
+    });
     expect(resolveRequestedSessionProxyNode(null, ["Tokyo-01", "Seoul-02"])).toEqual({
       proxyNode: null,
       error: null,

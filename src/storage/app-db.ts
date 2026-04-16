@@ -2482,20 +2482,46 @@ export class AppDatabase {
     return this.getBrowserSessionByAccountId(accountId)!;
   }
 
-  queueBrowserSessionBootstrap(accountId: number): AccountBrowserSessionRecord {
+  queueBrowserSessionBootstrap(
+    accountId: number,
+    input?: {
+      browserEngine?: string | null;
+      proxyNode?: string | null;
+      clearProxySnapshot?: boolean;
+    },
+  ): AccountBrowserSessionRecord {
     this.ensureBrowserSessionForAccount(accountId);
     const now = nowIso();
+    const clearProxySnapshot = input?.clearProxySnapshot ? 1 : 0;
     this.db
       .query(`
         UPDATE account_browser_sessions
         SET status = 'pending',
-            browser_engine = COALESCE(browser_engine, 'chrome'),
+            browser_engine = COALESCE(?, browser_engine, 'chrome'),
+            proxy_node = CASE WHEN ? THEN ? ELSE COALESCE(?, proxy_node) END,
+            proxy_ip = CASE WHEN ? THEN NULL ELSE proxy_ip END,
+            proxy_country = CASE WHEN ? THEN NULL ELSE proxy_country END,
+            proxy_region = CASE WHEN ? THEN NULL ELSE proxy_region END,
+            proxy_city = CASE WHEN ? THEN NULL ELSE proxy_city END,
+            proxy_timezone = CASE WHEN ? THEN NULL ELSE proxy_timezone END,
             last_error_code = NULL,
             last_error_message = NULL,
             updated_at = ?
         WHERE account_id = ?
       `)
-      .run(now, accountId);
+      .run(
+        input?.browserEngine ?? null,
+        input?.proxyNode !== undefined ? 1 : 0,
+        input?.proxyNode ?? null,
+        input?.proxyNode ?? null,
+        clearProxySnapshot,
+        clearProxySnapshot,
+        clearProxySnapshot,
+        clearProxySnapshot,
+        clearProxySnapshot,
+        now,
+        accountId,
+      );
     return this.getBrowserSessionByAccountId(accountId)!;
   }
 
