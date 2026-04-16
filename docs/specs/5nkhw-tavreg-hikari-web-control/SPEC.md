@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-03-19
+- Last: 2026-04-16
 
 ## 背景 / 问题陈述
 
@@ -182,6 +182,7 @@
 
 - 前端点击导入后先在浏览器侧解析内容，再调用预览接口展示确认弹窗
 - 前端导入格式支持 `email,password`、`email:password`、`email|password`、`email password`、`email----password`
+- 若导入行为微软消费者邮箱（如 `outlook.com`、`outlook.co.uk`、`hotmail.com.br`、`live.*`、`msn.*`）常见的 `email----password----uuid----M...$$` 多段格式，则只取前两段作为邮箱与密码，后续 UUID / token / SSO 等字段全部忽略
 - 账号池列表返回 proof 邮箱映射字段，支持单账号设置或清空 Microsoft proof 备用邮箱
 - proof 邮箱映射只支持 `cfmail`，地址与已缓存的 mailbox id 一并持久化到数据库
 - 支持“密码在前、邮箱在后”的格式纠正
@@ -273,3 +274,4 @@
 - 2026-03-18: 完成 Web 管理台实现，补齐业务表、调度器、REST/WebSocket、React 控制台、测试入口与文档同步。
 - 2026-03-19: 扩展账号页导入预解析弹窗、账号分组、跨分页勾选、批量分组/删除与更宽松的账号密码分隔格式解析。
 - 2026-04-04: 账号页 proof 邮箱链路切换到 CF Mail，补齐绑定弹窗 Storybook 场景与视觉证据。
+- 2026-04-16: 微软账号导入兼容微软消费者邮箱常见的 `email----password----uuid----M...$$` 多段格式，前后端预解析统一只取前两段，并覆盖多级消费者域名后缀，同时收紧启发式以避免误截普通 dashed 密码。
