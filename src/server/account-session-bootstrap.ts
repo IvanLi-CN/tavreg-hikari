@@ -3,7 +3,7 @@ import type { MicrosoftAccountRecord } from "../storage/app-db.js";
 export type AccountBatchBootstrapMode = "pending_only" | "force";
 export type AccountSessionRebootstrapRequest = {
   force: boolean;
-  proxyNode: string | null;
+  proxyNode?: string | null;
 };
 export type AccountBatchBootstrapPreviewDecision =
   | "queue"
@@ -38,23 +38,33 @@ export function normalizeAccountSessionRebootstrapRequest(value: unknown): Accou
     value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
-  const rawProxyNode = body.proxyNode;
+  const hasProxyNode = Object.prototype.hasOwnProperty.call(body, "proxyNode");
+  const rawProxyNode = hasProxyNode ? body.proxyNode : undefined;
   const proxyNode =
-    typeof rawProxyNode === "string"
-      ? rawProxyNode.trim() || null
-      : rawProxyNode == null
-        ? null
-        : String(rawProxyNode).trim() || null;
-  return {
-    force: body.force !== false,
-    proxyNode,
-  };
+    rawProxyNode === undefined
+      ? undefined
+      : typeof rawProxyNode === "string"
+        ? rawProxyNode.trim() || null
+        : rawProxyNode == null
+          ? null
+          : String(rawProxyNode).trim() || null;
+  return proxyNode === undefined
+    ? {
+        force: body.force !== false,
+      }
+    : {
+        force: body.force !== false,
+        proxyNode,
+      };
 }
 
 export function resolveRequestedSessionProxyNode(
   requestedProxyNode: string | null | undefined,
   availableNodeNames: Iterable<string>,
-): { proxyNode: string | null; error: string | null } {
+): { proxyNode: string | null | undefined; error: string | null } {
+  if (requestedProxyNode === undefined) {
+    return { proxyNode: undefined, error: null };
+  }
   const normalized = String(requestedProxyNode || "").trim();
   if (!normalized) {
     return { proxyNode: null, error: null };
