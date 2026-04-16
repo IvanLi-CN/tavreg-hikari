@@ -1318,7 +1318,7 @@ async function main(): Promise<void> {
     db.queueBrowserSessionBootstrap(accountId, {
       browserEngine: "chrome",
       proxyNode: requestedProxyNode,
-      clearProxySnapshot: requestedProxyNode != null,
+      clearProxySnapshot: requestedProxyNode !== undefined,
     });
     sessionBootstrapQueuedIds.add(accountId);
     void runExclusiveMailboxOauth(async () => {

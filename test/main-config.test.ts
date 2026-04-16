@@ -155,7 +155,7 @@ test("manual proxy switch queue writes a pending proxy snapshot before the async
 
   expect(mainSource).toContain("db.queueBrowserSessionBootstrap(accountId, {");
   expect(mainSource).toContain("proxyNode: requestedProxyNode,");
-  expect(mainSource).toContain("clearProxySnapshot: requestedProxyNode != null,");
+  expect(mainSource).toContain("clearProxySnapshot: requestedProxyNode !== undefined,");
   expect(storageSource).toContain("clearProxySnapshot?: boolean;");
   expect(storageSource).toContain("proxy_ip = CASE WHEN ? THEN NULL ELSE proxy_ip END");
   expect(storageSource).toContain("proxy_country = CASE WHEN ? THEN NULL ELSE proxy_country END");
