@@ -278,17 +278,23 @@ export function classifyMicrosoftProofSurface(
   let kind: MicrosoftProofSurfaceKind = "none";
   if (input.hasCodeInput || (onProofRoute && hasCodeCopy && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)) {
     kind = "code_entry";
-  } else if (input.hasProofRadio) {
-    kind = "verify_choice";
-  } else if (input.hasProofOptionsSelect || (onAddRoute && hasAddCopy && !input.hasAddEmailInput)) {
+  } else if (
+    input.hasProofOptionsSelect ||
+    (onAddRoute && hasAddCopy && !input.hasAddEmailInput) ||
+    (onAddRoute && input.hasProofRadio && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)
+  ) {
     kind = "add_method";
   } else if (
     (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
     (onAddRoute && (hasAddCopy || hasConfirmCopy))
   ) {
     kind = "add_email";
+  } else if (onVerifyRoute && input.hasProofRadio) {
+    kind = "verify_choice";
   } else if (input.hasConfirmationEmailInput || (onProofRoute && hasConfirmCopy)) {
     kind = "confirm_email";
+  } else if (input.hasProofRadio) {
+    kind = "verify_choice";
   } else if (onVerifyRoute || (onProofRoute && hasVerifyCopy)) {
     kind = "verify_choice";
   } else if (onProofRoute || hasAddCopy || hasConfirmCopy || hasVerifyCopy || hasCodeCopy) {

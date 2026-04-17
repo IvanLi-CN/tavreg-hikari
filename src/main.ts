@@ -4990,7 +4990,11 @@ async function collectMicrosoftProofSurfaceSnapshot(page: any): Promise<{
           'input[id*="proof-confirmation-email" i]',
           'input[data-testid*="proof-confirmation-email" i]',
         ]),
-        hasProofRadio: hasVisible(['input[name="proof"][type="radio"]', 'input[type="radio"][name="proof"]']),
+        hasProofRadio: hasVisible([
+          'input[name="proof"][type="radio"]',
+          'input[type="radio"][name="proof"]',
+          'input[type="radio"]',
+        ]),
         hasCodeInput: hasVisible([
           "#iOttText",
           'input[name="iOttText"]',
@@ -5782,9 +5786,77 @@ async function handleMicrosoftProofMethodPrompt(
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
+  const clickedDirectly = await page
+    .evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
+      const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const normalize = (value: string): string =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim();
+      const isVisible = (node: Element | null): node is HTMLElement => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const isMeaningfulText = (value: string): boolean => value.length > 0 && value.length <= 120;
+      const readText = (node: Element): string =>
+        normalize(
+          [
+            node.textContent || "",
+            node.getAttribute("aria-label") || "",
+            node.getAttribute("title") || "",
+            node.getAttribute("value") || "",
+          ].join(" "),
+        );
+      const candidates = Array.from(
+        document.querySelectorAll(
+          'label, button, a, [role="button"], [role="radio"], [tabindex]:not([tabindex="-1"]), li, div, span',
+        ),
+      )
+        .filter(isVisible)
+        .map((node) => ({ node, text: readText(node) }))
+        .filter((entry) => isMeaningfulText(entry.text))
+        .filter((entry) => matchers.some((matcher) => matcher.test(entry.text)));
+      for (const entry of candidates) {
+        const node = entry.node;
+        let target: HTMLElement | null = null;
+        if (node instanceof HTMLLabelElement) {
+          target =
+            (node.control instanceof HTMLElement ? node.control : null) ||
+            (node.querySelector('input, button, a, [role="button"], [role="radio"]') as HTMLElement | null) ||
+            node;
+        } else {
+          target =
+            (node.closest(
+              'label, button, a, [role="button"], [role="radio"], [tabindex]:not([tabindex="-1"])',
+            ) as HTMLElement | null) ||
+            (node.querySelector('input, button, a, [role="button"], [role="radio"]') as HTMLElement | null) ||
+            node;
+        }
+        if (!(target instanceof HTMLElement) || !isVisible(target)) continue;
+        target.click();
+        return true;
+      }
+      return false;
+    }, [
+      { source: "backup email", flags: "i" },
+      { source: "alternate email", flags: "i" },
+      { source: "备用电子邮件地址", flags: "i" },
+      { source: "備用電子郵件地址", flags: "i" },
+      { source: "电子邮件地址", flags: "i" },
+      { source: "電子郵件地址", flags: "i" },
+    ])
+    .catch(() => false);
+  if (clickedDirectly) {
+    await page.waitForTimeout(1_000);
+    log("login flow: selected Microsoft proof backup email method");
+    return true;
+  }
   const selected = await clickMatchingAction(
     page,
-    [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /備用電子郵件地址/i, /电子邮件地址/i],
+    [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /備用電子郵件地址/i, /电子邮件地址/i, /電子郵件地址/i],
     undefined,
     ["button", "option", "link"],
   );
@@ -6927,7 +6999,11 @@ export async function completeMicrosoftLogin(
         const summary = await collectPageSurfaceSummary(page);
         if (summary !== lastMicrosoftSurface) {
           lastMicrosoftSurface = summary;
-          log(`login flow: waiting on unhandled Microsoft surface (${step}/40): ${summary}`);
+          const proofDetail =
+            proofSurface.onProofRoute
+              ? ` proof_kind=${proofSurface.kind} proof_signals=${proofSurface.matchedSignals.join(",") || "none"}`
+              : "";
+          log(`login flow: waiting on unhandled Microsoft surface (${step}/40): ${summary}${proofDetail}`);
         }
       }
 
