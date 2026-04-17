@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.11.0",
+  "base_stable_version": "0.10.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-17T09:17:11Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.11.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "50d4b501e3568ab4c9a60001c5540a5a16a44dc4",
+  "pr_number": 48,
+  "pr_title": "feat: align cross-site job controls",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.11.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.11.0",
+  "target_sha": "e7d5173e278dcce3b8f53f551470c970951080c9",
+  "type_label": "type:minor"
+}
