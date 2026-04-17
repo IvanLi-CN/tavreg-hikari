@@ -6,6 +6,7 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
+| 8tmtv | 微软账号列表双字段分组与图标化操作 | 已实现 | `8tmtv-microsoft-account-list-two-field-layout/SPEC.md` | 2026-04-17 | 双字段布局、辅助邮箱命名、图标 tooltip 与默认导入时间倒序已落地 |
 | kq7rv | 跨站点任务控制区对齐：ChatGPT 补齐更新限制，Tavily / ChatGPT 对齐 Grok | 已完成 | `kq7rv-cross-site-job-control-alignment/SPEC.md` | 2026-04-17 | PR #48；ChatGPT 补 pause/resume/update_limits，Tavily 控制区文案与按钮顺序对齐 Grok |
 | s76pf | 共享 mailbox provider 启动节流 | 已完成 | `s76pf-mailbox-provider-start-pacing/SPEC.md` | 2026-04-14 | PR #41；共享 guard 增加最小启动间隔，压平 ChatGPT / Grok 的 mailbox provisioning 启动波峰 |
 | vyg62 | Release 失败 Telegram 告警接入 | 进行中 | `vyg62-release-failure-telegram-alerts/SPEC.md` | 2026-04-11 | release notifier wrapper、SHA 标记、Telegram smoke test |

@@ -613,7 +613,7 @@ function resolveAccountListOrderClause(sortBy?: string, sortDir?: string): strin
     }
     return "ORDER BY CASE WHEN a.last_used_at IS NULL THEN 1 ELSE 0 END ASC, a.last_used_at DESC, a.updated_at DESC, a.id DESC";
   }
-  return "ORDER BY a.updated_at DESC";
+  return "ORDER BY a.imported_at DESC, a.updated_at DESC, a.id DESC";
 }
 
 function normalizeOrderDirection(sortDir?: string): "ASC" | "DESC" {
