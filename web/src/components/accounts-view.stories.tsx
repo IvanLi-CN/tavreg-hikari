@@ -551,6 +551,27 @@ const sessionBootstrapAccounts: AccountsPayload = {
   rows: sampleAccounts.rows.filter((row) => ["alpha@example.test", "beta@example.test", "gamma@example.test"].includes(row.microsoftEmail)),
 };
 
+const sessionProxyDenseProxies: ProxyPayload = {
+  ...sampleProxies,
+  nodes: [
+    sampleProxies.nodes[0]!,
+    sampleProxies.nodes[1]!,
+    { ...sampleProxies.nodes[1]!, id: 3, nodeName: "Sydney-03", lastLatencyMs: 707, lastEgressIp: "207.211.147.108" },
+    { ...sampleProxies.nodes[1]!, id: 4, nodeName: "Melbourne-04", lastLatencyMs: 701, lastEgressIp: "168.138.12.140" },
+    { ...sampleProxies.nodes[1]!, id: 5, nodeName: "Zurich-05", lastLatencyMs: 1323, lastEgressIp: "152.67.70.103" },
+    { ...sampleProxies.nodes[0]!, id: 6, nodeName: "Hong Kong-06", lastLatencyMs: 650, lastEgressIp: "103.197.71.112" },
+    { ...sampleProxies.nodes[1]!, id: 7, nodeName: "Hong Kong-07", lastLatencyMs: 7714, lastEgressIp: "103.197.71.115" },
+    { ...sampleProxies.nodes[0]!, id: 8, nodeName: "Hong Kong-08", lastLatencyMs: 644, lastEgressIp: "103.197.71.113" },
+    { ...sampleProxies.nodes[1]!, id: 9, nodeName: "Hong Kong-09", lastLatencyMs: null, lastEgressIp: null },
+    { ...sampleProxies.nodes[0]!, id: 10, nodeName: "Hong Kong-10", lastLatencyMs: 648, lastEgressIp: "103.197.71.114" },
+    { ...sampleProxies.nodes[1]!, id: 11, nodeName: "Hong Kong-11", lastLatencyMs: null, lastEgressIp: null },
+    { ...sampleProxies.nodes[1]!, id: 12, nodeName: "Hong Kong-12", lastLatencyMs: null, lastEgressIp: null },
+    { ...sampleProxies.nodes[1]!, id: 13, nodeName: "Hong Kong-13", lastLatencyMs: null, lastEgressIp: null },
+    { ...sampleProxies.nodes[1]!, id: 14, nodeName: "Hong Kong-14", lastLatencyMs: 2549, lastEgressIp: "103.197.71.236" },
+    { ...sampleProxies.nodes[1]!, id: 15, nodeName: "Hong Kong-15", lastLatencyMs: null, lastEgressIp: null },
+  ],
+};
+
 const sortingDemoAccounts: AccountsPayload = {
   ...sampleAccounts,
   rows: sampleAccounts.rows.map((row) => {
@@ -581,6 +602,15 @@ async function openExtractorSettingsDialog(canvasElement: HTMLElement): Promise<
 
 async function getExtractorHistoryViewport(): Promise<HTMLElement> {
   const scrollRoot = within(document.body).getByTestId("extractor-history-scroll-area");
+  await waitFor(() => {
+    const viewport = scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
+    expect(viewport).not.toBeNull();
+  });
+  return scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")!;
+}
+
+async function getSessionProxyViewport(): Promise<HTMLElement> {
+  const scrollRoot = within(document.body).getByTestId("session-proxy-scroll-area");
   await waitFor(() => {
     const viewport = scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
     expect(viewport).not.toBeNull();
@@ -1177,7 +1207,7 @@ export const SessionBootstrapCompactCards: Story = {
 
 export const SessionProxySwitchDialogPlay: Story = {
   args: baseArgs,
-  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} initialSelectedIds={[]} frameClassName="mx-auto max-w-[1440px]" />,
+  render: () => <AccountsStorySurface accounts={sessionBootstrapAccounts} proxies={sessionProxyDenseProxies} initialSelectedIds={[]} frameClassName="mx-auto max-w-[1440px]" />,
   parameters: {
     docs: {
       description: {
@@ -1189,12 +1219,32 @@ export const SessionProxySwitchDialogPlay: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
     const dialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
+    await expect(within(dialog).getByText("当前节点信息")).toBeInTheDocument();
+    await expect(within(dialog).getByText("候选代理节点")).toBeInTheDocument();
     await expect(within(dialog).getByText("名称")).toBeInTheDocument();
     await expect(within(dialog).getByText("IP")).toBeInTheDocument();
     await expect(within(dialog).getByText("延迟")).toBeInTheDocument();
     await expect(within(dialog).getByText("操作")).toBeInTheDocument();
     await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
     await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
+    const nameHeader = within(dialog).getByText("名称");
+    expect(window.getComputedStyle(nameHeader).position).toBe("sticky");
+    const proxyViewport = await getSessionProxyViewport();
+    await expectNoHorizontalOverflow(proxyViewport, 2);
+    await waitFor(() => {
+      expect(proxyViewport.scrollHeight).toBeGreaterThan(proxyViewport.clientHeight);
+    });
+    proxyViewport.scrollTop = 220;
+    proxyViewport.dispatchEvent(new Event("scroll"));
+    const stickyTop = Math.round(nameHeader.getBoundingClientRect().top);
+    proxyViewport.scrollTop = proxyViewport.scrollHeight;
+    proxyViewport.dispatchEvent(new Event("scroll"));
+    await waitFor(() => {
+      expect(proxyViewport.scrollTop).toBeGreaterThan(0);
+    });
+    await waitFor(() => {
+      expect(Math.abs(Math.round(nameHeader.getBoundingClientRect().top) - stickyTop)).toBeLessThanOrEqual(2);
+    });
     await userEvent.click(within(dialog).getAllByRole("button", { name: "测速" })[1]!);
     await expect(within(dialog).getByText("208 ms")).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "选择" }));
@@ -1206,9 +1256,10 @@ export const SessionProxySwitchDialogPlay: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
     const reopenedDialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
-    await expect(within(reopenedDialog).getByText("当前节点：Seoul-02")).toBeInTheDocument();
-    await expect(within(reopenedDialog).getByText("当前代理：Seoul-02")).toBeInTheDocument();
-    const seoulRow = within(reopenedDialog).getByText("Seoul-02").closest("tr");
+    await expect(within(reopenedDialog).getByText("当前节点信息")).toBeInTheDocument();
+    await expect(within(reopenedDialog).getByText("Seoul-02")).toBeInTheDocument();
+    await expect(within(reopenedDialog).getByText("当前代理")).toBeInTheDocument();
+    const seoulRow = within(reopenedDialog).getAllByText("Seoul-02").find((element) => element.closest("tr"))?.closest("tr");
     expect(seoulRow).not.toBeNull();
     await expect(within(seoulRow as HTMLElement).getByText("当前")).toBeInTheDocument();
   },

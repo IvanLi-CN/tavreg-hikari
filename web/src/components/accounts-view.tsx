@@ -1808,7 +1808,7 @@ export function AccountsView({
       </Dialog>
 
       <Dialog open={sessionProxyDialogOpen} onOpenChange={closeSessionProxyDialog}>
-        <DialogContent className="!flex w-[min(96vw,68rem)] max-h-[88vh] max-w-[96vw] !flex-col">
+        <DialogContent className="!flex w-[min(96vw,72rem)] max-h-[88vh] max-w-[96vw] !flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle>更换 Session Proxy</DialogTitle>
             <DialogDescription>
@@ -1816,15 +1816,28 @@ export function AccountsView({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 px-6 py-2">
-            <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
-              <div className="break-all font-medium text-white">{sessionProxyAccount?.microsoftEmail || "—"}</div>
-              <div className="mt-2 flex flex-wrap items-center gap-2 text-slate-400">
-                <span>当前节点：{currentSessionProxyNode || "未绑定"}</span>
-                <span>·</span>
-                <span>当前代理：{sessionProxyAccount ? formatBrowserSessionProxy(sessionProxyAccount) : "—"}</span>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(16rem,17.5rem)_minmax(0,1fr)]">
+            <div className="shrink-0 space-y-4 xl:min-h-0 xl:overflow-auto xl:pr-1">
+              <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
+                <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">当前账号</div>
+                <div className="mt-2 break-all text-base font-medium text-white">{sessionProxyAccount?.microsoftEmail || "—"}</div>
               </div>
-              <div className="mt-2 text-slate-500">
+
+              <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
+                <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">当前节点信息</div>
+                <dl className="mt-3 space-y-3">
+                  <div>
+                    <dt className="text-slate-500">当前节点</dt>
+                    <dd className="mt-1 font-medium text-white">{currentSessionProxyNode || "未绑定"}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-slate-500">当前代理</dt>
+                    <dd className="mt-1 break-all text-slate-300">{sessionProxyAccount ? formatBrowserSessionProxy(sessionProxyAccount) : "—"}</dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="rounded-[24px] border border-cyan-300/14 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
                 选择后会立即重新 Bootstrap；如果节点临时异常，会保留失败态供后续重试。
               </div>
             </div>
@@ -1834,64 +1847,80 @@ export function AccountsView({
                 当前没有可选代理节点，请先去代理节点页同步库存。
               </div>
             ) : (
-              <ScrollArea className="rounded-3xl border border-white/8 bg-[#0d1728]/70">
-                <Table className="min-w-[46rem]">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="min-w-[14rem]">名称</TableHead>
-                      <TableHead className="min-w-[12rem]">IP</TableHead>
-                      <TableHead className="min-w-[8rem]">延迟</TableHead>
-                      <TableHead className="min-w-[13rem] text-right">操作</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {proxyNodes.map((node) => {
-                      const checking = isProxyNodeChecking(node.nodeName);
-                      const selecting = selectingProxyNodeName === node.nodeName;
-                      const current = currentSessionProxyNode === node.nodeName;
-                      const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
-                      return (
-                        <TableRow key={node.id}>
-                          <TableCell className="min-w-[14rem]">
-                            <div className="flex items-center gap-2">
-                              <span className="font-medium text-white">{node.nodeName}</span>
-                              {current ? <Badge variant="info">当前</Badge> : null}
-                            </div>
-                          </TableCell>
-                          <TableCell className="font-mono text-xs text-slate-300">{node.lastEgressIp || "—"}</TableCell>
-                          <TableCell className="whitespace-nowrap text-slate-200">
-                            {checking ? "测速中…" : formatProxyLatency(node.lastLatencyMs)}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <div className="ml-auto flex w-max items-center justify-end gap-2">
-                              <Button
-                                type="button"
-                                variant="outline"
-                                size="sm"
-                                className="h-8 shrink-0 px-3 text-xs"
-                                onClick={() => void handleCheckProxyNode(node.nodeName)}
-                                disabled={selectingProxyNodeName != null || blocked || checking}
-                              >
-                                {checking ? "测速中…" : "测速"}
-                              </Button>
-                              <Button
-                                type="button"
-                                variant={current ? "secondary" : "default"}
-                                size="sm"
-                                className="h-8 shrink-0 px-3 text-xs"
-                                onClick={() => void handleSwitchSessionProxy(node.nodeName)}
-                                disabled={blocked || checking || selecting || current}
-                              >
-                                {selecting ? "切换中…" : current ? "已选中" : "选择"}
-                              </Button>
-                            </div>
-                          </TableCell>
+              <div className="min-h-0 min-w-0 xl:flex xl:flex-col">
+                <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                  <div>
+                    <div className="text-sm font-medium text-white">候选代理节点</div>
+                    <div className="text-xs text-slate-500">桌面端列表保持独立滚动，当前节点信息固定在侧栏。</div>
+                  </div>
+                  <div className="text-xs text-slate-500">共 {proxyNodes.length} 个节点</div>
+                </div>
+                <ScrollArea
+                  className="h-[min(52vh,36rem)] min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 xl:min-h-0 xl:h-full"
+                  data-testid="session-proxy-scroll-area"
+                >
+                  <div className="w-full rounded-[24px] bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                    <table className="w-full min-w-0 table-fixed text-sm">
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="sticky top-0 z-10 w-[34%] min-w-[10rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">名称</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[25%] min-w-[8.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">IP</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[16%] min-w-[6.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">延迟</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[25%] min-w-[9rem] bg-[#132033]/95 text-right backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">操作</TableHead>
                         </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              </ScrollArea>
+                      </TableHeader>
+                      <TableBody>
+                        {proxyNodes.map((node) => {
+                          const checking = isProxyNodeChecking(node.nodeName);
+                          const selecting = selectingProxyNodeName === node.nodeName;
+                          const current = currentSessionProxyNode === node.nodeName;
+                          const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
+                          return (
+                            <TableRow key={node.id}>
+                              <TableCell className="min-w-0">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  <span className="truncate font-medium text-white">{node.nodeName}</span>
+                                  {current ? <Badge variant="info">当前</Badge> : null}
+                                </div>
+                              </TableCell>
+                              <TableCell className="font-mono text-xs text-slate-300">
+                                <span className="block truncate">{node.lastEgressIp || "—"}</span>
+                              </TableCell>
+                              <TableCell className="whitespace-nowrap text-slate-200">
+                                {checking ? "测速中…" : formatProxyLatency(node.lastLatencyMs)}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <div className="ml-auto flex max-w-full items-center justify-end gap-2">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-8 shrink-0 px-2.5 text-xs"
+                                    onClick={() => void handleCheckProxyNode(node.nodeName)}
+                                    disabled={selectingProxyNodeName != null || blocked || checking}
+                                  >
+                                    {checking ? "测速中…" : "测速"}
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant={current ? "secondary" : "default"}
+                                    size="sm"
+                                    className="h-8 shrink-0 px-2.5 text-xs"
+                                    onClick={() => void handleSwitchSessionProxy(node.nodeName)}
+                                    disabled={blocked || checking || selecting || current}
+                                  >
+                                    {selecting ? "切换中…" : current ? "已选中" : "选择"}
+                                  </Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </table>
+                  </div>
+                </ScrollArea>
+              </div>
             )}
 
             {sessionProxyActionError ? (
