@@ -157,7 +157,7 @@ export function DashboardView({
         <Card>
           <CardHeader>
             <CardTitle>任务控制</CardTitle>
-            <CardDescription>运行中支持软暂停、动态调整并行数与需求值。</CardDescription>
+            <CardDescription>运行中支持软暂停、更新限制与统一停止控制。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-3 lg:grid-cols-4">
@@ -338,9 +338,16 @@ export function DashboardView({
               >
                 {primaryLabel}
               </Button>
+              <Button
+                variant="secondary"
+                onClick={() => handleJobActionClick("update_limits")}
+                disabled={!canUpdateJobLimits(currentStatus)}
+              >
+                更新限制
+              </Button>
               {canGracefullyStop(currentStatus) || currentStatus === "stopping" ? (
                 <Button
-                  variant="secondary"
+                  variant="outline"
                   onClick={() => handleJobActionClick("stop")}
                   disabled={currentStatus === "stopping"}
                 >
@@ -353,16 +360,9 @@ export function DashboardView({
                   onClick={() => setForceStopDialogOpen(true)}
                   disabled={currentStatus === "force_stopping"}
                 >
-                  {currentStatus === "force_stopping" ? "强停中" : "强行停止"}
+                  {currentStatus === "force_stopping" ? "强停中" : "强制停止"}
                 </Button>
               ) : null}
-              <Button
-                variant="outline"
-                onClick={() => handleJobActionClick("update_limits")}
-                disabled={!canUpdateJobLimits(currentStatus)}
-              >
-                应用调参
-              </Button>
             </div>
             {stopHint ? (
               <div className="rounded-2xl border border-amber-300/18 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-100">
@@ -375,9 +375,9 @@ export function DashboardView({
         <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
           <DialogContent className="w-[min(92vw,34rem)]">
             <DialogHeader>
-              <DialogTitle>确认强行停止</DialogTitle>
+              <DialogTitle>确认强制停止</DialogTitle>
               <DialogDescription>
-                强行停止会立即中断当前 worker 与补号请求；已经在跑的 attempt 会标记为“已停止”，不会继续自然收尾。
+                强制停止会立即中断当前 worker 与补号请求；已经在跑的 attempt 会标记为“已停止”，不会继续自然收尾。
               </DialogDescription>
             </DialogHeader>
             <div className="px-6 text-sm leading-6 text-slate-300">

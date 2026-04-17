@@ -91,6 +91,21 @@ const headlessOnlyAvailability: RunModeAvailability = {
   headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
 };
 
+function buildJob(status: NonNullable<typeof sampleJob.job>["status"]): JobSnapshot {
+  return {
+    ...sampleJob,
+    activeAttempts: status === "paused" || status === "running" ? sampleJob.activeAttempts : [],
+    job: sampleJob.job
+      ? {
+          ...sampleJob.job,
+          status,
+          pausedAt: status === "paused" ? "2026-04-05T09:33:02.000Z" : null,
+          completedAt: ["completed", "failed", "stopped"].includes(status) ? "2026-04-05T09:40:00.000Z" : null,
+        }
+      : null,
+  };
+}
+
 const meta = {
   title: "Views/ChatGptView",
   component: ChatGptView,
@@ -98,7 +113,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "ChatGPT 批量有头浏览器流页面，仅负责批量任务控制与运行态；生成结果统一在 Keys > ChatGPT 查看与导出。",
+        component: "ChatGPT 批量控制页，支持上下文主按钮、更新限制、停止/强制停止与运行态 attempts 展示。",
       },
     },
   },
@@ -107,22 +122,41 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const BatchRunning: Story = {
+export const Running: Story = {
   args: {
     jobDraft: sampleJobDraft,
     job: sampleJob,
     runModeAvailability: sampleJob.runModeAvailability,
     jobBusy: false,
     onJobDraftChange: fn(),
-    onStart: fn(),
-    onStop: fn(),
-    onForceStop: fn(),
+    onJobAction: fn(),
+  },
+};
+
+export const Paused: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("paused"),
+  },
+};
+
+export const Stopping: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("stopping"),
+  },
+};
+
+export const Stopped: Story = {
+  args: {
+    ...Running.args,
+    job: buildJob("stopped"),
   },
 };
 
 export const BatchReady: Story = {
   args: {
-    ...BatchRunning.args,
+    ...Running.args,
     job: {
       site: "chatgpt",
       job: null,
@@ -182,7 +216,7 @@ export const MailboxCooldown: Story = {
 
 export const InteractiveBatchControls: Story = {
   args: {
-    ...BatchRunning.args,
+    ...BatchReady.args,
   },
   render: () => {
     const [batchDraft, setBatchDraft] = useState(sampleJobDraft);
@@ -194,9 +228,7 @@ export const InteractiveBatchControls: Story = {
           runModeAvailability={sampleJob.runModeAvailability}
           jobBusy={false}
           onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
-          onStart={() => undefined}
-          onStop={() => undefined}
-          onForceStop={() => undefined}
+          onJobAction={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
           {JSON.stringify(batchDraft)}
@@ -215,7 +247,7 @@ export const InteractiveBatchControls: Story = {
     await userEvent.tab();
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"need":4');
-    await expect(canvas.queryByText("最近凭据")).toBeNull();
+    await expect(canvas.getByText("开始")).toBeInTheDocument();
     await expect(canvas.getByText(/Keys > ChatGPT/)).toBeInTheDocument();
   },
 };
@@ -239,9 +271,7 @@ export const InteractiveHeadlessOnly: Story = {
           runModeAvailability={headlessOnlyAvailability}
           jobBusy={false}
           onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
-          onStart={() => undefined}
-          onStop={() => undefined}
-          onForceStop={() => undefined}
+          onJobAction={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
           {JSON.stringify(batchDraft)}
@@ -257,5 +287,60 @@ export const InteractiveHeadlessOnly: Story = {
     await expect(within(document.body).getByRole("option", { name: "headless" })).toBeInTheDocument();
     await expect(canvas.getByText(/当前环境仅支持/)).toBeInTheDocument();
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
+  },
+};
+
+export const ControlPlay: Story = {
+  args: {
+    ...Running.args,
+    onJobAction: fn(),
+  },
+  render: (args) => {
+    const [draft, setDraft] = useState(sampleJobDraft);
+    return (
+      <>
+        <ChatGptView
+          jobDraft={draft}
+          job={sampleJob}
+          runModeAvailability={sampleJob.runModeAvailability}
+          jobBusy={false}
+          onJobDraftChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
+          onJobAction={args.onJobAction}
+        />
+        <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
+          {JSON.stringify(draft)}
+        </pre>
+      </>
+    );
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    const draftDebug = canvas.getByTestId("chatgpt-job-draft-debug");
+
+    await userEvent.click(canvas.getByRole("button", { name: "暂停" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("pause", undefined);
+
+    await userEvent.clear(canvas.getByLabelText("Need"));
+    await userEvent.type(canvas.getByLabelText("Need"), "4");
+    await userEvent.click(canvas.getByRole("button", { name: "更新限制" }));
+    await expect(draftDebug).toHaveTextContent('"need":4');
+    await expect(args.onJobAction).toHaveBeenCalledWith(
+      "update_limits",
+      expect.objectContaining({
+        draft: expect.objectContaining({ need: 4, parallel: 2, maxAttempts: 5, runMode: "headed" }),
+      }),
+    );
+
+    await userEvent.click(canvas.getByRole("button", { name: "停止" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);
+
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
+    await expect(within(document.body).getByRole("dialog", { name: "强制停止 ChatGPT 任务？" })).toBeInTheDocument();
+    await userEvent.click(within(document.body).getByRole("button", { name: "取消" }));
+    await expect(args.onJobAction).not.toHaveBeenCalledWith("force_stop", expect.anything());
+
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "确认强停" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("force_stop", { confirmForceStop: true });
   },
 };

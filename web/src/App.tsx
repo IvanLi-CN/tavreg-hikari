@@ -633,7 +633,7 @@ export function App() {
     });
   };
 
-  const handleChatGptJobAction = async (action: "start" | "stop" | "force_stop", draft?: ChatGptJobDraft) => {
+  const handleChatGptJobAction = async (action: JobControlAction, options?: JobControlOptions) => {
     try {
       setChatGptJobBusy(true);
       setError(null);
@@ -641,8 +641,8 @@ export function App() {
         site: "chatgpt",
         action,
       };
-      if (action === "start") {
-        const nextJobDraft = draft || chatGptJobDraft;
+      if (action === "start" || action === "update_limits") {
+        const nextJobDraft = (options?.draft as ChatGptJobDraft | undefined) || chatGptJobDraft;
         body.runMode = clampRunModeToAvailability(nextJobDraft.runMode, chatGptJob.runModeAvailability);
         body.need = nextJobDraft.need;
         body.parallel = nextJobDraft.parallel;
@@ -651,11 +651,19 @@ export function App() {
       if (action === "force_stop") {
         body.confirmForceStop = true;
       }
-      await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
+      const payload = await api<{ ok: true; job?: JobSnapshot["job"] }>("/api/jobs/current/control", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      setChatGptJobDraftTouched(false);
+      if (payload.job && (action === "start" || action === "update_limits")) {
+        setChatGptJobDraft({
+          runMode: clampRunModeToAvailability(payload.job.runMode, chatGptJob.runModeAvailability),
+          need: payload.job.need,
+          parallel: payload.job.parallel,
+          maxAttempts: payload.job.maxAttempts,
+        });
+        setChatGptJobDraftTouched(false);
+      }
       await Promise.all([
         refreshJob("chatgpt"),
         refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current),
@@ -1948,9 +1956,7 @@ export function App() {
           runModeAvailability={chatGptJob.runModeAvailability}
           jobBusy={chatGptJobBusy}
           onJobDraftChange={handleChatGptJobDraftChange}
-          onStart={(draft) => handleChatGptJobAction("start", draft)}
-          onStop={() => handleChatGptJobAction("stop")}
-          onForceStop={() => handleChatGptJobAction("force_stop")}
+          onJobAction={handleChatGptJobAction}
         />
       ) : null}
 
