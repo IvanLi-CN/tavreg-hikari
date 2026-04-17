@@ -6,6 +6,7 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
+| kq7rv | 跨站点任务控制区对齐：ChatGPT 补齐更新限制，Tavily / ChatGPT 对齐 Grok | 进行中 | `kq7rv-cross-site-job-control-alignment/SPEC.md` | 2026-04-17 | ChatGPT 补 pause/resume/update_limits，Tavily 控制区文案与按钮顺序对齐 Grok |
 | s76pf | 共享 mailbox provider 启动节流 | 已完成 | `s76pf-mailbox-provider-start-pacing/SPEC.md` | 2026-04-14 | PR #41；共享 guard 增加最小启动间隔，压平 ChatGPT / Grok 的 mailbox provisioning 启动波峰 |
 | vyg62 | Release 失败 Telegram 告警接入 | 进行中 | `vyg62-release-failure-telegram-alerts/SPEC.md` | 2026-04-11 | release notifier wrapper、SHA 标记、Telegram smoke test |
 | k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 进行中 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-08 | 显式 `CHROME_EXECUTABLE_PATH`、跨平台安装脚本、Docker 内置指纹浏览器、CI/Release/branch rules |

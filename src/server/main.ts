@@ -2424,13 +2424,13 @@ async function main(): Promise<void> {
           }
           if (action === "pause") {
             if (site === "chatgpt") {
-              return badRequest("pause is not supported for ChatGPT jobs");
+              return json({ ok: true, job: chatgptScheduler.pauseCurrentJob() });
             }
             return json({ ok: true, job: site === "grok" ? grokScheduler.pauseCurrentJob() : tavilyScheduler.pauseCurrentJob() });
           }
           if (action === "resume") {
             if (site === "chatgpt") {
-              return badRequest("resume is not supported for ChatGPT jobs");
+              return json({ ok: true, job: chatgptScheduler.resumeCurrentJob() });
             }
             return json({ ok: true, job: site === "grok" ? grokScheduler.resumeCurrentJob() : tavilyScheduler.resumeCurrentJob() });
           }
@@ -2445,7 +2445,12 @@ async function main(): Promise<void> {
           }
           if (action === "update_limits") {
             if (site === "chatgpt") {
-              return badRequest("update_limits is not supported for ChatGPT jobs");
+              const job = chatgptScheduler.updateCurrentJobLimits({
+                parallel: body?.parallel == null ? undefined : Number(body.parallel),
+                need: body?.need == null ? undefined : Number(body.need),
+                maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
+              });
+              return json({ ok: true, job });
             }
             if (site === "grok") {
               const job = grokScheduler.updateCurrentJobLimits({

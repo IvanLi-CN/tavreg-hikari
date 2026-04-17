@@ -355,34 +355,119 @@ export class ChatGptJobScheduler {
     return current;
   }
 
-  stopCurrentJob(): JobRecord {
+  pauseCurrentJob(): JobRecord {
     const job = this.requireCurrentJob();
-    if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
+    if (job.status === "paused") {
       return job;
     }
     if (job.status !== "running") {
+      throw new Error(`current ChatGPT job cannot be paused from ${job.status}`);
+    }
+    const next = this.db.updateJobState(job.id, { status: "paused", pausedAt: nowIso() });
+    this.emit("job.updated", { site: this.site, job: next });
+    this.emit("toast", { level: "info", message: `chatgpt job #${job.id} paused` });
+    return next;
+  }
+
+  resumeCurrentJob(): JobRecord {
+    const job = this.requireCurrentJob();
+    if (job.status === "running") {
+      return job;
+    }
+    if (job.status !== "paused") {
+      throw new Error(`current ChatGPT job cannot be resumed from ${job.status}`);
+    }
+    const next = this.db.updateJobState(job.id, { status: "running", pausedAt: null });
+    this.emit("job.updated", { site: this.site, job: next });
+    this.emit("toast", { level: "info", message: `chatgpt job #${job.id} resumed` });
+    this.ensureLoop(job.id);
+    return next;
+  }
+
+  stopCurrentJob(): JobRecord {
+    const job = this.db.getCurrentJob(this.site);
+    if (!job) throw new Error("no current ChatGPT job");
+    if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
+    if (!["running", "paused"].includes(job.status)) {
       throw new Error(`current ChatGPT job cannot be stopped from ${job.status}`);
     }
     const next = this.db.updateJobState(job.id, { status: "stopping", pausedAt: null });
-    this.emit("job.updated", { site: this.site, job: next });
-    this.ensureLoop(job.id);
-    return next;
+    const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
+    this.emit("job.updated", { site: this.site, job: finalized });
+    this.emit("toast", {
+      level: "info",
+      message:
+        finalized.status === "stopped"
+          ? `chatgpt job #${job.id} stopped`
+          : `chatgpt job #${job.id} stopping gracefully; waiting for active work to finish`,
+    });
+    if (finalized.status !== "stopped") {
+      this.ensureLoop(job.id);
+    }
+    return finalized;
   }
 
   forceStopCurrentJob(confirmForceStop = false): JobRecord {
     if (!confirmForceStop) {
       throw new Error("force stop requires confirmForceStop=true");
     }
-    const job = this.requireCurrentJob();
+    const job = this.db.getCurrentJob(this.site);
+    if (!job) throw new Error("no current ChatGPT job");
     if (job.status === "stopped" || job.status === "force_stopping") {
-      return job;
+      return this.maybeFinalizeStoppedJob(job.id) || job;
+    }
+    if (!["running", "paused", "stopping"].includes(job.status)) {
+      throw new Error(`current ChatGPT job cannot be force stopped from ${job.status}`);
     }
     const next = this.db.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
     for (const active of this.activeAttempts.values()) {
       active.stopRequested = "force_stop";
       signalChildProcess(active.child, "SIGTERM");
     }
+    const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
+    this.emit("job.updated", { site: this.site, job: finalized });
+    this.emit("toast", {
+      level: "warning",
+      message:
+        finalized.status === "stopped"
+          ? `chatgpt job #${job.id} force stopped`
+          : `chatgpt job #${job.id} force stopping`,
+    });
+    if (finalized.status !== "stopped") {
+      this.ensureLoop(job.id);
+    }
+    return finalized;
+  }
+
+  updateCurrentJobLimits(input: Partial<Pick<JobRecord, "parallel" | "need" | "maxAttempts">>): JobRecord {
+    const job = this.requireCurrentJob();
+    if (!["running", "paused"].includes(job.status)) {
+      throw new Error(`current ChatGPT job cannot update limits from ${job.status}`);
+    }
+    const requestedNeed =
+      typeof input.need === "number" ? Math.max(1, Number.isFinite(input.need) ? Math.trunc(input.need) : 1) : job.need;
+    const requestedParallel =
+      typeof input.parallel === "number" ? Math.max(1, Number.isFinite(input.parallel) ? Math.trunc(input.parallel) : 1) : job.parallel;
+    const requestedMaxAttempts =
+      typeof input.maxAttempts === "number"
+        ? Math.max(1, Number.isFinite(input.maxAttempts) ? Math.trunc(input.maxAttempts) : 1)
+        : job.maxAttempts;
+    const maxAttempts = normalizeJobMaxAttempts(requestedNeed, requestedMaxAttempts);
+    const next = this.db.updateJobState(job.id, {
+      need: requestedNeed,
+      parallel: requestedParallel,
+      maxAttempts,
+    });
     this.emit("job.updated", { site: this.site, job: next });
+    this.emit("toast", { level: "info", message: `chatgpt job #${job.id} limits updated` });
+    if (maxAttempts !== requestedMaxAttempts) {
+      this.emit("toast", {
+        level: "info",
+        message: `chatgpt job #${job.id} max attempts auto-adjusted to ${maxAttempts} for need ${requestedNeed}`,
+      });
+    }
     this.ensureLoop(job.id);
     return next;
   }
@@ -415,6 +500,19 @@ export class ChatGptJobScheduler {
 
   private clearJobRuntimeState(jobId: number): void {
     this.draftFailureCounts.delete(jobId);
+  }
+
+  private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
+    const job = this.db.getJob(jobId);
+    if (!job || !isStopInProgressStatus(job.status)) {
+      return null;
+    }
+    if (this.activeAttempts.size > 0) {
+      return null;
+    }
+    const stopped = this.db.stopJob(jobId);
+    this.clearJobRuntimeState(jobId);
+    return stopped;
   }
 
   private async dispatchAttempt(
@@ -451,15 +549,21 @@ export class ChatGptJobScheduler {
       return { launched: false, fatal: true, error: failed.lastError || lastError };
     }
 
+    const launchJob = this.db.getJob(job.id) || job;
+    if (launchJob.site !== this.site || launchJob.status !== "running") {
+      return { launched: false, fatal: false };
+    }
+
     this.draftFailureCounts.delete(job.id);
 
-    const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${launchIndex + 1}`);
+    const nextLaunchIndex = launchJob.launchedCount;
+    const outputDir = path.join(this.repoRoot, "output", "web-runs", `chatgpt-job-${job.id}`, `attempt-${Date.now()}-${nextLaunchIndex + 1}`);
     const attempt = this.db.createAttempt(job.id, {
       accountEmail: draft.email,
       outputDir,
     });
     try {
-      await this.spawnAttempt(currentJob, attempt, draft, outputDir);
+      await this.spawnAttempt(launchJob, attempt, draft, outputDir);
       this.emit("attempt.updated", { site: this.site, attempt: this.db.getAttempt(attempt.id) });
       this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
     } catch (error) {
@@ -478,9 +582,8 @@ export class ChatGptJobScheduler {
       if (isTerminalJobStatus(job.status)) return;
 
       if (isStopInProgressStatus(job.status)) {
-        if (this.activeAttempts.size === 0) {
-          const stopped = this.db.stopJob(job.id);
-          this.clearJobRuntimeState(job.id);
+        const stopped = this.maybeFinalizeStoppedJob(job.id);
+        if (stopped) {
           this.emit("job.updated", { site: this.site, job: stopped });
           this.emit("toast", { level: "info", message: `chatgpt job #${job.id} stopped` });
           return;
@@ -512,7 +615,12 @@ export class ChatGptJobScheduler {
       const launchCapacity = computeLaunchCapacity(job, this.activeAttempts.size);
       if (launchCapacity > 0) {
         for (let slot = 0; slot < launchCapacity; slot += 1) {
-          const launch = await this.dispatchAttempt(job);
+          const dispatchJob = this.db.getJob(jobId);
+          if (!dispatchJob || dispatchJob.site !== this.site) return;
+          if (dispatchJob.status !== "running") {
+            break;
+          }
+          const launch = await this.dispatchAttempt(dispatchJob);
           if (!launch.launched) {
             if (launch.fatal) {
               return;
@@ -529,6 +637,7 @@ export class ChatGptJobScheduler {
       const draftBudgetExhausted = remainingLaunchBudget >= 0 && draftFailureCount > remainingLaunchBudget;
       if (
         this.activeAttempts.size === 0
+        && refreshed.status !== "paused"
         && refreshed.successCount < refreshed.need
         && (refreshed.launchedCount >= refreshed.maxAttempts || draftBudgetExhausted)
       ) {
@@ -537,6 +646,11 @@ export class ChatGptJobScheduler {
         this.emit("job.updated", { site: this.site, job: failed });
         this.emit("toast", { level: "error", message: `chatgpt job #${job.id} failed: ${failed.lastError}` });
         return;
+      }
+
+      if (job.status === "paused") {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }

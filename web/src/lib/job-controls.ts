@@ -41,7 +41,7 @@ export function resolveStopHint(status: JobStatus | null | undefined): string | 
     return "优雅停止中：不再派发新 attempt 或补号请求，正在等待已启动任务自然收尾。";
   }
   if (status === "force_stopping") {
-    return "强行停止中：正在中断 worker 与补号请求，并等待退出收束。";
+    return "强制停止中：正在中断 worker 与补号请求，并等待退出收束。";
   }
   if (status === "stopped") {
     return "任务已手动停止，可直接重新启动新的 job。";
