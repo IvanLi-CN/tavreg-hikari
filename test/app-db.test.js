@@ -1081,6 +1081,76 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("manual proxy switch pending snapshot updates the selected node immediately and clears stale proxy geo", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-switch-feedback@example.test", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "34.91.22.10",
+      proxyCountry: "JP",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
+      proxyTimezone: "Asia/Tokyo",
+    });
+
+    appDb.queueBrowserSessionBootstrap(accountId, {
+      browserEngine: "chrome",
+      proxyNode: "Seoul-02",
+      clearProxySnapshot: true,
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      browserEngine: "chrome",
+      proxyNode: "Seoul-02",
+      proxyIp: null,
+      proxyCountry: null,
+      proxyRegion: null,
+      proxyCity: null,
+      proxyTimezone: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    });
+
+    appDb.close();
+  });
+
+  test("explicit null proxy reset clears the stale proxy snapshot immediately", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-reset-feedback@example.test", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId, {
+      proxyNode: "Tokyo-01",
+      proxyIp: "34.91.22.10",
+      proxyCountry: "JP",
+      proxyRegion: "Tokyo",
+      proxyCity: "Tokyo",
+      proxyTimezone: "Asia/Tokyo",
+    });
+
+    appDb.queueBrowserSessionBootstrap(accountId, {
+      browserEngine: "chrome",
+      proxyNode: null,
+      clearProxySnapshot: true,
+    });
+
+    expect(appDb.getAccount(accountId)?.browserSession).toMatchObject({
+      status: "pending",
+      browserEngine: "chrome",
+      proxyNode: null,
+      proxyIp: null,
+      proxyCountry: null,
+      proxyRegion: null,
+      proxyCity: null,
+      proxyTimezone: null,
+      lastErrorCode: null,
+      lastErrorMessage: null,
+    });
+
+    appDb.close();
+  });
+
   test("does not reschedule succeeded accounts within the same job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "same-job-success@example.test", password: "success-pass" }]);

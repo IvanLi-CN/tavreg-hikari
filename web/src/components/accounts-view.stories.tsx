@@ -407,7 +407,6 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
 
   const handleStorySwitchSessionProxy = props.onSwitchSessionProxy
     ?? (async (accountId: number, proxyNode: string) => {
-      const selectedProxy = proxyState.nodes.find((node) => node.nodeName === proxyNode) || null;
       setAccountsState((current) => ({
         ...current,
         rows: current.rows.map((row) =>
@@ -418,27 +417,30 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
                 browserSession: row.browserSession
                   ? {
                       ...row.browserSession,
-                      status: "ready",
+                      status: "pending",
                       proxyNode,
-                      proxyIp: selectedProxy?.lastEgressIp || row.browserSession.proxyIp,
-                      proxyCountry: selectedProxy?.lastCountry || row.browserSession.proxyCountry,
-                      proxyRegion: selectedProxy?.lastRegion || row.browserSession.proxyRegion,
-                      proxyCity: selectedProxy?.lastCity || row.browserSession.proxyCity,
+                      proxyIp: null,
+                      proxyCountry: null,
+                      proxyRegion: null,
+                      proxyCity: null,
+                      proxyTimezone: null,
+                      lastErrorCode: null,
+                      lastErrorMessage: null,
                       updatedAt: "2026-04-15T12:01:00.000Z",
                     }
                   : {
                       id: 9990 + accountId,
-                      status: "ready",
+                      status: "pending",
                       profilePath: `/workspace/output/browser-profiles/accounts/${accountId}/chrome`,
                       browserEngine: "chrome",
                       proxyNode,
-                      proxyIp: selectedProxy?.lastEgressIp || null,
-                      proxyCountry: selectedProxy?.lastCountry || null,
-                      proxyRegion: selectedProxy?.lastRegion || null,
-                      proxyCity: selectedProxy?.lastCity || null,
+                      proxyIp: null,
+                      proxyCountry: null,
+                      proxyRegion: null,
+                      proxyCity: null,
                       proxyTimezone: null,
-                      lastBootstrappedAt: "2026-04-15T12:01:00.000Z",
-                      lastUsedAt: "2026-04-15T12:01:00.000Z",
+                      lastBootstrappedAt: null,
+                      lastUsedAt: null,
                       lastErrorCode: null,
                       lastErrorMessage: null,
                       createdAt: "2026-04-15T12:01:00.000Z",
@@ -1199,7 +1201,16 @@ export const SessionProxySwitchDialogPlay: Story = {
     await waitFor(() => {
       expect(within(document.body).queryByRole("dialog", { name: "更换 Session Proxy" })).not.toBeInTheDocument();
     });
-    await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
+    await expect(canvas.getByText("Seoul-02")).toBeInTheDocument();
+    await expect(canvas.queryByText("52.11.12.44 · Seoul-02")).not.toBeInTheDocument();
+
+    await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
+    const reopenedDialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
+    await expect(within(reopenedDialog).getByText("当前节点：Seoul-02")).toBeInTheDocument();
+    await expect(within(reopenedDialog).getByText("当前代理：Seoul-02")).toBeInTheDocument();
+    const seoulRow = within(reopenedDialog).getByText("Seoul-02").closest("tr");
+    expect(seoulRow).not.toBeNull();
+    await expect(within(seoulRow as HTMLElement).getByText("当前")).toBeInTheDocument();
   },
 };
 

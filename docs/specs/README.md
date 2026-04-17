@@ -30,5 +30,5 @@
 | 3hrx4 | Grok 第三站点接入现有 Web 管理台 | 已实现 | `3hrx4-grok-web-site/SPEC.md` | 2026-04-10 | 第三站点路由、Grok scheduler/worker、独立 keys tab 与导出 |
 | m9jnq | Keys 页双数据源收敛：Tavily / ChatGPT 双 Tabs | 已完成 | `m9jnq-keys-dual-source-page/SPEC.md` | 2026-04-09 | 统一 Keys 导航与双 tabs，接管 pakwp / 2dkks 的旧 UI 口径 |
 | 55uxa | 默认邮箱生成收敛：provider-first + 真人风格兜底 | 已完成 | `55uxa-provider-first-default-mailboxes/SPEC.md` | 2026-04-12 | ChatGPT draft provider-first、DuckMail 共用真人风格 local-part，移除 `CHATGPT_CFMAIL_ROOT_DOMAIN` 依赖 |
-| 9p1fh | 微软账号页 Session Proxy 行内更换代理节点 | 进行中 | `9p1fh-account-session-proxy-switch/SPEC.md` | 2026-04-15 | 账号级代理切换弹窗、单节点测速复用、立即 rebootstrap |
+| 9p1fh | 微软账号页 Session Proxy 行内更换代理节点 | 已完成 | `9p1fh-account-session-proxy-switch/SPEC.md` | 2026-04-17 | 账号级代理切换弹窗、单节点测速复用、立即 rebootstrap；切换后列表/弹窗即时回显新节点并清空旧 IP |
 | bqa97 | 代理节点检查并发化与 SSE 进度流 | 已完成 | `bqa97-proxy-check-progress-stream/SPEC.md` | 2026-04-15 | `/api/proxies` 快照化、独立 proxy check coordinator、SSE 进度推送 |

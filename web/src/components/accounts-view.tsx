@@ -487,7 +487,7 @@ export function AccountsView({
   const [availabilityBusy, setAvailabilityBusy] = useState(false);
   const [availabilityError, setAvailabilityError] = useState<string | null>(null);
   const [sessionProxyDialogOpen, setSessionProxyDialogOpen] = useState(false);
-  const [sessionProxyAccount, setSessionProxyAccount] = useState<AccountRecord | null>(null);
+  const [sessionProxyAccountId, setSessionProxyAccountId] = useState<number | null>(null);
   const [sessionProxyActionError, setSessionProxyActionError] = useState<string | null>(null);
   const [checkingProxyNodeName, setCheckingProxyNodeName] = useState<string | null>(null);
   const [selectingProxyNodeName, setSelectingProxyNodeName] = useState<string | null>(null);
@@ -584,6 +584,9 @@ export function AccountsView({
     queuePasswordCopyFeedbackReset();
   };
   const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "cfmail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
+  const sessionProxyAccount = sessionProxyAccountId == null
+    ? null
+    : accounts.rows.find((row) => row.id === sessionProxyAccountId) || null;
   const currentSessionProxyNode = sessionProxyAccount?.browserSession?.proxyNode?.trim() || null;
 
   const openProofDialog = (account: AccountRecord) => {
@@ -682,7 +685,7 @@ export function AccountsView({
   };
 
   const openSessionProxyDialog = (account: AccountRecord) => {
-    setSessionProxyAccount(account);
+    setSessionProxyAccountId(account.id);
     setSessionProxyActionError(null);
     setCheckingProxyNodeName(null);
     setSelectingProxyNodeName(null);
@@ -692,7 +695,7 @@ export function AccountsView({
   const closeSessionProxyDialog = (open: boolean) => {
     setSessionProxyDialogOpen(open);
     if (open) return;
-    setSessionProxyAccount(null);
+    setSessionProxyAccountId(null);
     setSessionProxyActionError(null);
     setCheckingProxyNodeName(null);
     setSelectingProxyNodeName(null);
