@@ -1228,6 +1228,7 @@ export const SessionProxySwitchDialogPlay: Story = {
     await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
     await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
     const proxyViewport = await getSessionProxyViewport();
+    await expectNoHorizontalOverflow(proxyViewport, 2);
     await waitFor(() => {
       expect(proxyViewport.scrollHeight).toBeGreaterThan(proxyViewport.clientHeight);
     });

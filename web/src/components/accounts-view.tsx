@@ -1808,7 +1808,7 @@ export function AccountsView({
       </Dialog>
 
       <Dialog open={sessionProxyDialogOpen} onOpenChange={closeSessionProxyDialog}>
-        <DialogContent className="!flex w-[min(96vw,68rem)] max-h-[88vh] max-w-[96vw] !flex-col">
+        <DialogContent className="!flex w-[min(96vw,72rem)] max-h-[88vh] max-w-[96vw] !flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle>更换 Session Proxy</DialogTitle>
             <DialogDescription>
@@ -1816,7 +1816,7 @@ export function AccountsView({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(18rem,0.42fr)_minmax(0,1fr)]">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(16rem,17.5rem)_minmax(0,1fr)]">
             <div className="shrink-0 space-y-4 xl:min-h-0 xl:overflow-auto xl:pr-1">
               <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
                 <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">当前账号</div>
@@ -1859,13 +1859,13 @@ export function AccountsView({
                   className="h-[min(52vh,36rem)] min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 xl:min-h-0 xl:h-full"
                   data-testid="session-proxy-scroll-area"
                 >
-                  <Table className="min-w-[46rem]">
+                  <Table className="min-w-0 table-fixed">
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="min-w-[14rem]">名称</TableHead>
-                        <TableHead className="min-w-[12rem]">IP</TableHead>
-                        <TableHead className="min-w-[8rem]">延迟</TableHead>
-                        <TableHead className="min-w-[13rem] text-right">操作</TableHead>
+                        <TableHead className="w-[34%] min-w-[10rem]">名称</TableHead>
+                        <TableHead className="w-[25%] min-w-[8.5rem]">IP</TableHead>
+                        <TableHead className="w-[16%] min-w-[6.5rem]">延迟</TableHead>
+                        <TableHead className="w-[25%] min-w-[9rem] text-right">操作</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1876,23 +1876,25 @@ export function AccountsView({
                         const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
                         return (
                           <TableRow key={node.id}>
-                            <TableCell className="min-w-[14rem]">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-white">{node.nodeName}</span>
+                            <TableCell className="min-w-0">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="truncate font-medium text-white">{node.nodeName}</span>
                                 {current ? <Badge variant="info">当前</Badge> : null}
                               </div>
                             </TableCell>
-                            <TableCell className="font-mono text-xs text-slate-300">{node.lastEgressIp || "—"}</TableCell>
+                            <TableCell className="font-mono text-xs text-slate-300">
+                              <span className="block truncate">{node.lastEgressIp || "—"}</span>
+                            </TableCell>
                             <TableCell className="whitespace-nowrap text-slate-200">
                               {checking ? "测速中…" : formatProxyLatency(node.lastLatencyMs)}
                             </TableCell>
                             <TableCell className="text-right">
-                              <div className="ml-auto flex w-max items-center justify-end gap-2">
+                              <div className="ml-auto flex max-w-full items-center justify-end gap-2">
                                 <Button
                                   type="button"
                                   variant="outline"
                                   size="sm"
-                                  className="h-8 shrink-0 px-3 text-xs"
+                                  className="h-8 shrink-0 px-2.5 text-xs"
                                   onClick={() => void handleCheckProxyNode(node.nodeName)}
                                   disabled={selectingProxyNodeName != null || blocked || checking}
                                 >
@@ -1902,7 +1904,7 @@ export function AccountsView({
                                   type="button"
                                   variant={current ? "secondary" : "default"}
                                   size="sm"
-                                  className="h-8 shrink-0 px-3 text-xs"
+                                  className="h-8 shrink-0 px-2.5 text-xs"
                                   onClick={() => void handleSwitchSessionProxy(node.nodeName)}
                                   disabled={blocked || checking || selecting || current}
                                 >
