@@ -5,7 +5,7 @@ export type SortDir = "desc" | "asc";
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
 export type JobControlAction = "start" | "pause" | "resume" | "stop" | "force_stop" | "update_limits";
 export type JobControlOptions = {
-  draft?: JobDraft;
+  draft?: JobDraft | ChatGptJobDraft;
   confirmForceStop?: boolean;
 };
 export type AccountExtractorProvider = "zhanghaoya" | "shanyouxiang" | "shankeyun" | "hotmail666";

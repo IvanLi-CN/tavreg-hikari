@@ -1,14 +1,24 @@
-import { type ReactNode, useRef } from "react";
+import { type ReactNode, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
-import type { ChatGptJobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
+import type { ChatGptJobDraft, JobControlAction, JobControlOptions, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
+import {
+  canForceStop,
+  canGracefullyStop,
+  canUpdateJobLimits,
+  primaryJobActionDisabled,
+  resolvePrimaryJobAction,
+  resolvePrimaryJobLabel,
+  resolveStopHint,
+} from "@/lib/job-controls";
 import { isRunModeAvailabilityPending } from "@/lib/run-mode";
 
 function Field(props: { label: string; children: ReactNode }) {
@@ -34,7 +44,7 @@ function normalizeMaxAttempts(need: number, maxAttempts: number): number {
 function statusTone(status: string): "default" | "good" | "warn" | "bad" {
   if (status === "completed") return "good";
   if (status === "failed") return "bad";
-  if (["running", "stopping", "force_stopping"].includes(status)) return "warn";
+  if (["running", "paused", "stopping", "force_stopping"].includes(status)) return "warn";
   return "default";
 }
 
@@ -49,29 +59,25 @@ export function ChatGptView({
   runModeAvailability,
   jobBusy,
   onJobDraftChange,
-  onStart,
-  onStop,
-  onForceStop,
+  onJobAction,
 }: {
   jobDraft: ChatGptJobDraft;
   job: JobSnapshot;
   runModeAvailability: RunModeAvailability;
   jobBusy: boolean;
   onJobDraftChange: (patch: Partial<ChatGptJobDraft>) => void;
-  onStart: (draft: ChatGptJobDraft) => void | Promise<void>;
-  onStop: () => void | Promise<void>;
-  onForceStop: () => void | Promise<void>;
+  onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
   const maxAttemptsRef = useRef<BufferedNumberInputHandle>(null);
+  const [forceStopDialogOpen, setForceStopDialogOpen] = useState(false);
   const status = job.job?.status || "idle";
+  const currentStatus = job.job?.status ?? null;
   const cooldown = job.cooldown?.active ? job.cooldown : null;
   const runModeAvailabilityPending = isRunModeAvailabilityPending(runModeAvailability);
-  const canStart = (!job.job || ["completed", "failed", "stopped"].includes(status)) && !cooldown && !runModeAvailabilityPending;
-  const canStop = status === "running";
-  const canForceStop = ["running", "stopping", "force_stopping"].includes(status);
   const jobConfigLocked = Boolean(job.job && !["completed", "failed", "stopped"].includes(status));
+  const limitInputsLocked = currentStatus === "stopping" || currentStatus === "force_stopping";
   const effectiveRunMode = jobConfigLocked ? (job.job?.runMode || jobDraft.runMode) : jobDraft.runMode;
   const effectiveNeed = jobConfigLocked ? (job.job?.need || jobDraft.need) : jobDraft.need;
   const effectiveParallel = jobConfigLocked ? (job.job?.parallel || jobDraft.parallel) : jobDraft.parallel;
@@ -89,14 +95,31 @@ export function ChatGptView({
     };
   };
 
-  const handleStartClick = () => {
-    let committedDraft = jobDraft;
-    flushSync(() => {
-      committedDraft = commitJobDraft();
-      onJobDraftChange(committedDraft);
-    });
-    void onStart(committedDraft);
+  const handleJobActionClick = (action: JobControlAction, options?: JobControlOptions) => {
+    if (action === "start" || action === "update_limits") {
+      let committedDraft = jobDraft;
+      flushSync(() => {
+        committedDraft = commitJobDraft();
+        onJobDraftChange(committedDraft);
+      });
+      void onJobAction(action, { ...(options || {}), draft: committedDraft });
+      return;
+    }
+    void onJobAction(action, options);
   };
+
+  const primaryAction = resolvePrimaryJobAction(currentStatus);
+  const primaryDisabled =
+    primaryJobActionDisabled(currentStatus)
+    || (primaryAction === "start" && (Boolean(cooldown) || runModeAvailabilityPending))
+    || jobBusy;
+  const primaryLabel =
+    primaryAction === "start"
+      ? job.job
+        ? "重新开始"
+        : "开始"
+      : resolvePrimaryJobLabel(currentStatus);
+  const stopHint = resolveStopHint(currentStatus);
 
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.16fr)_minmax(0,0.84fr)]">
@@ -136,7 +159,7 @@ export function ChatGptView({
                 <BufferedNumberInput
                   ref={needRef}
                   min={1}
-                  disabled={jobConfigLocked}
+                  disabled={limitInputsLocked}
                   value={jobDraft.need}
                   onCommit={(value) => onJobDraftChange({ need: value })}
                 />
@@ -145,7 +168,7 @@ export function ChatGptView({
                 <BufferedNumberInput
                   ref={parallelRef}
                   min={1}
-                  disabled={jobConfigLocked}
+                  disabled={limitInputsLocked}
                   value={jobDraft.parallel}
                   onCommit={(value) => onJobDraftChange({ parallel: value })}
                 />
@@ -154,7 +177,7 @@ export function ChatGptView({
                 <BufferedNumberInput
                   ref={maxAttemptsRef}
                   min={1}
-                  disabled={jobConfigLocked}
+                  disabled={limitInputsLocked}
                   value={jobDraft.maxAttempts}
                   onCommit={(value) => onJobDraftChange({ maxAttempts: value })}
                 />
@@ -190,16 +213,42 @@ export function ChatGptView({
               </div>
             ) : null}
             <div className="flex flex-wrap gap-3">
-              <Button disabled={!canStart || jobBusy} onClick={handleStartClick}>
-                {jobBusy ? "提交中..." : job.job ? "重新开始" : "开始"}
+              <Button
+                disabled={primaryDisabled}
+                onClick={() => {
+                  if (!primaryAction) return;
+                  handleJobActionClick(primaryAction);
+                }}
+              >
+                {jobBusy ? "提交中..." : primaryLabel}
               </Button>
-              <Button variant="outline" disabled={!canStop || jobBusy} onClick={() => void onStop()}>
+              <Button
+                variant="secondary"
+                disabled={!canUpdateJobLimits(currentStatus) || jobBusy}
+                onClick={() => handleJobActionClick("update_limits")}
+              >
+                更新限制
+              </Button>
+              <Button
+                variant="outline"
+                disabled={!canGracefullyStop(currentStatus) || jobBusy}
+                onClick={() => handleJobActionClick("stop")}
+              >
                 停止
               </Button>
-              <Button variant="danger" disabled={!canForceStop || jobBusy} onClick={() => void onForceStop()}>
+              <Button
+                variant="danger"
+                disabled={!canForceStop(currentStatus) || jobBusy}
+                onClick={() => setForceStopDialogOpen(true)}
+              >
                 强制停止
               </Button>
             </div>
+            {stopHint ? (
+              <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
+                {stopHint}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -334,6 +383,29 @@ export function ChatGptView({
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>强制停止 ChatGPT 任务？</DialogTitle>
+            <DialogDescription>这会立刻中断现有 worker，并把当前 job 标记为 force_stopping。</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="secondary" onClick={() => setForceStopDialogOpen(false)}>
+              取消
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                setForceStopDialogOpen(false);
+                handleJobActionClick("force_stop", { confirmForceStop: true });
+              }}
+            >
+              确认强停
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }

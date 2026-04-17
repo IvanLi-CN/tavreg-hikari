@@ -390,15 +390,18 @@ export const ControlPlay: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "暂停" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("pause", undefined);
 
+    await userEvent.click(canvas.getByRole("button", { name: "更新限制" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("update_limits", expect.anything());
+
     await userEvent.click(canvas.getByRole("button", { name: "停止" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);
 
-    await userEvent.click(canvas.getByRole("button", { name: "强行停止" }));
-    await expect(within(document.body).getByRole("dialog", { name: "确认强行停止" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
+    await expect(within(document.body).getByRole("dialog", { name: "确认强制停止" })).toBeInTheDocument();
     await userEvent.click(within(document.body).getByRole("button", { name: "取消" }));
     await expect(args.onJobAction).not.toHaveBeenCalledWith("force_stop", expect.anything());
 
-    await userEvent.click(canvas.getByRole("button", { name: "强行停止" }));
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
     await userEvent.click(within(document.body).getByRole("button", { name: "确认强停" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("force_stop", { confirmForceStop: true });
   },
@@ -453,7 +456,7 @@ export const BufferedNumberFlowPlay: Story = {
 
     await userEvent.clear(needInput);
     await userEvent.type(needInput, "12");
-    await userEvent.click(canvas.getByRole("button", { name: "应用调参" }));
+    await userEvent.click(canvas.getByRole("button", { name: "更新限制" }));
     await expect(needInput).toHaveValue("12");
     await expect(draftDebug.textContent).toContain("\"need\":12");
     await expect(draftDebug.textContent).toContain("\"lastAction\":\"update_limits\"");

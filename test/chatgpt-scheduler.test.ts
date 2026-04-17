@@ -191,6 +191,262 @@ test("chatgpt scheduler starts without pre-provisioned drafts in payload", async
   appDb.close();
 });
 
+test("chatgpt scheduler supports pause resume update and stop on its own site", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+  (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async () => undefined;
+
+  const started = await scheduler.startJob({
+    runMode: "headed",
+    need: 3,
+    parallel: 2,
+    maxAttempts: 1,
+  });
+  expect(started.site).toBe("chatgpt");
+  expect(started.status).toBe("running");
+  expect(started.maxAttempts).toBeGreaterThanOrEqual(3);
+  expect(appDb.getCurrentJob("tavily")).toBeNull();
+
+  const paused = scheduler.pauseCurrentJob();
+  expect(paused.status).toBe("paused");
+
+  const resumed = scheduler.resumeCurrentJob();
+  expect(resumed.status).toBe("running");
+
+  const updated = scheduler.updateCurrentJobLimits({
+    parallel: 4,
+    need: 5,
+    maxAttempts: 2,
+  });
+  expect(updated.parallel).toBe(4);
+  expect(updated.need).toBe(5);
+  expect(updated.maxAttempts).toBeGreaterThanOrEqual(5);
+
+  const stopped = scheduler.stopCurrentJob();
+  expect(stopped.site).toBe("chatgpt");
+  expect(["stopping", "stopped"]).toContain(stopped.status);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler lets paused jobs complete after in-flight attempts finish", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any, draft: ReturnType<typeof createDraft>) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: null,
+      stopRequested: null,
+    });
+    setTimeout(() => {
+      appDb.completeChatGptAttemptSuccess(job.id, attempt.id, {
+        email: draft.email,
+        accountId: `acc-${attempt.id}`,
+        accessToken: `access-${attempt.id}`,
+        refreshToken: `refresh-${attempt.id}`,
+        idToken: `id-${attempt.id}`,
+        expiresAt: null,
+        credentialJson: JSON.stringify({ email: draft.email }),
+      });
+      (scheduler as any).activeAttempts.delete(attempt.id);
+    }, 50);
+  };
+
+  const started = await scheduler.startJob({
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  expect(started.status).toBe("running");
+
+  const paused = scheduler.pauseCurrentJob();
+  expect(paused.status).toBe("paused");
+
+  for (let index = 0; index < 80; index += 1) {
+    const current = appDb.getJob(started.id);
+    if (current?.status === "completed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const completed = appDb.getJob(started.id);
+  expect(completed?.status).toBe("completed");
+  expect(completed?.successCount).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler keeps exhausted paused jobs resumable for limit updates", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(++draftCalls),
+  });
+
+  (scheduler as any).spawnAttempt = async (job: any, attempt: any) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: null,
+      stopRequested: null,
+    });
+    setTimeout(() => {
+      (scheduler as any).failAttempt(job.id, attempt.id, {
+        errorCode: "simulated_failure",
+        errorMessage: `attempt-${attempt.id}-failed`,
+      });
+      (scheduler as any).activeAttempts.delete(attempt.id);
+    }, 40);
+  };
+
+  const started = await scheduler.startJob({
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  expect(started.status).toBe("running");
+
+  const paused = scheduler.pauseCurrentJob();
+  expect(paused.status).toBe("paused");
+
+  for (let index = 0; index < 80; index += 1) {
+    const current = appDb.getJob(started.id);
+    if (current?.status === "paused" && current.launchedCount === 1 && current.successCount === 0) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const stillPaused = appDb.getJob(started.id);
+  expect(stillPaused?.status).toBe("paused");
+  expect(stillPaused?.launchedCount).toBe(1);
+  expect(stillPaused?.successCount).toBe(0);
+
+  const updated = scheduler.updateCurrentJobLimits({ maxAttempts: 2 });
+  expect(updated.status).toBe("paused");
+  expect(updated.maxAttempts).toBe(2);
+
+  const resumed = scheduler.resumeCurrentJob();
+  expect(resumed.status).toBe("running");
+
+  for (let index = 0; index < 80; index += 1) {
+    const current = appDb.getJob(started.id);
+    if (current?.status === "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const failed = appDb.getJob(started.id);
+  expect(failed?.status).toBe("failed");
+  expect(failed?.maxAttempts).toBe(2);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler stops dispatching additional slots as soon as pause is requested", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(++draftCalls),
+  });
+
+  (scheduler as any).spawnAttempt = async (_job: any, attempt: any) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: {
+        pid: 0,
+        kill: () => true,
+      },
+      stopRequested: null,
+    });
+    if (attempt.id === 2) {
+      scheduler.pauseCurrentJob();
+    }
+  };
+
+  const started = await scheduler.startJob({
+    runMode: "headless",
+    need: 3,
+    parallel: 3,
+    maxAttempts: 3,
+  });
+  expect(started.status).toBe("running");
+
+  for (let index = 0; index < 40; index += 1) {
+    const current = appDb.getJob(started.id);
+    if (current?.status === "paused" && current.launchedCount >= 2) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  const paused = appDb.getJob(started.id);
+  expect(paused?.status).toBe("paused");
+  expect(paused?.launchedCount).toBe(2);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler does not launch a draft that finishes after pause", async () => {
+  const { appDb } = await createTempDb();
+  let draftCalls = 0;
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => {
+      draftCalls += 1;
+      if (draftCalls === 2) {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      return createDraft(draftCalls);
+    },
+  });
+
+  (scheduler as any).spawnAttempt = async (_job: any, attempt: any) => {
+    (scheduler as any).activeAttempts.set(attempt.id, {
+      attemptId: attempt.id,
+      child: {
+        pid: 0,
+        kill: () => true,
+      },
+      stopRequested: null,
+    });
+  };
+
+  const started = await scheduler.startJob({
+    runMode: "headless",
+    need: 2,
+    parallel: 2,
+    maxAttempts: 2,
+  });
+  expect(started.status).toBe("running");
+
+  for (let index = 0; index < 40; index += 1) {
+    if (draftCalls >= 2) break;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(draftCalls).toBeGreaterThanOrEqual(2);
+
+  const paused = scheduler.pauseCurrentJob();
+  expect(paused.status).toBe("paused");
+
+  await new Promise((resolve) => setTimeout(resolve, 120));
+
+  const current = appDb.getJob(started.id);
+  expect(current?.status).toBe("paused");
+  expect(current?.launchedCount).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("chatgpt scheduler surfaces first-attempt draft provisioning failures during start", async () => {
   const { appDb } = await createTempDb();
   const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
