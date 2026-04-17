@@ -1227,15 +1227,23 @@ export const SessionProxySwitchDialogPlay: Story = {
     await expect(within(dialog).getByText("操作")).toBeInTheDocument();
     await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
     await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
+    const nameHeader = within(dialog).getByText("名称");
+    expect(window.getComputedStyle(nameHeader).position).toBe("sticky");
     const proxyViewport = await getSessionProxyViewport();
     await expectNoHorizontalOverflow(proxyViewport, 2);
     await waitFor(() => {
       expect(proxyViewport.scrollHeight).toBeGreaterThan(proxyViewport.clientHeight);
     });
+    proxyViewport.scrollTop = 220;
+    proxyViewport.dispatchEvent(new Event("scroll"));
+    const stickyTop = Math.round(nameHeader.getBoundingClientRect().top);
     proxyViewport.scrollTop = proxyViewport.scrollHeight;
     proxyViewport.dispatchEvent(new Event("scroll"));
     await waitFor(() => {
       expect(proxyViewport.scrollTop).toBeGreaterThan(0);
+    });
+    await waitFor(() => {
+      expect(Math.abs(Math.round(nameHeader.getBoundingClientRect().top) - stickyTop)).toBeLessThanOrEqual(2);
     });
     await userEvent.click(within(dialog).getAllByRole("button", { name: "测速" })[1]!);
     await expect(within(dialog).getByText("208 ms")).toBeInTheDocument();
