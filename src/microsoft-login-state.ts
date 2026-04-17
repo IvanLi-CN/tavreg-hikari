@@ -276,7 +276,15 @@ export function classifyMicrosoftProofSurface(
   pushSignal(matchedSignals, hasCodeCopy, "copy:code");
 
   let kind: MicrosoftProofSurfaceKind = "none";
-  if (input.hasCodeInput || (onProofRoute && hasCodeCopy && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)) {
+  if (
+    input.hasCodeInput ||
+    (onProofRoute &&
+      hasCodeCopy &&
+      !onAddRoute &&
+      !hasAddCopy &&
+      !input.hasAddEmailInput &&
+      !input.hasConfirmationEmailInput)
+  ) {
     kind = "code_entry";
   } else if (
     input.hasProofOptionsSelect ||

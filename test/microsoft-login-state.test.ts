@@ -197,7 +197,8 @@ describe("Microsoft login state", () => {
       classifyMicrosoftProofSurface({
         url: "https://account.live.com/proofs/Add?mkt=zh-TW",
         title: "讓我們保護您的帳戶",
-        bodyText: "讓我們保護您的帳戶 您希望新增的安全性資訊為何? 備用電子郵件地址",
+        bodyText:
+          "讓我們保護您的帳戶 您希望新增的安全性資訊為何? 備用電子郵件地址 下一步，我們會傳送安全性驗證碼到您的備用電子郵件地址。",
         hasProofOptionsSelect: true,
       }),
     ).toMatchObject({
