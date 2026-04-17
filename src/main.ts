@@ -27,11 +27,13 @@ import { generateRealisticMailboxLocalPart } from "./mailbox-address.js";
 import {
   MICROSOFT_PASSWORD_SUBMIT_LIMIT,
   classifyMicrosoftFlowInterrupt,
+  classifyMicrosoftProofSurface,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftPasswordError,
   getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
   isMicrosoftKeepSignedInPrompt,
+  type MicrosoftProofSurfaceClassification,
   shouldBlockMicrosoftPasswordSubmission,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
   shouldAttemptMicrosoftProofPasswordFallback,
@@ -1485,6 +1487,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/proxy_node_blocked_by_recent_ip_rate_limit/i.test(message)) {
     return "proxy_ip_rate_limit_block";
   }
+  if (/microsoft_proof_surface_unclassified/i.test(message)) return "microsoft_proof_surface_unclassified";
   if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
   if (/cfmail_api_key_missing/i.test(message)) return "cfmail_api_key_missing";
   if (/cfmail_mailbox_not_found/i.test(message)) return "cfmail_mailbox_not_found";
@@ -4954,6 +4957,106 @@ async function collectMicrosoftSurfaceSnapshot(page: any): Promise<{ url: string
     }));
 }
 
+async function collectMicrosoftProofSurfaceSnapshot(page: any): Promise<{
+  url: string;
+  title: string;
+  bodyText: string;
+  hasProofOptionsSelect: boolean;
+  hasAddEmailInput: boolean;
+  hasConfirmationEmailInput: boolean;
+  hasProofRadio: boolean;
+  hasCodeInput: boolean;
+}> {
+  return await page
+    .evaluate(() => {
+      const isVisible = (node: Element | null): node is HTMLElement => {
+        if (!(node instanceof HTMLElement)) return false;
+        const rect = node.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
+      };
+      const hasVisible = (selectors: string[]): boolean =>
+        selectors.some((selector) => Array.from(document.querySelectorAll(selector)).some((node) => isVisible(node)));
+      return {
+        url: window.location.href,
+        title: document.title || "",
+        bodyText: (document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 1200),
+        hasProofOptionsSelect: hasVisible(["#iProofOptions"]),
+        hasAddEmailInput: hasVisible(["#EmailAddress", 'input[name="EmailAddress"]']),
+        hasConfirmationEmailInput: hasVisible([
+          "#iProofEmail",
+          '#proof-confirmation-email-input',
+          'input[id*="proof-confirmation-email" i]',
+          'input[data-testid*="proof-confirmation-email" i]',
+        ]),
+        hasProofRadio: hasVisible(['input[name="proof"][type="radio"]', 'input[type="radio"][name="proof"]']),
+        hasCodeInput: hasVisible([
+          "#iOttText",
+          'input[name="iOttText"]',
+          'input[id^="codeEntry-"]',
+          'input[autocomplete="one-time-code"]',
+          'input[aria-label*="code" i]',
+          'input[placeholder*="code" i]',
+          'input[inputmode="numeric"]',
+          'input[inputmode="decimal"]',
+          'input[type="tel"]',
+          'input[type="number"]',
+        ]),
+      };
+    })
+    .catch(async () => {
+      const fallback = await collectMicrosoftSurfaceSnapshot(page);
+      return {
+        ...fallback,
+        hasProofOptionsSelect: false,
+        hasAddEmailInput: false,
+        hasConfirmationEmailInput: false,
+        hasProofRadio: false,
+        hasCodeInput: false,
+      };
+    });
+}
+
+async function collectMicrosoftProofSurfaceClassification(page: any): Promise<
+  MicrosoftProofSurfaceClassification &
+    Awaited<ReturnType<typeof collectMicrosoftProofSurfaceSnapshot>>
+> {
+  const snapshot = await collectMicrosoftProofSurfaceSnapshot(page);
+  return {
+    ...snapshot,
+    ...classifyMicrosoftProofSurface(snapshot),
+  };
+}
+
+type MicrosoftProofSurfacePageState = Awaited<ReturnType<typeof collectMicrosoftProofSurfaceClassification>>;
+
+function buildMicrosoftProofSurfaceUnclassifiedMessage(surface: {
+  url: string;
+  title: string;
+  bodyText: string;
+  matchedSignals: string[];
+}): string {
+  const title = surface.title.replace(/\s+/g, " ").trim().slice(0, 160) || "(empty)";
+  const body = surface.bodyText.replace(/\s+/g, " ").trim().slice(0, 240) || "(empty)";
+  const signals = surface.matchedSignals.length > 0 ? surface.matchedSignals.join(",") : "none";
+  return `microsoft_proof_surface_unclassified:url=${surface.url};signals=${signals};title=${title};body=${body}`;
+}
+
+function buildMicrosoftProofSurfaceStabilityKey(surface: {
+  url: string;
+  title: string;
+  bodyText: string;
+  matchedSignals: string[];
+}): string {
+  return [
+    surface.url,
+    surface.matchedSignals.join(","),
+    surface.title.replace(/\s+/g, " ").trim().slice(0, 120),
+    surface.bodyText.replace(/\s+/g, " ").trim().slice(0, 160),
+  ].join("|");
+}
+
 async function classifyMicrosoftFlowInterruptFromPage(page: any) {
   const payload = await collectMicrosoftSurfaceSnapshot(page);
   return classifyMicrosoftFlowInterrupt(payload);
@@ -5265,6 +5368,8 @@ interface MicrosoftProofFlowState {
   passwordShortcutKey: string | null;
   passwordShortcutSubmittedAt: number | null;
   passwordShortcutSubmittedCount: number;
+  unclassifiedSurfaceKey: string | null;
+  unclassifiedFirstSeenAt: number | null;
 }
 
 interface MicrosoftPasskeyState {
@@ -5578,13 +5683,14 @@ async function handleMicrosoftProofAddPrompt(
   cfg: AppConfig,
   proxyUrl: string | undefined,
   proofState: MicrosoftProofFlowState,
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
-  const onAddRoute = /account\.live\.com\/proofs\/Add/i.test(page.url());
-  const hasProofOptionSelector = await hasVisibleElement(page, "#iProofOptions").catch(() => false);
-  let emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
-  if (!onAddRoute && !emailSelector) {
+  if (proofSurface.kind !== "add_method" && proofSurface.kind !== "add_email") {
     return false;
   }
+  const onAddRoute = proofSurface.onAddRoute;
+  const hasProofOptionSelector = proofSurface.hasProofOptionsSelect;
+  let emailSelector = (await firstVisibleSelector(page, ["#EmailAddress", 'input[name="EmailAddress"]'])) || null;
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
@@ -5609,7 +5715,8 @@ async function handleMicrosoftProofAddPrompt(
     return false;
   }
 
-  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute }));
+  const proofMailbox =
+    proofState.mailbox || (await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: proofSurface.allowProvision }));
   proofState.mailbox = proofMailbox;
   const activeEmailSelector =
     (await markBestVisibleControl(
@@ -5652,8 +5759,12 @@ async function handleMicrosoftProofAddPrompt(
 async function handleMicrosoftProofMethodPrompt(
   page: any,
   proofState: MicrosoftProofFlowState,
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
-  if (await hasVisibleElement(page, "#iProofOptions")) {
+  if (proofSurface.kind !== "add_method") {
+    return false;
+  }
+  if (proofSurface.hasProofOptionsSelect || (await hasVisibleElement(page, "#iProofOptions"))) {
     await page
       .evaluate(() => {
         const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
@@ -5668,17 +5779,15 @@ async function handleMicrosoftProofMethodPrompt(
     log("login flow: selected Microsoft proof backup email method");
     return true;
   }
-  if (!(await pageContainsAnyText(page, [/what security info would you like to add/i, /你想添加哪些安全信息/i]))) {
-    return false;
-  }
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
   }
-  const selected = await clickMatchingAction(page, [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /电子邮件地址/i], undefined, [
-    "button",
-    "option",
-    "link",
-  ]);
+  const selected = await clickMatchingAction(
+    page,
+    [/backup email/i, /alternate email/i, /备用电子邮件地址/i, /備用電子郵件地址/i, /电子邮件地址/i],
+    undefined,
+    ["button", "option", "link"],
+  );
   if (selected) {
     log("login flow: selected Microsoft proof backup email method");
   }
@@ -5692,10 +5801,9 @@ async function handleMicrosoftProofVerifyPrompt(
   proofState: MicrosoftProofFlowState,
   password: string,
   passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number; totalSubmittedCount: number },
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
-  const onProofVerifyRoute = /account\.live\.com\/proofs\/verify/i.test(page.url());
-  const proofOptionsCount = await page.locator('input[name="proof"][type="radio"]').count().catch(() => 0);
-  if (!onProofVerifyRoute && proofOptionsCount === 0) {
+  if (proofSurface.kind !== "verify_choice") {
     return false;
   }
   if (!proofState.startedAt) {
@@ -5929,79 +6037,69 @@ async function handleMicrosoftProofEmailPrompt(
   proofState: MicrosoftProofFlowState,
   password: string,
   passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number; totalSubmittedCount: number },
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
   if (await isMicrosoftLikelyPasswordSurface(page)) {
     return false;
   }
-  const confirmationSelectors = [
-    '#proof-confirmation-email-input',
-    'input[id*="proof-confirmation-email" i]',
-    'input[data-testid*="proof-confirmation-email" i]',
-  ];
-  if (await firstVisibleSelector(page, confirmationSelectors)) {
-    return false;
-  }
-  const onProofRoute = /account\.live\.com\/proofs\//i.test(page.url());
-  const hasProofCopy = await pageContainsAnyText(page, [
-    /protect your account/i,
-    /let.?s protect your account/i,
-    /let us protect your account/i,
-    /让我们来保护你的帐户/i,
-    /what security info would you like to add/i,
-    /你想添加哪些安全信息/i,
-    /verify your email/i,
-    /验证你的电子邮件/i,
-    /verify your identity/i,
-    /验证你的身份/i,
-  ]);
-  if (!onProofRoute && !hasProofCopy) {
+  if (proofSurface.kind !== "add_email") {
     return false;
   }
   let proofMailbox = proofState.mailbox;
   let proofMailboxError: Error | null = null;
   const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
-  const challengeState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
-  const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
-    hasConfiguredMailbox: !!configuredProofAddress,
-    configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
-    passwordFallbackAttempted: proofState.passwordFallbackAttempted,
-    passwordFallbackBlocked: proofState.passwordFallbackBlocked,
-  });
-  if (shouldUsePasswordFallback) {
-    if (await clickMicrosoftPasswordFallbackAction(page)) {
-      proofState.passwordFallbackAttempted = true;
-      proofState.passwordFallbackReturnUrl = page.url();
-      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
-      log(
-        `login flow: switched Microsoft proof email prompt to password fallback${
-          challengeState.hintedMaskedEmail ? ` (hint=${challengeState.hintedMaskedEmail})` : ""
-        }`,
-      );
-      return true;
-    }
-    if (challengeState.matchesConfiguredMailbox === false) {
-      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind);
-      throw new Error(`${terminalCode}:${challengeState.hintedMaskedEmail || "challenge_mismatch"}`);
-    }
-  }
-  if (
-    shouldClassifyMicrosoftUnknownRecoveryEmail({
-      surfaceKind: challengeState.surfaceKind,
+  const challengeState = proofSurface.allowProvision
+    ? {
+        hintedMaskedEmail: "",
+        matchesConfiguredMailbox: null,
+        hasMismatchError: false,
+        hasPasswordFallback: false,
+        surfaceKind: "unknown" as const,
+      }
+    : await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  if (!proofSurface.allowProvision) {
+    const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
+      hasConfiguredMailbox: !!configuredProofAddress,
       configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
-      hasPasswordFallback: challengeState.hasPasswordFallback,
-    })
-  ) {
-    if (await clickMicrosoftRecoveryAlternateAction(page)) {
-      log(
-        `login flow: switched Microsoft proof email prompt to alternate recovery path${
-          challengeState.hintedMaskedEmail ? ` (hint=${challengeState.hintedMaskedEmail})` : ""
-        }`,
-      );
-      return true;
+      passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+      passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+    });
+    if (shouldUsePasswordFallback) {
+      if (await clickMicrosoftPasswordFallbackAction(page)) {
+        proofState.passwordFallbackAttempted = true;
+        proofState.passwordFallbackReturnUrl = page.url();
+        await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+        log(
+          `login flow: switched Microsoft proof email prompt to password fallback${
+            challengeState.hintedMaskedEmail ? ` (hint=${challengeState.hintedMaskedEmail})` : ""
+          }`,
+        );
+        return true;
+      }
+      if (challengeState.matchesConfiguredMailbox === false) {
+        const terminalCode = getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind);
+        throw new Error(`${terminalCode}:${challengeState.hintedMaskedEmail || "challenge_mismatch"}`);
+      }
     }
-    throw new Error(
-      `${getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind)}:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`,
-    );
+    if (
+      shouldClassifyMicrosoftUnknownRecoveryEmail({
+        surfaceKind: challengeState.surfaceKind,
+        configuredMailboxMatchesChallenge: challengeState.matchesConfiguredMailbox,
+        hasPasswordFallback: challengeState.hasPasswordFallback,
+      })
+    ) {
+      if (await clickMicrosoftRecoveryAlternateAction(page)) {
+        log(
+          `login flow: switched Microsoft proof email prompt to alternate recovery path${
+            challengeState.hintedMaskedEmail ? ` (hint=${challengeState.hintedMaskedEmail})` : ""
+          }`,
+        );
+        return true;
+      }
+      throw new Error(
+        `${getMicrosoftRecoveryTerminalErrorCode(challengeState.surfaceKind)}:${challengeState.hintedMaskedEmail || "unknown_recovery_email"}`,
+      );
+    }
   }
   if (!proofState.startedAt) {
     proofState.startedAt = Date.now();
@@ -6011,7 +6109,7 @@ async function handleMicrosoftProofEmailPrompt(
     (await markBestVisibleControl(
       page,
       'input[type="email"], input[type="text"], input:not([type])',
-      [/backup.*email/i, /alternate.*email/i, /备用电子邮件/i, /电子邮件地址/i, /example\.com/i, /email/i],
+      [/backup.*email/i, /alternate.*email/i, /备用电子邮件/i, /備用電子郵件/i, /电子邮件地址/i, /電子郵件地址/i, /example\.com/i, /email/i],
       "microsoft-proof-email",
     )) ||
     null;
@@ -6020,24 +6118,21 @@ async function handleMicrosoftProofEmailPrompt(
   }
   if (!proofMailbox) {
     try {
-      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
+      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: proofSurface.allowProvision });
       proofState.mailbox = proofMailbox;
     } catch (error) {
       proofMailboxError = error instanceof Error ? error : new Error(String(error));
     }
   }
   if (!proofMailbox) {
-    const surface = await collectMicrosoftSurfaceSnapshot(page).catch(() => ({
-      url: page.url(),
-      title: "",
-      bodyText: "",
-    }));
     log(
-      `login flow: proof email prompt missing configured mailbox on surface title=${surface.title || "(empty)"} body=${surface.bodyText.slice(0, 160) || "(empty)"}`,
+      `login flow: proof email prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
+        proofSurface.bodyText.slice(0, 160) || "(empty)"
+      }`,
     );
     throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
-  if (/account\.live\.com\/proofs\/Add/i.test(page.url())) {
+  if (proofSurface.onAddRoute) {
     await page
       .evaluate(() => {
         const select = document.querySelector("#iProofOptions") as HTMLSelectElement | null;
@@ -6122,8 +6217,15 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
   proofState: MicrosoftProofFlowState,
   password: string,
   passwordState: { submissionKey: string | null; submittedAt: number | null; submittedCount: number; totalSubmittedCount: number },
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
   if (await isMicrosoftLikelyPasswordSurface(page)) {
+    return false;
+  }
+  if (proofSurface.kind !== "confirm_email") {
+    proofState.confirmationSubmissionKey = null;
+    proofState.confirmationSubmittedAt = null;
+    proofState.confirmationSubmittedCount = 0;
     return false;
   }
   const confirmationSelectors = [
@@ -6133,24 +6235,6 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     'input[data-testid*="proof-confirmation-email" i]',
   ];
   const confirmationSelector = confirmationSelectors.join(", ");
-  const hasConfirmationInput = Boolean(await firstVisibleSelector(page, confirmationSelectors));
-  const hasConfirmationCopy = await pageContainsAnyText(page, [
-    /verify your email/i,
-    /we'll send a code to/i,
-    /we[’']?ll send a code to/i,
-    /already received a code/i,
-    /use your password/i,
-    /验证你的电子邮件/i,
-    /メールをご確認ください/i,
-    /コードを送信します/i,
-    /パスワードを使用する/i,
-  ]);
-  if (!hasConfirmationCopy && !hasConfirmationInput) {
-    proofState.confirmationSubmissionKey = null;
-    proofState.confirmationSubmittedAt = null;
-    proofState.confirmationSubmittedCount = 0;
-    return false;
-  }
   const confirmationSurfaceKey = page.url();
   let proofMailbox = proofState.mailbox;
   let proofMailboxError: Error | null = null;
@@ -6203,7 +6287,7 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     (await markBestVisibleControl(
       page,
       confirmationSelector,
-      [/email/i, /proof/i, /验证码/i, /电子邮件/i],
+      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i],
       "microsoft-proof-confirm-email",
     )) ||
     null;
@@ -6225,13 +6309,10 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     throw proofMailboxError || new Error("microsoft_proof_add_email_input_missing");
   }
   if (!proofMailbox) {
-    const surface = await collectMicrosoftSurfaceSnapshot(page).catch(() => ({
-      url: page.url(),
-      title: "",
-      bodyText: "",
-    }));
     log(
-      `login flow: proof confirmation prompt missing configured mailbox on surface title=${surface.title || "(empty)"} body=${surface.bodyText.slice(0, 160) || "(empty)"}`,
+      `login flow: proof confirmation prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
+        proofSurface.bodyText.slice(0, 160) || "(empty)"
+      }`,
     );
     throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
@@ -6280,7 +6361,7 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     (await markBestVisibleControl(
       page,
       selector,
-      [/email/i, /proof/i, /验证码/i, /电子邮件/i, /備用電子郵件/i, /alternate.*email/i],
+      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i, /備用電子郵件/i, /alternate.*email/i],
       "microsoft-proof-confirm-email-submit",
     )) || selector;
   await clearAuthFieldValidationState(page, activeSelector);
@@ -6339,8 +6420,12 @@ async function handleMicrosoftProofCodePrompt(
   cfg: AppConfig,
   proxyUrl: string | undefined,
   proofState: MicrosoftProofFlowState,
+  proofSurface: MicrosoftProofSurfacePageState,
 ): Promise<boolean> {
   if (await isMicrosoftLikelyPasswordSurface(page)) {
+    return false;
+  }
+  if (proofSurface.kind !== "code_entry") {
     return false;
   }
   const isStillOnProofCodeSurface = async (): Promise<boolean> => {
@@ -6580,6 +6665,8 @@ export async function completeMicrosoftLogin(
     passwordShortcutKey: null,
     passwordShortcutSubmittedAt: null,
     passwordShortcutSubmittedCount: 0,
+    unclassifiedSurfaceKey: null,
+    unclassifiedFirstSeenAt: null,
   };
   const passwordState = {
     submissionKey: null as string | null,
@@ -6791,13 +6878,40 @@ export async function completeMicrosoftLogin(
       }
       proofState.postEmailPasswordPriorityUntil = null;
       if (await handleMicrosoftAccountPicker(page, email)) continue;
-      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
-      if (await handleMicrosoftProofMethodPrompt(page, proofState)) continue;
-      if (await handleMicrosoftProofVerifyPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
-      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState)) continue;
-      if (await handleMicrosoftProofConfirmationEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
-      if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState)) continue;
-      if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState)) continue;
+      const proofSurface = await collectMicrosoftProofSurfaceClassification(page);
+      if (proofSurface.kind !== "unclassified") {
+        proofState.unclassifiedSurfaceKey = null;
+        proofState.unclassifiedFirstSeenAt = null;
+      }
+      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState, proofSurface)) continue;
+      if (await handleMicrosoftProofMethodPrompt(page, proofState, proofSurface)) continue;
+      if (await handleMicrosoftProofVerifyPrompt(page, cfg, proxyUrl, proofState, password, passwordState, proofSurface)) continue;
+      if (await handleMicrosoftProofAddPrompt(page, cfg, proxyUrl, proofState, proofSurface)) continue;
+      if (await handleMicrosoftProofConfirmationEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState, proofSurface)) continue;
+      if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState, proofSurface)) continue;
+      if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState, proofSurface)) continue;
+      if (proofSurface.kind === "unclassified" && proofSurface.onProofRoute) {
+        const stabilityKey = buildMicrosoftProofSurfaceStabilityKey(proofSurface);
+        if (proofState.unclassifiedSurfaceKey !== stabilityKey) {
+          proofState.unclassifiedSurfaceKey = stabilityKey;
+          proofState.unclassifiedFirstSeenAt = Date.now();
+          log(
+            `login flow: waiting for Microsoft proof surface classification settle (signals=${
+              proofSurface.matchedSignals.join(",") || "none"
+            })`,
+          );
+          await page.waitForTimeout(1_000);
+          continue;
+        }
+        const unclassifiedElapsedMs = Date.now() - (proofState.unclassifiedFirstSeenAt || Date.now());
+        if (unclassifiedElapsedMs < 5_000) {
+          await page.waitForTimeout(1_000);
+          continue;
+        }
+        const diagnosticMessage = buildMicrosoftProofSurfaceUnclassifiedMessage(proofSurface);
+        log(`login flow: ${diagnosticMessage}`);
+        throw new Error(diagnosticMessage);
+      }
       if (await handleMicrosoftEmailPrompt(page, email, proofState)) continue;
       const passkeyResult = await handleMicrosoftPasskeyInterrupt(page, passkeyState, proofState, passkeyRecoveryUrl);
       if (passkeyResult) {
@@ -9678,7 +9792,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submission_limit|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_mailbox_missing|cfmail_api_key_missing|cfmail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
+  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submission_limit|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_surface_unclassified|microsoft_proof_mailbox_missing|cfmail_api_key_missing|cfmail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
     message,
   );
 }

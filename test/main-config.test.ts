@@ -71,11 +71,12 @@ test("scheduled workers defer successful account finalization to the scheduler e
   expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
 });
 
-test("proof-add handler only provisions mailboxes on the actual add route", async () => {
+test("proof surface flow shares classifier-based provisioning and explicit unknown diagnostics", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute })");
-  expect(source).toContain("if (!onAddRoute && !emailSelector) {");
-  expect(source).toContain("if (!emailSelector) {\n    return false;\n  }\n\n  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession");
+  expect(source).toContain("const proofSurface = await collectMicrosoftProofSurfaceClassification(page);");
+  expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: proofSurface.allowProvision })");
+  expect(source).toContain('if (proofSurface.kind === "unclassified" && proofSurface.onProofRoute) {');
+  expect(source).toContain("buildMicrosoftProofSurfaceUnclassifiedMessage(proofSurface)");
 });
 
 test("chatgpt draft only pins cfmail root domain when configured", async () => {
