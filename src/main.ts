@@ -4990,22 +4990,15 @@ async function collectMicrosoftProofSurfaceSnapshot(page: any): Promise<{
           'input[id*="proof-confirmation-email" i]',
           'input[data-testid*="proof-confirmation-email" i]',
         ]),
-        hasProofRadio: hasVisible([
-          'input[name="proof"][type="radio"]',
-          'input[type="radio"][name="proof"]',
-          'input[type="radio"]',
-        ]),
+        hasProofRadio: hasVisible(['input[name="proof"][type="radio"]', 'input[type="radio"][name="proof"]']),
         hasCodeInput: hasVisible([
           "#iOttText",
           'input[name="iOttText"]',
           'input[id^="codeEntry-"]',
           'input[autocomplete="one-time-code"]',
+          'input[maxlength="1"][inputmode="numeric"]',
           'input[aria-label*="code" i]',
           'input[placeholder*="code" i]',
-          'input[inputmode="numeric"]',
-          'input[inputmode="decimal"]',
-          'input[type="tel"]',
-          'input[type="number"]',
         ]),
       };
     })
