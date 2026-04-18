@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronLeft, ChevronRight, Copy, Inbox, Mail, PencilLine, RefreshCw, RotateCcw, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronLeft, ChevronRight, Copy, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -174,6 +175,26 @@ function formatAvailabilitySummary(account: Pick<AccountRecord, "skipReason" | "
   return parts.length > 0 ? parts.join(" / ") : "—";
 }
 
+function buildAccountStatusBadges(
+  account: Pick<AccountRecord, "hasApiKey" | "skipReason" | "disabledAt" | "lastResultStatus" | "browserSession" | "lastErrorCode">,
+): Array<{ label: string; variant: "success" | "warning" | "danger" }> {
+  const badges: Array<{ label: string; variant: "success" | "warning" | "danger" }> = [];
+  const usedByTavily = account.hasApiKey || account.skipReason === "has_api_key";
+  const failedRecently = account.lastResultStatus === "failed" || account.browserSession?.status === "failed" || account.browserSession?.status === "blocked";
+  const retired = Boolean(account.disabledAt) || isLockedAccountBlock(account);
+  if (usedByTavily) {
+    badges.push({ label: "Tavily", variant: "success" });
+  }
+  if (failedRecently) {
+    badges.push({ label: usedByTavily ? "已失败" : "Tavily 失败", variant: "warning" });
+  }
+  if (retired) {
+    badges.push({ label: usedByTavily ? "已废弃" : "Tavily 废弃", variant: "danger" });
+  }
+
+  return badges;
+}
+
 function resolveConnectButtonDisabled(account: AccountRecord, input: {
   graphSettingsConfigured: boolean;
   batchBusy: boolean;
@@ -199,9 +220,16 @@ function FieldLabel(props: { children: ReactNode }) {
   return <div className="text-[0.68rem] uppercase tracking-[0.16em] text-slate-500">{props.children}</div>;
 }
 
-function FieldValue(props: { children: ReactNode; className?: string; align?: "left" | "right" }) {
+function FieldValue(props: { children: ReactNode; className?: string; align?: "left" | "right"; compact?: boolean }) {
   return (
-    <div className={cn("mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap", props.align === "right" ? "justify-end text-right" : "text-left", props.className)}>
+    <div
+      className={cn(
+        "flex min-w-0 items-center overflow-hidden whitespace-nowrap",
+        props.compact ? "mt-0 gap-1" : "mt-1 gap-2",
+        props.align === "right" ? "justify-end text-right" : "text-left",
+        props.className,
+      )}
+    >
       {props.children}
     </div>
   );
@@ -229,6 +257,47 @@ function TwoLineFieldCell(props: {
   );
 }
 
+function DesktopGroupHeader(props: {
+  title: string;
+  primaryLabel: ReactNode;
+  secondaryLabel: ReactNode;
+  align?: "left" | "right";
+}) {
+  return (
+    <div className={cn("grid min-w-0 gap-1", props.align === "right" ? "text-right" : "text-left")}>
+      <div className="text-sm font-medium text-slate-100">{props.title}</div>
+      <div
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[0.68rem] uppercase tracking-[0.16em] text-slate-500",
+          props.align === "right" ? "justify-end text-right" : "justify-start text-left",
+        )}
+      >
+        <span className="min-w-0 shrink truncate">{props.primaryLabel}</span>
+        <span className="shrink-0 text-slate-600">/</span>
+        <span className="min-w-0 shrink truncate">{props.secondaryLabel}</span>
+      </div>
+    </div>
+  );
+}
+
+function DesktopTwoLineValueCell(props: {
+  primaryValue: ReactNode;
+  secondaryValue: ReactNode;
+  className?: string;
+  align?: "left" | "right";
+}) {
+  return (
+    <div className={cn("grid min-w-0 gap-0.5", props.className)}>
+      <div className="min-w-0">
+        <FieldValue align={props.align} compact>{props.primaryValue}</FieldValue>
+      </div>
+      <div className="min-w-0">
+        <FieldValue align={props.align} compact>{props.secondaryValue}</FieldValue>
+      </div>
+    </div>
+  );
+}
+
 function IconActionButton(props: {
   label: string;
   icon: ReactNode;
@@ -236,6 +305,7 @@ function IconActionButton(props: {
   disabled?: boolean;
   variant?: "default" | "secondary" | "outline" | "danger" | "ghost";
   className?: string;
+  size?: "default" | "compact" | "dense";
 }) {
   return (
     <Tooltip>
@@ -245,7 +315,14 @@ function IconActionButton(props: {
             type="button"
             variant={props.variant || "ghost"}
             size="icon"
-            className={cn("size-8 shrink-0 rounded-xl", props.className)}
+            className={cn(
+              props.size === "dense"
+                ? "size-5 shrink-0 rounded-md"
+                : props.size === "compact"
+                  ? "size-7 shrink-0 rounded-lg"
+                  : "size-8 shrink-0 rounded-xl",
+              props.className,
+            )}
             onClick={props.onClick}
             disabled={props.disabled}
             aria-label={props.label}
@@ -263,7 +340,9 @@ function CopyIconButton(props: {
   label: string;
   copyStatus: "idle" | "copied" | "failed";
   disabled?: boolean;
-  onCopy: () => void;
+  onCopy: (anchorElement: HTMLElement) => void;
+  size?: "default" | "compact" | "dense";
+  idleIcon?: ReactNode;
 }) {
   const tooltipLabel = props.disabled
     ? `${props.label}不可复制`
@@ -274,23 +353,88 @@ function CopyIconButton(props: {
         : `复制${props.label}`;
 
   return (
-    <IconActionButton
-      label={tooltipLabel}
-      disabled={props.disabled}
-      onClick={props.onCopy}
-      className={cn(
-        props.copyStatus === "copied"
-          ? "text-emerald-200 hover:text-emerald-100"
-          : props.copyStatus === "failed"
-            ? "text-rose-200 hover:text-rose-100"
-            : "text-cyan-200 hover:text-cyan-100",
-      )}
-      icon={
-        props.copyStatus === "copied"
-          ? <Check className="size-4" aria-hidden="true" />
-          : <Copy className="size-4" aria-hidden="true" />
-      }
-    />
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={cn(
+              props.size === "dense"
+                ? "size-5 shrink-0 rounded-md"
+                : props.size === "compact"
+                  ? "size-7 shrink-0 rounded-lg"
+                  : "size-8 shrink-0 rounded-xl",
+              props.copyStatus === "copied"
+                ? "text-emerald-200 hover:text-emerald-100"
+                : props.copyStatus === "failed"
+                  ? "text-rose-200 hover:text-rose-100"
+                  : "text-cyan-200 hover:text-cyan-100",
+            )}
+            disabled={props.disabled}
+            aria-label={tooltipLabel}
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              props.onCopy(event.currentTarget);
+            }}
+          >
+            {props.copyStatus === "copied"
+              ? <Check className="size-4" aria-hidden="true" />
+              : props.idleIcon || <Copy className="size-4" aria-hidden="true" />}
+          </Button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent>{tooltipLabel}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function GroupBadge(props: { groupName: string | null }) {
+  if (!props.groupName) return null;
+  return (
+    <Badge variant="neutral" className="px-2 py-0.5 text-[0.62rem] tracking-[0.1em]">
+      {props.groupName}
+    </Badge>
+  );
+}
+
+function describeCopyField(field: AccountCopyField): string {
+  if (field === "email") return "邮箱";
+  if (field === "password") return "密码";
+  return "辅助邮箱";
+}
+
+function formatCopySuccessMessage(label: string): string {
+  return `${label}已复制到剪贴板。若系统拦截粘贴，可在下方手动复制完整内容。`;
+}
+
+function formatCopyPendingMessage(label: string): string {
+  return `正在尝试自动复制${label}。如果浏览器没有成功写入剪贴板，你也可以直接复制下方完整内容。`;
+}
+
+function formatCopyFailureMessage(error: unknown, label: string): string {
+  const rawMessage = error instanceof Error ? error.message.trim() : String(error || "").trim();
+  if (rawMessage && rawMessage !== "clipboard unavailable") {
+    return `${label}自动复制失败：${rawMessage}`;
+  }
+  return `${label}自动复制失败。请手动复制下方完整内容。`;
+}
+
+function UsageBadgesRow(props: { account: AccountRecord; fallback?: ReactNode }) {
+  const usageBadges = buildAccountStatusBadges(props.account);
+  if (usageBadges.length === 0) {
+    return props.fallback ? <>{props.fallback}</> : <span className="text-slate-500">—</span>;
+  }
+  return (
+    <>
+      {usageBadges.map((badge) => (
+        <Badge key={`${props.account.id}-${badge.label}`} variant={badge.variant} className="px-2 py-0.5 text-[0.62rem] tracking-[0.12em]">
+          {badge.label}
+        </Badge>
+      ))}
+    </>
   );
 }
 
@@ -310,7 +454,8 @@ function SessionProxyCell(props: {
         icon={<PencilLine className="size-3.5" aria-hidden="true" />}
         onClick={props.onEdit}
         disabled={props.disabled}
-        className="size-7 rounded-lg text-cyan-200 hover:text-cyan-100"
+        size="dense"
+        className="text-cyan-200 hover:text-cyan-100"
       />
     </div>
   );
@@ -600,7 +745,20 @@ export function AccountsView({
     key: string | null;
     status: "idle" | "copied" | "failed";
   }>({ key: null, status: "idle" });
+  const [copyPopoverState, setCopyPopoverState] = useState<{
+    key: string;
+    title: string;
+    message: string;
+    value: string;
+    anchorRect: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+  } | null>(null);
   const copyFeedbackResetTimerRef = useRef<number | null>(null);
+  const copyPopoverOpenTimerRef = useRef<number | null>(null);
   const [extractorQuantityInput, setExtractorQuantityInput] = useState(() => String(extractorRunDraft.quantity));
   const [extractorMaxWaitInput, setExtractorMaxWaitInput] = useState(() => String(extractorRunDraft.maxWaitSec));
   const extractorActionTimerRef = useRef<number | null>(null);
@@ -636,6 +794,9 @@ export function AccountsView({
       if (copyFeedbackResetTimerRef.current != null) {
         window.clearTimeout(copyFeedbackResetTimerRef.current);
       }
+      if (copyPopoverOpenTimerRef.current != null) {
+        window.clearTimeout(copyPopoverOpenTimerRef.current);
+      }
       if (extractorActionTimerRef.current != null) {
         window.clearTimeout(extractorActionTimerRef.current);
       }
@@ -660,27 +821,86 @@ export function AccountsView({
     }, 1800);
   };
 
+  const queueCopyPopoverState = (nextState: {
+    key: string;
+    title: string;
+    message: string;
+    value: string;
+    anchorRect: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    };
+  }) => {
+    if (copyPopoverOpenTimerRef.current != null) {
+      window.clearTimeout(copyPopoverOpenTimerRef.current);
+    }
+    copyPopoverOpenTimerRef.current = window.setTimeout(() => {
+      setCopyPopoverState(nextState);
+      copyPopoverOpenTimerRef.current = null;
+    }, 0);
+  };
+
   const getPasswordCopyValue = (accountId: number, plaintext?: string | null) => plaintext || revealedPasswordsById[accountId] || "";
   const getCopyStatus = (accountId: number, field: AccountCopyField) =>
     copyFeedback.key === getCopyFeedbackKey(accountId, field) ? copyFeedback.status : "idle";
-  const handleCopyField = async (account: AccountRecord, field: AccountCopyField, copyValue: string) => {
+  const selectCopyContent = (event: ReactMouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>) => {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(event.currentTarget);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+  const handleCopyField = async (account: AccountRecord, field: AccountCopyField, copyValue: string, anchorElement: HTMLElement) => {
     const feedbackKey = getCopyFeedbackKey(account.id, field);
+    const label = `${account.microsoftEmail} ${describeCopyField(field)}`;
+    const anchorRect = anchorElement.getBoundingClientRect();
     if (!copyValue.trim()) {
+      queueCopyPopoverState({
+        key: feedbackKey,
+        title: "自动复制失败",
+        value: copyValue,
+        message: `${label}当前没有可复制内容。`,
+        anchorRect,
+      });
       setCopyFeedback({ key: feedbackKey, status: "failed" });
-      queueCopyFeedbackReset();
       return;
     }
+    queueCopyPopoverState({
+      key: feedbackKey,
+      title: "复制中",
+      value: copyValue,
+      message: formatCopyPendingMessage(label),
+      anchorRect,
+    });
     try {
       await copyTextToClipboard(copyValue);
+      queueCopyPopoverState({
+        key: feedbackKey,
+        title: "已复制",
+        value: copyValue,
+        message: formatCopySuccessMessage(label),
+        anchorRect,
+      });
       setCopyFeedback({ key: feedbackKey, status: "copied" });
-    } catch {
+      queueCopyFeedbackReset();
+    } catch (error) {
+      queueCopyPopoverState({
+        key: feedbackKey,
+        title: "自动复制失败",
+        value: copyValue,
+        message: formatCopyFailureMessage(error, label),
+        anchorRect,
+      });
       setCopyFeedback({ key: feedbackKey, status: "failed" });
+      return;
     }
-    queueCopyFeedbackReset();
   };
-  const handleCopyPassword = async (account: AccountRecord) => handleCopyField(account, "password", getPasswordCopyValue(account.id, account.passwordPlaintext));
-  const handleCopyEmail = async (account: AccountRecord) => handleCopyField(account, "email", account.microsoftEmail || "");
-  const handleCopyProofMailbox = async (account: AccountRecord) => handleCopyField(account, "proofMailboxAddress", account.proofMailboxAddress || "");
+  const handleCopyPassword = async (account: AccountRecord, anchorElement: HTMLElement) => handleCopyField(account, "password", getPasswordCopyValue(account.id, account.passwordPlaintext), anchorElement);
+  const handleCopyEmail = async (account: AccountRecord, anchorElement: HTMLElement) => handleCopyField(account, "email", account.microsoftEmail || "", anchorElement);
+  const handleCopyProofMailbox = async (account: AccountRecord, anchorElement: HTMLElement) => handleCopyField(account, "proofMailboxAddress", account.proofMailboxAddress || "", anchorElement);
   const proofMailboxPreview = editingAccount ? `${editingAccount.proofMailboxProvider || "cfmail"} · ${editingAccount.proofMailboxId || "未缓存"}` : "—";
   const sessionProxyAccount = sessionProxyAccountId == null
     ? null
@@ -938,21 +1158,23 @@ export function AccountsView({
     const connectLabel = `对 ${row.microsoftEmail} ${getConnectActionLabel(row, connectingAccountIds.includes(row.id))}`;
 
     return (
-      <div className="flex flex-wrap items-center justify-end gap-1.5">
+      <div className="flex flex-wrap items-center justify-end gap-1">
         <IconActionButton
           label={connectLabel}
           icon={resolveConnectActionIcon(row, connectingAccountIds.includes(row.id))}
           onClick={() => void onConnectAccount(row.id)}
           disabled={connectDisabled}
           variant={row.mailboxStatus && row.mailboxStatus !== "preparing" ? "secondary" : "outline"}
-          className="size-8"
+          size="compact"
+          className="size-7 rounded-lg"
         />
         <IconActionButton
           label={`设置 ${row.microsoftEmail} 的辅助邮箱`}
           icon={<Mail className="size-4" aria-hidden="true" />}
           onClick={() => openProofDialog(row)}
           variant="outline"
-          className="size-8"
+          size="compact"
+          className="size-7 rounded-lg"
         />
         {row.disabledAt || isRestorableAccountBlock(row.skipReason) ? (
           <IconActionButton
@@ -960,7 +1182,8 @@ export function AccountsView({
             icon={<RotateCcw className="size-4" aria-hidden="true" />}
             onClick={() => void handleRestoreAvailability(row)}
             variant="secondary"
-            className="size-8"
+            size="compact"
+            className="size-7 rounded-lg"
           />
         ) : (
           <IconActionButton
@@ -968,7 +1191,8 @@ export function AccountsView({
             icon={<ShieldOff className="size-4" aria-hidden="true" />}
             onClick={() => openAvailabilityDialog(row)}
             variant="outline"
-            className="size-8"
+            size="compact"
+            className="size-7 rounded-lg"
           />
         )}
         <IconActionButton
@@ -976,7 +1200,8 @@ export function AccountsView({
           icon={<Inbox className="size-4" aria-hidden="true" />}
           onClick={() => onOpenMailbox(row.id)}
           variant="secondary"
-          className="size-8"
+          size="compact"
+          className="size-7 rounded-lg"
         />
       </div>
     );
@@ -985,35 +1210,23 @@ export function AccountsView({
   const renderAccountIdentityCell = (row: AccountRecord) => (
     <TwoLineFieldCell
       primaryLabel="账号"
-      secondaryLabel="分组"
+      secondaryLabel="辅助邮箱 / 分组"
       primaryValue={
         <>
           <span className="min-w-0 truncate whitespace-nowrap font-medium text-white">{row.microsoftEmail}</span>
           <CopyIconButton
             label={`${row.microsoftEmail} 邮箱`}
             copyStatus={getCopyStatus(row.id, "email")}
-            onCopy={() => void handleCopyEmail(row)}
+            onCopy={(anchorElement) => void handleCopyEmail(row, anchorElement)}
+            size="dense"
           />
-          {row.hasApiKey ? <StatusBadge status="active" /> : <StatusBadge status="no-key" />}
-        </>
-      }
-      secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{row.groupName || "—"}</span>}
-      className="min-w-0"
-    />
-  );
-
-  const renderCredentialCell = (row: AccountRecord) => (
-    <TwoLineFieldCell
-      primaryLabel="密码"
-      secondaryLabel="辅助邮箱"
-      primaryValue={
-        <>
-          <span className="text-sm text-slate-300">仅复制</span>
           <CopyIconButton
             label={`${row.microsoftEmail} 密码`}
             copyStatus={getCopyStatus(row.id, "password")}
             disabled={!getPasswordCopyValue(row.id, row.passwordPlaintext).trim()}
-            onCopy={() => void handleCopyPassword(row)}
+            onCopy={(anchorElement) => void handleCopyPassword(row, anchorElement)}
+            size="dense"
+            idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
           />
         </>
       }
@@ -1024,8 +1237,10 @@ export function AccountsView({
             label={`${row.microsoftEmail} 辅助邮箱`}
             copyStatus={getCopyStatus(row.id, "proofMailboxAddress")}
             disabled={!row.proofMailboxAddress}
-            onCopy={() => void handleCopyProofMailbox(row)}
+            onCopy={(anchorElement) => void handleCopyProofMailbox(row, anchorElement)}
+            size="dense"
           />
+          <GroupBadge groupName={row.groupName} />
         </>
       }
       className="min-w-0"
@@ -1055,7 +1270,7 @@ export function AccountsView({
       primaryLabel="状态"
       secondaryLabel="阻断 / 停用"
       primaryValue={<StatusBadge status={getAccountDisplayStatus(row)} />}
-      secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatAvailabilitySummary(row)}</span>}
+      secondaryValue={<UsageBadgesRow account={row} fallback={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatAvailabilitySummary(row)}</span>} />}
       className="min-w-0"
       align={align}
     />
@@ -1085,6 +1300,82 @@ export function AccountsView({
       secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.lastUsedAt)}</span>}
       className="min-w-0"
       align={align}
+    />
+  );
+
+  const renderDesktopAccountIdentityCell = (row: AccountRecord) => (
+    <DesktopTwoLineValueCell
+      primaryValue={
+        <>
+          <span className="min-w-0 truncate whitespace-nowrap font-medium text-white">{row.microsoftEmail}</span>
+          <CopyIconButton
+            label={`${row.microsoftEmail} 邮箱`}
+            copyStatus={getCopyStatus(row.id, "email")}
+            onCopy={(anchorElement) => void handleCopyEmail(row, anchorElement)}
+            size="dense"
+          />
+          <CopyIconButton
+            label={`${row.microsoftEmail} 密码`}
+            copyStatus={getCopyStatus(row.id, "password")}
+            disabled={!getPasswordCopyValue(row.id, row.passwordPlaintext).trim()}
+            onCopy={(anchorElement) => void handleCopyPassword(row, anchorElement)}
+            size="dense"
+            idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+          />
+        </>
+      }
+      secondaryValue={
+        <>
+          <span className="min-w-0 truncate whitespace-nowrap text-slate-300">{row.proofMailboxAddress || "—"}</span>
+          <CopyIconButton
+            label={`${row.microsoftEmail} 辅助邮箱`}
+            copyStatus={getCopyStatus(row.id, "proofMailboxAddress")}
+            disabled={!row.proofMailboxAddress}
+            onCopy={(anchorElement) => void handleCopyProofMailbox(row, anchorElement)}
+            size="dense"
+          />
+          <GroupBadge groupName={row.groupName} />
+        </>
+      }
+    />
+  );
+
+  const renderDesktopSessionCell = (row: AccountRecord) => (
+    <DesktopTwoLineValueCell
+      primaryValue={<StatusBadge status={row.browserSession?.status || "pending"} />}
+      secondaryValue={
+        <SessionProxyCell
+          account={row}
+          disabled={isSessionProxySwitchBlocked(row) || batchBusy || connectBusy}
+          onEdit={() => openSessionProxyDialog(row)}
+        />
+      }
+    />
+  );
+
+  const renderDesktopStatusCell = (row: AccountRecord) => (
+    <DesktopTwoLineValueCell
+      primaryValue={<StatusBadge status={getAccountDisplayStatus(row)} />}
+      secondaryValue={<UsageBadgesRow account={row} fallback={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatAvailabilitySummary(row)}</span>} />}
+    />
+  );
+
+  const renderDesktopMailboxCell = (row: AccountRecord) => (
+    <DesktopTwoLineValueCell
+      primaryValue={
+        <>
+          <StatusBadge status={row.mailboxStatus} />
+          {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
+        </>
+      }
+      secondaryValue={<span className="min-w-0 truncate whitespace-nowrap font-mono text-xs text-slate-300">{formatBrowserSessionPath(row)}</span>}
+    />
+  );
+
+  const renderDesktopTimeCell = (row: AccountRecord) => (
+    <DesktopTwoLineValueCell
+      primaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.importedAt)}</span>}
+      secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.lastUsedAt)}</span>}
     />
   );
 
@@ -1490,10 +1781,9 @@ export function AccountsView({
                             <div className="shrink-0">{renderAccountActions(row)}</div>
                           </div>
                           <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                            <div className="min-w-0">{renderCredentialCell(row)}</div>
                             <div className="min-w-0">{renderSessionCell(row, "right")}</div>
-                            <div className="min-w-0">{renderStatusCell(row, "right")}</div>
                             <div className="min-w-0">{renderMailboxCell(row, "right")}</div>
+                            <div className="min-w-0">{renderStatusCell(row, "right")}</div>
                             <div className="min-w-0 sm:col-span-2">{renderTimeCell(row, "right")}</div>
                           </div>
                         </div>
@@ -1503,113 +1793,126 @@ export function AccountsView({
                 </div>
 
                 <div className="hidden md:block">
-                  <Table className="min-w-[1260px]">
+                  <Table className="min-w-[1210px]">
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="w-14">
+                        <TableHead className="w-14 align-top">
                           <Checkbox
                             checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
                             onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
                             aria-label="select-current-page"
                           />
                         </TableHead>
-                        <TableHead className="min-w-[18rem]">账号</TableHead>
-                        <TableHead className="min-w-[15rem]">凭据</TableHead>
-                        <TableHead className="min-w-[15rem]">会话</TableHead>
-                        <TableHead className="min-w-[15rem]">状态</TableHead>
-                        <TableHead className="min-w-[15rem]">收信</TableHead>
-                        <TableHead className="min-w-[13rem]">
-                          <div className="grid gap-3">
-                            <button
-                              type="button"
-                              className={cn(
-                                "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
-                                resolveAccountSortState(query, "importedAt") === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
-                              )}
-                              onClick={() => {
-                                const state = resolveAccountSortState(query, "importedAt");
-                                onQueryChange(
-                                  state === "inactive"
-                                    ? { ...query, sortBy: "importedAt", sortDir: "desc", page: 1 }
-                                    : state === "desc"
-                                      ? { ...query, sortBy: "importedAt", sortDir: "asc", page: 1 }
-                                      : { ...query, sortBy: DEFAULT_ACCOUNT_QUERY_SORT.sortBy, sortDir: DEFAULT_ACCOUNT_QUERY_SORT.sortDir, page: 1 },
-                                );
-                              }}
-                              aria-label={`导入时间排序：${
-                                resolveAccountSortState(query, "importedAt") === "asc"
-                                  ? "当前升序，再点恢复默认"
-                                  : resolveAccountSortState(query, "importedAt") === "desc"
-                                    ? isDefaultAccountQuerySort(query)
-                                      ? "当前默认降序，再点升序"
-                                      : "当前降序，再点升序"
-                                    : "当前未排序，点击按降序排序"
-                              }`}
-                            >
-                              <span>导入时间</span>
-                              {resolveAccountSortState(query, "importedAt") === "desc" ? (
-                                <ArrowDown className="size-3.5" aria-hidden="true" />
-                              ) : resolveAccountSortState(query, "importedAt") === "asc" ? (
-                                <ArrowUp className="size-3.5" aria-hidden="true" />
-                              ) : (
-                                <ArrowUpDown className="size-3.5" aria-hidden="true" />
-                              )}
-                            </button>
-                            <button
-                              type="button"
-                              className={cn(
-                                "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
-                                resolveAccountSortState(query, "lastUsedAt") === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
-                              )}
-                              onClick={() => {
-                                const state = resolveAccountSortState(query, "lastUsedAt");
-                                onQueryChange(
-                                  state === "inactive"
-                                    ? { ...query, sortBy: "lastUsedAt", sortDir: "desc", page: 1 }
-                                    : state === "desc"
-                                      ? { ...query, sortBy: "lastUsedAt", sortDir: "asc", page: 1 }
-                                      : { ...query, sortBy: DEFAULT_ACCOUNT_QUERY_SORT.sortBy, sortDir: DEFAULT_ACCOUNT_QUERY_SORT.sortDir, page: 1 },
-                                );
-                              }}
-                              aria-label={`最近使用排序：${
-                                resolveAccountSortState(query, "lastUsedAt") === "asc"
-                                  ? "当前升序，再点恢复默认"
-                                  : resolveAccountSortState(query, "lastUsedAt") === "desc"
-                                    ? "当前降序，再点升序"
-                                    : "当前未排序，点击按降序排序"
-                              }`}
-                            >
-                              <span>最近使用</span>
-                              {resolveAccountSortState(query, "lastUsedAt") === "desc" ? (
-                                <ArrowDown className="size-3.5" aria-hidden="true" />
-                              ) : resolveAccountSortState(query, "lastUsedAt") === "asc" ? (
-                                <ArrowUp className="size-3.5" aria-hidden="true" />
-                              ) : (
-                                <ArrowUpDown className="size-3.5" aria-hidden="true" />
-                              )}
-                            </button>
-                          </div>
+                        <TableHead className="min-w-[23rem] align-top">
+                          <DesktopGroupHeader title="账号" primaryLabel="邮箱" secondaryLabel="辅助邮箱 / 分组" />
                         </TableHead>
-                        <TableHead className="w-[11.5rem] min-w-[11.5rem] whitespace-nowrap text-right">操作</TableHead>
+                        <TableHead className="min-w-[13rem] align-top">
+                          <DesktopGroupHeader title="会话" primaryLabel="Session" secondaryLabel="Session Proxy" />
+                        </TableHead>
+                        <TableHead className="min-w-[11rem] align-top">
+                          <DesktopGroupHeader title="收信" primaryLabel="收信状态" secondaryLabel="Profile" />
+                        </TableHead>
+                        <TableHead className="min-w-[15rem] align-top">
+                          <DesktopGroupHeader title="状态" primaryLabel="最近状态" secondaryLabel="阻断 / 停用" />
+                        </TableHead>
+                        <TableHead className="min-w-[10.5rem] align-top">
+                          <DesktopGroupHeader
+                            title="时间"
+                            primaryLabel={
+                              <button
+                                type="button"
+                                className={cn(
+                                  "inline-flex items-center gap-2 rounded-xl px-1 py-0.5 text-left transition-colors",
+                                  resolveAccountSortState(query, "importedAt") === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
+                                )}
+                                onClick={() => {
+                                  const state = resolveAccountSortState(query, "importedAt");
+                                  onQueryChange(
+                                    state === "inactive"
+                                      ? { ...query, sortBy: "importedAt", sortDir: "desc", page: 1 }
+                                      : state === "desc"
+                                        ? { ...query, sortBy: "importedAt", sortDir: "asc", page: 1 }
+                                        : { ...query, sortBy: DEFAULT_ACCOUNT_QUERY_SORT.sortBy, sortDir: DEFAULT_ACCOUNT_QUERY_SORT.sortDir, page: 1 },
+                                  );
+                                }}
+                                aria-label={`导入时间排序：${
+                                  resolveAccountSortState(query, "importedAt") === "asc"
+                                    ? "当前升序，再点恢复默认"
+                                    : resolveAccountSortState(query, "importedAt") === "desc"
+                                      ? isDefaultAccountQuerySort(query)
+                                        ? "当前默认降序，再点升序"
+                                        : "当前降序，再点升序"
+                                      : "当前未排序，点击按降序排序"
+                                }`}
+                              >
+                                <span>导入时间</span>
+                                {resolveAccountSortState(query, "importedAt") === "desc" ? (
+                                  <ArrowDown className="size-3.5" aria-hidden="true" />
+                                ) : resolveAccountSortState(query, "importedAt") === "asc" ? (
+                                  <ArrowUp className="size-3.5" aria-hidden="true" />
+                                ) : (
+                                  <ArrowUpDown className="size-3.5" aria-hidden="true" />
+                                )}
+                              </button>
+                            }
+                            secondaryLabel={
+                              <button
+                                type="button"
+                                className={cn(
+                                  "inline-flex items-center gap-2 rounded-xl px-1 py-0.5 text-left transition-colors",
+                                  resolveAccountSortState(query, "lastUsedAt") === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
+                                )}
+                                onClick={() => {
+                                  const state = resolveAccountSortState(query, "lastUsedAt");
+                                  onQueryChange(
+                                    state === "inactive"
+                                      ? { ...query, sortBy: "lastUsedAt", sortDir: "desc", page: 1 }
+                                      : state === "desc"
+                                        ? { ...query, sortBy: "lastUsedAt", sortDir: "asc", page: 1 }
+                                        : { ...query, sortBy: DEFAULT_ACCOUNT_QUERY_SORT.sortBy, sortDir: DEFAULT_ACCOUNT_QUERY_SORT.sortDir, page: 1 },
+                                  );
+                                }}
+                                aria-label={`最近使用排序：${
+                                  resolveAccountSortState(query, "lastUsedAt") === "asc"
+                                    ? "当前升序，再点恢复默认"
+                                    : resolveAccountSortState(query, "lastUsedAt") === "desc"
+                                      ? "当前降序，再点升序"
+                                      : "当前未排序，点击按降序排序"
+                                }`}
+                              >
+                                <span>最近使用</span>
+                                {resolveAccountSortState(query, "lastUsedAt") === "desc" ? (
+                                  <ArrowDown className="size-3.5" aria-hidden="true" />
+                                ) : resolveAccountSortState(query, "lastUsedAt") === "asc" ? (
+                                  <ArrowUp className="size-3.5" aria-hidden="true" />
+                                ) : (
+                                  <ArrowUpDown className="size-3.5" aria-hidden="true" />
+                                )}
+                              </button>
+                            }
+                          />
+                          </TableHead>
+                        <TableHead className="min-w-[10.5rem] whitespace-nowrap text-right align-top">
+                          <DesktopGroupHeader title="操作" primaryLabel="Bootstrap / 编辑" secondaryLabel="停用 / 收件箱" align="right" />
+                        </TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {accounts.rows.map((row) => (
                         <TableRow key={row.id}>
-                          <TableCell>
+                          <TableCell className="py-2 align-top">
                             <Checkbox
                               checked={selectedIds.includes(row.id)}
                               onCheckedChange={(checked) => onToggleSelection(row.id, checked === true)}
                               aria-label={`select-${row.microsoftEmail}`}
                             />
                           </TableCell>
-                          <TableCell className="min-w-[18rem]">{renderAccountIdentityCell(row)}</TableCell>
-                          <TableCell className="min-w-[15rem]">{renderCredentialCell(row)}</TableCell>
-                          <TableCell className="min-w-[15rem]">{renderSessionCell(row)}</TableCell>
-                          <TableCell className="min-w-[15rem]">{renderStatusCell(row)}</TableCell>
-                          <TableCell className="min-w-[15rem]">{renderMailboxCell(row)}</TableCell>
-                          <TableCell className="min-w-[13rem]">{renderTimeCell(row)}</TableCell>
-                          <TableCell className="w-[11.5rem] min-w-[11.5rem] text-right">
+                          <TableCell className="py-2 align-top">{renderDesktopAccountIdentityCell(row)}</TableCell>
+                          <TableCell className="py-2 align-top">{renderDesktopSessionCell(row)}</TableCell>
+                          <TableCell className="py-2 align-top">{renderDesktopMailboxCell(row)}</TableCell>
+                          <TableCell className="py-2 align-top">{renderDesktopStatusCell(row)}</TableCell>
+                          <TableCell className="py-2 align-top">{renderDesktopTimeCell(row)}</TableCell>
+                          <TableCell className="py-2 align-top text-right">
                             <div className="ml-auto flex w-max flex-nowrap justify-end">{renderAccountActions(row)}</div>
                           </TableCell>
                         </TableRow>
@@ -2228,6 +2531,67 @@ export function AccountsView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {copyPopoverState ? (
+        <Popover
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setCopyPopoverState(null);
+            }
+          }}
+        >
+          <PopoverAnchor asChild>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none fixed z-40 size-px"
+              style={{
+                left: copyPopoverState.anchorRect.left + (copyPopoverState.anchorRect.width / 2),
+                top: copyPopoverState.anchorRect.top + copyPopoverState.anchorRect.height,
+              }}
+            />
+          </PopoverAnchor>
+          <PopoverContent
+            className="w-[min(92vw,24rem)] rounded-2xl border border-white/12 bg-[linear-gradient(180deg,rgba(12,22,38,0.98),rgba(7,14,27,0.98))] p-3"
+            side="bottom"
+            align="start"
+            sideOffset={10}
+            onOpenAutoFocus={(event) => event.preventDefault()}
+          >
+            <div className="space-y-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="text-sm font-medium text-white">{copyPopoverState.title}</div>
+                  <div className="text-xs leading-5 text-slate-300">{copyPopoverState.message}</div>
+                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="size-7 shrink-0 rounded-lg text-slate-400 hover:text-white"
+                  onClick={() => setCopyPopoverState(null)}
+                  aria-label="关闭复制反馈"
+                >
+                  <ChevronRight className="size-4 rotate-45" aria-hidden="true" />
+                </Button>
+              </div>
+              <div className="space-y-2">
+                <div className="text-[0.68rem] uppercase tracking-[0.14em] text-slate-500">完整内容（点击全选）</div>
+                <div
+                  role="textbox"
+                  tabIndex={0}
+                  aria-label="完整内容（点击全选）"
+                  className="rounded-xl border border-white/10 bg-[#0b1423]/90 px-3 py-2 font-mono text-xs text-slate-100 outline-none transition focus-visible:border-cyan-300/50 focus-visible:ring-2 focus-visible:ring-cyan-300/20"
+                  onClick={selectCopyContent}
+                  onFocus={selectCopyContent}
+                >
+                  {copyPopoverState.value || "—"}
+                </div>
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
+      ) : null}
       </>
     </TooltipProvider>
   );

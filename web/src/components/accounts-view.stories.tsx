@@ -1119,6 +1119,13 @@ export const ExtractorRuntimeOutcomeStates: Story = {
 export const PasswordCopyPlay: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "复制成功后会弹出可见气泡，明确提示已复制，同时保留可点击全选的完整内容文本块供手动校验或再次复制。",
+      },
+    },
+  },
   play: async ({ canvasElement }) => {
     const writeText = fn(async () => undefined);
     Object.defineProperty(window.navigator, "clipboard", {
@@ -1132,6 +1139,36 @@ export const PasswordCopyPlay: Story = {
     await waitFor(() => {
       expect(canvas.getByRole("button", { name: "alpha@example.test 密码已复制" })).toBeInTheDocument();
     });
+    await expect(within(document.body).getByText("已复制")).toBeInTheDocument();
+    await expect(within(document.body).getByRole("textbox", { name: "完整内容（点击全选）" })).toHaveTextContent("pass-456");
+  },
+};
+
+export const CopyFailureFallbackPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "当浏览器拒绝自动复制时，复制图标会弹出气泡说明失败原因，并提供可点击全选的完整内容文本块供手动复制。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const writeText = fn(async () => {
+      throw new Error("clipboard blocked by browser");
+    });
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: "复制beta@example.test 邮箱" });
+    await userEvent.click(trigger);
+    await waitFor(() => {
+      expect(within(document.body).getByText("自动复制失败")).toBeInTheDocument();
+    });
+    await expect(within(document.body).getByRole("textbox", { name: "完整内容（点击全选）" })).toHaveTextContent("beta@example.test");
   },
 };
 
