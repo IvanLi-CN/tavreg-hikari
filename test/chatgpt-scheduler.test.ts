@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -188,6 +188,303 @@ test("chatgpt scheduler starts without pre-provisioned drafts in payload", async
   expect(generatedDrafts).toBe(1);
 
   await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler persists and updates upstream group selection in job payload", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+  (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async () => undefined;
+
+  const started = await scheduler.startJob({
+    runMode: "headless",
+    need: 2,
+    parallel: 1,
+    maxAttempts: 2,
+    upstreamGroupName: "sync-ready",
+  });
+  expect(started.payloadJson).toEqual({ upstreamGroupName: "sync-ready" });
+
+  const updated = scheduler.updateCurrentJobLimits({
+    upstreamGroupName: "warm-pool",
+  });
+  expect(updated.payloadJson).toEqual({ upstreamGroupName: "warm-pool" });
+
+  const cleared = scheduler.updateCurrentJobLimits({
+    upstreamGroupName: "",
+  });
+  expect(cleared.payloadJson).toEqual({});
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler does not block attempt finalization on background supplement", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  let releaseSupplement: () => void = () => {};
+  const supplementStarted = new Promise<void>((resolve) => {
+    releaseSupplement = resolve;
+  });
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    supplementCredential: async () => supplementStarted,
+  });
+
+  const job = appDb.createJob({
+    site: "chatgpt",
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    payloadJson: { upstreamGroupName: "sync-ready" },
+  });
+  const outputDir = path.join(tempDir, "attempt-success-nonblocking");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      mode: "headless",
+      email: "nonblocking@example.com",
+      password: "Password123!",
+      nickname: "Koha",
+      birthDate: "1995-04-02",
+      credentials: {
+        access_token: "access-token-demo",
+        refresh_token: "refresh-token-demo",
+        id_token: "id-token-demo",
+        account_id: "acc-nonblocking",
+        expires_at: "2026-04-18T10:00:00.000Z",
+        token_type: "Bearer",
+      },
+    }),
+  );
+  const attempt = appDb.createAttempt(job.id, {
+    accountEmail: "nonblocking@example.com",
+    outputDir,
+  });
+
+  const finalizePromise = (scheduler as any).handleAttemptExit(job.id, attempt.id, outputDir, 0, null, {
+    child: { pid: 0, kill: () => false },
+    attempt,
+    outputDir,
+    reservedPorts: { apiPort: 39091, mixedPort: 49091 },
+    stopRequested: null,
+  });
+
+  const finalizedQuickly = await Promise.race([
+    finalizePromise.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
+  ]);
+
+  expect(finalizedQuickly).toBe(true);
+  expect(appDb.getChatGptCredential(1)?.email).toBe("nonblocking@example.com");
+
+  releaseSupplement();
+  await finalizePromise;
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler waits for in-flight supplement work during shutdown", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  let releaseSupplement: () => void = () => {};
+  const supplementGate = new Promise<void>((resolve) => {
+    releaseSupplement = resolve;
+  });
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    supplementCredential: async () => supplementGate,
+  });
+
+  const job = appDb.createJob({
+    site: "chatgpt",
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    payloadJson: { upstreamGroupName: "sync-ready" },
+  });
+  const outputDir = path.join(tempDir, "attempt-success-shutdown-wait");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      mode: "headless",
+      email: "shutdown-wait@example.com",
+      password: "Password123!",
+      nickname: "Koha",
+      birthDate: "1995-04-02",
+      credentials: {
+        access_token: "access-token-demo",
+        refresh_token: "refresh-token-demo",
+        id_token: "id-token-demo",
+        account_id: "acc-shutdown-wait",
+        expires_at: "2026-04-18T10:00:00.000Z",
+        token_type: "Bearer",
+      },
+    }),
+  );
+  const attempt = appDb.createAttempt(job.id, {
+    accountEmail: "shutdown-wait@example.com",
+    outputDir,
+  });
+
+  await (scheduler as any).handleAttemptExit(job.id, attempt.id, outputDir, 0, null, {
+    child: { pid: 0, kill: () => false },
+    attempt,
+    outputDir,
+    reservedPorts: { apiPort: 39092, mixedPort: 49092 },
+    stopRequested: null,
+  });
+
+  const shutdownPromise = scheduler.shutdown();
+  const finishedEarly = await Promise.race([
+    shutdownPromise.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 50)),
+  ]);
+
+  expect(finishedEarly).toBe(false);
+
+  releaseSupplement();
+  await shutdownPromise;
+  appDb.close();
+});
+
+test("chatgpt scheduler keeps local credential success when supplement fails", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const publishedEvents: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const scheduler = new ChatGptJobScheduler(
+    appDb,
+    process.cwd(),
+    () => createSchedulerSettings(),
+    (event) => publishedEvents.push({ type: event.type, payload: event.payload }),
+    {
+      supplementCredential: async () => {
+        throw new Error("upstream refused sync");
+      },
+    },
+  );
+
+  const job = appDb.createJob({
+    site: "chatgpt",
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    payloadJson: { upstreamGroupName: "sync-ready" },
+  });
+  const outputDir = path.join(tempDir, "attempt-success");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      mode: "headless",
+      email: "supplement@example.com",
+      password: "Password123!",
+      nickname: "Koha",
+      birthDate: "1995-04-02",
+      credentials: {
+        access_token: "access-token-demo",
+        refresh_token: "refresh-token-demo",
+        id_token: "id-token-demo",
+        account_id: "acc-supplement",
+        expires_at: "2026-04-18T10:00:00.000Z",
+        token_type: "Bearer",
+      },
+    }),
+  );
+  const attempt = appDb.createAttempt(job.id, {
+    accountEmail: "supplement@example.com",
+    outputDir,
+  });
+
+  await (scheduler as any).handleAttemptExit(job.id, attempt.id, outputDir, 0, null, {
+    child: { pid: 0, kill: () => false },
+    attempt,
+    outputDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    stopRequested: null,
+  });
+
+  const credential = appDb.getChatGptCredential(1);
+  expect(credential?.email).toBe("supplement@example.com");
+  expect(appDb.getJob(job.id)?.successCount).toBe(1);
+
+  await scheduler.shutdown();
+  expect(
+    publishedEvents.some(
+      (event) => event.type === "toast" && event.payload.level === "warning" && String(event.payload.message || "").includes("supplement failed"),
+    ),
+  ).toBe(true);
+
+  appDb.close();
+});
+
+test("chatgpt scheduler emits upstream settings refresh after successful supplement", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const publishedEvents: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const scheduler = new ChatGptJobScheduler(
+    appDb,
+    process.cwd(),
+    () => createSchedulerSettings(),
+    (event) => publishedEvents.push({ type: event.type, payload: event.payload }),
+    {
+      supplementCredential: async () => undefined,
+    },
+  );
+
+  const job = appDb.createJob({
+    site: "chatgpt",
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    payloadJson: { upstreamGroupName: "sync-ready" },
+  });
+  const outputDir = path.join(tempDir, "attempt-success-refresh");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      mode: "headless",
+      email: "refresh@example.com",
+      password: "Password123!",
+      nickname: "Koha",
+      birthDate: "1995-04-02",
+      credentials: {
+        access_token: "access-token-demo",
+        refresh_token: "refresh-token-demo",
+        id_token: "id-token-demo",
+        account_id: "acc-refresh",
+        expires_at: "2026-04-18T10:00:00.000Z",
+        token_type: "Bearer",
+      },
+    }),
+  );
+  const attempt = appDb.createAttempt(job.id, {
+    accountEmail: "refresh@example.com",
+    outputDir,
+  });
+
+  await (scheduler as any).handleAttemptExit(job.id, attempt.id, outputDir, 0, null, {
+    child: { pid: 0, kill: () => false },
+    attempt,
+    outputDir,
+    reservedPorts: { apiPort: 39093, mixedPort: 49093 },
+    stopRequested: null,
+  });
+  await scheduler.shutdown();
+
+  expect(
+    publishedEvents.some(
+      (event) =>
+        event.type === "chatgpt.upstream-settings.updated"
+        && event.payload.groupName === "sync-ready"
+        && event.payload.credentialId === 1,
+    ),
+  ).toBe(true);
+
   appDb.close();
 });
 

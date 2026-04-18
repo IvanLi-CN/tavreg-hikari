@@ -33,3 +33,4 @@
 | 9p1fh | 微软账号页 Session Proxy 行内更换代理节点 | 已完成 | `9p1fh-account-session-proxy-switch/SPEC.md` | 2026-04-17 | 账号级代理切换弹窗、单节点测速复用、立即 rebootstrap；切换后列表/弹窗即时回显新节点并清空旧 IP |
 | bqa97 | 代理节点检查并发化与 SSE 进度流 | 已完成 | `bqa97-proxy-check-progress-stream/SPEC.md` | 2026-04-15 | `/api/proxies` 快照化、独立 proxy check coordinator、SSE 进度推送 |
 | zxuvb | Microsoft proof 补邮箱分支修复与多语言诊断加固 | 已完成 | `zxuvb-microsoft-proof-surface-locale-hardening/SPEC.md` | 2026-04-18 | 101 热修上线并完成 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归；zh-TW `/proofs/Add` auto-provision 已恢复 |
+| vhvds | ChatGPT 补号到 codex-vibe-monitor 分组 | 已实现待评审 | `vhvds-chatgpt-upstream-account-supplement/SPEC.md` | 2026-04-18 | 自动补号 + Keys 批量补号 + 设置入口收敛到 Keys > ChatGPT |

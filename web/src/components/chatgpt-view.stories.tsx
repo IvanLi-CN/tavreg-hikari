@@ -9,6 +9,7 @@ const sampleJobDraft: ChatGptJobDraft = {
   need: 3,
   parallel: 2,
   maxAttempts: 5,
+  upstreamGroupName: "",
 };
 
 const sampleJob: JobSnapshot = {
@@ -32,6 +33,7 @@ const sampleJob: JobSnapshot = {
     pausedAt: null,
     completedAt: null,
     lastError: "chatgpt_auth_challenge_detected",
+    upstreamGroupName: "sync-ready",
   },
   activeAttempts: [
     {
@@ -128,6 +130,8 @@ export const Running: Story = {
     job: sampleJob,
     runModeAvailability: sampleJob.runModeAvailability,
     jobBusy: false,
+    draftTouched: false,
+    groupOptions: ["sync-ready", "warm-pool", "hold"],
     onJobDraftChange: fn(),
     onJobAction: fn(),
   },
@@ -214,12 +218,29 @@ export const MailboxCooldown: Story = {
   },
 };
 
+export const RunningStagedDisableSupplement: Story = {
+  args: {
+    ...Running.args,
+    draftTouched: true,
+    jobDraft: {
+      ...sampleJobDraft,
+      upstreamGroupName: "",
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("supplement: 不补号")).toBeInTheDocument();
+    await expect(canvas.getByText("当前不会执行自动补号。")).toBeInTheDocument();
+  },
+};
+
 export const InteractiveBatchControls: Story = {
   args: {
     ...BatchReady.args,
   },
   render: () => {
     const [batchDraft, setBatchDraft] = useState(sampleJobDraft);
+    const [draftTouched, setDraftTouched] = useState(false);
     return (
       <>
         <ChatGptView
@@ -227,7 +248,12 @@ export const InteractiveBatchControls: Story = {
           job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [], runModeAvailability: sampleJob.runModeAvailability }}
           runModeAvailability={sampleJob.runModeAvailability}
           jobBusy={false}
-          onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
+          draftTouched={draftTouched}
+          groupOptions={["sync-ready", "warm-pool", "hold"]}
+          onJobDraftChange={(patch) => {
+            setDraftTouched(true);
+            setBatchDraft((current) => ({ ...current, ...patch }));
+          }}
           onJobAction={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
@@ -245,8 +271,11 @@ export const InteractiveBatchControls: Story = {
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
     await userEvent.tab();
+    await userEvent.click(canvas.getByRole("button", { name: "不补号" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "warm-pool" }));
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"need":4');
+    await expect(canvas.getByText(/supplement:/)).toBeInTheDocument();
     await expect(canvas.getByText("开始")).toBeInTheDocument();
     await expect(canvas.getByText(/Keys > ChatGPT/)).toBeInTheDocument();
   },
@@ -263,6 +292,7 @@ export const InteractiveHeadlessOnly: Story = {
   },
   render: () => {
     const [batchDraft, setBatchDraft] = useState<ChatGptJobDraft>({ ...sampleJobDraft, runMode: "headless" });
+    const [draftTouched, setDraftTouched] = useState(false);
     return (
       <>
         <ChatGptView
@@ -270,7 +300,12 @@ export const InteractiveHeadlessOnly: Story = {
           job={{ ...sampleJob, job: null, activeAttempts: [], recentAttempts: [], runModeAvailability: headlessOnlyAvailability }}
           runModeAvailability={headlessOnlyAvailability}
           jobBusy={false}
-          onJobDraftChange={(patch) => setBatchDraft((current) => ({ ...current, ...patch }))}
+          draftTouched={draftTouched}
+          groupOptions={["sync-ready", "warm-pool", "hold"]}
+          onJobDraftChange={(patch) => {
+            setDraftTouched(true);
+            setBatchDraft((current) => ({ ...current, ...patch }));
+          }}
           onJobAction={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
@@ -297,6 +332,7 @@ export const ControlPlay: Story = {
   },
   render: (args) => {
     const [draft, setDraft] = useState(sampleJobDraft);
+    const [draftTouched, setDraftTouched] = useState(false);
     return (
       <>
         <ChatGptView
@@ -304,7 +340,12 @@ export const ControlPlay: Story = {
           job={sampleJob}
           runModeAvailability={sampleJob.runModeAvailability}
           jobBusy={false}
-          onJobDraftChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
+          draftTouched={draftTouched}
+          groupOptions={["sync-ready", "warm-pool", "hold"]}
+          onJobDraftChange={(patch) => {
+            setDraftTouched(true);
+            setDraft((current) => ({ ...current, ...patch }));
+          }}
           onJobAction={args.onJobAction}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
@@ -322,14 +363,17 @@ export const ControlPlay: Story = {
 
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
+    await userEvent.click(canvas.getByRole("button", { name: /sync-ready/ }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "warm-pool" }));
     await userEvent.click(canvas.getByRole("button", { name: "更新限制" }));
     await expect(draftDebug).toHaveTextContent('"need":4');
     await expect(args.onJobAction).toHaveBeenCalledWith(
       "update_limits",
       expect.objectContaining({
-        draft: expect.objectContaining({ need: 4, parallel: 2, maxAttempts: 5, runMode: "headed" }),
+        draft: expect.objectContaining({ need: 4, parallel: 2, maxAttempts: 5, runMode: "headed", upstreamGroupName: "warm-pool" }),
       }),
     );
+
 
     await userEvent.click(canvas.getByRole("button", { name: "停止" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);

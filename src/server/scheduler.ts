@@ -31,6 +31,7 @@ export interface ServerEvent {
   type:
     | "job.updated"
     | "attempt.updated"
+    | "chatgpt.upstream-settings.updated"
     | "account.updated"
     | "mailbox.updated"
     | "proxy.updated"

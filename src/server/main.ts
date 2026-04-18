@@ -60,6 +60,11 @@ import { createExclusiveRunner } from "./exclusive-runner.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { JobScheduler, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { ChatGptJobScheduler } from "./chatgpt-scheduler.js";
+import {
+  ChatGptUpstreamSupplementService,
+  normalizeChatGptUpstreamGroupName,
+  readChatGptJobUpstreamGroupName,
+} from "./chatgpt-upstream-supplement.js";
 import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
 import { GrokJobScheduler } from "./grok-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
@@ -612,6 +617,17 @@ function broadcastAccountAction(
   });
 }
 
+function broadcastChatGptUpstreamSettingsUpdated(
+  broadcast: (event: ServerEvent) => void,
+  payload: Record<string, unknown> = {},
+): void {
+  broadcast({
+    type: "chatgpt.upstream-settings.updated",
+    payload,
+    timestamp: nowIso(),
+  });
+}
+
 function parseJobSite(value: string | null | undefined): JobSite {
   if (value === "chatgpt") return "chatgpt";
   if (value === "grok") return "grok";
@@ -623,6 +639,18 @@ type SiteScheduler = {
   getAutoExtractSnapshot(jobId: number): unknown;
   getCooldownSnapshot?: () => unknown;
 };
+
+function serializeJobRecordForApi(job: NonNullable<ReturnType<AppDatabase["getCurrentJob"]>>) {
+  const { payloadJson: _payloadJson, ...rest } = job;
+  return {
+    ...rest,
+    ...(job.site === "chatgpt"
+      ? {
+          upstreamGroupName: readChatGptJobUpstreamGroupName(job),
+        }
+      : {}),
+  };
+}
 
 function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
   const runModeAvailability = detectBrowserRunModeAvailability();
@@ -641,7 +669,7 @@ function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteSch
   }
   return {
     site,
-    job,
+    job: serializeJobRecordForApi(job),
     activeAttempts: scheduler.activeAttemptRows().map((row) => serializeAttemptForApi(db, row)),
     recentAttempts: db
       .listAttempts(job.id, false)
@@ -1387,6 +1415,9 @@ async function main(): Promise<void> {
     },
   });
   const grokScheduler = new GrokJobScheduler(db, REPO_ROOT, readSettings, broadcast);
+  const chatGptUpstreamSupplement = new ChatGptUpstreamSupplementService(db, {
+    projectLabel: path.basename(REPO_ROOT),
+  });
   const chatgptScheduler = new ChatGptJobScheduler(db, REPO_ROOT, readSettings, broadcast, {
     createAttemptDraft: () =>
       buildChatGptDraft({
@@ -1399,6 +1430,12 @@ async function main(): Promise<void> {
         createBirthDate: randomBirthDate,
         nowIso,
       }),
+    supplementCredential: async ({ credential, groupName }) => {
+      const result = await chatGptUpstreamSupplement.supplementCredential(credential, groupName);
+      if (!result.success) {
+        throw new Error(result.message);
+      }
+    },
   });
   const getSchedulerBySite = (site: JobSite) => {
     if (site === "chatgpt") return chatgptScheduler;
@@ -1999,6 +2036,74 @@ async function main(): Promise<void> {
         });
       }
 
+      if (pathname === "/api/chatgpt/upstream-settings" && req.method === "GET") {
+        return json({
+          ok: true,
+          settings: chatGptUpstreamSupplement.serializeSettings(),
+        });
+      }
+
+      if (pathname === "/api/chatgpt/upstream-settings" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as {
+          baseUrl?: unknown;
+          apiKey?: unknown;
+          clearBaseUrl?: unknown;
+          clearApiKey?: unknown;
+          groupHistory?: unknown;
+        } | null;
+        try {
+          const settings = chatGptUpstreamSupplement.updateSettings({
+            baseUrl: typeof body?.baseUrl === "string" ? body.baseUrl : undefined,
+            apiKey: typeof body?.apiKey === "string" ? body.apiKey : undefined,
+            clearBaseUrl: body?.clearBaseUrl === true,
+            clearApiKey: body?.clearApiKey === true,
+            groupHistory: Array.isArray(body?.groupHistory) ? body?.groupHistory.map((item) => String(item || "")) : undefined,
+          });
+          broadcastChatGptUpstreamSettingsUpdated(broadcast, {
+            reason: "settings_saved",
+            configured: settings.configured,
+            groupHistory: settings.groupHistory,
+          });
+          return json({
+            ok: true,
+            settings,
+          });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+      }
+
+      if (pathname === "/api/chatgpt/credentials/supplement" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as {
+          ids?: unknown;
+          groupName?: unknown;
+        } | null;
+        const ids = Array.isArray(body?.ids) ? body.ids.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0) : [];
+        const groupName = normalizeChatGptUpstreamGroupName(body?.groupName);
+        if (ids.length === 0) {
+          return badRequest("at least one credential id is required");
+        }
+        if (!groupName) {
+          return badRequest("groupName is required");
+        }
+        try {
+          const result = await chatGptUpstreamSupplement.supplementCredentials(ids, groupName);
+          if (result.succeeded > 0) {
+            broadcastChatGptUpstreamSettingsUpdated(broadcast, {
+              reason: "manual_supplement",
+              groupName: result.groupName,
+              succeeded: result.succeeded,
+            });
+          }
+          return json({
+            ok: true,
+            ...result,
+          });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+      }
+
       if (pathname === "/api/account-extractors/settings" && req.method === "GET") {
         const settings = readSettings();
         return json({
@@ -2391,8 +2496,9 @@ async function main(): Promise<void> {
                 need,
                 parallel,
                 maxAttempts,
+                upstreamGroupName: normalizeChatGptUpstreamGroupName(body?.upstreamGroupName),
               });
-              return json({ ok: true, job });
+              return json({ ok: true, job: serializeJobRecordForApi(job) });
             }
             const settings = readSettings();
             const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
@@ -2407,7 +2513,7 @@ async function main(): Promise<void> {
                 parallel: Math.max(1, Number(body?.parallel || settings.defaultParallel)),
                 maxAttempts: Math.max(1, Number(body?.maxAttempts || settings.defaultMaxAttempts)),
               });
-              return json({ ok: true, job });
+              return json({ ok: true, job: serializeJobRecordForApi(job) });
             }
             const job = await tavilyScheduler.startJob({
               runMode: requestedRunMode,
@@ -2424,27 +2530,33 @@ async function main(): Promise<void> {
                 settings.defaultAutoExtractAccountType,
               ),
             });
-            return json({ ok: true, job });
+            return json({ ok: true, job: serializeJobRecordForApi(job) });
           }
           if (action === "pause") {
             if (site === "chatgpt") {
-              return json({ ok: true, job: chatgptScheduler.pauseCurrentJob() });
+              return json({ ok: true, job: serializeJobRecordForApi(chatgptScheduler.pauseCurrentJob()) });
             }
-            return json({ ok: true, job: site === "grok" ? grokScheduler.pauseCurrentJob() : tavilyScheduler.pauseCurrentJob() });
+            return json({
+              ok: true,
+              job: serializeJobRecordForApi(site === "grok" ? grokScheduler.pauseCurrentJob() : tavilyScheduler.pauseCurrentJob()),
+            });
           }
           if (action === "resume") {
             if (site === "chatgpt") {
-              return json({ ok: true, job: chatgptScheduler.resumeCurrentJob() });
+              return json({ ok: true, job: serializeJobRecordForApi(chatgptScheduler.resumeCurrentJob()) });
             }
-            return json({ ok: true, job: site === "grok" ? grokScheduler.resumeCurrentJob() : tavilyScheduler.resumeCurrentJob() });
+            return json({
+              ok: true,
+              job: serializeJobRecordForApi(site === "grok" ? grokScheduler.resumeCurrentJob() : tavilyScheduler.resumeCurrentJob()),
+            });
           }
           if (action === "stop") {
-            return json({ ok: true, job: scheduler.stopCurrentJob() });
+            return json({ ok: true, job: serializeJobRecordForApi(scheduler.stopCurrentJob()) });
           }
           if (action === "force_stop") {
             return json({
               ok: true,
-              job: scheduler.forceStopCurrentJob(body?.confirmForceStop === true),
+              job: serializeJobRecordForApi(scheduler.forceStopCurrentJob(body?.confirmForceStop === true)),
             });
           }
           if (action === "update_limits") {
@@ -2453,8 +2565,12 @@ async function main(): Promise<void> {
                 parallel: body?.parallel == null ? undefined : Number(body.parallel),
                 need: body?.need == null ? undefined : Number(body.need),
                 maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
+                upstreamGroupName:
+                  body && Object.prototype.hasOwnProperty.call(body, "upstreamGroupName")
+                    ? normalizeChatGptUpstreamGroupName(body?.upstreamGroupName)
+                    : undefined,
               });
-              return json({ ok: true, job });
+              return json({ ok: true, job: serializeJobRecordForApi(job) });
             }
             if (site === "grok") {
               const job = grokScheduler.updateCurrentJobLimits({
@@ -2462,7 +2578,7 @@ async function main(): Promise<void> {
                 need: body?.need == null ? undefined : Number(body.need),
                 maxAttempts: body?.maxAttempts == null ? undefined : Number(body.maxAttempts),
               });
-              return json({ ok: true, job });
+              return json({ ok: true, job: serializeJobRecordForApi(job) });
             }
             const job = tavilyScheduler.updateCurrentJobLimits({
               parallel: body?.parallel == null ? undefined : Number(body.parallel),
@@ -2489,7 +2605,7 @@ async function main(): Promise<void> {
                     )
                   : undefined,
             });
-            return json({ ok: true, job });
+            return json({ ok: true, job: serializeJobRecordForApi(job) });
           }
           return badRequest(`unsupported action: ${action}`);
         } catch (error) {

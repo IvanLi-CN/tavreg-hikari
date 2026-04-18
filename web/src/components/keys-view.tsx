@@ -1,5 +1,6 @@
 import { useState, type ComponentProps } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ChatGptCredentialsView } from "@/components/chatgpt-credentials-view";
 import { ApiKeysView } from "@/components/api-keys-view";
@@ -9,7 +10,9 @@ type KeysTabKey = "tavily" | "grok" | "chatgpt";
 
 type TavilyKeysPaneProps = ComponentProps<typeof ApiKeysView>;
 type GrokKeysPaneProps = ComponentProps<typeof GrokApiKeysView>;
-type ChatGptKeysPaneProps = ComponentProps<typeof ChatGptCredentialsView>;
+type ChatGptKeysPaneProps = ComponentProps<typeof ChatGptCredentialsView> & {
+  onOpenUpstreamSettings: () => void;
+};
 
 export function KeysView({
   tavily,
@@ -25,17 +28,18 @@ export function KeysView({
   nowMs?: number;
 }) {
   const [tab, setTab] = useState<KeysTabKey>(defaultTab);
-  const chatGptValidCount = chatgpt.credentials.filter((row) => {
+  const { onOpenUpstreamSettings, ...chatgptPane } = chatgpt;
+  const chatGptValidCount = chatgptPane.credentials.filter((row) => {
     if (!row.expiresAt) return false;
     const expiresAt = Date.parse(row.expiresAt);
     return Number.isFinite(expiresAt) && expiresAt > nowMs;
   }).length;
-  const chatGptExpiredCount = chatgpt.credentials.filter((row) => {
+  const chatGptExpiredCount = chatgptPane.credentials.filter((row) => {
     if (!row.expiresAt) return false;
     const expiresAt = Date.parse(row.expiresAt);
     return Number.isFinite(expiresAt) && expiresAt <= nowMs;
   }).length;
-  const chatGptNoExpiryCount = chatgpt.credentials.filter((row) => !row.expiresAt).length;
+  const chatGptNoExpiryCount = chatgptPane.credentials.filter((row) => !row.expiresAt).length;
   const headerSlot = (
     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <TabsList className="w-full justify-start overflow-x-auto md:w-fit">
@@ -62,7 +66,8 @@ export function KeysView({
             <Badge variant="success">valid · {chatGptValidCount}</Badge>
             <Badge variant="warning">expired · {chatGptExpiredCount}</Badge>
             <Badge variant="neutral">no expiry · {chatGptNoExpiryCount}</Badge>
-            <Badge variant="info">total · {chatgpt.credentials.length}</Badge>
+            <Badge variant="info">total · {chatgptPane.credentials.length}</Badge>
+            <Button type="button" variant="outline" size="sm" onClick={onOpenUpstreamSettings}>补号设置</Button>
           </>
         )}
       </div>
@@ -80,7 +85,7 @@ export function KeysView({
       </TabsContent>
 
       <TabsContent value="chatgpt" className="pt-0">
-        <ChatGptCredentialsView {...chatgpt} headerSlot={headerSlot} />
+        <ChatGptCredentialsView {...chatgptPane} headerSlot={headerSlot} />
       </TabsContent>
     </Tabs>
   );

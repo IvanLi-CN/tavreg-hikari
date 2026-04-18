@@ -3,7 +3,12 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ChatGptCredentialsView } from "@/components/chatgpt-credentials-view";
 import { sampleChatGptCredentials } from "@/stories/fixtures";
-import type { ChatGptCredentialQuery, ChatGptCredentialRecord, ChatGptCredentialSort } from "@/lib/app-types";
+import type {
+  ChatGptCredentialQuery,
+  ChatGptCredentialRecord,
+  ChatGptCredentialSort,
+  ChatGptCredentialSupplementPayload,
+} from "@/lib/app-types";
 
 const defaultSort: ChatGptCredentialSort = {
   sortBy: "createdAt",
@@ -91,6 +96,9 @@ function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentia
   const sourceCredentials = props?.credentials || sampleChatGptCredentials;
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
+  const [batchSupplementOpen, setBatchSupplementOpen] = useState(false);
+  const [batchSupplementGroupName, setBatchSupplementGroupName] = useState("");
+  const [batchSupplementResult, setBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
   const [query, setQuery] = useState<ChatGptCredentialQuery>(defaultQuery);
   const [sort, setSort] = useState<ChatGptCredentialSort>(defaultSort);
   const filteredCredentials = useMemo(() => applyCredentialQuery(sourceCredentials, query), [query, sourceCredentials]);
@@ -118,6 +126,12 @@ function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentia
       exportOpen={exportOpen}
       exportContent={exportContent}
       exportBusy={false}
+      groupOptions={["sync-ready", "warm-pool", "hold"]}
+      upstreamSettingsConfigured
+      batchSupplementOpen={batchSupplementOpen}
+      batchSupplementBusy={false}
+      batchSupplementGroupName={batchSupplementGroupName}
+      batchSupplementResult={batchSupplementResult}
       onQueryChange={setQuery}
       onSortChange={setSort}
       onToggleSelection={(credentialId, checked) =>
@@ -131,6 +145,35 @@ function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentia
       onSaveExport={() => undefined}
       onCopyCredential={() => undefined}
       onExportCredential={() => undefined}
+      onBatchSupplementOpenChange={(open) => {
+        setBatchSupplementOpen(open);
+        if (!open) setBatchSupplementResult(null);
+      }}
+      onBatchSupplementGroupNameChange={setBatchSupplementGroupName}
+      onOpenBatchSupplement={() => {
+        setBatchSupplementOpen(true);
+        setBatchSupplementResult(null);
+      }}
+      onSubmitBatchSupplement={() => {
+        setBatchSupplementResult({
+          ok: true,
+          groupName: batchSupplementGroupName || "sync-ready",
+          requested: selectedIds.length,
+          succeeded: Math.max(0, selectedIds.length - 1),
+          failed: selectedIds.length > 0 ? 1 : 0,
+          results: selectedIds.map((id, index) => {
+            const row = sourceCredentials.find((item) => item.id === id) || null;
+            return {
+              credentialId: id,
+              email: row?.email || null,
+              accountId: row?.accountId || null,
+              groupName: batchSupplementGroupName || "sync-ready",
+              success: index !== 0,
+              message: index === 0 ? "missing accountId" : "ok",
+            };
+          }),
+        });
+      }}
     />
   );
 }
@@ -142,7 +185,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "ChatGPT keys 列表片段，使用与 Keys 页一致的列表骨架展示最近记录；行内只提供复制与下载动作，但不会在页面展示明文详情。",
+        component: "ChatGPT keys 列表片段，支持导出、复制、批量补号与勾选结果反馈。",
       },
     },
   },
@@ -161,6 +204,12 @@ export const Default: Story = {
     exportOpen: false,
     exportContent: "",
     exportBusy: false,
+    groupOptions: ["sync-ready", "warm-pool", "hold"],
+    upstreamSettingsConfigured: true,
+    batchSupplementOpen: false,
+    batchSupplementBusy: false,
+    batchSupplementGroupName: "",
+    batchSupplementResult: null,
     onQueryChange: fn(),
     onSortChange: fn(),
     onToggleSelection: fn(),
@@ -172,6 +221,10 @@ export const Default: Story = {
     onSaveExport: fn(),
     onCopyCredential: fn(),
     onExportCredential: fn(),
+    onBatchSupplementOpenChange: fn(),
+    onBatchSupplementGroupNameChange: fn(),
+    onOpenBatchSupplement: fn(),
+    onSubmitBatchSupplement: fn(),
   },
   render: () => <ChatGptCredentialsStorySurface />,
 };
@@ -203,6 +256,24 @@ export const ExportPlay: Story = {
         2,
       ),
     );
+  },
+};
+
+export const BatchSupplementPlay: Story = {
+  args: {
+    ...Default.args,
+  },
+  render: () => <ChatGptCredentialsStorySurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getAllByRole("checkbox", { name: /select-credential-/ })[0]!);
+    await userEvent.click(canvas.getByRole("button", { name: "批量补号" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "批量补号" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "不补号" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "sync-ready" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /补号 1 条/ }));
+    await expect(within(dialog).getByText(/success · 0|success · 1/i)).toBeInTheDocument();
+    await expect(within(dialog).getByText(/missing accountId|当前批次全部补号成功/)).toBeInTheDocument();
   },
 };
 
