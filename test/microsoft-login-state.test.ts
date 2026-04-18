@@ -209,6 +209,22 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("keeps proofs/Add surfaces in add flow even when a generic numeric input is also visible", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=zh-TW",
+        title: "讓我們保護您的帳戶",
+        bodyText: "您希望新增的安全性資訊為何? 備用電子郵件地址 電話號碼",
+        hasProofRadio: true,
+        hasCodeInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_method",
+      onAddRoute: true,
+      allowProvision: true,
+    });
+  });
+
   test("classifies zh-TW proofs/Add email-entry surfaces as add-email with provisioning enabled", () => {
     expect(
       classifyMicrosoftProofSurface({
@@ -225,6 +241,35 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("classifies proofs/Add confirmation surfaces as confirm-email before add flow", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "We'll send a code to ha*****@example.com before you continue.",
+        hasConfirmationEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("classifies proofs/Add confirmation copy without add-email input as confirm-email", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Verify your email. We'll send a code to your backup email address.",
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
   test("keeps verify-choice surfaces out of add-flow provisioning", () => {
     expect(
       classifyMicrosoftProofSurface({
@@ -236,6 +281,21 @@ describe("Microsoft login state", () => {
     ).toMatchObject({
       kind: "verify_choice",
       onProofRoute: true,
+      onVerifyRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("keeps non-add proof email prompts out of auto-provisioning", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Verify?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Enter your alternate email address before we send a code.",
+        hasAddEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_email",
       onVerifyRoute: true,
       allowProvision: false,
     });

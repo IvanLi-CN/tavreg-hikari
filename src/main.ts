@@ -5053,12 +5053,7 @@ function buildMicrosoftProofSurfaceStabilityKey(surface: {
   bodyText: string;
   matchedSignals: string[];
 }): string {
-  return [
-    surface.url,
-    surface.matchedSignals.join(","),
-    surface.title.replace(/\s+/g, " ").trim().slice(0, 120),
-    surface.bodyText.replace(/\s+/g, " ").trim().slice(0, 160),
-  ].join("|");
+  return [surface.url, surface.matchedSignals.join(",")].join("|");
 }
 
 async function classifyMicrosoftFlowInterruptFromPage(page: any) {
@@ -6976,7 +6971,7 @@ export async function completeMicrosoftLogin(
           continue;
         }
         const unclassifiedElapsedMs = Date.now() - (proofState.unclassifiedFirstSeenAt || Date.now());
-        if (unclassifiedElapsedMs < 5_000) {
+        if (unclassifiedElapsedMs < 20_000) {
           await page.waitForTimeout(1_000);
           continue;
         }

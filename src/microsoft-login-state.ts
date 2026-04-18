@@ -277,6 +277,25 @@ export function classifyMicrosoftProofSurface(
 
   let kind: MicrosoftProofSurfaceKind = "none";
   if (
+    input.hasProofOptionsSelect ||
+    (onAddRoute && input.hasProofRadio && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)
+  ) {
+    kind = "add_method";
+  } else if (onVerifyRoute && input.hasProofRadio) {
+    kind = "verify_choice";
+  } else if (
+    input.hasConfirmationEmailInput ||
+    (onProofRoute && hasConfirmCopy && !input.hasAddEmailInput)
+  ) {
+    kind = "confirm_email";
+  } else if (
+    (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
+    (onAddRoute && hasAddCopy && !hasConfirmCopy && !input.hasConfirmationEmailInput)
+  ) {
+    kind = "add_email";
+  } else if (onAddRoute && hasAddCopy && !input.hasAddEmailInput) {
+    kind = "add_method";
+  } else if (
     input.hasCodeInput ||
     (onProofRoute &&
       hasCodeCopy &&
@@ -286,21 +305,6 @@ export function classifyMicrosoftProofSurface(
       !input.hasConfirmationEmailInput)
   ) {
     kind = "code_entry";
-  } else if (
-    input.hasProofOptionsSelect ||
-    (onAddRoute && hasAddCopy && !input.hasAddEmailInput) ||
-    (onAddRoute && input.hasProofRadio && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)
-  ) {
-    kind = "add_method";
-  } else if (
-    (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
-    (onAddRoute && (hasAddCopy || hasConfirmCopy))
-  ) {
-    kind = "add_email";
-  } else if (onVerifyRoute && input.hasProofRadio) {
-    kind = "verify_choice";
-  } else if (input.hasConfirmationEmailInput || (onProofRoute && hasConfirmCopy)) {
-    kind = "confirm_email";
   } else if (input.hasProofRadio) {
     kind = "verify_choice";
   } else if (onVerifyRoute || (onProofRoute && hasVerifyCopy)) {
@@ -314,7 +318,7 @@ export function classifyMicrosoftProofSurface(
     onProofRoute,
     onAddRoute,
     onVerifyRoute,
-    allowProvision: kind === "add_method" || kind === "add_email",
+    allowProvision: onAddRoute && (kind === "add_method" || kind === "add_email"),
     matchedSignals,
   };
 }

@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-04-17
-- Last: 2026-04-17
+- Last: 2026-04-18
 
 ## 背景 / 问题陈述
 
@@ -145,7 +145,7 @@ None
 - [x] M1: 建立 proof surface classifier 与未知 surface 显式诊断
 - [x] M2: 修正 add-surface auto-provision 分支与错误分类 / 重试策略
 - [x] M3: 补齐回归测试并完成 `bun run typecheck` / `bun test`
-- [ ] M4: 完成 fast-track 收口、101 滚动上线与目标账号回归验证
+- [x] M4: 完成 fast-track 收口、101 滚动上线与目标账号回归验证
 
 ## 方案概述（Approach, high-level）
 
@@ -163,6 +163,7 @@ None
 
 - 2026-04-17: 创建规格，冻结 proof surface locale hardening + diagnostics 的实现范围与验收口径。
 - 2026-04-17: 完成 classifier / handler / 诊断改动，并通过 `bun run typecheck`、`bun test` 与两轮本地 review 收敛。
+- 2026-04-18: 完成 101 热修上线与目标账号 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归，worker log 确认 `provisioned Microsoft proof mailbox ...`，数据库 proof mailbox 与 session 状态回到可用态。
 
 ## 参考（References）
 
