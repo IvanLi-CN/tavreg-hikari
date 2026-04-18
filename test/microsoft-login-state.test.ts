@@ -270,6 +270,20 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("keeps legacy confirmation copy markers routed to confirm-email", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=ja-JP",
+        title: "メールをご確認ください",
+        bodyText: "既にコードを受け取りましたか? パスワードを使用する",
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
   test("keeps verify-choice surfaces out of add-flow provisioning", () => {
     expect(
       classifyMicrosoftProofSurface({

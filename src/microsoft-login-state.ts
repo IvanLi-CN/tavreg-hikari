@@ -110,12 +110,16 @@ const MICROSOFT_PROOF_CONFIRM_COPY = [
   /verify your email/i,
   /we[’']?ll send a code to/i,
   /already received a code/i,
+  /use your password/i,
   /验证你的电子邮件/i,
+  /使用密码/i,
   /驗證您的電子郵件/i,
   /我們將把驗證碼傳送到/i,
   /我們將傳送代碼到/i,
+  /既にコードを受け取りましたか/i,
   /メールをご確認ください/i,
   /コードを送信します/i,
+  /パスワードを使用する/i,
 ] as const;
 
 const MICROSOFT_PROOF_VERIFY_COPY = [
