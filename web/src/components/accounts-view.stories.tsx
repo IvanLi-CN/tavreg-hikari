@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import { AccountsView } from "@/components/accounts-view";
 import { buildImportCommitEntries } from "@/lib/account-import";
+import { createDefaultAccountQuery } from "@/lib/account-query";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -32,7 +33,7 @@ import {
 } from "@/stories/fixtures";
 
 function createDefaultQuery(): AccountQuery {
-  return { q: "", status: "", hasApiKey: "", sessionStatus: "", mailboxStatus: "", groupName: "", sortBy: "", sortDir: "desc", page: 1, pageSize: 20 };
+  return createDefaultAccountQuery();
 }
 
 function createDefaultExtractorHistoryQuery(): AccountExtractorHistoryQuery {
@@ -230,8 +231,8 @@ function applyStoryAccountQuery(accounts: AccountsPayload, query: AccountQuery):
     ].some((value) => value.toLowerCase().includes(pattern));
   });
   const sortedRows = [...filteredRows].sort((left, right) => {
-    const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
-    if (updatedDelta !== 0) return updatedDelta;
+    const importedDelta = right.importedAt.localeCompare(left.importedAt);
+    if (importedDelta !== 0) return importedDelta;
     return right.id - left.id;
   });
   if (query.sortBy === "importedAt") {
@@ -240,8 +241,8 @@ function applyStoryAccountQuery(accounts: AccountsPayload, query: AccountQuery):
         ? left.importedAt.localeCompare(right.importedAt)
         : right.importedAt.localeCompare(left.importedAt);
       if (delta !== 0) return delta;
-      const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
-      if (updatedDelta !== 0) return updatedDelta;
+      const importedDelta = right.importedAt.localeCompare(left.importedAt);
+      if (importedDelta !== 0) return importedDelta;
       return right.id - left.id;
     });
   } else if (query.sortBy === "lastUsedAt") {
@@ -263,8 +264,8 @@ function applyStoryAccountQuery(accounts: AccountsPayload, query: AccountQuery):
           if (delta !== 0) return delta;
         }
       }
-      const updatedDelta = right.updatedAt.localeCompare(left.updatedAt);
-      if (updatedDelta !== 0) return updatedDelta;
+      const importedDelta = right.importedAt.localeCompare(left.importedAt);
+      if (importedDelta !== 0) return importedDelta;
       return right.id - left.id;
     });
   }
@@ -578,13 +579,13 @@ const sortingDemoAccounts: AccountsPayload = {
     if (row.id === 1) {
       return {
         ...row,
-        updatedAt: "2026-03-18T07:20:00.000Z",
+        importedAt: "2026-03-18T07:20:00.000Z",
       };
     }
     if (row.id === 2) {
       return {
         ...row,
-        updatedAt: "2026-03-18T07:25:00.000Z",
+        importedAt: "2026-03-18T07:25:00.000Z",
       };
     }
     return row;
@@ -657,20 +658,35 @@ export const Default: Story = {
   render: () => <AccountsStorySurface />,
 };
 
+export const DefaultCompactCards: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "默认账号池在 375px 视口下切换为卡片布局，验证双字段分组和图标操作在移动宽度下仍可直接使用。",
+      },
+    },
+  },
+};
+
 export const ProofMailboxDialogPlay: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface frameClassName="mx-auto max-w-[1400px]" />,
   parameters: {
     docs: {
       description: {
-        story: "打开账号页 proof 邮箱绑定弹窗，确认当前展示与保存链路都围绕 `cfmail` provider。",
+        story: "打开账号页辅助邮箱弹窗，确认当前展示与保存链路都围绕 `cfmail` provider。",
       },
     },
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!);
-    const dialog = await waitFor(() => within(document.body).getByRole("dialog", { name: "绑定备用邮箱" }));
+    await userEvent.click(canvas.getAllByRole("button", { name: /设置 .* 的辅助邮箱/ })[0]!);
+    const dialog = await waitFor(() => within(document.body).getByRole("dialog", { name: "设置辅助邮箱" }));
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByText(/cfmail/i)).toBeInTheDocument();
     expect(within(dialog).getByDisplayValue("alpha-proof@mail.example.test")).toBeInTheDocument();
@@ -683,7 +699,7 @@ export const DesktopActionButtonsNoWrap: Story = {
   parameters: {
     docs: {
       description: {
-        story: "桌面表格回归场景，固定较窄工作区宽度，验证操作列保留横向按钮组并通过表格横向滚动消化宽度压力，而不是把中文按钮压成竖排。",
+        story: "桌面表格回归场景，固定较窄工作区宽度，验证操作列收敛为图标按钮组并通过表格横向滚动消化宽度压力。",
       },
     },
   },
@@ -691,21 +707,41 @@ export const DesktopActionButtonsNoWrap: Story = {
     const canvas = within(canvasElement);
     const table = canvas.getByRole("table");
     const tableScroller = table.parentElement as HTMLDivElement | null;
-    const connectButton = canvas.getAllByRole("button", { name: /Bootstrap/ })[0]!;
-    const proofButton = canvas.getAllByRole("button", { name: "绑定邮箱" })[0]!;
-    const availabilityButton = canvas.getAllByRole("button", { name: "标记不可用" })[0]!;
-    const mailboxButton = canvas.getAllByRole("button", { name: "收件箱" })[0]!;
+    const connectButton = canvas.getAllByRole("button", { name: /alpha@example\.test .*Bootstrap/ })[0]!;
+    const proofButton = canvas.getAllByRole("button", { name: /设置 alpha@example\.test 的辅助邮箱/ })[0]!;
+    const availabilityButton = canvas.getAllByRole("button", { name: /标记 alpha@example\.test 不可用/ })[0]!;
+    const mailboxButton = canvas.getAllByRole("button", { name: /打开 alpha@example\.test 的收件箱/ })[0]!;
 
     expect(connectButton).toBeTruthy();
     expect(proofButton).toBeTruthy();
     expect(availabilityButton).toBeTruthy();
     expect(mailboxButton).toBeTruthy();
-    expect(window.getComputedStyle(connectButton).whiteSpace).toBe("nowrap");
-    expect(window.getComputedStyle(proofButton).whiteSpace).toBe("nowrap");
-    expect(window.getComputedStyle(availabilityButton).whiteSpace).toBe("nowrap");
-    expect(window.getComputedStyle(mailboxButton).whiteSpace).toBe("nowrap");
+    expect(connectButton.textContent?.trim()).toBe("");
+    expect(proofButton.textContent?.trim()).toBe("");
+    expect(availabilityButton.textContent?.trim()).toBe("");
+    expect(mailboxButton.textContent?.trim()).toBe("");
     expect(tableScroller).toBeTruthy();
     expect(tableScroller!.scrollWidth).toBeGreaterThan(tableScroller!.clientWidth);
+  },
+};
+
+export const ActionIconTooltipsPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface frameClassName="mx-auto max-w-[1400px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证账号列表的图标按钮统一通过第三方 tooltip 延迟展示用途说明，而不是依赖原生 title。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const proofButton = canvas.getAllByRole("button", { name: /设置 alpha@example\.test 的辅助邮箱/ })[0]!;
+    await userEvent.hover(proofButton);
+    await waitFor(() => {
+      expect(within(document.body).getByText("设置 alpha@example.test 的辅助邮箱")).toBeInTheDocument();
+    });
   },
 };
 
@@ -1083,6 +1119,13 @@ export const ExtractorRuntimeOutcomeStates: Story = {
 export const PasswordCopyPlay: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "复制成功后会弹出可见气泡，明确提示已复制，同时保留可点击全选的完整内容文本块供手动校验或再次复制。",
+      },
+    },
+  },
   play: async ({ canvasElement }) => {
     const writeText = fn(async () => undefined);
     Object.defineProperty(window.navigator, "clipboard", {
@@ -1090,10 +1133,42 @@ export const PasswordCopyPlay: Story = {
       value: { writeText },
     });
     const canvas = within(canvasElement);
-    const trigger = canvas.getByRole("button", { name: "复制 alpha@example.test 密码" });
+    const trigger = canvas.getByRole("button", { name: "复制alpha@example.test 密码" });
     await userEvent.click(trigger);
     await expect(writeText).toHaveBeenCalledWith("pass-456");
-    await expect(within(trigger).getByText("已复制")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(canvas.getByRole("button", { name: "alpha@example.test 密码已复制" })).toBeInTheDocument();
+    });
+    await expect(within(document.body).getByText("已复制")).toBeInTheDocument();
+    await expect(within(document.body).getByRole("textbox", { name: "完整内容（点击全选）" })).toHaveTextContent("pass-456");
+  },
+};
+
+export const CopyFailureFallbackPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "当浏览器拒绝自动复制时，复制图标会弹出气泡说明失败原因，并提供可点击全选的完整内容文本块供手动复制。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const writeText = fn(async () => {
+      throw new Error("clipboard blocked by browser");
+    });
+    Object.defineProperty(window.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const canvas = within(canvasElement);
+    const trigger = canvas.getByRole("button", { name: "复制beta@example.test 邮箱" });
+    await userEvent.click(trigger);
+    await waitFor(() => {
+      expect(within(document.body).getByText("自动复制失败")).toBeInTheDocument();
+    });
+    await expect(within(document.body).getByRole("textbox", { name: "完整内容（点击全选）" })).toHaveTextContent("beta@example.test");
   },
 };
 
@@ -1112,7 +1187,7 @@ export const FailureReuseMatrix: Story = {
     await expect(canvas.getByText("Microsoft 密码错误")).toBeInTheDocument();
     await expect(canvas.getByText("未知辅助邮箱：de*****@genq.top")).toBeInTheDocument();
     await expect(canvas.getByText("人工复核中")).toBeInTheDocument();
-    await expect(canvas.getAllByRole("button", { name: "恢复可用" }).length).toBeGreaterThanOrEqual(3);
+    await expect(canvas.getAllByRole("button", { name: /恢复 .* 可用/ }).length).toBeGreaterThanOrEqual(3);
   },
 };
 
@@ -1134,7 +1209,7 @@ export const FailureReuseCompactCards: Story = {
     await expect(canvas.getByText("Microsoft 密码错误")).toBeInTheDocument();
     await expect(canvas.getByText("未知辅助邮箱：de*****@genq.top")).toBeInTheDocument();
     await expect(canvas.getByText("人工复核中")).toBeInTheDocument();
-    await expect(canvas.getAllByRole("button", { name: "恢复可用" }).length).toBeGreaterThanOrEqual(3);
+    await expect(canvas.getAllByRole("button", { name: /恢复 .* 可用/ }).length).toBeGreaterThanOrEqual(3);
   },
 };
 
@@ -1150,7 +1225,7 @@ export const RestoreBlockedAccountPlay: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    const restoreButtons = canvas.getAllByRole("button", { name: "恢复可用" });
+    const restoreButtons = canvas.getAllByRole("button", { name: /恢复 .* 可用/ });
     await expect(restoreButtons.length).toBeGreaterThan(0);
     await userEvent.click(restoreButtons[0]!);
     await expect(restoreAvailabilitySpy).toHaveBeenCalledWith(expect.any(Number), false, null);
@@ -1172,8 +1247,8 @@ export const SessionBootstrapStates: Story = {
     await expect(canvas.getByText("BOOTSTRAPPING")).toBeInTheDocument();
     await expect(canvas.getAllByText("READY").length).toBeGreaterThan(0);
     await expect(canvas.getByText("BLOCKED")).toBeInTheDocument();
-    await expect(canvas.getByRole("button", { name: "Bootstrap 中" })).toBeDisabled();
-    await expect(canvas.getAllByRole("button", { name: "重试 Bootstrap" }).length).toBeGreaterThanOrEqual(2);
+    await expect(canvas.getByRole("button", { name: /alpha@example\.test Bootstrap 中/ })).toBeDisabled();
+    await expect(canvas.getAllByRole("button", { name: /重试 Bootstrap/ }).length).toBeGreaterThanOrEqual(2);
     await expect(canvas.getByText("34.91.22.10 · Tokyo-01")).toBeInTheDocument();
     await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
@@ -1379,7 +1454,7 @@ export const SortingTimeColumnsPlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "验证导入时间与最近使用列头支持 降序 → 升序 → 恢复默认 的三态排序，并在切换列时清掉上一列状态。",
+        story: "验证账号页默认按导入时间降序展示，并在时间列排序切换后恢复到默认的导入时间降序。",
       },
     },
   },
@@ -1391,8 +1466,6 @@ export const SortingTimeColumnsPlay: Story = {
 
     await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
     await userEvent.click(importedAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("alpha@example.test");
-    await userEvent.click(importedAtButton);
     await expect(rowCells()[0]).toHaveTextContent("gamma@example.test");
     await userEvent.click(importedAtButton);
     await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
@@ -1401,6 +1474,8 @@ export const SortingTimeColumnsPlay: Story = {
     await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
     await userEvent.click(lastUsedButton);
     await expect(rowCells()[0]).toHaveTextContent("alpha@example.test");
-    await expect(importedAtButton).toHaveAttribute("aria-label", expect.stringContaining("当前未排序"));
+    await userEvent.click(lastUsedButton);
+    await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
+    await expect(importedAtButton).toHaveAttribute("aria-label", expect.stringContaining("当前默认降序"));
   },
 };

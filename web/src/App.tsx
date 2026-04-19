@@ -14,6 +14,7 @@ import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
+import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
 import type {
@@ -366,18 +367,7 @@ export function App() {
     autoExtractMaxWaitSec: 60,
     autoExtractAccountType: "outlook",
   });
-  const [accountQuery, setAccountQuery] = useState<AccountQuery>({
-    q: "",
-    status: "",
-    hasApiKey: "",
-    sessionStatus: "",
-    mailboxStatus: "",
-    groupName: "",
-    sortBy: "",
-    sortDir: "desc",
-    page: 1,
-    pageSize: 20,
-  });
+  const [accountQuery, setAccountQuery] = useState<AccountQuery>(() => createDefaultAccountQuery());
   const [apiKeyQuery, setApiKeyQuery] = useState<ApiKeyQuery>({
     q: "",
     status: "",
