@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.13.0",
+  "base_stable_version": "0.12.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-19T15:32:00Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.13.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "0d175dca9aa5b03fe1d6bbd8ec9fc3ee48d21f96",
+  "pr_number": 54,
+  "pr_title": "feat(ui): consolidate nav keys and mailbox drawer",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.13.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.13.0",
+  "target_sha": "15970034a984286c8ad5d5ad04c40c2def33817a",
+  "type_label": "type:minor"
+}
