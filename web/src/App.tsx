@@ -8,10 +8,11 @@ import {
 import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { GrokView } from "@/components/grok-view";
-import { KeysView } from "@/components/keys-view";
+import { KeysView, ChatGptKeysPane, GrokKeysPane, TavilyKeysPane } from "@/components/keys-view";
+import { MailboxDrawer } from "@/components/mailbox-drawer";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
-import { MailboxesView } from "@/components/mailboxes-view";
 import { ProxiesView } from "@/components/proxies-view";
+import { SiteKeysView } from "@/components/site-keys-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
 import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { createDefaultAccountQuery } from "@/lib/account-query";
@@ -79,7 +80,14 @@ import {
   createPendingRunModeAvailability,
   resolvePendingRunModeAvailabilityFallback,
 } from "@/lib/run-mode";
-import { getPageFromPathname, isMailboxSettingsPath, normalizeAppPath } from "@/lib/routes";
+import {
+  getMailboxAccountIdFromLocation,
+  getPageFromPathname,
+  isKeysCompatPath,
+  isMailboxSettingsPath,
+  isSiteKeysViewPath,
+  normalizeAppPath,
+} from "@/lib/routes";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -227,6 +235,16 @@ function createChatGptUpstreamSettingsDialogDraft(
     clearBaseUrl: false,
     clearApiKey: false,
   };
+}
+
+function getPagePath(page: PageKey): string {
+  if (page === "tavily") return "/";
+  return `/${page}`;
+}
+
+function getSiteKeysPath(site: JobSite): string {
+  const basePath = site === "tavily" ? "/tavily" : `/${site}`;
+  return `${basePath}?view=keys`;
 }
 
 export function App() {
@@ -436,11 +454,15 @@ export function App() {
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
 
-  const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname), [pathname]);
-  const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname), [pathname]);
-  const isMailboxWorkspacePage = activePage === "mailboxes" && !isMailboxSettingsPage;
+  const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname, search), [pathname, search]);
+  const isLegacyKeysPage = useMemo(() => isKeysCompatPath(pathname), [pathname]);
+  const isSiteKeysPage = useMemo(() => !isLegacyKeysPage && isSiteKeysViewPath(pathname, search), [isLegacyKeysPage, pathname, search]);
+  const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname, search), [pathname, search]);
+  const requestedMailboxAccountId = useMemo(() => getMailboxAccountIdFromLocation(pathname, search), [pathname, search]);
+  const isMailboxWorkspacePage = activePage === "accounts" && !isMailboxSettingsPage && requestedMailboxAccountId != null;
   const mailboxSelectionRef = useRef<number | null>(null);
   const autoSyncedMailboxIdsRef = useRef<number[]>([]);
+  const mailboxDrawerRefreshKeyRef = useRef<string | null>(null);
 
   const selectedMailbox = useMemo(
     () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
@@ -1234,10 +1256,8 @@ export function App() {
 
   useEffect(() => {
     if (!isMailboxWorkspacePage) return;
-    const params = new URLSearchParams(search);
-    const accountId = Number(params.get("accountId") || 0);
-    if (Number.isInteger(accountId) && accountId > 0) {
-      const matched = mailboxes.find((mailbox) => mailbox.accountId === accountId);
+    if (requestedMailboxAccountId != null) {
+      const matched = mailboxes.find((mailbox) => mailbox.accountId === requestedMailboxAccountId);
       if (matched && matched.id !== selectedMailboxId) {
         setSelectedMailboxId(matched.id);
         setSelectedMessageId(null);
@@ -1275,7 +1295,7 @@ export function App() {
       setSelectedMessageId(null);
       setSelectedMessageDetail(null);
     }
-  }, [isMailboxWorkspacePage, mailboxes, search, selectedMailboxId]);
+  }, [isMailboxWorkspacePage, mailboxes, requestedMailboxAccountId, selectedMailboxId]);
 
   useEffect(() => {
     if (!isMailboxWorkspacePage || !selectedMailboxId) return;
@@ -1290,6 +1310,19 @@ export function App() {
       void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }
   }, [isMailboxWorkspacePage, selectedMailbox]);
+
+  useEffect(() => {
+    if (!isMailboxWorkspacePage) {
+      mailboxDrawerRefreshKeyRef.current = null;
+      return;
+    }
+    if (!selectedMailbox || !selectedMailbox.isAuthorized || selectedMailbox.status === "locked") return;
+    if (selectedMailbox.status === "preparing" && !selectedMailbox.lastSyncedAt) return;
+    const refreshKey = `${selectedMailbox.id}:${requestedMailboxAccountId ?? "none"}`;
+    if (mailboxDrawerRefreshKeyRef.current === refreshKey) return;
+    mailboxDrawerRefreshKeyRef.current = refreshKey;
+    void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [isMailboxWorkspacePage, requestedMailboxAccountId, selectedMailbox]);
 
   useEffect(() => {
     if (!isMailboxWorkspacePage) return;
@@ -1780,8 +1813,16 @@ export function App() {
     }
   };
 
+  const handleOpenSiteKeys = (site: JobSite) => {
+    navigate(getSiteKeysPath(site));
+  };
+
+  const handleCloseSiteKeys = (site: JobSite) => {
+    navigate(getPagePath(site as PageKey));
+  };
+
   const handleOpenMailbox = (accountId: number) => {
-    navigate(`/mailboxes?accountId=${accountId}`);
+    navigate(`/accounts?mailboxAccountId=${accountId}`);
   };
 
   const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean; proxyNode?: string | null }) => {
@@ -1939,15 +1980,19 @@ export function App() {
   };
 
   const handleOpenMailboxSettings = () => {
-    navigate("/mailboxes/settings");
+    navigate("/accounts?view=graph-settings");
   };
 
   const handleBackToMailboxes = () => {
-    if (selectedMailbox) {
-      navigate(`/mailboxes?accountId=${selectedMailbox.accountId}`);
+    if (requestedMailboxAccountId) {
+      navigate(`/accounts?mailboxAccountId=${requestedMailboxAccountId}`);
       return;
     }
-    navigate("/mailboxes");
+    if (selectedMailbox) {
+      navigate(`/accounts?mailboxAccountId=${selectedMailbox.accountId}`);
+      return;
+    }
+    navigate("/accounts");
   };
 
   const handleSelectMailbox = (mailboxId: number) => {
@@ -1956,8 +2001,13 @@ export function App() {
     setSelectedMessageId(null);
     setSelectedMessageDetail(null);
     if (mailbox) {
-      navigate(`/mailboxes?accountId=${mailbox.accountId}`);
+      navigate(`/accounts?mailboxAccountId=${mailbox.accountId}`);
     }
+  };
+
+  const handleMailboxDrawerOpenChange = (open: boolean) => {
+    if (open) return;
+    navigate("/accounts");
   };
 
   const handleSyncMailbox = async (mailboxId: number) => {
@@ -2019,17 +2069,116 @@ export function App() {
     }
   }, [isMailboxWorkspacePage, mailboxMessages.rows, selectedMessageId]);
 
+  const tavilyKeysProps = {
+    apiKeys,
+    query: apiKeyQuery,
+    selectedIds: selectedApiKeyIds,
+    exportOpen: apiKeyExportOpen,
+    exportContent: apiKeyExportContent,
+    exportBusy: apiKeyExportBusy,
+    onQueryChange: setApiKeyQuery,
+    onToggleSelection: handleToggleApiKeySelection,
+    onTogglePageSelection: handleToggleApiKeyPageSelection,
+    onClearSelection: () => setSelectedApiKeyIds([]),
+    onOpenExport: handleOpenApiKeyExport,
+    onExportOpenChange: setApiKeyExportOpen,
+    onCopyExport: handleCopyApiKeyExport,
+    onSaveExport: handleSaveApiKeyExport,
+  } satisfies Parameters<typeof TavilyKeysPane>[0];
+
+  const grokKeysProps = {
+    apiKeys: grokApiKeys,
+    query: grokApiKeyQuery,
+    selectedIds: selectedGrokApiKeyIds,
+    exportOpen: grokApiKeyExportOpen,
+    exportContent: grokApiKeyExportContent,
+    exportBusy: grokApiKeyExportBusy,
+    onQueryChange: setGrokApiKeyQuery,
+    onToggleSelection: handleToggleGrokApiKeySelection,
+    onTogglePageSelection: handleToggleGrokApiKeyPageSelection,
+    onClearSelection: () => setSelectedGrokApiKeyIds([]),
+    onOpenExport: handleOpenGrokApiKeyExport,
+    onExportOpenChange: setGrokApiKeyExportOpen,
+    onCopyExport: handleCopyGrokApiKeyExport,
+    onSaveExport: handleSaveGrokApiKeyExport,
+    onResolveCopyField: async (apiKeyId: number, field: "email" | "password" | "sso") => {
+      try {
+        setError(null);
+        return await resolveGrokCopyField(apiKeyId, field);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        throw err;
+      }
+    },
+  } satisfies Parameters<typeof GrokKeysPane>[0];
+
+  const chatGptKeysProps = {
+    credentials: chatGptCredentials,
+    query: chatGptCredentialQuery,
+    sort: chatGptCredentialSort,
+    credentialBusy: chatGptCredentialBusy,
+    selectedIds: selectedChatGptCredentialIds,
+    exportOpen: chatGptExportOpen,
+    exportContent: chatGptExportContent,
+    exportBusy: chatGptExportBusy,
+    groupOptions: chatGptUpstreamSettings.groupHistory,
+    upstreamSettingsConfigured: chatGptUpstreamSettings.configured,
+    batchSupplementOpen: chatGptBatchSupplementOpen,
+    batchSupplementBusy: chatGptBatchSupplementBusy,
+    batchSupplementGroupName: chatGptBatchSupplementGroupName,
+    batchSupplementResult: chatGptBatchSupplementResult,
+    onQueryChange: setChatGptCredentialQuery,
+    onSortChange: setChatGptCredentialSort,
+    onToggleSelection: handleToggleChatGptCredentialSelection,
+    onTogglePageSelection: handleToggleChatGptCredentialPageSelection,
+    onClearSelection: () => setSelectedChatGptCredentialIds([]),
+    onOpenExport: handleOpenChatGptCredentialExport,
+    onExportOpenChange: setChatGptExportOpen,
+    onCopyExport: handleCopyChatGptExport,
+    onSaveExport: handleSaveChatGptExport,
+    onCopyCredential: handleCopyChatGptCredential,
+    onExportCredential: handleExportChatGptCredential,
+    onBatchSupplementOpenChange: (open: boolean) => {
+      setChatGptBatchSupplementOpen(open);
+      if (!open) {
+        setChatGptBatchSupplementResult(null);
+      }
+    },
+    onBatchSupplementGroupNameChange: setChatGptBatchSupplementGroupName,
+    onOpenBatchSupplement: handleOpenChatGptBatchSupplement,
+    onSubmitBatchSupplement: handleSubmitChatGptBatchSupplement,
+    onOpenUpstreamSettings: handleOpenChatGptUpstreamSettings,
+  } satisfies Parameters<typeof ChatGptKeysPane>[0];
+
+  const legacyKeysDefaultTab =
+    activePage === "grok" ? "grok" : activePage === "chatgpt" ? "chatgpt" : "tavily";
+
   return (
     <AppShell
       activePage={activePage}
       error={error}
-      onNavigate={(page) =>
-        navigate(
-          page === "tavily" ? "/" : page === "keys" ? "/keys" : `/${page}`,
-        )
-      }
+      onNavigate={(page) => navigate(getPagePath(page))}
     >
-      {activePage === "tavily" ? (
+      {isLegacyKeysPage ? (
+        <KeysView
+          defaultTab={legacyKeysDefaultTab}
+          tavily={tavilyKeysProps}
+          grok={grokKeysProps}
+          chatgpt={chatGptKeysProps}
+        />
+      ) : null}
+
+      {activePage === "tavily" && !isLegacyKeysPage ? (
+        isSiteKeysPage ? (
+          <SiteKeysView
+            siteLabel="Tavily"
+            description="这里收纳 Tavily 提取结果；返回后继续处理 Tavily 主流程与自动补号。"
+            badgeText={`总计 ${apiKeys.total}`}
+            onBack={() => handleCloseSiteKeys("tavily")}
+          >
+            <TavilyKeysPane {...tavilyKeysProps} />
+          </SiteKeysView>
+        ) : (
         <DashboardView
           job={job}
           events={events}
@@ -2045,10 +2194,22 @@ export function App() {
           }
           onJobDraftChange={updateJobDraft}
           onJobAction={handleJobAction}
+          onOpenKeysView={() => handleOpenSiteKeys("tavily")}
         />
+        )
       ) : null}
 
-      {activePage === "grok" ? (
+      {activePage === "grok" && !isLegacyKeysPage ? (
+        isSiteKeysPage ? (
+          <SiteKeysView
+            siteLabel="Grok"
+            description="这里集中查看 Grok 站点的 SSO 与导出结果；返回后继续 Grok 批量任务。"
+            badgeText={`总计 ${grokApiKeys.total}`}
+            onBack={() => handleCloseSiteKeys("grok")}
+          >
+            <GrokKeysPane {...grokKeysProps} />
+          </SiteKeysView>
+        ) : (
         <GrokView
           job={grokJob}
           jobDraft={grokJobDraft}
@@ -2063,10 +2224,22 @@ export function App() {
             )
           }
           onJobAction={handleGrokJobAction}
+          onOpenKeysView={() => handleOpenSiteKeys("grok")}
         />
+        )
       ) : null}
 
-      {activePage === "chatgpt" ? (
+      {activePage === "chatgpt" && !isLegacyKeysPage ? (
+        isSiteKeysPage ? (
+          <SiteKeysView
+            siteLabel="ChatGPT"
+            description="这里集中查看 ChatGPT keys，并保留站内补号设置入口；返回后继续 ChatGPT 任务控制。"
+            badgeText={`总计 ${chatGptCredentials.length}`}
+            onBack={() => handleCloseSiteKeys("chatgpt")}
+          >
+            <ChatGptKeysPane {...chatGptKeysProps} />
+          </SiteKeysView>
+        ) : (
         <ChatGptView
           jobDraft={chatGptJobDraft}
           job={chatGptJob}
@@ -2076,81 +2249,12 @@ export function App() {
           groupOptions={chatGptUpstreamSettings.groupHistory}
           onJobDraftChange={handleChatGptJobDraftChange}
           onJobAction={handleChatGptJobAction}
+          onOpenKeysView={() => handleOpenSiteKeys("chatgpt")}
         />
+        )
       ) : null}
 
       {activePage === "accounts" ? (
-        <AccountsView
-          accounts={accounts}
-          importContent={importContent}
-          importGroupName={importGroupName}
-          batchGroupName={batchGroupName}
-          preview={importPreview}
-          previewCommitCount={importCommitEntries.length}
-          previewOpen={importPreviewOpen}
-          query={accountQuery}
-          selectedIds={selectedAccountIds}
-          revealedPasswordsById={revealedPasswordsById}
-          importBusy={importBusy}
-          previewBusy={previewBusy}
-          batchBusy={batchBusy}
-          connectBusy={accountConnectBusy}
-          connectProgress={accountConnectProgress}
-          batchBootstrapPreview={batchBootstrapPreview}
-          batchBootstrapPreviewBusy={batchBootstrapPreviewBusy}
-          activeBatchBootstrapMode={activeBatchBootstrapMode}
-          extractorSettings={extractorSettings}
-          extractorSettingsBusy={extractorSettingsBusy}
-          extractorRuntime={extractorRuntime}
-          extractorRunDraft={extractorRunDraft}
-          extractorRunBusy={extractorRunBusy}
-          extractorSseState={extractorSseState}
-          extractorHistory={extractorHistory}
-          extractorHistoryQuery={extractorHistoryQuery}
-          extractorHistoryBusy={extractorHistoryBusy}
-          allCurrentPageSelected={allCurrentPageSelected}
-          graphSettingsConfigured={microsoftGraphSettings?.configured ?? false}
-          connectingAccountIds={connectingAccountIds}
-          proxyNodes={proxies?.nodes || []}
-          proxyCheckState={proxies?.checkState || null}
-          onImportContentChange={setImportContent}
-          onImportGroupChange={setImportGroupName}
-          onBatchGroupNameChange={setBatchGroupName}
-          onOpenPreview={handleOpenImportPreview}
-          onPreviewOpenChange={(open) => {
-            setImportPreviewOpen(open);
-            if (!open) setImportPreview(null);
-          }}
-          onConfirmImport={handleConfirmImport}
-          onQueryChange={handleAccountQueryChange}
-          onToggleSelection={handleToggleSelection}
-          onTogglePageSelection={handleTogglePageSelection}
-          onApplyBatchGroup={handleApplyBatchGroup}
-          onDeleteSelected={handleDeleteSelected}
-          onClearSelection={() => setSelectedAccountIds([])}
-          onConnectAccount={handleConnectAccount}
-          onConnectSelectedAccounts={handleConnectSelectedAccounts}
-          onCheckProxyNode={handleCheckSingleNode}
-          onSwitchSessionProxy={handleSwitchAccountSessionProxy}
-          onSaveProofMailbox={handleSaveProofMailbox}
-          onSaveAvailability={handleSaveAvailability}
-          onSaveExtractorSettings={handleSaveExtractorSettings}
-          onExtractorRunDraftChange={(patch) => {
-            setExtractorRunDraftTouched(true);
-            setExtractorRunDraft((current) => ({
-              ...current,
-              ...patch,
-            }));
-          }}
-          onRunExtractor={handleRunExtractor}
-          onStopExtractor={handleStopExtractor}
-          onExtractorHistoryQueryChange={setExtractorHistoryQuery}
-          onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
-          onOpenMailbox={handleOpenMailbox}
-        />
-      ) : null}
-
-      {activePage === "mailboxes" ? (
         isMailboxSettingsPage ? (
           <MailboxSettingsView
             settings={microsoftGraphSettings}
@@ -2166,108 +2270,99 @@ export function App() {
             onBack={handleBackToMailboxes}
           />
         ) : (
-          <MailboxesView
-            settingsConfigured={microsoftGraphSettings?.configured ?? false}
-            mailboxes={mailboxes}
-            selectedMailbox={selectedMailbox}
-            messages={mailboxMessages.rows}
-            messagesTotal={mailboxMessages.total}
-            messagesHasMore={mailboxMessages.hasMore}
-            messagesBusy={messagesBusy || mailboxesBusy}
-            selectedMessageId={selectedMessageId}
-            messageDetail={selectedMessageDetail}
-            messageBusy={messageBusy}
-            syncingMailboxId={syncingMailboxId}
-            onOpenSettings={handleOpenMailboxSettings}
-            onSelectMailbox={handleSelectMailbox}
-            onSyncMailbox={handleSyncMailbox}
-            onLoadMoreMessages={handleLoadMoreMailboxMessages}
-            onSelectMessage={handleSelectMailboxMessage}
-          />
-        )
-      ) : null}
+          <>
+            <AccountsView
+              accounts={accounts}
+              importContent={importContent}
+              importGroupName={importGroupName}
+              batchGroupName={batchGroupName}
+              preview={importPreview}
+              previewCommitCount={importCommitEntries.length}
+              previewOpen={importPreviewOpen}
+              query={accountQuery}
+              selectedIds={selectedAccountIds}
+              revealedPasswordsById={revealedPasswordsById}
+              importBusy={importBusy}
+              previewBusy={previewBusy}
+              batchBusy={batchBusy}
+              connectBusy={accountConnectBusy}
+              connectProgress={accountConnectProgress}
+              batchBootstrapPreview={batchBootstrapPreview}
+              batchBootstrapPreviewBusy={batchBootstrapPreviewBusy}
+              activeBatchBootstrapMode={activeBatchBootstrapMode}
+              extractorSettings={extractorSettings}
+              extractorSettingsBusy={extractorSettingsBusy}
+              extractorRuntime={extractorRuntime}
+              extractorRunDraft={extractorRunDraft}
+              extractorRunBusy={extractorRunBusy}
+              extractorSseState={extractorSseState}
+              extractorHistory={extractorHistory}
+              extractorHistoryQuery={extractorHistoryQuery}
+              extractorHistoryBusy={extractorHistoryBusy}
+              allCurrentPageSelected={allCurrentPageSelected}
+              graphSettingsConfigured={microsoftGraphSettings?.configured ?? false}
+              connectingAccountIds={connectingAccountIds}
+              proxyNodes={proxies?.nodes || []}
+              proxyCheckState={proxies?.checkState || null}
+              onImportContentChange={setImportContent}
+              onImportGroupChange={setImportGroupName}
+              onBatchGroupNameChange={setBatchGroupName}
+              onOpenPreview={handleOpenImportPreview}
+              onPreviewOpenChange={(open) => {
+                setImportPreviewOpen(open);
+                if (!open) setImportPreview(null);
+              }}
+              onConfirmImport={handleConfirmImport}
+              onQueryChange={handleAccountQueryChange}
+              onToggleSelection={handleToggleSelection}
+              onTogglePageSelection={handleTogglePageSelection}
+              onApplyBatchGroup={handleApplyBatchGroup}
+              onDeleteSelected={handleDeleteSelected}
+              onClearSelection={() => setSelectedAccountIds([])}
+              onConnectAccount={handleConnectAccount}
+              onConnectSelectedAccounts={handleConnectSelectedAccounts}
+              onCheckProxyNode={handleCheckSingleNode}
+              onSwitchSessionProxy={handleSwitchAccountSessionProxy}
+              onSaveProofMailbox={handleSaveProofMailbox}
+              onSaveAvailability={handleSaveAvailability}
+              onSaveExtractorSettings={handleSaveExtractorSettings}
+              onExtractorRunDraftChange={(patch) => {
+                setExtractorRunDraftTouched(true);
+                setExtractorRunDraft((current) => ({
+                  ...current,
+                  ...patch,
+                }));
+              }}
+              onRunExtractor={handleRunExtractor}
+              onStopExtractor={handleStopExtractor}
+              onExtractorHistoryQueryChange={setExtractorHistoryQuery}
+              onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
+              onOpenMailbox={handleOpenMailbox}
+              onOpenMailboxSettings={handleOpenMailboxSettings}
+            />
 
-      {activePage === "keys" ? (
-        <KeysView
-          tavily={{
-            apiKeys,
-            query: apiKeyQuery,
-            selectedIds: selectedApiKeyIds,
-            exportOpen: apiKeyExportOpen,
-            exportContent: apiKeyExportContent,
-            exportBusy: apiKeyExportBusy,
-            onQueryChange: setApiKeyQuery,
-            onToggleSelection: handleToggleApiKeySelection,
-            onTogglePageSelection: handleToggleApiKeyPageSelection,
-            onClearSelection: () => setSelectedApiKeyIds([]),
-            onOpenExport: handleOpenApiKeyExport,
-            onExportOpenChange: setApiKeyExportOpen,
-            onCopyExport: handleCopyApiKeyExport,
-            onSaveExport: handleSaveApiKeyExport,
-          }}
-          grok={{
-            apiKeys: grokApiKeys,
-            query: grokApiKeyQuery,
-            selectedIds: selectedGrokApiKeyIds,
-            exportOpen: grokApiKeyExportOpen,
-            exportContent: grokApiKeyExportContent,
-            exportBusy: grokApiKeyExportBusy,
-            onQueryChange: setGrokApiKeyQuery,
-            onToggleSelection: handleToggleGrokApiKeySelection,
-            onTogglePageSelection: handleToggleGrokApiKeyPageSelection,
-            onClearSelection: () => setSelectedGrokApiKeyIds([]),
-            onOpenExport: handleOpenGrokApiKeyExport,
-            onExportOpenChange: setGrokApiKeyExportOpen,
-            onCopyExport: handleCopyGrokApiKeyExport,
-            onSaveExport: handleSaveGrokApiKeyExport,
-            onResolveCopyField: async (apiKeyId, field) => {
-              try {
-                setError(null);
-                return await resolveGrokCopyField(apiKeyId, field);
-              } catch (err) {
-                setError(err instanceof Error ? err.message : String(err));
-                throw err;
-              }
-            },
-          }}
-          chatgpt={{
-            credentials: chatGptCredentials,
-            query: chatGptCredentialQuery,
-            sort: chatGptCredentialSort,
-            credentialBusy: chatGptCredentialBusy,
-            selectedIds: selectedChatGptCredentialIds,
-            exportOpen: chatGptExportOpen,
-            exportContent: chatGptExportContent,
-            exportBusy: chatGptExportBusy,
-            groupOptions: chatGptUpstreamSettings.groupHistory,
-            upstreamSettingsConfigured: chatGptUpstreamSettings.configured,
-            batchSupplementOpen: chatGptBatchSupplementOpen,
-            batchSupplementBusy: chatGptBatchSupplementBusy,
-            batchSupplementGroupName: chatGptBatchSupplementGroupName,
-            batchSupplementResult: chatGptBatchSupplementResult,
-            onQueryChange: setChatGptCredentialQuery,
-            onSortChange: setChatGptCredentialSort,
-            onToggleSelection: handleToggleChatGptCredentialSelection,
-            onTogglePageSelection: handleToggleChatGptCredentialPageSelection,
-            onClearSelection: () => setSelectedChatGptCredentialIds([]),
-            onOpenExport: handleOpenChatGptCredentialExport,
-            onExportOpenChange: setChatGptExportOpen,
-            onCopyExport: handleCopyChatGptExport,
-            onSaveExport: handleSaveChatGptExport,
-            onCopyCredential: handleCopyChatGptCredential,
-            onExportCredential: handleExportChatGptCredential,
-            onBatchSupplementOpenChange: (open) => {
-              setChatGptBatchSupplementOpen(open);
-              if (!open) {
-                setChatGptBatchSupplementResult(null);
-              }
-            },
-            onBatchSupplementGroupNameChange: setChatGptBatchSupplementGroupName,
-            onOpenBatchSupplement: handleOpenChatGptBatchSupplement,
-            onSubmitBatchSupplement: handleSubmitChatGptBatchSupplement,
-            onOpenUpstreamSettings: handleOpenChatGptUpstreamSettings,
-          }}
-        />
+            <MailboxDrawer
+              open={isMailboxWorkspacePage}
+              onOpenChange={handleMailboxDrawerOpenChange}
+              settingsConfigured={microsoftGraphSettings?.configured ?? false}
+              mailboxes={mailboxes}
+              selectedMailbox={selectedMailbox}
+              messages={mailboxMessages.rows}
+              messagesTotal={mailboxMessages.total}
+              messagesHasMore={mailboxMessages.hasMore}
+              messagesBusy={messagesBusy || mailboxesBusy}
+              selectedMessageId={selectedMessageId}
+              messageDetail={selectedMessageDetail}
+              messageBusy={messageBusy}
+              syncingMailboxId={syncingMailboxId}
+              onOpenSettings={handleOpenMailboxSettings}
+              onSelectMailbox={handleSelectMailbox}
+              onSyncMailbox={handleSyncMailbox}
+              onLoadMoreMessages={handleLoadMoreMailboxMessages}
+              onSelectMessage={handleSelectMailboxMessage}
+            />
+          </>
+        )
       ) : null}
 
       {activePage === "proxies" && proxies ? (

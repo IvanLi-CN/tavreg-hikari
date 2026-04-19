@@ -55,6 +55,7 @@ export const Running: Story = {
     jobBusy: false,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   render: () => {
     const [draft, setDraft] = useState<JobDraft>(defaultDraft);
@@ -65,6 +66,7 @@ export const Running: Story = {
         jobBusy={false}
         onJobDraftChange={(patch) => setDraft((current) => normalizeJobDraft({ ...current, ...patch, autoExtractSources: [] }))}
         onJobAction={() => undefined}
+        onOpenKeysView={() => undefined}
       />
     );
   },
@@ -90,6 +92,7 @@ export const Idle: Story = {
     jobBusy: false,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
 };
 

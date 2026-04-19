@@ -77,6 +77,7 @@ export function DashboardView({
   extractorAvailability,
   onJobDraftChange,
   onJobAction,
+  onOpenKeysView,
 }: {
   job: JobSnapshot;
   events: EventRecord[];
@@ -90,6 +91,7 @@ export function DashboardView({
   };
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
+  onOpenKeysView: () => void;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
@@ -143,6 +145,11 @@ export function DashboardView({
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
       <div className="min-w-0 space-y-4">
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={onOpenKeysView}>
+            查看 Keys
+          </Button>
+        </div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard
             label="Job 状态"

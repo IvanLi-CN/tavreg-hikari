@@ -39,9 +39,9 @@ export const Default: Story = {
   },
 };
 
-export const KeysActive: Story = {
+export const MicrosoftActive: Story = {
   args: {
-    activePage: "keys",
+    activePage: "accounts",
     error: null,
     onNavigate: fn(),
     children: null,
@@ -103,8 +103,8 @@ export const NavigationPlay: Story = {
     await expect(canvas.getByRole("tab", { name: "Grok" })).toBeInTheDocument();
     await userEvent.click(canvas.getByRole("tab", { name: "Grok" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("grok");
-    await expect(canvas.getByRole("tab", { name: "Keys" })).toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("tab", { name: "Keys" }));
-    await expect(args.onNavigate).toHaveBeenCalledWith("keys");
+    await expect(canvas.getByRole("tab", { name: "Microsoft" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("tab", { name: "Microsoft" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("accounts");
   },
 };

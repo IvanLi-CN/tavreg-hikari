@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronLeft, ChevronRight, Copy, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronLeft, ChevronRight, Copy, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,6 +70,7 @@ const MAILBOX_STATUS_OPTIONS = [
   { value: "invalidated", label: "invalidated" },
   { value: "locked", label: "locked" },
 ] as const satisfies Array<{ value: MailboxStatus; label: string }>;
+const DESKTOP_TOOLS_STORAGE_KEY = "tavreg-hikari.accounts.desktopToolsCollapsed";
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
@@ -656,6 +657,7 @@ export function AccountsView({
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
   onOpenMailbox,
+  onOpenMailboxSettings,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -715,6 +717,7 @@ export function AccountsView({
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
+  onOpenMailboxSettings: () => void;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -764,7 +767,17 @@ export function AccountsView({
   const extractorActionTimerRef = useRef<number | null>(null);
   const [extractorActionCooldown, setExtractorActionCooldown] = useState<"start" | "cancel" | null>(null);
   const [extractorActionPending, setExtractorActionPending] = useState<"start" | "cancel" | null>(null);
-  const [desktopToolsCollapsed, setDesktopToolsCollapsed] = useState(Boolean(initialDesktopToolsCollapsed));
+  const [desktopToolsCollapsed, setDesktopToolsCollapsed] = useState(() => {
+    if (typeof initialDesktopToolsCollapsed === "boolean") {
+      return initialDesktopToolsCollapsed;
+    }
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(DESKTOP_TOOLS_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const readyCount = accounts.summary.ready;
   const linkedCount = accounts.summary.linked;
   const failedCount = accounts.summary.failed;
@@ -1247,6 +1260,15 @@ export function AccountsView({
     />
   );
 
+  useEffect(() => {
+    if (typeof initialDesktopToolsCollapsed === "boolean" || typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(DESKTOP_TOOLS_STORAGE_KEY, desktopToolsCollapsed ? "1" : "0");
+    } catch {
+      // ignore storage failures
+    }
+  }, [desktopToolsCollapsed, initialDesktopToolsCollapsed]);
+
   const renderSessionCell = (row: AccountRecord, align?: "left" | "right") => (
     <TwoLineFieldCell
       primaryLabel="Session"
@@ -1594,19 +1616,25 @@ export function AccountsView({
                   总数 {accounts.total} 条，已选 {selectedIds.length} 条。支持跨分页勾选、批量分组、批量 Bootstrap 和批量删除。
                 </CardDescription>
               </div>
-              <Button
-                type="button"
-                variant="outline"
-                className="hidden xl:inline-flex xl:self-start"
-                onClick={() => setDesktopToolsCollapsed((current) => !current)}
-              >
-                {desktopToolsCollapsed ? (
-                  <ChevronRight className="mr-1 size-4" aria-hidden="true" />
-                ) : (
-                  <ChevronLeft className="mr-1 size-4" aria-hidden="true" />
-                )}
-                {desktopToolsCollapsed ? "展开工具列" : "收起工具列"}
-              </Button>
+              <div className="flex flex-wrap gap-2 xl:justify-end">
+                <Button type="button" variant="outline" className="xl:self-start" onClick={onOpenMailboxSettings}>
+                  <Settings2 className="mr-1 size-4" aria-hidden="true" />
+                  Graph 设置
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="hidden xl:inline-flex xl:self-start"
+                  onClick={() => setDesktopToolsCollapsed((current) => !current)}
+                >
+                  {desktopToolsCollapsed ? (
+                    <ChevronRight className="mr-1 size-4" aria-hidden="true" />
+                  ) : (
+                    <ChevronLeft className="mr-1 size-4" aria-hidden="true" />
+                  )}
+                  {desktopToolsCollapsed ? "展开工具列" : "收起工具列"}
+                </Button>
+              </div>
             </div>
           </CardHeader>
           <CardContent className="space-y-4">

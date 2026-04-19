@@ -134,6 +134,7 @@ export const Running: Story = {
     groupOptions: ["sync-ready", "warm-pool", "hold"],
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
 };
 
@@ -255,6 +256,7 @@ export const InteractiveBatchControls: Story = {
             setBatchDraft((current) => ({ ...current, ...patch }));
           }}
           onJobAction={() => undefined}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
           {JSON.stringify(batchDraft)}
@@ -307,6 +309,7 @@ export const InteractiveHeadlessOnly: Story = {
             setBatchDraft((current) => ({ ...current, ...patch }));
           }}
           onJobAction={() => undefined}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
           {JSON.stringify(batchDraft)}
@@ -347,6 +350,7 @@ export const ControlPlay: Story = {
             setDraft((current) => ({ ...current, ...patch }));
           }}
           onJobAction={args.onJobAction}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="chatgpt-job-draft-debug" className="sr-only">
           {JSON.stringify(draft)}

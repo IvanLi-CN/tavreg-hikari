@@ -1,4 +1,4 @@
-export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "mailboxes" | "keys" | "proxies";
+export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "proxies";
 export type JobSite = "tavily" | "grok" | "chatgpt";
 export type SortDir = "desc" | "asc";
 

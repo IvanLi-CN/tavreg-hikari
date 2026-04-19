@@ -8,9 +8,7 @@ const pageItems: Array<{ key: PageKey; label: string }> = [
   { key: "tavily", label: "Tavily" },
   { key: "grok", label: "Grok" },
   { key: "chatgpt", label: "ChatGPT" },
-  { key: "accounts", label: "微软账号" },
-  { key: "mailboxes", label: "微软邮箱" },
-  { key: "keys", label: "Keys" },
+  { key: "accounts", label: "Microsoft" },
   { key: "proxies", label: "代理节点" },
 ];
 
@@ -40,7 +38,7 @@ export function AppShell({
               <div className="text-xs uppercase tracking-[0.3em] text-cyan-300/80">Tavreg Hikari</div>
               <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">Web 管理台</h1>
               <p className="mt-2 text-sm text-slate-400">
-                Tavily、Grok 与 ChatGPT 的浏览器流程、账号池和代理状态统一在一个本机控制面里。
+                Tavily、Grok、ChatGPT 与 Microsoft 的主流程和次级工具，统一收纳在一个本机控制面里。
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <Badge variant="success">localhost only</Badge>

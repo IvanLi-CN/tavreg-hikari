@@ -3,6 +3,7 @@ import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { AppShell } from "@/components/app-shell";
 import { KeysView } from "@/components/keys-view";
+import { Button } from "@/components/ui/button";
 import type {
   ApiKeyQuery,
   ApiKeysPayload,
@@ -322,8 +323,32 @@ function IntegratedKeysStorySurface(props: {
   defaultTab?: "tavily" | "grok" | "chatgpt";
 }) {
   return (
-    <AppShell activePage="keys" error={null} onNavigate={() => undefined}>
+    <AppShell activePage={props.defaultTab === "grok" ? "grok" : props.defaultTab === "chatgpt" ? "chatgpt" : "tavily"} error={null} onNavigate={() => undefined}>
       <KeysStorySurface {...props} />
+    </AppShell>
+  );
+}
+
+function CompatibilityRouteSyncSurface() {
+  const [defaultTab, setDefaultTab] = useState<"tavily" | "grok" | "chatgpt">("tavily");
+
+  return (
+    <AppShell activePage={defaultTab === "grok" ? "grok" : defaultTab === "chatgpt" ? "chatgpt" : "tavily"} error={null} onNavigate={() => undefined}>
+      <div className="space-y-4">
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" variant="outline" onClick={() => setDefaultTab("tavily")}>
+            /keys?site=tavily
+          </Button>
+          <Button type="button" variant="outline" onClick={() => setDefaultTab("grok")}>
+            /keys?site=grok
+          </Button>
+          <Button type="button" variant="outline" onClick={() => setDefaultTab("chatgpt")}>
+            /keys?site=chatgpt
+          </Button>
+        </div>
+
+        <KeysStorySurface defaultTab={defaultTab} />
+      </div>
     </AppShell>
   );
 }
@@ -488,5 +513,27 @@ export const SettingsEntryPlay: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: "补号设置" }));
     await expect(args.chatgpt.onOpenUpstreamSettings).toHaveBeenCalled();
+  },
+};
+
+export const CompatibilityRouteSyncPlay: Story = {
+  args: Default.args,
+  render: () => <CompatibilityRouteSyncSurface />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const tavilyTab = canvas.getByRole("tab", { name: "Tavily" });
+    const grokTab = canvas.getByRole("tab", { name: "Grok" });
+    const chatGptTab = canvas.getByRole("tab", { name: "ChatGPT" });
+
+    await expect(tavilyTab).toHaveAttribute("aria-selected", "true");
+
+    await userEvent.click(canvas.getByRole("button", { name: "/keys?site=grok" }));
+    await expect(grokTab).toHaveAttribute("aria-selected", "true");
+
+    await userEvent.click(canvas.getByRole("button", { name: "/keys?site=chatgpt" }));
+    await expect(chatGptTab).toHaveAttribute("aria-selected", "true");
+
+    await userEvent.click(canvas.getByRole("button", { name: "/keys?site=tavily" }));
+    await expect(tavilyTab).toHaveAttribute("aria-selected", "true");
   },
 };
