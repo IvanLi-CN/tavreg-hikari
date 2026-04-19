@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-04-19
 - Last: 2026-04-19
 
@@ -202,7 +202,7 @@
 - [x] M1: 顶层导航与兼容路由收敛完成
 - [x] M2: Tavily / Grok / ChatGPT 站内 Keys 子视图完成
 - [x] M3: Microsoft mailbox drawer 与 Graph 设置入口收敛完成
-- [ ] M4: Storybook、视觉证据、验证链路与 PR merge-ready 收敛完成
+- [x] M4: Storybook、视觉证据、验证链路与 PR merge-ready 收敛完成
 
 ## 方案概述（Approach, high-level）
 
@@ -220,6 +220,7 @@
 ## 变更记录（Change log）
 
 - 2026-04-19: 创建规格，冻结导航收敛、站内 keys 子视图、Microsoft mailbox drawer 与工具列持久化范围。
+- 2026-04-19: 完成 codex review 收敛、Storybook/验证链路与 PR #54 merge-ready 收口，同步兼容 `/keys?site=` tab 切换回归覆盖。
 
 ## 参考（References）
 
