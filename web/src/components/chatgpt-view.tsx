@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { GroupCombobox } from "@/components/group-combobox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
@@ -58,6 +59,8 @@ export function ChatGptView({
   job,
   runModeAvailability,
   jobBusy,
+  draftTouched,
+  groupOptions,
   onJobDraftChange,
   onJobAction,
 }: {
@@ -65,6 +68,8 @@ export function ChatGptView({
   job: JobSnapshot;
   runModeAvailability: RunModeAvailability;
   jobBusy: boolean;
+  draftTouched: boolean;
+  groupOptions: string[];
   onJobDraftChange: (patch: Partial<ChatGptJobDraft>) => void;
   onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
 }) {
@@ -82,6 +87,9 @@ export function ChatGptView({
   const effectiveNeed = jobConfigLocked ? (job.job?.need || jobDraft.need) : jobDraft.need;
   const effectiveParallel = jobConfigLocked ? (job.job?.parallel || jobDraft.parallel) : jobDraft.parallel;
   const effectiveMaxAttempts = jobConfigLocked ? (job.job?.maxAttempts || jobDraft.maxAttempts) : jobDraft.maxAttempts;
+  const effectiveUpstreamGroupName = jobConfigLocked && !draftTouched
+    ? (job.job?.upstreamGroupName || jobDraft.upstreamGroupName)
+    : jobDraft.upstreamGroupName;
 
   const commitJobDraft = (): ChatGptJobDraft => {
     const need = needRef.current?.commit() ?? jobDraft.need;
@@ -92,6 +100,7 @@ export function ChatGptView({
       need,
       parallel,
       maxAttempts: normalizeMaxAttempts(need, maxAttempts),
+      upstreamGroupName: jobDraft.upstreamGroupName.trim(),
     };
   };
 
@@ -139,7 +148,7 @@ export function ChatGptView({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid gap-3 lg:grid-cols-4">
+            <div className="grid gap-3 lg:grid-cols-5">
               <Field label="Run Mode">
                 <Select
                   value={jobDraft.runMode}
@@ -182,13 +191,31 @@ export function ChatGptView({
                   onCommit={(value) => onJobDraftChange({ maxAttempts: value })}
                 />
               </Field>
+              <Field label="补充到分组">
+                <GroupCombobox
+                  groups={groupOptions}
+                  value={jobDraft.upstreamGroupName}
+                  onChange={(value) => onJobDraftChange({ upstreamGroupName: value })}
+                  placeholder="不补号"
+                  emptyLabel="不补号"
+                  triggerClassName="h-11"
+                />
+              </Field>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <Badge variant="info">mode: {effectiveRunMode}</Badge>
               <Badge variant="neutral">need: {effectiveNeed}</Badge>
               <Badge variant="neutral">parallel: {effectiveParallel}</Badge>
               <Badge variant="neutral">max attempts: {effectiveMaxAttempts}</Badge>
+              <Badge variant={effectiveUpstreamGroupName ? "success" : "neutral"}>
+                supplement: {effectiveUpstreamGroupName || "不补号"}
+              </Badge>
               <span>{effectiveRunMode === "headless" ? "当前将以无头浏览器模式批量运行" : "当前将以有头浏览器模式批量运行"}</span>
+            </div>
+            <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
+              {effectiveUpstreamGroupName
+                ? `成功 credential 会自动补到分组 ${effectiveUpstreamGroupName}。`
+                : "当前不会执行自动补号。"}
             </div>
             {runModeAvailabilityPending ? (
               <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">

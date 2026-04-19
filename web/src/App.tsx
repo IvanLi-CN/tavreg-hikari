@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
 import { AppShell } from "@/components/app-shell";
+import {
+  ChatGptUpstreamSettingsDialog,
+  type ChatGptUpstreamSettingsDialogDraft,
+} from "@/components/chatgpt-upstream-settings-dialog";
 import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { GrokView } from "@/components/grok-view";
@@ -36,6 +40,10 @@ import type {
   ChatGptCredentialSort,
   ChatGptCredentialsPayload,
   ChatGptJobDraft,
+  ChatGptCredentialSupplementPayload,
+  ChatGptUpstreamSettings,
+  ChatGptUpstreamSettingsPayload,
+  ChatGptUpstreamSettingsUpdate,
   GrokApiKeyExportPayload,
   GrokApiKeyQuery,
   GrokApiKeysPayload,
@@ -198,6 +206,29 @@ function createIdleJobSnapshot(site: JobSite): JobSnapshot {
   };
 }
 
+function createEmptyChatGptUpstreamSettings(): ChatGptUpstreamSettings {
+  return {
+    baseUrl: "",
+    apiKeyMasked: "",
+    hasApiKey: false,
+    configured: false,
+    groupHistory: [],
+    baseUrlSource: "unset",
+    apiKeySource: "unset",
+  };
+}
+
+function createChatGptUpstreamSettingsDialogDraft(
+  settings: ChatGptUpstreamSettings | null,
+): ChatGptUpstreamSettingsDialogDraft {
+  return {
+    baseUrl: settings?.baseUrlSource === "db" ? settings.baseUrl : "",
+    apiKey: "",
+    clearBaseUrl: false,
+    clearApiKey: false,
+  };
+}
+
 export function App() {
   const { pathname, search, navigate } = usePathname();
   const [job, setJob] = useState<JobSnapshot>(() => createIdleJobSnapshot("tavily"));
@@ -208,8 +239,20 @@ export function App() {
     need: 1,
     parallel: 1,
     maxAttempts: 1,
+    upstreamGroupName: "",
   });
   const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [chatGptUpstreamSettings, setChatGptUpstreamSettings] = useState<ChatGptUpstreamSettings>(createEmptyChatGptUpstreamSettings);
+  const [chatGptUpstreamSettingsOpen, setChatGptUpstreamSettingsOpen] = useState(false);
+  const [chatGptUpstreamSettingsDraft, setChatGptUpstreamSettingsDraft] = useState<ChatGptUpstreamSettingsDialogDraft>(() =>
+    createChatGptUpstreamSettingsDialogDraft(null),
+  );
+  const [chatGptUpstreamSettingsBusy, setChatGptUpstreamSettingsBusy] = useState(false);
+  const [chatGptUpstreamSettingsError, setChatGptUpstreamSettingsError] = useState<string | null>(null);
+  const [chatGptBatchSupplementOpen, setChatGptBatchSupplementOpen] = useState(false);
+  const [chatGptBatchSupplementGroupName, setChatGptBatchSupplementGroupName] = useState("");
+  const [chatGptBatchSupplementBusy, setChatGptBatchSupplementBusy] = useState(false);
+  const [chatGptBatchSupplementResult, setChatGptBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
   const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [grokApiKeys, setGrokApiKeys] = useState<GrokApiKeysPayload>({
     ok: true,
@@ -444,6 +487,15 @@ export function App() {
     const payload = await api<ChatGptCredentialsPayload>(`/api/chatgpt/credentials?${params.toString()}`);
     setChatGptCredentials(payload.rows);
   };
+  const refreshChatGptUpstreamSettings = async () => {
+    const payload = await api<ChatGptUpstreamSettingsPayload>("/api/chatgpt/upstream-settings");
+    setChatGptUpstreamSettings(payload.settings);
+    setChatGptUpstreamSettingsDraft((current) =>
+      current.apiKey || current.clearApiKey || current.clearBaseUrl || current.baseUrl
+        ? current
+        : createChatGptUpstreamSettingsDialogDraft(payload.settings),
+    );
+  };
   const refreshAccounts = async (nextQuery = accountQuery) => {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
@@ -619,6 +671,8 @@ export function App() {
         need,
         parallel,
         maxAttempts,
+        upstreamGroupName:
+          patch.upstreamGroupName === undefined ? current.upstreamGroupName : patch.upstreamGroupName.trim(),
       };
     });
   };
@@ -637,6 +691,7 @@ export function App() {
         body.need = nextJobDraft.need;
         body.parallel = nextJobDraft.parallel;
         body.maxAttempts = nextJobDraft.maxAttempts;
+        body.upstreamGroupName = nextJobDraft.upstreamGroupName || null;
       }
       if (action === "force_stop") {
         body.confirmForceStop = true;
@@ -651,6 +706,7 @@ export function App() {
           need: payload.job.need,
           parallel: payload.job.parallel,
           maxAttempts: payload.job.maxAttempts,
+          upstreamGroupName: payload.job.upstreamGroupName || "",
         });
         setChatGptJobDraftTouched(false);
       }
@@ -784,12 +840,79 @@ export function App() {
     window.setTimeout(() => window.URL.revokeObjectURL(url), 0);
   };
 
+  const handleOpenChatGptUpstreamSettings = () => {
+    setChatGptUpstreamSettingsDraft(createChatGptUpstreamSettingsDialogDraft(chatGptUpstreamSettings));
+    setChatGptUpstreamSettingsError(null);
+    setChatGptUpstreamSettingsOpen(true);
+  };
+
+  const handleSaveChatGptUpstreamSettings = async () => {
+    try {
+      setChatGptUpstreamSettingsBusy(true);
+      setChatGptUpstreamSettingsError(null);
+      setError(null);
+      const patch: ChatGptUpstreamSettingsUpdate = {};
+      if (chatGptUpstreamSettingsDraft.baseUrl.trim()) {
+        patch.baseUrl = chatGptUpstreamSettingsDraft.baseUrl.trim();
+      }
+      if (chatGptUpstreamSettingsDraft.apiKey.trim()) {
+        patch.apiKey = chatGptUpstreamSettingsDraft.apiKey.trim();
+      }
+      if (chatGptUpstreamSettingsDraft.clearBaseUrl) {
+        patch.clearBaseUrl = true;
+      }
+      if (chatGptUpstreamSettingsDraft.clearApiKey) {
+        patch.clearApiKey = true;
+      }
+      const payload = await api<ChatGptUpstreamSettingsPayload>("/api/chatgpt/upstream-settings", {
+        method: "POST",
+        body: JSON.stringify(patch),
+      });
+      setChatGptUpstreamSettings(payload.settings);
+      setChatGptUpstreamSettingsDraft(createChatGptUpstreamSettingsDialogDraft(payload.settings));
+      setChatGptUpstreamSettingsOpen(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setChatGptUpstreamSettingsError(message);
+      setError(message);
+    } finally {
+      setChatGptUpstreamSettingsBusy(false);
+    }
+  };
+
+  const handleOpenChatGptBatchSupplement = () => {
+    setChatGptBatchSupplementResult(null);
+    setChatGptBatchSupplementOpen(true);
+  };
+
+  const handleSubmitChatGptBatchSupplement = async () => {
+    if (selectedChatGptCredentialIds.length === 0 || !chatGptBatchSupplementGroupName.trim()) return;
+    try {
+      setChatGptBatchSupplementBusy(true);
+      setError(null);
+      const payload = await api<ChatGptCredentialSupplementPayload>("/api/chatgpt/credentials/supplement", {
+        method: "POST",
+        body: JSON.stringify({
+          ids: selectedChatGptCredentialIds,
+          groupName: chatGptBatchSupplementGroupName.trim(),
+        }),
+      });
+      setChatGptBatchSupplementResult(payload);
+      await refreshChatGptUpstreamSettings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChatGptBatchSupplementBusy(false);
+    }
+  };
+
   useEffect(() => {
     void Promise.all([
       refreshJob("tavily"),
       refreshJob("grok"),
       refreshJob("chatgpt"),
       refreshChatGptCredentials(),
+      refreshChatGptUpstreamSettings(),
       refreshAccounts(),
       refreshApiKeys(),
       refreshGrokApiKeys(),
@@ -842,6 +965,7 @@ export function App() {
       need: chatGptJob.job.need,
       parallel: chatGptJob.job.parallel,
       maxAttempts: chatGptJob.job.maxAttempts,
+      upstreamGroupName: chatGptJob.job.upstreamGroupName || "",
     });
     setChatGptJobDraftTouched(false);
   }, [chatGptJob.job, chatGptJob.runModeAvailability]);
@@ -945,6 +1069,9 @@ export function App() {
         void Promise.all([refreshJob("tavily"), refreshJob("grok"), refreshJob("chatgpt")]);
         void refreshGrokApiKeys(grokApiKeyQueryRef.current);
         void refreshChatGptCredentials(chatGptCredentialQueryRef.current, chatGptCredentialSortRef.current);
+      }
+      if (next.type === "chatgpt.upstream-settings.updated") {
+        void refreshChatGptUpstreamSettings();
       }
       if (next.type === "account.updated") {
         void refreshAccounts(accountQueryRef.current);
@@ -1945,6 +2072,8 @@ export function App() {
           job={chatGptJob}
           runModeAvailability={chatGptJob.runModeAvailability}
           jobBusy={chatGptJobBusy}
+          draftTouched={chatGptJobDraftTouched}
+          groupOptions={chatGptUpstreamSettings.groupHistory}
           onJobDraftChange={handleChatGptJobDraftChange}
           onJobAction={handleChatGptJobAction}
         />
@@ -2110,6 +2239,12 @@ export function App() {
             exportOpen: chatGptExportOpen,
             exportContent: chatGptExportContent,
             exportBusy: chatGptExportBusy,
+            groupOptions: chatGptUpstreamSettings.groupHistory,
+            upstreamSettingsConfigured: chatGptUpstreamSettings.configured,
+            batchSupplementOpen: chatGptBatchSupplementOpen,
+            batchSupplementBusy: chatGptBatchSupplementBusy,
+            batchSupplementGroupName: chatGptBatchSupplementGroupName,
+            batchSupplementResult: chatGptBatchSupplementResult,
             onQueryChange: setChatGptCredentialQuery,
             onSortChange: setChatGptCredentialSort,
             onToggleSelection: handleToggleChatGptCredentialSelection,
@@ -2121,6 +2256,16 @@ export function App() {
             onSaveExport: handleSaveChatGptExport,
             onCopyCredential: handleCopyChatGptCredential,
             onExportCredential: handleExportChatGptCredential,
+            onBatchSupplementOpenChange: (open) => {
+              setChatGptBatchSupplementOpen(open);
+              if (!open) {
+                setChatGptBatchSupplementResult(null);
+              }
+            },
+            onBatchSupplementGroupNameChange: setChatGptBatchSupplementGroupName,
+            onOpenBatchSupplement: handleOpenChatGptBatchSupplement,
+            onSubmitBatchSupplement: handleSubmitChatGptBatchSupplement,
+            onOpenUpstreamSettings: handleOpenChatGptUpstreamSettings,
           }}
         />
       ) : null}
@@ -2136,6 +2281,22 @@ export function App() {
           onCheckNode={handleCheckSingleNode}
         />
       ) : null}
+
+      <ChatGptUpstreamSettingsDialog
+        open={chatGptUpstreamSettingsOpen}
+        onOpenChange={(open) => {
+          setChatGptUpstreamSettingsOpen(open);
+          if (!open) {
+            setChatGptUpstreamSettingsError(null);
+          }
+        }}
+        settings={chatGptUpstreamSettings}
+        draft={chatGptUpstreamSettingsDraft}
+        saveBusy={chatGptUpstreamSettingsBusy}
+        error={chatGptUpstreamSettingsError}
+        onDraftChange={(patch) => setChatGptUpstreamSettingsDraft((current) => ({ ...current, ...patch }))}
+        onSave={handleSaveChatGptUpstreamSettings}
+      />
     </AppShell>
   );
 }

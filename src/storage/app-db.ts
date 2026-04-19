@@ -1633,6 +1633,29 @@ export class AppDatabase {
     return current;
   }
 
+  getJsonSetting<T>(key: string, fallback: T): T {
+    const row = this.db.query("SELECT value_json FROM app_settings WHERE key = ?").get(key) as { value_json?: string } | null;
+    if (!row || typeof row.value_json !== "string") return fallback;
+    return parseJson<T>(row.value_json, fallback);
+  }
+
+  setJsonSetting(key: string, value: unknown): void {
+    const now = nowIso();
+    this.db
+      .query(`
+        INSERT INTO app_settings (key, value_json, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+          value_json = excluded.value_json,
+          updated_at = excluded.updated_at
+      `)
+      .run(key, JSON.stringify(value), now);
+  }
+
+  deleteSetting(key: string): void {
+    this.db.query("DELETE FROM app_settings WHERE key = ?").run(key);
+  }
+
   setSettings(settings: Record<string, unknown>): void {
     const now = nowIso();
     const stmt = this.db.query(`
@@ -2341,6 +2364,7 @@ export class AppDatabase {
         | "failureCount"
         | "skipCount"
         | "launchedCount"
+        | "payloadJson"
       >
     >,
   ): JobRecord {
@@ -2359,7 +2383,7 @@ export class AppDatabase {
         UPDATE jobs
         SET status = ?, parallel = ?, need = ?, max_attempts = ?, success_count = ?, failure_count = ?,
             skip_count = ?, launched_count = ?, auto_extract_sources_json = ?, auto_extract_quantity = ?, auto_extract_max_wait_sec = ?,
-            auto_extract_account_type = ?, paused_at = ?, completed_at = ?, last_error = ?, updated_at = ?
+            auto_extract_account_type = ?, paused_at = ?, completed_at = ?, last_error = ?, payload_json = ?, updated_at = ?
         WHERE id = ?
       `)
       .run(
@@ -2378,6 +2402,7 @@ export class AppDatabase {
         next.pausedAt,
         next.completedAt,
         next.lastError,
+        JSON.stringify(next.payloadJson),
         next.updatedAt,
         jobId,
       );

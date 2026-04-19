@@ -1,4 +1,4 @@
-import { Check, ChevronsUpDown, FolderPlus, Search, X } from "lucide-react";
+import { Check, ChevronsUpDown, FolderPlus, Search } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -109,17 +109,6 @@ export function GroupCombobox({
               ) : null}
             </div>
           </ScrollArea>
-
-          {value ? (
-            <button
-              type="button"
-              className="flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 px-3 py-2 text-sm text-slate-400 transition hover:bg-white/6 hover:text-slate-200"
-              onClick={() => commit("")}
-            >
-              <X className="size-4" />
-              清空分组
-            </button>
-          ) : null}
         </div>
       </PopoverContent>
     </Popover>

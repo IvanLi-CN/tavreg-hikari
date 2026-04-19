@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { ChatGptBatchSupplementDialog } from "@/components/chatgpt-batch-supplement-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -15,7 +16,13 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import type { ChatGptCredentialQuery, ChatGptCredentialRecord, ChatGptCredentialSort, ChatGptCredentialSortBy } from "@/lib/app-types";
+import type {
+  ChatGptCredentialQuery,
+  ChatGptCredentialRecord,
+  ChatGptCredentialSort,
+  ChatGptCredentialSortBy,
+  ChatGptCredentialSupplementPayload,
+} from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -82,6 +89,12 @@ export function ChatGptCredentialsView({
   exportOpen,
   exportContent,
   exportBusy,
+  groupOptions,
+  upstreamSettingsConfigured,
+  batchSupplementOpen,
+  batchSupplementBusy,
+  batchSupplementGroupName,
+  batchSupplementResult,
   headerSlot,
   onQueryChange,
   onSortChange,
@@ -94,6 +107,10 @@ export function ChatGptCredentialsView({
   onSaveExport,
   onCopyCredential,
   onExportCredential,
+  onBatchSupplementOpenChange,
+  onBatchSupplementGroupNameChange,
+  onOpenBatchSupplement,
+  onSubmitBatchSupplement,
 }: {
   credentials: ChatGptCredentialRecord[];
   query: ChatGptCredentialQuery;
@@ -103,6 +120,12 @@ export function ChatGptCredentialsView({
   exportOpen: boolean;
   exportContent: string;
   exportBusy: boolean;
+  groupOptions: string[];
+  upstreamSettingsConfigured: boolean;
+  batchSupplementOpen: boolean;
+  batchSupplementBusy: boolean;
+  batchSupplementGroupName: string;
+  batchSupplementResult: ChatGptCredentialSupplementPayload | null;
   headerSlot?: ReactNode;
   onQueryChange: (value: ChatGptCredentialQuery) => void;
   onSortChange: (value: ChatGptCredentialSort) => void;
@@ -115,6 +138,10 @@ export function ChatGptCredentialsView({
   onSaveExport: () => void;
   onCopyCredential: (credential: ChatGptCredentialRecord) => void | Promise<void>;
   onExportCredential: (credential: ChatGptCredentialRecord) => void | Promise<void>;
+  onBatchSupplementOpenChange: (open: boolean) => void;
+  onBatchSupplementGroupNameChange: (value: string) => void;
+  onOpenBatchSupplement: () => void;
+  onSubmitBatchSupplement: () => void | Promise<void>;
 }) {
   const exportTextareaRef = useRef<HTMLTextAreaElement>(null);
   const selectedOnPage = credentials.filter((row) => selectedIds.includes(row.id)).length;
@@ -154,6 +181,9 @@ export function ChatGptCredentialsView({
             <div className="flex flex-wrap gap-2">
               <Button variant="secondary" onClick={onClearSelection} disabled={selectedIds.length === 0 || exportBusy}>
                 清空勾选
+              </Button>
+              <Button variant="outline" onClick={onOpenBatchSupplement} disabled={selectedIds.length === 0 || exportBusy}>
+                批量补号
               </Button>
               <Button onClick={onOpenExport} disabled={selectedIds.length === 0 || exportBusy}>
                 {exportBusy ? "导出中…" : "导出"}
@@ -348,6 +378,19 @@ export function ChatGptCredentialsView({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ChatGptBatchSupplementDialog
+        open={batchSupplementOpen}
+        onOpenChange={onBatchSupplementOpenChange}
+        selectedCount={selectedIds.length}
+        groupOptions={groupOptions}
+        groupName={batchSupplementGroupName}
+        busy={batchSupplementBusy}
+        configured={upstreamSettingsConfigured}
+        result={batchSupplementResult}
+        onGroupNameChange={onBatchSupplementGroupNameChange}
+        onSubmit={onSubmitBatchSupplement}
+      />
     </>
   );
 }

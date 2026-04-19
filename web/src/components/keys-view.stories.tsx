@@ -9,6 +9,7 @@ import type {
   ChatGptCredentialQuery,
   ChatGptCredentialRecord,
   ChatGptCredentialSort,
+  ChatGptCredentialSupplementPayload,
   GrokApiKeyQuery,
   GrokApiKeysPayload,
 } from "@/lib/app-types";
@@ -183,6 +184,7 @@ function KeysStorySurface(props: {
   grokApiKeys?: GrokApiKeysPayload;
   credentials?: ChatGptCredentialRecord[];
   defaultTab?: "tavily" | "grok" | "chatgpt";
+  onOpenChatGptUpstreamSettings?: () => void;
 }) {
   const sourceApiKeys = props.apiKeys || sampleApiKeys;
   const sourceGrokApiKeys = props.grokApiKeys || sampleGrokApiKeys;
@@ -197,6 +199,9 @@ function KeysStorySurface(props: {
   const [exportOpen, setExportOpen] = useState(false);
   const [grokExportOpen, setGrokExportOpen] = useState(false);
   const [chatGptExportOpen, setChatGptExportOpen] = useState(false);
+  const [chatGptBatchSupplementOpen, setChatGptBatchSupplementOpen] = useState(false);
+  const [chatGptBatchSupplementGroupName, setChatGptBatchSupplementGroupName] = useState("");
+  const [chatGptBatchSupplementResult, setChatGptBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
   const apiKeys = useMemo(() => applyQuery(sourceApiKeys, query), [query, sourceApiKeys]);
   const grokApiKeys = useMemo(() => applyGrokQuery(sourceGrokApiKeys, grokQuery), [grokQuery, sourceGrokApiKeys]);
   const filteredCredentials = useMemo(() => applyCredentialQuery(sourceCredentials, credentialQuery), [credentialQuery, sourceCredentials]);
@@ -257,6 +262,12 @@ function KeysStorySurface(props: {
         exportOpen: chatGptExportOpen,
         exportContent: chatGptExportContent,
         exportBusy: false,
+        groupOptions: ["sync-ready", "warm-pool", "hold"],
+        upstreamSettingsConfigured: true,
+        batchSupplementOpen: chatGptBatchSupplementOpen,
+        batchSupplementBusy: false,
+        batchSupplementGroupName: chatGptBatchSupplementGroupName,
+        batchSupplementResult: chatGptBatchSupplementResult,
         onQueryChange: setCredentialQuery,
         onSortChange: setCredentialSort,
         onToggleSelection: (credentialId, checked) =>
@@ -269,6 +280,36 @@ function KeysStorySurface(props: {
         onSaveExport: () => undefined,
         onCopyCredential: () => undefined,
         onExportCredential: () => undefined,
+        onBatchSupplementOpenChange: (open) => {
+          setChatGptBatchSupplementOpen(open);
+          if (!open) setChatGptBatchSupplementResult(null);
+        },
+        onBatchSupplementGroupNameChange: setChatGptBatchSupplementGroupName,
+        onOpenBatchSupplement: () => {
+          setChatGptBatchSupplementOpen(true);
+          setChatGptBatchSupplementResult(null);
+        },
+        onSubmitBatchSupplement: () => {
+          setChatGptBatchSupplementResult({
+            ok: true,
+            groupName: chatGptBatchSupplementGroupName || "sync-ready",
+            requested: selectedChatGptIds.length,
+            succeeded: selectedChatGptIds.length,
+            failed: 0,
+            results: selectedChatGptIds.map((id) => {
+              const row = sourceCredentials.find((item) => item.id === id) || null;
+              return {
+                credentialId: id,
+                email: row?.email || null,
+                accountId: row?.accountId || null,
+                groupName: chatGptBatchSupplementGroupName || "sync-ready",
+                success: true,
+                message: "ok",
+              };
+            }),
+          });
+        },
+        onOpenUpstreamSettings: props.onOpenChatGptUpstreamSettings || (() => undefined),
       }}
     />
   );
@@ -347,6 +388,12 @@ export const Default: Story = {
       exportOpen: false,
       exportContent: "",
       exportBusy: false,
+      groupOptions: ["sync-ready", "warm-pool", "hold"],
+      upstreamSettingsConfigured: true,
+      batchSupplementOpen: false,
+      batchSupplementBusy: false,
+      batchSupplementGroupName: "",
+      batchSupplementResult: null,
       onQueryChange: fn(),
       onSortChange: fn(),
       onToggleSelection: fn(),
@@ -358,6 +405,11 @@ export const Default: Story = {
       onSaveExport: fn(),
       onCopyCredential: fn(),
       onExportCredential: fn(),
+      onBatchSupplementOpenChange: fn(),
+      onBatchSupplementGroupNameChange: fn(),
+      onOpenBatchSupplement: fn(),
+      onSubmitBatchSupplement: fn(),
+      onOpenUpstreamSettings: fn(),
     },
   },
   render: () => <KeysStorySurface />,
@@ -405,5 +457,36 @@ export const ExportPlay: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "导出" }));
     const dialog = within(document.body).getByRole("dialog", { name: "导出 ChatGPT Keys" });
     await expect(dialog).toBeInTheDocument();
+  },
+};
+
+export const BatchSupplementPlay: Story = {
+  args: Default.args,
+  render: () => <KeysStorySurface defaultTab="chatgpt" />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getAllByRole("checkbox", { name: /select-credential-/ })[0]!);
+    await userEvent.click(canvas.getByRole("button", { name: "批量补号" }));
+    const dialog = within(document.body).getByRole("dialog", { name: "批量补号" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "不补号" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "sync-ready" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: /补号 1 条/ }));
+    await expect(within(dialog).getByText(/success · 1/i)).toBeInTheDocument();
+    await expect(within(dialog).getByText(/当前批次全部补号成功/)).toBeInTheDocument();
+  },
+};
+
+export const SettingsEntryPlay: Story = {
+  args: Default.args,
+  render: (args) => (
+    <KeysStorySurface
+      defaultTab="chatgpt"
+      onOpenChatGptUpstreamSettings={args.chatgpt.onOpenUpstreamSettings as () => void}
+    />
+  ),
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "补号设置" }));
+    await expect(args.chatgpt.onOpenUpstreamSettings).toHaveBeenCalled();
   },
 };

@@ -365,6 +365,7 @@ export type JobSnapshot = {
     pausedAt: string | null;
     completedAt: string | null;
     lastError: string | null;
+    upstreamGroupName?: string | null;
   };
   activeAttempts: AttemptRecord[];
   recentAttempts: AttemptRecord[];
@@ -386,6 +387,7 @@ export type ChatGptJobDraft = {
   need: number;
   parallel: number;
   maxAttempts: number;
+  upstreamGroupName: string;
 };
 
 export type ChatGptCredentialRecord = {
@@ -428,6 +430,49 @@ export type ChatGptCredentialsPayload = {
 export type ChatGptCredentialDetailPayload = {
   ok: true;
   credential: ChatGptCredentialRecord;
+};
+
+export type ChatGptUpstreamSettingsSource = "db" | "env" | "unset";
+
+export type ChatGptUpstreamSettings = {
+  baseUrl: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  configured: boolean;
+  groupHistory: string[];
+  baseUrlSource: ChatGptUpstreamSettingsSource;
+  apiKeySource: ChatGptUpstreamSettingsSource;
+};
+
+export type ChatGptUpstreamSettingsUpdate = {
+  baseUrl?: string;
+  apiKey?: string;
+  clearBaseUrl?: boolean;
+  clearApiKey?: boolean;
+  groupHistory?: string[];
+};
+
+export type ChatGptUpstreamSettingsPayload = {
+  ok: true;
+  settings: ChatGptUpstreamSettings;
+};
+
+export type ChatGptCredentialSupplementResult = {
+  credentialId: number;
+  email: string | null;
+  accountId: string | null;
+  groupName: string;
+  success: boolean;
+  message: string;
+};
+
+export type ChatGptCredentialSupplementPayload = {
+  ok: true;
+  groupName: string;
+  requested: number;
+  succeeded: number;
+  failed: number;
+  results: ChatGptCredentialSupplementResult[];
 };
 
 export type AutoExtractState = {

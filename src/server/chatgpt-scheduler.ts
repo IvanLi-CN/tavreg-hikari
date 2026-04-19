@@ -14,6 +14,7 @@ import {
   type ProxyNodeRecord,
 } from "../storage/app-db.js";
 import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
+import { normalizeChatGptUpstreamGroupName, readChatGptJobUpstreamGroupName } from "./chatgpt-upstream-supplement.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { pickAutoProxyNode } from "./proxy-node-allocation.js";
@@ -215,11 +216,13 @@ function resolveChatGptProxyNode(
 export class ChatGptJobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
+  private readonly pendingSupplementTasks = new Set<Promise<void>>();
   private readonly draftFailureCounts = new Map<number, number>();
   private loopPromise: Promise<void> | null = null;
   private shuttingDown = false;
   private readonly site: JobSite;
   private readonly createAttemptDraft: () => Promise<ChatGptAttemptDraft>;
+  private readonly supplementCredential?: (input: { credential: ChatGptCredentialRecord; groupName: string }) => Promise<void>;
 
   constructor(
     private readonly db: AppDatabase,
@@ -229,6 +232,7 @@ export class ChatGptJobScheduler {
     options?: {
       site?: JobSite;
       createAttemptDraft?: () => Promise<ChatGptAttemptDraft>;
+      supplementCredential?: (input: { credential: ChatGptCredentialRecord; groupName: string }) => Promise<void>;
     },
   ) {
     this.site = options?.site || "chatgpt";
@@ -237,6 +241,7 @@ export class ChatGptJobScheduler {
       || (async (): Promise<ChatGptAttemptDraft> => {
         throw new Error("chatgpt_attempt_draft_factory_missing");
       });
+    this.supplementCredential = options?.supplementCredential;
   }
 
   currentJob(): JobRecord | null {
@@ -322,6 +327,7 @@ export class ChatGptJobScheduler {
     need: number;
     parallel: number;
     maxAttempts: number;
+    upstreamGroupName?: string | null;
   }): Promise<JobRecord> {
     const settings = this.getSettings();
     if (!settings.subscriptionUrl.trim()) {
@@ -335,13 +341,14 @@ export class ChatGptJobScheduler {
     const normalizedParallel = Math.max(1, Math.trunc(input.parallel));
     const normalizedMaxAttempts = normalizeJobMaxAttempts(normalizedNeed, input.maxAttempts);
     const runMode = input.runMode === "headless" ? "headless" : "headed";
+    const upstreamGroupName = normalizeChatGptUpstreamGroupName(input.upstreamGroupName);
     const job = this.db.createJob({
       site: this.site,
       runMode,
       need: normalizedNeed,
       parallel: normalizedParallel,
       maxAttempts: normalizedMaxAttempts,
-      payloadJson: {},
+      payloadJson: upstreamGroupName ? { upstreamGroupName } : {},
     });
     const startupLaunch = await this.dispatchAttempt(job, { persistFailureOnDraftError: false });
     if (!startupLaunch.launched && startupLaunch.fatal) {
@@ -441,7 +448,9 @@ export class ChatGptJobScheduler {
     return finalized;
   }
 
-  updateCurrentJobLimits(input: Partial<Pick<JobRecord, "parallel" | "need" | "maxAttempts">>): JobRecord {
+  updateCurrentJobLimits(
+    input: Partial<Pick<JobRecord, "parallel" | "need" | "maxAttempts">> & { upstreamGroupName?: string | null },
+  ): JobRecord {
     const job = this.requireCurrentJob();
     if (!["running", "paused"].includes(job.status)) {
       throw new Error(`current ChatGPT job cannot update limits from ${job.status}`);
@@ -454,11 +463,16 @@ export class ChatGptJobScheduler {
       typeof input.maxAttempts === "number"
         ? Math.max(1, Number.isFinite(input.maxAttempts) ? Math.trunc(input.maxAttempts) : 1)
         : job.maxAttempts;
+    const upstreamGroupName =
+      input.upstreamGroupName === undefined
+        ? readChatGptJobUpstreamGroupName(job)
+        : normalizeChatGptUpstreamGroupName(input.upstreamGroupName);
     const maxAttempts = normalizeJobMaxAttempts(requestedNeed, requestedMaxAttempts);
     const next = this.db.updateJobState(job.id, {
       need: requestedNeed,
       parallel: requestedParallel,
       maxAttempts,
+      payloadJson: upstreamGroupName ? { ...job.payloadJson, upstreamGroupName } : {},
     });
     this.emit("job.updated", { site: this.site, job: next });
     this.emit("toast", { level: "info", message: `chatgpt job #${job.id} limits updated` });
@@ -479,6 +493,7 @@ export class ChatGptJobScheduler {
       signalChildProcess(active.child, "SIGTERM");
     }
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
+    await Promise.allSettled(Array.from(this.pendingSupplementTasks));
     await this.loopPromise;
   }
 
@@ -500,6 +515,13 @@ export class ChatGptJobScheduler {
 
   private clearJobRuntimeState(jobId: number): void {
     this.draftFailureCounts.delete(jobId);
+  }
+
+  private trackSupplementTask(task: Promise<void>): void {
+    this.pendingSupplementTasks.add(task);
+    void task.finally(() => {
+      this.pendingSupplementTasks.delete(task);
+    });
   }
 
   private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
@@ -828,6 +850,25 @@ export class ChatGptJobScheduler {
       this.emit("attempt.updated", { site: this.site, attempt });
       this.emit("job.updated", { site: this.site, job });
       this.emit("toast", { level: "success", message: `chatgpt credential saved #${credential.id}` });
+      const upstreamGroupName = readChatGptJobUpstreamGroupName(job);
+      if (upstreamGroupName && this.supplementCredential) {
+        const supplementTask = this.supplementCredential({ credential, groupName: upstreamGroupName })
+          .then(() => {
+            this.emit("chatgpt.upstream-settings.updated", {
+              groupName: upstreamGroupName,
+              credentialId: credential.id,
+            });
+          })
+          .catch((supplementError) => {
+            const message = supplementError instanceof Error ? supplementError.message : String(supplementError);
+            this.emit("toast", {
+              level: "warning",
+              message: `chatgpt credential #${credential.id} supplement failed: ${message}`,
+            });
+            console.warn(`[chatgpt-upstream-supplement] credential #${credential.id} failed: ${message}`);
+          });
+        this.trackSupplementTask(supplementTask);
+      }
       return;
     }
 
