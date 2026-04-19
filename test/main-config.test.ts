@@ -115,7 +115,10 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider")');
   expect(serverSource).toContain('rawProvider != null && rawProvider !== "cfmail"');
   expect(accountsViewSource).toContain("async function copyTextToClipboard");
-  expect(accountsViewSource).toContain("aria-label={`复制 ${props.accountEmail} 密码`}");
+  expect(accountsViewSource).toContain("function CopyIconButton");
+  expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 密码`}');
+  expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 辅助邮箱`}');
+  expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 邮箱`}');
   expect(accountsViewSource).toContain('proofMailboxProvider || "cfmail"');
   expect(accountsStoriesSource).toContain("export const PasswordCopyPlay");
   expect(accountsStoriesSource).toContain('await expect(writeText).toHaveBeenCalledWith("pass-456");');
