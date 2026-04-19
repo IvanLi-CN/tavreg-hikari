@@ -91,6 +91,7 @@ import {
   isSiteKeysViewPath,
   normalizeAppPath,
 } from "@/lib/routes";
+import { findMailboxForRequestedAccount } from "@/lib/mailbox-selection";
 
 async function api<T>(input: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(input, {
@@ -1261,11 +1262,26 @@ export function App() {
   useEffect(() => {
     if (!isMailboxWorkspacePage) return;
     if (requestedMailboxAccountId != null) {
-      const matched = mailboxes.find((mailbox) => mailbox.accountId === requestedMailboxAccountId);
+      const matched = findMailboxForRequestedAccount(mailboxes, requestedMailboxAccountId);
       if (matched && matched.id !== selectedMailboxId) {
         setSelectedMailboxId(matched.id);
         setSelectedMessageId(null);
         setSelectedMessageDetail(null);
+        return;
+      }
+      if (!matched) {
+        if (selectedMailboxId !== null) {
+          setSelectedMailboxId(null);
+        }
+        setSelectedMessageId(null);
+        setSelectedMessageDetail(null);
+        setMailboxMessages((current) => ({
+          ...current,
+          rows: [],
+          total: 0,
+          offset: 0,
+          hasMore: false,
+        }));
         return;
       }
     }
