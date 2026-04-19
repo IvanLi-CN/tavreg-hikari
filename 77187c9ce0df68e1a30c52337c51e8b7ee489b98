@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "",
+  "base_stable_version": "",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-19T15:39:41Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "147be66a578943ce11c2dd59f659defd6acf9cc8",
+  "pr_number": 55,
+  "pr_title": "docs: close out remaining non-complete specs",
+  "registry": "ghcr.io",
+  "release_bump": "docs",
+  "release_channel": "stable",
+  "release_enabled": false,
+  "release_prerelease": false,
+  "release_tag": "",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "",
+  "target_sha": "77187c9ce0df68e1a30c52337c51e8b7ee489b98",
+  "type_label": "type:docs"
+}
