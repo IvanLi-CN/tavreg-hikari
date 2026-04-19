@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 进行中
+- Status: 已完成
 - Created: 2026-04-07
-- Last: 2026-04-07
+- Last: 2026-04-19
 
 ## 背景 / 问题陈述
 
@@ -101,8 +101,8 @@
 - [x] M1: 删除浏览器扫描 / 回退逻辑，收敛为显式路径契约
 - [x] M2: 拆分代理设置保存载荷并补齐前后端回归
 - [x] M3: 为 Mihomo 订阅增加共享缓存与锁，降低并发上游请求
-- [ ] M4: 补齐 GitHub 质量门禁、Release 流程与 live branch rules
-- [ ] M5: 完成本地验证、视觉证据、PR / merge / release / 101 smoke 收口
+- [x] M4: 补齐 GitHub 质量门禁、Release 流程与 live branch rules
+- [x] M5: 完成本地验证、视觉证据、PR / merge / release / 101 smoke 收口
 
 ## 文档更新（Docs to Update）
 

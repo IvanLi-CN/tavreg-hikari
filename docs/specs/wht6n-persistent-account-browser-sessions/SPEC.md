@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 已实现
+- Status: 已完成
 - Created: 2026-03-31
-- Last: 2026-04-07
+- Last: 2026-04-19
 
 ## 背景 / 问题陈述
 
@@ -202,11 +202,11 @@ None
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
-- [ ] M1: 扩展数据库 schema、repository API 与代理 LRU 数据
-- [ ] M2: 实现账号 bootstrap 队列、持久 profile、Graph/Tavily 串联 worker
-- [ ] M3: 调度器改为消费 ready session 并复用 profile/proxy
-- [ ] M4: 账号页、Storybook 与视觉证据完成
-- [ ] M5: 验证、review 收敛与 PR-ready 收口
+- [x] M1: 扩展数据库 schema、repository API 与代理 LRU 数据
+- [x] M2: 实现账号 bootstrap 队列、持久 profile、Graph/Tavily 串联 worker
+- [x] M3: 调度器改为消费 ready session 并复用 profile/proxy
+- [x] M4: 账号页、Storybook 与视觉证据完成
+- [x] M5: 验证、review 收敛与 PR-ready 收口
 
 ## 方案概述（Approach, high-level）
 
