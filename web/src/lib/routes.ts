@@ -34,6 +34,10 @@ export function isMailboxSettingsPath(pathname: string, search = ""): boolean {
   return normalizeAppPath(pathname) === "/mailboxes/settings" || new URLSearchParams(search).get("view") === "graph-settings";
 }
 
+export function isAccountsMailboxSurfacePath(pathname: string, search = ""): boolean {
+  return getPageFromPathname(pathname, search) === "accounts" && !isMailboxSettingsPath(pathname, search);
+}
+
 export function isSiteKeysViewPath(pathname: string, search = ""): boolean {
   return isKeysCompatPath(pathname) || new URLSearchParams(search).get("view") === "keys";
 }
@@ -47,4 +51,20 @@ export function getMailboxAccountIdFromLocation(pathname: string, search = ""): 
       : params.get("mailboxAccountId") || params.get("accountId");
   const accountId = Number(rawValue || 0);
   return Number.isInteger(accountId) && accountId > 0 ? accountId : null;
+}
+
+export function buildAccountsPath(mailboxAccountId?: number | null): string {
+  if (mailboxAccountId != null && Number.isInteger(mailboxAccountId) && mailboxAccountId > 0) {
+    return `/accounts?mailboxAccountId=${mailboxAccountId}`;
+  }
+  return "/accounts";
+}
+
+export function buildMailboxSettingsPath(mailboxAccountId?: number | null): string {
+  const params = new URLSearchParams();
+  params.set("view", "graph-settings");
+  if (mailboxAccountId != null && Number.isInteger(mailboxAccountId) && mailboxAccountId > 0) {
+    params.set("mailboxAccountId", String(mailboxAccountId));
+  }
+  return `/accounts?${params.toString()}`;
 }

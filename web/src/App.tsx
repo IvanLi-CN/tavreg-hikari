@@ -81,8 +81,11 @@ import {
   resolvePendingRunModeAvailabilityFallback,
 } from "@/lib/run-mode";
 import {
+  buildAccountsPath,
+  buildMailboxSettingsPath,
   getMailboxAccountIdFromLocation,
   getPageFromPathname,
+  isAccountsMailboxSurfacePath,
   isKeysCompatPath,
   isMailboxSettingsPath,
   isSiteKeysViewPath,
@@ -458,6 +461,7 @@ export function App() {
   const isLegacyKeysPage = useMemo(() => isKeysCompatPath(pathname), [pathname]);
   const isSiteKeysPage = useMemo(() => !isLegacyKeysPage && isSiteKeysViewPath(pathname, search), [isLegacyKeysPage, pathname, search]);
   const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname, search), [pathname, search]);
+  const isAccountsMailboxSurfacePage = useMemo(() => isAccountsMailboxSurfacePath(pathname, search), [pathname, search]);
   const requestedMailboxAccountId = useMemo(() => getMailboxAccountIdFromLocation(pathname, search), [pathname, search]);
   const isMailboxWorkspacePage = activePage === "accounts" && !isMailboxSettingsPage && requestedMailboxAccountId != null;
   const mailboxSelectionRef = useRef<number | null>(null);
@@ -1325,7 +1329,7 @@ export function App() {
   }, [isMailboxWorkspacePage, requestedMailboxAccountId, selectedMailbox]);
 
   useEffect(() => {
-    if (!isMailboxWorkspacePage) return;
+    if (!isAccountsMailboxSurfacePage) return;
     const outcome = new URLSearchParams(search).get("oauth");
     if (outcome === "error") {
       setError("Microsoft OAuth 授权失败，请检查 Graph 设置后重试。");
@@ -1334,7 +1338,7 @@ export function App() {
     if (outcome === "success") {
       setError(null);
     }
-  }, [isMailboxWorkspacePage, search]);
+  }, [isAccountsMailboxSurfacePage, search]);
 
   const handleOpenImportPreview = async () => {
     const parsed = parseImportContent(importContent);
@@ -1980,19 +1984,11 @@ export function App() {
   };
 
   const handleOpenMailboxSettings = () => {
-    navigate("/accounts?view=graph-settings");
+    navigate(buildMailboxSettingsPath(requestedMailboxAccountId));
   };
 
   const handleBackToMailboxes = () => {
-    if (requestedMailboxAccountId) {
-      navigate(`/accounts?mailboxAccountId=${requestedMailboxAccountId}`);
-      return;
-    }
-    if (selectedMailbox) {
-      navigate(`/accounts?mailboxAccountId=${selectedMailbox.accountId}`);
-      return;
-    }
-    navigate("/accounts");
+    navigate(buildAccountsPath(requestedMailboxAccountId));
   };
 
   const handleSelectMailbox = (mailboxId: number) => {
@@ -2001,13 +1997,13 @@ export function App() {
     setSelectedMessageId(null);
     setSelectedMessageDetail(null);
     if (mailbox) {
-      navigate(`/accounts?mailboxAccountId=${mailbox.accountId}`);
+      navigate(buildAccountsPath(mailbox.accountId));
     }
   };
 
   const handleMailboxDrawerOpenChange = (open: boolean) => {
     if (open) return;
-    navigate("/accounts");
+    navigate(buildAccountsPath());
   };
 
   const handleSyncMailbox = async (mailboxId: number) => {

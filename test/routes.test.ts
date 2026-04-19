@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+  buildAccountsPath,
+  buildMailboxSettingsPath,
   getMailboxAccountIdFromLocation,
   getPageFromPathname,
+  isAccountsMailboxSurfacePath,
   isMailboxSettingsPath,
   isSiteKeysViewPath,
   normalizeAppPath,
@@ -29,9 +32,15 @@ test("getPageFromPathname maps trailing-slash routes to the intended page", () =
 test("mailbox/settings and site keys helpers resolve compatibility routes", () => {
   expect(isMailboxSettingsPath("/mailboxes/settings")).toBe(true);
   expect(isMailboxSettingsPath("/accounts", "?view=graph-settings")).toBe(true);
+  expect(isAccountsMailboxSurfacePath("/mailboxes", "?oauth=error")).toBe(true);
+  expect(isAccountsMailboxSurfacePath("/accounts", "?view=graph-settings")).toBe(false);
   expect(isSiteKeysViewPath("/keys")).toBe(true);
   expect(isSiteKeysViewPath("/chatgpt", "?view=keys")).toBe(true);
   expect(getMailboxAccountIdFromLocation("/mailboxes", "?accountId=12")).toBe(12);
   expect(getMailboxAccountIdFromLocation("/accounts", "?mailboxAccountId=34")).toBe(34);
   expect(getMailboxAccountIdFromLocation("/accounts")).toBeNull();
+  expect(buildAccountsPath()).toBe("/accounts");
+  expect(buildAccountsPath(34)).toBe("/accounts?mailboxAccountId=34");
+  expect(buildMailboxSettingsPath()).toBe("/accounts?view=graph-settings");
+  expect(buildMailboxSettingsPath(34)).toBe("/accounts?view=graph-settings&mailboxAccountId=34");
 });
