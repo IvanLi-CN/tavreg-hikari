@@ -71,11 +71,27 @@ test("scheduled workers defer successful account finalization to the scheduler e
   expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
 });
 
-test("proof-add handler only provisions mailboxes on the actual add route", async () => {
+test("proof surface flow shares classifier-based provisioning and explicit unknown diagnostics", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: onAddRoute })");
-  expect(source).toContain("if (!onAddRoute && !emailSelector) {");
-  expect(source).toContain("if (!emailSelector) {\n    return false;\n  }\n\n  const proofMailbox = proofState.mailbox || (await resolveMicrosoftProofMailboxSession");
+  expect(source).toContain("const proofSurface = await collectMicrosoftProofSurfaceClassification(page);");
+  expect(source).toContain("resolveMicrosoftProofMailboxSession(cfg, proxyUrl, { allowProvision: proofSurface.allowProvision })");
+  expect(source).toContain('if (proofSurface.kind === "unclassified" && proofSurface.onProofRoute) {');
+  expect(source).toContain("buildMicrosoftProofSurfaceUnclassifiedMessage(proofSurface)");
+});
+
+test("proof surface DOM snapshot keeps radio and otp selectors narrow enough for unclassified fallback", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const snapshotStart = source.indexOf("async function collectMicrosoftProofSurfaceSnapshot");
+  const snapshotEnd = source.indexOf("async function collectMicrosoftProofSurfaceClassification", snapshotStart);
+  const snapshotSource = source.slice(snapshotStart, snapshotEnd);
+  expect(snapshotSource).toContain(
+    "hasProofRadio: hasVisible(['input[name=\"proof\"][type=\"radio\"]', 'input[type=\"radio\"][name=\"proof\"]'])",
+  );
+  expect(snapshotSource).toContain("'input[maxlength=\"1\"][inputmode=\"numeric\"]'");
+  expect(snapshotSource).not.toContain("'input[type=\"radio\"]',");
+  expect(snapshotSource).not.toContain("'input[inputmode=\"numeric\"]',");
+  expect(snapshotSource).not.toContain("'input[type=\"tel\"]',");
+  expect(snapshotSource).not.toContain("'input[type=\"number\"]',");
 });
 
 test("chatgpt draft only pins cfmail root domain when configured", async () => {

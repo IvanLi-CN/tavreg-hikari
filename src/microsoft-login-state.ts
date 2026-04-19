@@ -21,6 +21,14 @@ export interface MicrosoftPasskeyProofRecoveryInput {
 }
 
 export type MicrosoftRecoverySurfaceKind = "verify_email" | "identity_confirm" | "unknown";
+export type MicrosoftProofSurfaceKind =
+  | "none"
+  | "add_method"
+  | "add_email"
+  | "confirm_email"
+  | "verify_choice"
+  | "code_entry"
+  | "unclassified";
 
 export interface MicrosoftUnknownRecoveryEmailInput {
   surfaceKind: MicrosoftRecoverySurfaceKind;
@@ -32,6 +40,26 @@ export interface MicrosoftKeepSignedInPromptInput {
   url?: string;
   title?: string;
   bodyText?: string;
+}
+
+export interface MicrosoftProofSurfaceInput {
+  url: string;
+  title?: string;
+  bodyText?: string;
+  hasProofOptionsSelect?: boolean;
+  hasAddEmailInput?: boolean;
+  hasConfirmationEmailInput?: boolean;
+  hasProofRadio?: boolean;
+  hasCodeInput?: boolean;
+}
+
+export interface MicrosoftProofSurfaceClassification {
+  kind: MicrosoftProofSurfaceKind;
+  onProofRoute: boolean;
+  onAddRoute: boolean;
+  onVerifyRoute: boolean;
+  allowProvision: boolean;
+  matchedSignals: string[];
 }
 
 export const MICROSOFT_PASSWORD_SUBMIT_LIMIT = 3;
@@ -61,6 +89,70 @@ function derivePasswordBodyHint(bodyText: string): string {
   if (/security code|verification code|验证码|安全代码/i.test(normalized)) return "security-code";
   if (/protect your account|保护你的帐户|保护你的账户/i.test(normalized)) return "protect-account";
   return normalized.slice(0, 120);
+}
+
+function testPattern(normalizedText: string, pattern: RegExp): boolean {
+  return pattern.test(normalizedText);
+}
+
+const MICROSOFT_PROOF_ADD_COPY = [
+  /what security info would you like to add/i,
+  /你想添加哪些安全信息/i,
+  /您希望新增的安全性資訊為何/i,
+  /what kind of security info would you like to add/i,
+  /backup email/i,
+  /alternate email/i,
+  /备用电子邮件地址/i,
+  /備用電子郵件地址/i,
+] as const;
+
+const MICROSOFT_PROOF_CONFIRM_COPY = [
+  /verify your email/i,
+  /we[’']?ll send a code to/i,
+  /already received a code/i,
+  /use your password/i,
+  /验证你的电子邮件/i,
+  /使用密码/i,
+  /驗證您的電子郵件/i,
+  /我們將把驗證碼傳送到/i,
+  /我們將傳送代碼到/i,
+  /既にコードを受け取りましたか/i,
+  /メールをご確認ください/i,
+  /コードを送信します/i,
+  /パスワードを使用する/i,
+] as const;
+
+const MICROSOFT_PROOF_VERIFY_COPY = [
+  /help us protect your account/i,
+  /protect your account/i,
+  /let.?s protect your account/i,
+  /让我们来保护你的帐户/i,
+  /讓我們保護您的帳戶/i,
+  /verify online/i,
+  /i don[’']?t have these any more/i,
+  /我不再拥有这些信息/i,
+  /これらはもうありません/i,
+] as const;
+
+const MICROSOFT_PROOF_CODE_COPY = [
+  /security code/i,
+  /verification code/i,
+  /enter code/i,
+  /one-time code/i,
+  /验证码/i,
+  /驗證碼/i,
+  /安全代码/i,
+  /コード/i,
+] as const;
+
+function hasPatternMatch(normalizedText: string, patterns: readonly RegExp[]): boolean {
+  return patterns.some((pattern) => testPattern(normalizedText, pattern));
+}
+
+function pushSignal(target: string[], condition: boolean, signal: string): void {
+  if (condition) {
+    target.push(signal);
+  }
 }
 
 export function classifyMicrosoftPasswordError(errors: string[]): MicrosoftPasswordErrorClassification | null {
@@ -156,6 +248,83 @@ export function shouldRecoverMicrosoftPasskeyToProofCode(
   input: MicrosoftPasskeyProofRecoveryInput,
 ): boolean {
   return input.passwordFallbackAttempted && !input.passwordFallbackBlocked;
+}
+
+export function classifyMicrosoftProofSurface(
+  input: MicrosoftProofSurfaceInput,
+): MicrosoftProofSurfaceClassification {
+  const url = normalizeText(input.url);
+  const title = normalizeText(input.title);
+  const bodyText = normalizeText(input.bodyText);
+  const combined = [title, bodyText].filter((part) => part.length > 0).join(" | ");
+  const onProofRoute = /account\.live\.com\/proofs\//i.test(url);
+  const onAddRoute = /account\.live\.com\/proofs\/add/i.test(url);
+  const onVerifyRoute = /account\.live\.com\/proofs\/verify/i.test(url);
+  const hasAddCopy = hasPatternMatch(combined, MICROSOFT_PROOF_ADD_COPY);
+  const hasConfirmCopy = hasPatternMatch(combined, MICROSOFT_PROOF_CONFIRM_COPY);
+  const hasVerifyCopy = hasPatternMatch(combined, MICROSOFT_PROOF_VERIFY_COPY);
+  const hasCodeCopy = hasPatternMatch(combined, MICROSOFT_PROOF_CODE_COPY);
+
+  const matchedSignals: string[] = [];
+  pushSignal(matchedSignals, onProofRoute, "route:proof");
+  pushSignal(matchedSignals, onAddRoute, "route:add");
+  pushSignal(matchedSignals, onVerifyRoute, "route:verify");
+  pushSignal(matchedSignals, !!input.hasProofOptionsSelect, "selector:#iProofOptions");
+  pushSignal(matchedSignals, !!input.hasAddEmailInput, "selector:#EmailAddress");
+  pushSignal(matchedSignals, !!input.hasConfirmationEmailInput, "selector:#iProofEmail");
+  pushSignal(matchedSignals, !!input.hasProofRadio, "selector:proof-radio");
+  pushSignal(matchedSignals, !!input.hasCodeInput, "selector:otp-input");
+  pushSignal(matchedSignals, hasAddCopy, "copy:add");
+  pushSignal(matchedSignals, hasConfirmCopy, "copy:confirm");
+  pushSignal(matchedSignals, hasVerifyCopy, "copy:verify");
+  pushSignal(matchedSignals, hasCodeCopy, "copy:code");
+
+  let kind: MicrosoftProofSurfaceKind = "none";
+  if (
+    input.hasProofOptionsSelect ||
+    (onAddRoute && input.hasProofRadio && !input.hasAddEmailInput && !input.hasConfirmationEmailInput)
+  ) {
+    kind = "add_method";
+  } else if (onVerifyRoute && input.hasProofRadio) {
+    kind = "verify_choice";
+  } else if (
+    input.hasConfirmationEmailInput ||
+    (onProofRoute && hasConfirmCopy && !input.hasAddEmailInput)
+  ) {
+    kind = "confirm_email";
+  } else if (
+    (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
+    (onAddRoute && hasAddCopy && !hasConfirmCopy && !input.hasConfirmationEmailInput)
+  ) {
+    kind = "add_email";
+  } else if (onAddRoute && hasAddCopy && !input.hasAddEmailInput) {
+    kind = "add_method";
+  } else if (
+    input.hasCodeInput ||
+    (onProofRoute &&
+      hasCodeCopy &&
+      !onAddRoute &&
+      !hasAddCopy &&
+      !input.hasAddEmailInput &&
+      !input.hasConfirmationEmailInput)
+  ) {
+    kind = "code_entry";
+  } else if (input.hasProofRadio) {
+    kind = "verify_choice";
+  } else if (onVerifyRoute || (onProofRoute && hasVerifyCopy)) {
+    kind = "verify_choice";
+  } else if (onProofRoute || hasAddCopy || hasConfirmCopy || hasVerifyCopy || hasCodeCopy) {
+    kind = "unclassified";
+  }
+
+  return {
+    kind,
+    onProofRoute,
+    onAddRoute,
+    onVerifyRoute,
+    allowProvision: onAddRoute && (kind === "add_method" || kind === "add_email"),
+    matchedSignals,
+  };
 }
 
 export function shouldClassifyMicrosoftUnknownRecoveryEmail(

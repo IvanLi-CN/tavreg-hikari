@@ -3,6 +3,7 @@ import {
   MICROSOFT_PASSWORD_SUBMIT_LIMIT,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftFlowInterrupt,
+  classifyMicrosoftProofSurface,
   classifyMicrosoftPasswordError,
   getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
@@ -189,6 +190,173 @@ describe("Microsoft login state", () => {
     expect(getMicrosoftRecoveryTerminalErrorCode("identity_confirm")).toBe("microsoft_account_locked");
     expect(getMicrosoftRecoveryTerminalErrorCode("verify_email")).toBe("microsoft_unknown_recovery_email");
     expect(getMicrosoftRecoveryTerminalErrorCode("unknown")).toBe("microsoft_unknown_recovery_email");
+  });
+
+  test("classifies zh-TW proofs/Add method surfaces as add-flow with provisioning enabled", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=zh-TW",
+        title: "讓我們保護您的帳戶",
+        bodyText:
+          "讓我們保護您的帳戶 您希望新增的安全性資訊為何? 備用電子郵件地址 下一步，我們會傳送安全性驗證碼到您的備用電子郵件地址。",
+        hasProofOptionsSelect: true,
+      }),
+    ).toMatchObject({
+      kind: "add_method",
+      onProofRoute: true,
+      onAddRoute: true,
+      allowProvision: true,
+    });
+  });
+
+  test("keeps proofs/Add surfaces in add flow even when a generic numeric input is also visible", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=zh-TW",
+        title: "讓我們保護您的帳戶",
+        bodyText: "您希望新增的安全性資訊為何? 備用電子郵件地址 電話號碼",
+        hasProofRadio: true,
+        hasCodeInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_method",
+      onAddRoute: true,
+      allowProvision: true,
+    });
+  });
+
+  test("classifies zh-TW proofs/Add email-entry surfaces as add-email with provisioning enabled", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=zh-TW",
+        title: "讓我們保護您的帳戶",
+        bodyText: "讓我們保護您的帳戶 備用電子郵件地址",
+        hasAddEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_email",
+      onProofRoute: true,
+      onAddRoute: true,
+      allowProvision: true,
+    });
+  });
+
+  test("classifies proofs/Add confirmation surfaces as confirm-email before add flow", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "We'll send a code to ha*****@example.com before you continue.",
+        hasConfirmationEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("classifies proofs/Add confirmation copy without add-email input as confirm-email", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Verify your email. We'll send a code to your backup email address.",
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("keeps legacy confirmation copy markers routed to confirm-email", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=ja-JP",
+        title: "メールをご確認ください",
+        bodyText: "既にコードを受け取りましたか? パスワードを使用する",
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onAddRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("keeps verify-choice surfaces out of add-flow provisioning", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Verify?mkt=en-US",
+        title: "Help us protect your account",
+        bodyText: "We need to verify your identity before you can sign in.",
+        hasProofRadio: true,
+      }),
+    ).toMatchObject({
+      kind: "verify_choice",
+      onProofRoute: true,
+      onVerifyRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("keeps non-add proof email prompts out of auto-provisioning", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Verify?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Enter your alternate email address before we send a code.",
+        hasAddEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_email",
+      onVerifyRoute: true,
+      allowProvision: false,
+    });
+  });
+
+  test("keeps proof-radio surfaces in verify flow even when #iProofEmail is also visible", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Verify?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Select a proof option and enter the missing part of the email address.",
+        hasProofRadio: true,
+        hasConfirmationEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "verify_choice",
+      allowProvision: false,
+    });
+  });
+
+  test("keeps add-email surfaces in add flow even when verify-your-email copy is present", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://account.live.com/proofs/Add?mkt=en-US",
+        title: "Verify your email",
+        bodyText: "Verify your email before continuing. Enter your backup email address.",
+        hasAddEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "add_email",
+      onAddRoute: true,
+      allowProvision: true,
+    });
+  });
+
+  test("classifies unknown proof routes as explicit unclassified diagnostics", () => {
+    const classification = classifyMicrosoftProofSurface({
+      url: "https://account.live.com/proofs/Add?mkt=fr-FR",
+      title: "Microsoft account",
+      bodyText: "Surface inconnue sans selecteur attendu",
+    });
+
+    expect(classification.kind).toBe("unclassified");
+    expect(classification.onProofRoute).toBe(true);
+    expect(classification.allowProvision).toBe(false);
+    expect(classification.matchedSignals).toContain("route:proof");
+    expect(classification.matchedSignals).toContain("route:add");
   });
 
   test("keeps verify-email surfaces on password fallback when available", () => {
