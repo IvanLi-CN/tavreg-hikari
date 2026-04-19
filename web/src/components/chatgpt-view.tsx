@@ -63,6 +63,7 @@ export function ChatGptView({
   groupOptions,
   onJobDraftChange,
   onJobAction,
+  onOpenKeysView,
 }: {
   jobDraft: ChatGptJobDraft;
   job: JobSnapshot;
@@ -72,6 +73,7 @@ export function ChatGptView({
   groupOptions: string[];
   onJobDraftChange: (patch: Partial<ChatGptJobDraft>) => void;
   onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
+  onOpenKeysView: () => void;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
@@ -133,6 +135,11 @@ export function ChatGptView({
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.16fr)_minmax(0,0.84fr)]">
       <div className="min-w-0 space-y-4">
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={onOpenKeysView}>
+            查看 Keys
+          </Button>
+        </div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label="任务状态" value={status} tone={statusTone(status)} />
           <MetricCard label="成功 / 目标" value={`${job.job?.successCount || 0} / ${effectiveNeed}`} tone="good" />

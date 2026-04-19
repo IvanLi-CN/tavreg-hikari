@@ -70,6 +70,7 @@ export const Running: Story = {
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   render: () => {
     const [draft, setDraft] = useState<JobDraft>(defaultDraft);
@@ -83,6 +84,7 @@ export const Running: Story = {
           extractorAvailability={sampleExtractorSettings.availability}
           onJobDraftChange={(patch) => setDraft((current) => normalizeJobDraft({ ...current, ...patch }))}
           onJobAction={() => undefined}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="job-draft-debug" className="sr-only">
           {JSON.stringify(draft)}
@@ -110,6 +112,7 @@ export const Empty: Story = {
     extractorAvailability: { zhanghaoya: false, shanyouxiang: true, shankeyun: true, hotmail666: false },
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
 };
 
@@ -197,6 +200,7 @@ export const OverflowGuard: Story = {
     runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   decorators: [
     (Story) => (
@@ -268,6 +272,7 @@ export const ActiveAttemptsNoWrap: Story = {
     runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   parameters: {
     docs: {
@@ -308,6 +313,7 @@ export const FourSourceCompact: Story = {
     runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   decorators: [
     (Story) => (
@@ -335,6 +341,7 @@ export const AccountTypeSelectorPlay: Story = {
     runModeAvailability: defaultRunModeAvailability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   render: (args) => {
     const [draft, setDraft] = useState<JobDraft>(args.jobDraft);
@@ -357,6 +364,7 @@ export const AccountTypeSelectorPlay: Story = {
             args.onJobDraftChange(patch);
           }}
           onJobAction={args.onJobAction}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="job-account-type-debug" className="sr-only">
           {draft.autoExtractAccountType}
@@ -384,6 +392,7 @@ export const ControlPlay: Story = {
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
@@ -416,6 +425,7 @@ export const BufferedNumberFlowPlay: Story = {
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   render: (args) => {
     const [draft, setDraft] = useState<JobDraft>(args.jobDraft);
@@ -436,6 +446,7 @@ export const BufferedNumberFlowPlay: Story = {
             setLastAction(action);
             args.onJobAction(action);
           }}
+          onOpenKeysView={() => undefined}
         />
         <pre data-testid="job-draft-debug" className="sr-only">
           {JSON.stringify({ draft, lastAction })}
@@ -482,6 +493,7 @@ export const HeadlessOnlyRunModePlay: Story = {
     extractorAvailability: sampleExtractorSettings.availability,
     onJobDraftChange: fn(),
     onJobAction: fn(),
+    onOpenKeysView: fn(),
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);

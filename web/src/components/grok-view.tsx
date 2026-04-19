@@ -46,12 +46,14 @@ export function GrokView({
   jobBusy,
   onJobDraftChange,
   onJobAction,
+  onOpenKeysView,
 }: {
   job: JobSnapshot;
   jobDraft: JobDraft;
   jobBusy: boolean;
   onJobDraftChange: (patch: Partial<JobDraft>) => void;
   onJobAction: (action: JobControlAction, options?: JobControlOptions) => void | Promise<void>;
+  onOpenKeysView: () => void;
 }) {
   const needRef = useRef<BufferedNumberInputHandle>(null);
   const parallelRef = useRef<BufferedNumberInputHandle>(null);
@@ -88,6 +90,11 @@ export function GrokView({
   return (
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.14fr)_minmax(22rem,0.86fr)]">
       <div className="min-w-0 space-y-4">
+        <div className="flex justify-end">
+          <Button variant="outline" onClick={onOpenKeysView}>
+            查看 Keys
+          </Button>
+        </div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard
             label="Job 状态"

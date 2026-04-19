@@ -1,4 +1,4 @@
-import { useState, type ComponentProps } from "react";
+import { useEffect, useState, type ComponentProps, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -8,11 +8,73 @@ import { GrokApiKeysView } from "@/components/grok-api-keys-view";
 
 type KeysTabKey = "tavily" | "grok" | "chatgpt";
 
-type TavilyKeysPaneProps = ComponentProps<typeof ApiKeysView>;
-type GrokKeysPaneProps = ComponentProps<typeof GrokApiKeysView>;
+type TavilyKeysPaneProps = ComponentProps<typeof ApiKeysView> & {
+  headerSlot?: ReactNode;
+};
+type GrokKeysPaneProps = ComponentProps<typeof GrokApiKeysView> & {
+  headerSlot?: ReactNode;
+};
 type ChatGptKeysPaneProps = ComponentProps<typeof ChatGptCredentialsView> & {
   onOpenUpstreamSettings: () => void;
+  headerSlot?: ReactNode;
+  nowMs?: number;
 };
+
+function resolveChatGptCounts(credentials: ChatGptKeysPaneProps["credentials"], nowMs: number) {
+  const valid = credentials.filter((row) => {
+    if (!row.expiresAt) return false;
+    const expiresAt = Date.parse(row.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt > nowMs;
+  }).length;
+  const expired = credentials.filter((row) => {
+    if (!row.expiresAt) return false;
+    const expiresAt = Date.parse(row.expiresAt);
+    return Number.isFinite(expiresAt) && expiresAt <= nowMs;
+  }).length;
+  const noExpiry = credentials.filter((row) => !row.expiresAt).length;
+  return { valid, expired, noExpiry };
+}
+
+function buildChatGptHeaderSlot(props: {
+  credentials: ChatGptKeysPaneProps["credentials"];
+  onOpenUpstreamSettings: () => void;
+  nowMs: number;
+}) {
+  const counts = resolveChatGptCounts(props.credentials, props.nowMs);
+  return (
+    <div className="flex max-w-full flex-wrap items-center gap-2 md:justify-end md:pr-1">
+      <Badge variant="success">valid · {counts.valid}</Badge>
+      <Badge variant="warning">expired · {counts.expired}</Badge>
+      <Badge variant="neutral">no expiry · {counts.noExpiry}</Badge>
+      <Badge variant="info">total · {props.credentials.length}</Badge>
+      <Button type="button" variant="outline" size="sm" onClick={props.onOpenUpstreamSettings}>
+        补号设置
+      </Button>
+    </div>
+  );
+}
+
+export function TavilyKeysPane({ headerSlot, ...props }: TavilyKeysPaneProps) {
+  return <ApiKeysView {...props} headerSlot={headerSlot} />;
+}
+
+export function GrokKeysPane({ headerSlot, ...props }: GrokKeysPaneProps) {
+  return <GrokApiKeysView {...props} headerSlot={headerSlot} />;
+}
+
+export function ChatGptKeysPane({
+  onOpenUpstreamSettings,
+  headerSlot,
+  nowMs = Date.now(),
+  ...props
+}: ChatGptKeysPaneProps) {
+  return (
+    <ChatGptCredentialsView
+      {...props}
+      headerSlot={headerSlot || buildChatGptHeaderSlot({ credentials: props.credentials, onOpenUpstreamSettings, nowMs })}
+    />
+  );
+}
 
 export function KeysView({
   tavily,
@@ -21,25 +83,16 @@ export function KeysView({
   defaultTab = "tavily",
   nowMs = Date.now(),
 }: {
-  tavily: TavilyKeysPaneProps;
-  grok: GrokKeysPaneProps;
-  chatgpt: ChatGptKeysPaneProps;
+  tavily: Omit<TavilyKeysPaneProps, "headerSlot">;
+  grok: Omit<GrokKeysPaneProps, "headerSlot">;
+  chatgpt: Omit<ChatGptKeysPaneProps, "headerSlot" | "nowMs">;
   defaultTab?: KeysTabKey;
   nowMs?: number;
 }) {
   const [tab, setTab] = useState<KeysTabKey>(defaultTab);
-  const { onOpenUpstreamSettings, ...chatgptPane } = chatgpt;
-  const chatGptValidCount = chatgptPane.credentials.filter((row) => {
-    if (!row.expiresAt) return false;
-    const expiresAt = Date.parse(row.expiresAt);
-    return Number.isFinite(expiresAt) && expiresAt > nowMs;
-  }).length;
-  const chatGptExpiredCount = chatgptPane.credentials.filter((row) => {
-    if (!row.expiresAt) return false;
-    const expiresAt = Date.parse(row.expiresAt);
-    return Number.isFinite(expiresAt) && expiresAt <= nowMs;
-  }).length;
-  const chatGptNoExpiryCount = chatgptPane.credentials.filter((row) => !row.expiresAt).length;
+  useEffect(() => {
+    setTab(defaultTab);
+  }, [defaultTab]);
   const headerSlot = (
     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
       <TabsList className="w-full justify-start overflow-x-auto md:w-fit">
@@ -62,13 +115,11 @@ export function KeysView({
             <Badge variant="info">total · {grok.apiKeys.total}</Badge>
           </>
         ) : (
-          <>
-            <Badge variant="success">valid · {chatGptValidCount}</Badge>
-            <Badge variant="warning">expired · {chatGptExpiredCount}</Badge>
-            <Badge variant="neutral">no expiry · {chatGptNoExpiryCount}</Badge>
-            <Badge variant="info">total · {chatgptPane.credentials.length}</Badge>
-            <Button type="button" variant="outline" size="sm" onClick={onOpenUpstreamSettings}>补号设置</Button>
-          </>
+          buildChatGptHeaderSlot({
+            credentials: chatgpt.credentials,
+            onOpenUpstreamSettings: chatgpt.onOpenUpstreamSettings,
+            nowMs,
+          })
         )}
       </div>
     </div>
@@ -77,15 +128,15 @@ export function KeysView({
   return (
     <Tabs value={tab} onValueChange={(value) => setTab(value as KeysTabKey)}>
       <TabsContent value="tavily" className="pt-0">
-        <ApiKeysView {...tavily} headerSlot={headerSlot} />
+        <TavilyKeysPane {...tavily} headerSlot={headerSlot} />
       </TabsContent>
 
       <TabsContent value="grok" className="pt-0">
-        <GrokApiKeysView {...grok} headerSlot={headerSlot} />
+        <GrokKeysPane {...grok} headerSlot={headerSlot} />
       </TabsContent>
 
       <TabsContent value="chatgpt" className="pt-0">
-        <ChatGptCredentialsView {...chatgptPane} headerSlot={headerSlot} />
+        <ChatGptKeysPane {...chatgpt} nowMs={nowMs} headerSlot={headerSlot} />
       </TabsContent>
     </Tabs>
   );

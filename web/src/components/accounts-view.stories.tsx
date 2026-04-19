@@ -172,6 +172,7 @@ const baseArgs = {
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
+  onOpenMailboxSettings: fn(),
 };
 const restoreAvailabilitySpy = fn(async () => undefined);
 
@@ -519,6 +520,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
+        onOpenMailboxSettings={() => undefined}
       />
     </div>
   );
