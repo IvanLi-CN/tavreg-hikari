@@ -1,44 +1,10 @@
-import { useMemo, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, within } from "storybook/test";
 import { MailboxDrawer } from "@/components/mailbox-drawer";
-import type { MailboxRecord } from "@/lib/app-types";
-import { sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
+import { sampleAccounts, sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
 
-function MailboxDrawerStorySurface(props?: {
-  mailboxes?: MailboxRecord[];
-  initialMailboxId?: number | null;
-  settingsConfigured?: boolean;
-}) {
-  const mailboxes = props?.mailboxes || sampleMailboxes;
-  const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(props?.initialMailboxId ?? mailboxes[0]?.id ?? null);
-  const selectedMailbox = useMemo(
-    () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
-    [mailboxes, selectedMailboxId],
-  );
-
-  return (
-    <MailboxDrawer
-      open
-      onOpenChange={() => undefined}
-      settingsConfigured={props?.settingsConfigured ?? true}
-      mailboxes={mailboxes}
-      selectedMailbox={selectedMailbox}
-      messages={selectedMailbox?.status === "available" ? sampleMailboxMessages : []}
-      messagesTotal={selectedMailbox?.status === "available" ? sampleMailboxMessages.length : 0}
-      messagesHasMore={false}
-      messagesBusy={false}
-      selectedMessageId={selectedMailbox?.status === "available" ? sampleMailboxMessages[0]?.id ?? null : null}
-      messageDetail={selectedMailbox?.status === "available" ? sampleMailboxMessageDetail : null}
-      messageBusy={false}
-      syncingMailboxId={null}
-      onOpenSettings={() => undefined}
-      onSelectMailbox={setSelectedMailboxId}
-      onSyncMailbox={async () => undefined}
-      onLoadMoreMessages={async () => undefined}
-      onSelectMessage={async () => undefined}
-    />
-  );
+function findAccount(accountId: number | null) {
+  return accountId == null ? null : sampleAccounts.rows.find((row) => row.id === accountId) || null;
 }
 
 const meta = {
@@ -49,8 +15,8 @@ const meta = {
     open: true,
     onOpenChange: () => undefined,
     settingsConfigured: true,
-    mailboxes: sampleMailboxes,
-    selectedMailbox: sampleMailboxes[0] ?? null,
+    account: findAccount(sampleMailboxes[1]?.accountId ?? null),
+    mailbox: sampleMailboxes[1] ?? null,
     messages: sampleMailboxMessages,
     messagesTotal: sampleMailboxMessages.length,
     messagesHasMore: false,
@@ -60,7 +26,6 @@ const meta = {
     messageBusy: false,
     syncingMailboxId: null,
     onOpenSettings: () => undefined,
-    onSelectMailbox: () => undefined,
     onSyncMailbox: async () => undefined,
     onLoadMoreMessages: async () => undefined,
     onSelectMessage: async () => undefined,
@@ -68,7 +33,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "Microsoft 模块内的信箱抽屉，复用现有 mailbox 工作区并绑定到当前账号上下文。",
+        component: "Microsoft 账号页内的单邮箱抽屉：只显示当前账号对应信箱的邮件列表与邮件正文，不再显示邮箱账号列表。",
       },
     },
   },
@@ -78,17 +43,56 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const AvailableMailbox: Story = {
-  render: () => <MailboxDrawerStorySurface initialMailboxId={sampleMailboxes.find((mailbox) => mailbox.status === "available")?.id || null} />,
-};
-
-export const InvalidatedMailbox: Story = {
-  render: () => <MailboxDrawerStorySurface initialMailboxId={sampleMailboxes.find((mailbox) => mailbox.status === "invalidated")?.id || null} />,
-};
-
-export const EmptyState: Story = {
-  render: () => <MailboxDrawerStorySurface mailboxes={[]} initialMailboxId={null} settingsConfigured={false} />,
+  args: {
+    account: findAccount(2),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 2) ?? null,
+    messages: sampleMailboxMessages,
+    messagesTotal: sampleMailboxMessages.length,
+    selectedMessageId: sampleMailboxMessages[0]?.id ?? null,
+    messageDetail: sampleMailboxMessageDetail,
+  },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await expect(canvas.getByText("还没有已完成 Bootstrap 的微软邮箱。先回微软账号页完成 Bootstrap。")).toBeInTheDocument();
+    await expect(canvas.getByText("Inbox")).toBeInTheDocument();
+    await expect(canvas.queryByText("邮箱账号")).not.toBeInTheDocument();
+  },
+};
+
+export const NoMailboxBound: Story = {
+  args: {
+    account: findAccount(4),
+    mailbox: null,
+    messages: [],
+    messagesTotal: 0,
+    selectedMessageId: null,
+    messageDetail: null,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("当前邮箱状态")).toBeInTheDocument();
+    await expect(canvas.getByText(/还没有绑定可读取的邮箱/)).toBeInTheDocument();
+  },
+};
+
+export const LockedMailbox: Story = {
+  args: {
+    account: findAccount(3),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 3) ?? null,
+    messages: [],
+    messagesTotal: 0,
+    selectedMessageId: null,
+    messageDetail: null,
+  },
+};
+
+export const NeedsGraphSetup: Story = {
+  args: {
+    settingsConfigured: false,
+    account: findAccount(1),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 1) ?? null,
+    messages: [],
+    messagesTotal: 0,
+    selectedMessageId: null,
+    messageDetail: null,
   },
 };

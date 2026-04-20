@@ -658,6 +658,7 @@ export function AccountsView({
   onRefreshExtractorHistory,
   onOpenMailbox,
   onOpenMailboxSettings,
+  onOpenStandaloneMailboxWorkspace,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -718,6 +719,7 @@ export function AccountsView({
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
   onOpenMailboxSettings: () => void;
+  onOpenStandaloneMailboxWorkspace: () => void;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -1617,6 +1619,10 @@ export function AccountsView({
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2 xl:justify-end">
+                <Button type="button" variant="outline" className="xl:self-start" onClick={onOpenStandaloneMailboxWorkspace}>
+                  <Inbox className="mr-1 size-4" aria-hidden="true" />
+                  微软邮箱
+                </Button>
                 <Button type="button" variant="outline" className="xl:self-start" onClick={onOpenMailboxSettings}>
                   <Settings2 className="mr-1 size-4" aria-hidden="true" />
                   Graph 设置
