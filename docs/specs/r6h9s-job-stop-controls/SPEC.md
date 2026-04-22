@@ -60,6 +60,7 @@
 - `停止` 只在 `running / paused` 可用。
 - `强行停止` 在 `running / paused / stopping` 可用；点击后先弹出确认对话框。
 - 控制区状态徽标与提示文案需要明确区分 `停止中 / 强停中 / 已停止`。
+- 强制停止确认文案必须明确说明“会立即终止当前任务 / 补号请求”，并建议优先使用优雅停止。
 
 ### 调度器
 
@@ -84,7 +85,8 @@
 
 ![优雅停止中的 Dashboard 控制区](./assets/dashboard-stop-graceful.png)
 
-![强行停止二次确认对话框](./assets/dashboard-force-stop-dialog.png)
+PR: include
+![主流程强制停止确认弹窗](./assets/force-stop-dialog-generic.png)
 
 ![任务停止后的主按钮回到启动态](./assets/dashboard-stopped.png)
 

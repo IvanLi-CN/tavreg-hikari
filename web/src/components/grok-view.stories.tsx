@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import { GrokView } from "@/components/grok-view";
 import type { JobDraft } from "@/lib/app-types";
 import { normalizeJobDraft } from "@/lib/job-draft";
@@ -134,5 +134,58 @@ export const MailboxCooldown: Story = {
         reason: "recent mailbox provider rate limit detected",
       },
     },
+  },
+};
+
+export const ControlPlay: Story = {
+  args: {
+    job: sampleGrokJob,
+    jobDraft: defaultDraft,
+    jobBusy: false,
+    onJobDraftChange: fn(),
+    onJobAction: fn(),
+    onOpenKeysView: fn(),
+  },
+  render: (args) => {
+    const [draft, setDraft] = useState<JobDraft>(defaultDraft);
+    return (
+      <GrokView
+        job={sampleGrokJob}
+        jobDraft={draft}
+        jobBusy={false}
+        onJobDraftChange={(patch) => {
+          setDraft((current) => normalizeJobDraft({ ...current, ...patch, autoExtractSources: [] }));
+          args.onJobDraftChange(patch);
+        }}
+        onJobAction={args.onJobAction}
+        onOpenKeysView={args.onOpenKeysView}
+      />
+    );
+  },
+  play: async ({ canvasElement, args }) => {
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: "暂停" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("pause", undefined);
+
+    await userEvent.click(canvas.getByRole("button", { name: "更新限制" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith(
+      "update_limits",
+      expect.objectContaining({
+        draft: expect.objectContaining({ need: 3, parallel: 2, maxAttempts: 5, runMode: "headed" }),
+      }),
+    );
+
+    await userEvent.click(canvas.getByRole("button", { name: "停止" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);
+
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
+    await expect(within(document.body).getByRole("dialog", { name: "立即强制停止 Grok 任务？" })).toBeInTheDocument();
+    await userEvent.click(within(document.body).getByRole("button", { name: "返回" }));
+    await expect(args.onJobAction).not.toHaveBeenCalledWith("force_stop", expect.anything());
+
+    await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "强制停止" }));
+    await expect(args.onJobAction).toHaveBeenCalledWith("force_stop", { confirmForceStop: true });
   },
 };

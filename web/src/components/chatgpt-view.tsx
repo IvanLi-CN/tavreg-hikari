@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { ForceStopDialog } from "@/components/force-stop-dialog";
 import { GroupCombobox } from "@/components/group-combobox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/metric-card";
@@ -418,28 +418,15 @@ export function ChatGptView({
         </Card>
       </div>
 
-      <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>强制停止 ChatGPT 任务？</DialogTitle>
-            <DialogDescription>这会立刻中断现有 worker，并把当前 job 标记为 force_stopping。</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="secondary" onClick={() => setForceStopDialogOpen(false)}>
-              取消
-            </Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                setForceStopDialogOpen(false);
-                handleJobActionClick("force_stop", { confirmForceStop: true });
-              }}
-            >
-              确认强停
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ForceStopDialog
+        open={forceStopDialogOpen}
+        onOpenChange={setForceStopDialogOpen}
+        taskLabel="ChatGPT"
+        scopeLabel="当前任务"
+        onConfirm={() => {
+          handleJobActionClick("force_stop", { confirmForceStop: true });
+        }}
+      />
     </section>
   );
 }

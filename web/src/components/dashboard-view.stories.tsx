@@ -406,12 +406,12 @@ export const ControlPlay: Story = {
     await expect(args.onJobAction).toHaveBeenCalledWith("stop", undefined);
 
     await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
-    await expect(within(document.body).getByRole("dialog", { name: "确认强制停止" })).toBeInTheDocument();
-    await userEvent.click(within(document.body).getByRole("button", { name: "取消" }));
+    await expect(within(document.body).getByRole("dialog", { name: "立即强制停止？" })).toBeInTheDocument();
+    await userEvent.click(within(document.body).getByRole("button", { name: "返回" }));
     await expect(args.onJobAction).not.toHaveBeenCalledWith("force_stop", expect.anything());
 
     await userEvent.click(canvas.getByRole("button", { name: "强制停止" }));
-    await userEvent.click(within(document.body).getByRole("button", { name: "确认强停" }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "强制停止" }));
     await expect(args.onJobAction).toHaveBeenCalledWith("force_stop", { confirmForceStop: true });
   },
 };

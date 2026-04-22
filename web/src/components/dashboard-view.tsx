@@ -4,8 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
+import { ForceStopDialog } from "@/components/force-stop-dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
@@ -379,33 +379,14 @@ export function DashboardView({
           </CardContent>
         </Card>
 
-        <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
-          <DialogContent className="w-[min(92vw,34rem)]">
-            <DialogHeader>
-              <DialogTitle>确认强制停止</DialogTitle>
-              <DialogDescription>
-                强制停止会立即中断当前 worker 与补号请求；已经在跑的 attempt 会标记为“已停止”，不会继续自然收尾。
-              </DialogDescription>
-            </DialogHeader>
-            <div className="px-6 text-sm leading-6 text-slate-300">
-              只有在优雅停止仍无法尽快收束时才建议使用这一步，别乱点哦。
-            </div>
-            <DialogFooter>
-              <Button variant="secondary" onClick={() => setForceStopDialogOpen(false)}>
-                取消
-              </Button>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  void onJobAction("force_stop", { confirmForceStop: true });
-                  setForceStopDialogOpen(false);
-                }}
-              >
-                确认强停
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+        <ForceStopDialog
+          open={forceStopDialogOpen}
+          onOpenChange={setForceStopDialogOpen}
+          scopeLabel="当前任务和补号请求"
+          onConfirm={() => {
+            void onJobAction("force_stop", { confirmForceStop: true });
+          }}
+        />
 
         <Card>
           <CardHeader>

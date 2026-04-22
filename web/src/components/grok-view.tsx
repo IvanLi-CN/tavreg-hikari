@@ -3,8 +3,8 @@ import { flushSync } from "react-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { BufferedNumberInput, type BufferedNumberInputHandle } from "@/components/ui/buffered-number-input";
+import { ForceStopDialog } from "@/components/force-stop-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { MetricCard } from "@/components/metric-card";
@@ -242,26 +242,15 @@ export function GrokView({
         </Card>
       </div>
 
-      <Dialog open={forceStopDialogOpen} onOpenChange={setForceStopDialogOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>强制停止 Grok 任务？</DialogTitle>
-            <DialogDescription>这会立刻中断现有 worker，并把当前 job 标记为 force_stopping。</DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="secondary" onClick={() => setForceStopDialogOpen(false)}>取消</Button>
-            <Button
-              variant="danger"
-              onClick={() => {
-                setForceStopDialogOpen(false);
-                handleJobActionClick("force_stop", { confirmForceStop: true });
-              }}
-            >
-              确认强停
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <ForceStopDialog
+        open={forceStopDialogOpen}
+        onOpenChange={setForceStopDialogOpen}
+        taskLabel="Grok"
+        scopeLabel="当前任务"
+        onConfirm={() => {
+          handleJobActionClick("force_stop", { confirmForceStop: true });
+        }}
+      />
     </section>
   );
 }

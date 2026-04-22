@@ -58,6 +58,7 @@
 - Tavily 控制区按钮集合、按钮顺序与停机提示必须与 Grok 保持同口径。
 - Tavily `应用调参` 按钮文案必须改为 `更新限制`；`强行停止` 必须统一为 `强制停止`。
 - 三个站点复用同一份 `job-controls` 状态映射，不再在各页各写一套主按钮/停止提示条件。
+- 三个站点的强制停止确认弹窗应使用一致的危险提示文案，明确提示立即终止影响并建议优先使用优雅停止。
 
 ### SHOULD
 
@@ -160,6 +161,18 @@
   evidence_note: 验证 Tavily 控制区按钮顺序与文案已经对齐 Grok，显示 `暂停 / 更新限制 / 停止 / 强制停止`，旧的 `应用调参 / 强行停止` 已被移除。
   image:
   ![Tavily aligned controls](./assets/tavily-aligned-controls.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: element
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  story_id_or_title: `Components/ForceStopDialog/Default`
+  state: `chatgpt force stop copy`
+  evidence_note: 验证 ChatGPT / Grok 复用统一的危险确认弹窗文案，明确说明会立刻终止当前任务，并提示优先使用优雅停止。
+  image:
+  PR: include
+  ![ChatGPT force stop dialog](./assets/force-stop-dialog-chatgpt.png)
 
 ## 参考（References）
 
