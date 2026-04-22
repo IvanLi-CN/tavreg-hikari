@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.13.2",
+  "base_stable_version": "0.13.1",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-22T21:09:32Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.13.2",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "5e1dfa67257e9d6e7bbd5044eaf0c6a8a708d182",
+  "pr_number": 57,
+  "pr_title": "fix(ui): polish mailbox drawer copy feedback",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.13.2",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.13.2",
+  "target_sha": "26f5c684ebb41146bfa76b5063f8d258768412a1",
+  "type_label": "type:patch"
+}
