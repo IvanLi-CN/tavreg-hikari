@@ -6,9 +6,26 @@ const Popover = PopoverPrimitive.Root;
 const PopoverTrigger = PopoverPrimitive.Trigger;
 const PopoverAnchor = PopoverPrimitive.Anchor;
 
-function PopoverContent({ className, sideOffset = 8, align = "start", ...props }: React.ComponentProps<typeof PopoverPrimitive.Content>) {
+function PopoverContent({
+  className,
+  sideOffset = 8,
+  align = "start",
+  showArrow = false,
+  arrowClassName,
+  arrowWidth = 16,
+  arrowHeight = 8,
+  portalContainer,
+  children,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Content> & {
+  showArrow?: boolean;
+  arrowClassName?: string;
+  arrowWidth?: number;
+  arrowHeight?: number;
+  portalContainer?: HTMLElement | null;
+}) {
   return (
-    <PopoverPrimitive.Portal>
+    <PopoverPrimitive.Portal container={portalContainer ?? undefined}>
       <PopoverPrimitive.Content
         align={align}
         sideOffset={sideOffset}
@@ -17,7 +34,19 @@ function PopoverContent({ className, sideOffset = 8, align = "start", ...props }
           className,
         )}
         {...props}
-      />
+      >
+        {children}
+        {showArrow ? (
+          <PopoverPrimitive.Arrow
+            width={arrowWidth}
+            height={arrowHeight}
+            className={cn(
+              "fill-[#0d1728] stroke-white/12 stroke-[1px] drop-shadow-[0_6px_12px_rgba(2,6,23,0.18)]",
+              arrowClassName,
+            )}
+          />
+        ) : null}
+      </PopoverPrimitive.Content>
     </PopoverPrimitive.Portal>
   );
 }

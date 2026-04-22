@@ -104,6 +104,8 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   const accountsViewSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
   const accountsStoriesSource = await readFile(path.join(repoRoot, "web/src/components/accounts-view.stories.tsx"), "utf8");
+  const copyButtonSource = await readFile(path.join(repoRoot, "web/src/components/ui/copy-icon-button.tsx"), "utf8");
+  const clipboardSource = await readFile(path.join(repoRoot, "web/src/lib/clipboard.ts"), "utf8");
   expect(serverSource).toContain("await ensureSavedProofMailbox");
   expect(serverSource).toContain("passwordPlaintext: row.passwordPlaintext,");
   expect(serverSource).toContain("const unchangedSavedProofMailbox =");
@@ -114,8 +116,10 @@ test("accounts workflow exposes disabled rows and validates proof mailbox saves"
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxId")');
   expect(serverSource).toContain('Object.prototype.hasOwnProperty.call(body, "proofMailboxProvider")');
   expect(serverSource).toContain('rawProvider != null && rawProvider !== "cfmail"');
-  expect(accountsViewSource).toContain("async function copyTextToClipboard");
-  expect(accountsViewSource).toContain("function CopyIconButton");
+  expect(accountsViewSource).toContain('import { CopyIconButton } from "@/components/ui/copy-icon-button";');
+  expect(accountsViewSource).toContain('import { copyTextToClipboard } from "@/lib/clipboard";');
+  expect(copyButtonSource).toContain("export function CopyIconButton");
+  expect(clipboardSource).toContain("export async function copyTextToClipboard");
   expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 密码`}');
   expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 辅助邮箱`}');
   expect(accountsViewSource).toContain('label={`${row.microsoftEmail} 邮箱`}');

@@ -10,6 +10,7 @@ import { DashboardView } from "@/components/dashboard-view";
 import { GrokView } from "@/components/grok-view";
 import { KeysView, ChatGptKeysPane, GrokKeysPane, TavilyKeysPane } from "@/components/keys-view";
 import { MailboxDrawer } from "@/components/mailbox-drawer";
+import { MailboxesView } from "@/components/mailboxes-view";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { SiteKeysView } from "@/components/site-keys-view";
@@ -83,12 +84,15 @@ import {
 import {
   buildAccountsPath,
   buildMailboxSettingsPath,
+  buildMailboxWorkspacePath,
   getMailboxAccountIdFromLocation,
+  getMailboxSurfaceFromLocation,
   getPageFromPathname,
   isAccountsMailboxSurfacePath,
   isKeysCompatPath,
   isMailboxSettingsPath,
   isSiteKeysViewPath,
+  isStandaloneMailboxWorkspacePath,
   normalizeAppPath,
 } from "@/lib/routes";
 import { findMailboxForRequestedAccount } from "@/lib/mailbox-selection";
@@ -461,10 +465,13 @@ export function App() {
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname, search), [pathname, search]);
   const isLegacyKeysPage = useMemo(() => isKeysCompatPath(pathname), [pathname]);
   const isSiteKeysPage = useMemo(() => !isLegacyKeysPage && isSiteKeysViewPath(pathname, search), [isLegacyKeysPage, pathname, search]);
+  const mailboxSurface = useMemo(() => getMailboxSurfaceFromLocation(pathname), [pathname]);
   const isMailboxSettingsPage = useMemo(() => isMailboxSettingsPath(pathname, search), [pathname, search]);
   const isAccountsMailboxSurfacePage = useMemo(() => isAccountsMailboxSurfacePath(pathname, search), [pathname, search]);
+  const isStandaloneMailboxWorkspacePage = useMemo(() => isStandaloneMailboxWorkspacePath(pathname, search), [pathname, search]);
   const requestedMailboxAccountId = useMemo(() => getMailboxAccountIdFromLocation(pathname, search), [pathname, search]);
-  const isMailboxWorkspacePage = activePage === "accounts" && !isMailboxSettingsPage && requestedMailboxAccountId != null;
+  const isMailboxDrawerOpen = activePage === "accounts" && mailboxSurface === "accounts" && !isMailboxSettingsPage && requestedMailboxAccountId != null;
+  const isMailboxWorkspacePage = isStandaloneMailboxWorkspacePage || isMailboxDrawerOpen;
   const mailboxSelectionRef = useRef<number | null>(null);
   const autoSyncedMailboxIdsRef = useRef<number[]>([]);
   const mailboxDrawerRefreshKeyRef = useRef<string | null>(null);
@@ -472,6 +479,15 @@ export function App() {
   const selectedMailbox = useMemo(
     () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
     [mailboxes, selectedMailboxId],
+  );
+  const requestedMailbox = useMemo(
+    () => (requestedMailboxAccountId != null ? findMailboxForRequestedAccount(mailboxes, requestedMailboxAccountId) : null),
+    [mailboxes, requestedMailboxAccountId],
+  );
+  const activeMailbox = requestedMailboxAccountId != null ? requestedMailbox : selectedMailbox;
+  const requestedMailboxAccount = useMemo(
+    () => (requestedMailboxAccountId != null ? accounts.rows.find((row) => row.id === requestedMailboxAccountId) || null : null),
+    [accounts.rows, requestedMailboxAccountId],
   );
   const accountQueryRef = useRef(accountQuery);
   const apiKeyQueryRef = useRef(apiKeyQuery);
@@ -1262,14 +1278,13 @@ export function App() {
   useEffect(() => {
     if (!isMailboxWorkspacePage) return;
     if (requestedMailboxAccountId != null) {
-      const matched = findMailboxForRequestedAccount(mailboxes, requestedMailboxAccountId);
-      if (matched && matched.id !== selectedMailboxId) {
-        setSelectedMailboxId(matched.id);
+      if (requestedMailbox && requestedMailbox.id !== selectedMailboxId) {
+        setSelectedMailboxId(requestedMailbox.id);
         setSelectedMessageId(null);
         setSelectedMessageDetail(null);
         return;
       }
-      if (!matched) {
+      if (!requestedMailbox) {
         if (selectedMailboxId !== null) {
           setSelectedMailboxId(null);
         }
@@ -1301,6 +1316,12 @@ export function App() {
       return;
     }
     if (selectedMailboxId != null && !mailboxes.some((mailbox) => mailbox.id === selectedMailboxId)) {
+      if (!isStandaloneMailboxWorkspacePage) {
+        setSelectedMailboxId(null);
+        setSelectedMessageId(null);
+        setSelectedMessageDetail(null);
+        return;
+      }
       const firstMailbox = mailboxes[0];
       if (!firstMailbox) return;
       setSelectedMailboxId(firstMailbox.id);
@@ -1308,41 +1329,41 @@ export function App() {
       setSelectedMessageDetail(null);
       return;
     }
-    if (selectedMailboxId == null && mailboxes.length > 0) {
+    if (selectedMailboxId == null && mailboxes.length > 0 && requestedMailboxAccountId == null && isStandaloneMailboxWorkspacePage) {
       const firstMailbox = mailboxes[0];
       if (!firstMailbox) return;
       setSelectedMailboxId(firstMailbox.id);
       setSelectedMessageId(null);
       setSelectedMessageDetail(null);
     }
-  }, [isMailboxWorkspacePage, mailboxes, requestedMailboxAccountId, selectedMailboxId]);
+  }, [isMailboxWorkspacePage, isStandaloneMailboxWorkspacePage, mailboxes, requestedMailbox, requestedMailboxAccountId, selectedMailboxId]);
 
   useEffect(() => {
-    if (!isMailboxWorkspacePage || !selectedMailboxId) return;
-    void refreshMailboxMessages(selectedMailboxId).catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [isMailboxWorkspacePage, selectedMailboxId]);
+    if (!isMailboxWorkspacePage || !activeMailbox) return;
+    void refreshMailboxMessages(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [activeMailbox, isMailboxWorkspacePage]);
 
   useEffect(() => {
-    if (!selectedMailbox || !isMailboxWorkspacePage) return;
-    if (selectedMailbox.status === "preparing" && !selectedMailbox.lastSyncedAt && selectedMailbox.isAuthorized) {
-      if (autoSyncedMailboxIdsRef.current.includes(selectedMailbox.id)) return;
-      autoSyncedMailboxIdsRef.current = mergeIds(autoSyncedMailboxIdsRef.current, [selectedMailbox.id]);
-      void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    if (!activeMailbox || !isMailboxWorkspacePage) return;
+    if (activeMailbox.status === "preparing" && !activeMailbox.lastSyncedAt && activeMailbox.isAuthorized) {
+      if (autoSyncedMailboxIdsRef.current.includes(activeMailbox.id)) return;
+      autoSyncedMailboxIdsRef.current = mergeIds(autoSyncedMailboxIdsRef.current, [activeMailbox.id]);
+      void handleSyncMailbox(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
     }
-  }, [isMailboxWorkspacePage, selectedMailbox]);
+  }, [activeMailbox, isMailboxWorkspacePage]);
 
   useEffect(() => {
-    if (!isMailboxWorkspacePage) {
+    if (!isMailboxDrawerOpen) {
       mailboxDrawerRefreshKeyRef.current = null;
       return;
     }
-    if (!selectedMailbox || !selectedMailbox.isAuthorized || selectedMailbox.status === "locked") return;
-    if (selectedMailbox.status === "preparing" && !selectedMailbox.lastSyncedAt) return;
-    const refreshKey = `${selectedMailbox.id}:${requestedMailboxAccountId ?? "none"}`;
+    if (!activeMailbox || !activeMailbox.isAuthorized || activeMailbox.status === "locked") return;
+    if (activeMailbox.status === "preparing" && !activeMailbox.lastSyncedAt) return;
+    const refreshKey = `${activeMailbox.id}:${requestedMailboxAccountId ?? "none"}`;
     if (mailboxDrawerRefreshKeyRef.current === refreshKey) return;
     mailboxDrawerRefreshKeyRef.current = refreshKey;
-    void handleSyncMailbox(selectedMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [isMailboxWorkspacePage, requestedMailboxAccountId, selectedMailbox]);
+    void handleSyncMailbox(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, [activeMailbox, isMailboxDrawerOpen, requestedMailboxAccountId]);
 
   useEffect(() => {
     if (!isAccountsMailboxSurfacePage) return;
@@ -1999,11 +2020,19 @@ export function App() {
     }
   };
 
-  const handleOpenMailboxSettings = () => {
-    navigate(buildMailboxSettingsPath(requestedMailboxAccountId));
+  const handleOpenMailboxSettings = (surface: "accounts" | "mailboxes" = mailboxSurface) => {
+    navigate(buildMailboxSettingsPath(surface, activeMailbox?.accountId ?? requestedMailboxAccountId));
+  };
+
+  const handleOpenStandaloneMailboxWorkspace = () => {
+    navigate(buildMailboxWorkspacePath());
   };
 
   const handleBackToMailboxes = () => {
+    if (mailboxSurface === "mailboxes") {
+      navigate(buildMailboxWorkspacePath(requestedMailboxAccountId));
+      return;
+    }
     navigate(buildAccountsPath(requestedMailboxAccountId));
   };
 
@@ -2012,8 +2041,8 @@ export function App() {
     setSelectedMailboxId(mailboxId);
     setSelectedMessageId(null);
     setSelectedMessageDetail(null);
-    if (mailbox) {
-      navigate(buildAccountsPath(mailbox.accountId));
+    if (mailbox && isStandaloneMailboxWorkspacePage) {
+      navigate(buildMailboxWorkspacePath(mailbox.accountId));
     }
   };
 
@@ -2040,10 +2069,10 @@ export function App() {
   };
 
   const handleLoadMoreMailboxMessages = async () => {
-    if (!selectedMailbox) return;
+    if (!activeMailbox) return;
     try {
       setError(null);
-      await refreshMailboxMessages(selectedMailbox.id, {
+      await refreshMailboxMessages(activeMailbox.id, {
         offset: mailboxMessages.rows.length,
         append: true,
       });
@@ -2281,6 +2310,25 @@ export function App() {
             onSaveSettings={handleSaveMicrosoftGraphSettings}
             onBack={handleBackToMailboxes}
           />
+        ) : isStandaloneMailboxWorkspacePage ? (
+          <MailboxesView
+            settingsConfigured={microsoftGraphSettings?.configured ?? false}
+            mailboxes={mailboxes}
+            selectedMailbox={activeMailbox}
+            messages={mailboxMessages.rows}
+            messagesTotal={mailboxMessages.total}
+            messagesHasMore={mailboxMessages.hasMore}
+            messagesBusy={messagesBusy || mailboxesBusy}
+            selectedMessageId={selectedMessageId}
+            messageDetail={selectedMessageDetail}
+            messageBusy={messageBusy}
+            syncingMailboxId={syncingMailboxId}
+            onOpenSettings={() => handleOpenMailboxSettings("mailboxes")}
+            onSelectMailbox={handleSelectMailbox}
+            onSyncMailbox={handleSyncMailbox}
+            onLoadMoreMessages={handleLoadMoreMailboxMessages}
+            onSelectMessage={handleSelectMailboxMessage}
+          />
         ) : (
           <>
             <AccountsView
@@ -2350,15 +2398,16 @@ export function App() {
               onExtractorHistoryQueryChange={setExtractorHistoryQuery}
               onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
               onOpenMailbox={handleOpenMailbox}
-              onOpenMailboxSettings={handleOpenMailboxSettings}
+              onOpenMailboxSettings={() => handleOpenMailboxSettings("accounts")}
+              onOpenStandaloneMailboxWorkspace={handleOpenStandaloneMailboxWorkspace}
             />
 
             <MailboxDrawer
-              open={isMailboxWorkspacePage}
+              open={isMailboxDrawerOpen}
               onOpenChange={handleMailboxDrawerOpenChange}
               settingsConfigured={microsoftGraphSettings?.configured ?? false}
-              mailboxes={mailboxes}
-              selectedMailbox={selectedMailbox}
+              account={requestedMailboxAccount}
+              mailbox={activeMailbox}
               messages={mailboxMessages.rows}
               messagesTotal={mailboxMessages.total}
               messagesHasMore={mailboxMessages.hasMore}
@@ -2367,8 +2416,7 @@ export function App() {
               messageDetail={selectedMessageDetail}
               messageBusy={messageBusy}
               syncingMailboxId={syncingMailboxId}
-              onOpenSettings={handleOpenMailboxSettings}
-              onSelectMailbox={handleSelectMailbox}
+              onOpenSettings={() => handleOpenMailboxSettings("accounts")}
               onSyncMailbox={handleSyncMailbox}
               onLoadMoreMessages={handleLoadMoreMailboxMessages}
               onSelectMessage={handleSelectMailboxMessage}

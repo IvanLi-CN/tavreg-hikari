@@ -1,5 +1,7 @@
 import type { PageKey } from "@/lib/app-types";
 
+export type MailboxSurface = "accounts" | "mailboxes";
+
 export function normalizeAppPath(pathname: string): string {
   const value = String(pathname || "").trim() || "/";
   if (value === "/") return "/";
@@ -30,12 +32,24 @@ export function getPageFromPathname(pathname: string, search = ""): PageKey {
   return "tavily";
 }
 
+export function getMailboxSurfaceFromLocation(pathname: string): MailboxSurface {
+  const normalized = normalizeAppPath(pathname);
+  if (normalized === "/mailboxes" || normalized.startsWith("/mailboxes/")) {
+    return "mailboxes";
+  }
+  return "accounts";
+}
+
 export function isMailboxSettingsPath(pathname: string, search = ""): boolean {
   return normalizeAppPath(pathname) === "/mailboxes/settings" || new URLSearchParams(search).get("view") === "graph-settings";
 }
 
+export function isStandaloneMailboxWorkspacePath(pathname: string, search = ""): boolean {
+  return getMailboxSurfaceFromLocation(pathname) === "mailboxes" && !isMailboxSettingsPath(pathname, search);
+}
+
 export function isAccountsMailboxSurfacePath(pathname: string, search = ""): boolean {
-  return getPageFromPathname(pathname, search) === "accounts" && !isMailboxSettingsPath(pathname, search);
+  return normalizeAppPath(pathname) === "/accounts" && !isMailboxSettingsPath(pathname, search);
 }
 
 export function isSiteKeysViewPath(pathname: string, search = ""): boolean {
@@ -60,11 +74,22 @@ export function buildAccountsPath(mailboxAccountId?: number | null): string {
   return "/accounts";
 }
 
-export function buildMailboxSettingsPath(mailboxAccountId?: number | null): string {
-  const params = new URLSearchParams();
-  params.set("view", "graph-settings");
+export function buildMailboxWorkspacePath(mailboxAccountId?: number | null): string {
   if (mailboxAccountId != null && Number.isInteger(mailboxAccountId) && mailboxAccountId > 0) {
-    params.set("mailboxAccountId", String(mailboxAccountId));
+    return `/mailboxes?accountId=${mailboxAccountId}`;
   }
+  return "/mailboxes";
+}
+
+export function buildMailboxSettingsPath(surface: MailboxSurface = "accounts", mailboxAccountId?: number | null): string {
+  const params = new URLSearchParams();
+  if (mailboxAccountId != null && Number.isInteger(mailboxAccountId) && mailboxAccountId > 0) {
+    params.set(surface === "mailboxes" ? "accountId" : "mailboxAccountId", String(mailboxAccountId));
+  }
+  if (surface === "mailboxes") {
+    const search = params.toString();
+    return search ? `/mailboxes/settings?${search}` : "/mailboxes/settings";
+  }
+  params.set("view", "graph-settings");
   return `/accounts?${params.toString()}`;
 }

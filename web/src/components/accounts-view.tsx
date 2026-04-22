@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, Check, ChevronLeft, ChevronRight, Copy, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -21,6 +21,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { GroupCombobox } from "@/components/group-combobox";
 import { StatusBadge } from "@/components/status-badge";
+import { CopyIconButton } from "@/components/ui/copy-icon-button";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -337,61 +339,6 @@ function IconActionButton(props: {
   );
 }
 
-function CopyIconButton(props: {
-  label: string;
-  copyStatus: "idle" | "copied" | "failed";
-  disabled?: boolean;
-  onCopy: (anchorElement: HTMLElement) => void;
-  size?: "default" | "compact" | "dense";
-  idleIcon?: ReactNode;
-}) {
-  const tooltipLabel = props.disabled
-    ? `${props.label}不可复制`
-    : props.copyStatus === "copied"
-      ? `${props.label}已复制`
-      : props.copyStatus === "failed"
-        ? `${props.label}复制失败`
-        : `复制${props.label}`;
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className={cn(
-              props.size === "dense"
-                ? "size-5 shrink-0 rounded-md"
-                : props.size === "compact"
-                  ? "size-7 shrink-0 rounded-lg"
-                  : "size-8 shrink-0 rounded-xl",
-              props.copyStatus === "copied"
-                ? "text-emerald-200 hover:text-emerald-100"
-                : props.copyStatus === "failed"
-                  ? "text-rose-200 hover:text-rose-100"
-                  : "text-cyan-200 hover:text-cyan-100",
-            )}
-            disabled={props.disabled}
-            aria-label={tooltipLabel}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              props.onCopy(event.currentTarget);
-            }}
-          >
-            {props.copyStatus === "copied"
-              ? <Check className="size-4" aria-hidden="true" />
-              : props.idleIcon || <Copy className="size-4" aria-hidden="true" />}
-          </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{tooltipLabel}</TooltipContent>
-    </Tooltip>
-  );
-}
-
 function GroupBadge(props: { groupName: string | null }) {
   if (!props.groupName) return null;
   return (
@@ -574,30 +521,6 @@ function ExtractHistoryItemField(props: { label: string; value: ReactNode; class
   );
 }
 
-async function copyTextToClipboard(value: string): Promise<void> {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  if (typeof document === "undefined") {
-    throw new Error("clipboard unavailable");
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  const succeeded = document.execCommand("copy");
-  textarea.remove();
-  if (!succeeded) {
-    throw new Error("clipboard unavailable");
-  }
-}
-
 export function AccountsView({
   accounts,
   importContent,
@@ -658,6 +581,7 @@ export function AccountsView({
   onRefreshExtractorHistory,
   onOpenMailbox,
   onOpenMailboxSettings,
+  onOpenStandaloneMailboxWorkspace,
 }: {
   accounts: AccountsPayload;
   importContent: string;
@@ -718,6 +642,7 @@ export function AccountsView({
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
   onOpenMailboxSettings: () => void;
+  onOpenStandaloneMailboxWorkspace: () => void;
 }) {
   const [proofDialogOpen, setProofDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<AccountRecord | null>(null);
@@ -1232,6 +1157,7 @@ export function AccountsView({
             copyStatus={getCopyStatus(row.id, "email")}
             onCopy={(anchorElement) => void handleCopyEmail(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
           />
           <CopyIconButton
             label={`${row.microsoftEmail} 密码`}
@@ -1239,6 +1165,7 @@ export function AccountsView({
             disabled={!getPasswordCopyValue(row.id, row.passwordPlaintext).trim()}
             onCopy={(anchorElement) => void handleCopyPassword(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
             idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
           />
         </>
@@ -1252,6 +1179,7 @@ export function AccountsView({
             disabled={!row.proofMailboxAddress}
             onCopy={(anchorElement) => void handleCopyProofMailbox(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
           />
           <GroupBadge groupName={row.groupName} />
         </>
@@ -1335,6 +1263,7 @@ export function AccountsView({
             copyStatus={getCopyStatus(row.id, "email")}
             onCopy={(anchorElement) => void handleCopyEmail(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
           />
           <CopyIconButton
             label={`${row.microsoftEmail} 密码`}
@@ -1342,6 +1271,7 @@ export function AccountsView({
             disabled={!getPasswordCopyValue(row.id, row.passwordPlaintext).trim()}
             onCopy={(anchorElement) => void handleCopyPassword(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
             idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
           />
         </>
@@ -1355,6 +1285,7 @@ export function AccountsView({
             disabled={!row.proofMailboxAddress}
             onCopy={(anchorElement) => void handleCopyProofMailbox(row, anchorElement)}
             size="dense"
+            feedbackEnabled={false}
           />
           <GroupBadge groupName={row.groupName} />
         </>
@@ -1617,6 +1548,10 @@ export function AccountsView({
                 </CardDescription>
               </div>
               <div className="flex flex-wrap gap-2 xl:justify-end">
+                <Button type="button" variant="outline" className="xl:self-start" onClick={onOpenStandaloneMailboxWorkspace}>
+                  <Inbox className="mr-1 size-4" aria-hidden="true" />
+                  微软邮箱
+                </Button>
                 <Button type="button" variant="outline" className="xl:self-start" onClick={onOpenMailboxSettings}>
                   <Settings2 className="mr-1 size-4" aria-hidden="true" />
                   Graph 设置

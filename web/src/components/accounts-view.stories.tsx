@@ -173,6 +173,7 @@ const baseArgs = {
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
   onOpenMailboxSettings: fn(),
+  onOpenStandaloneMailboxWorkspace: fn(),
 };
 const restoreAvailabilitySpy = fn(async () => undefined);
 
@@ -521,6 +522,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
         onOpenMailboxSettings={() => undefined}
+        onOpenStandaloneMailboxWorkspace={() => undefined}
       />
     </div>
   );
@@ -1479,5 +1481,22 @@ export const SortingTimeColumnsPlay: Story = {
     await userEvent.click(lastUsedButton);
     await expect(rowCells()[0]).toHaveTextContent("beta@example.test");
     await expect(importedAtButton).toHaveAttribute("aria-label", expect.stringContaining("当前默认降序"));
+  },
+};
+
+export const MailWorkspaceEntryPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialSelectedIds={[]} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证 Microsoft 账号页头部同时暴露独立“微软邮箱”入口与 Graph 设置入口。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "微软邮箱" })).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "Graph 设置" })).toBeInTheDocument();
   },
 };
