@@ -186,9 +186,9 @@
   ![ChatGPT 站内 Keys 子视图](./assets/site-keys-chatgpt.png)
 
 - source_type: `storybook_canvas`
-  story_id_or_title: `Views/MailboxDrawer/Available Mailbox`
-  state: `microsoft mailbox drawer`
-  evidence_note: 验证 Microsoft 账号模块内通过 drawer 直接查看邮箱，保留 Graph 设置与刷新入口，并继续复用三栏 mailbox 工作区。
+  story_id_or_title: `Views/MailboxDrawer/Overlay Preview`
+  state: `microsoft mailbox drawer overlay`
+  evidence_note: 验证 Microsoft 邮箱工作区现在以右侧 overlay drawer 呈现，聚焦当前账号的单邮箱内容，并保留复制与刷新入口。
   ![Microsoft 邮箱抽屉](./assets/mailbox-drawer-available.png)
 
 - source_type: `storybook_canvas`
