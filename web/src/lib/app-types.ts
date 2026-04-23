@@ -420,11 +420,23 @@ export type ChatGptCredentialExpiryStatus = "" | "valid" | "expired" | "noExpiry
 export type ChatGptCredentialQuery = {
   q: string;
   expiryStatus: ChatGptCredentialExpiryStatus;
+  page: number;
+  pageSize: number;
+};
+
+export type ChatGptCredentialSummary = {
+  valid: number;
+  expired: number;
+  noExpiry: number;
 };
 
 export type ChatGptCredentialsPayload = {
   ok: true;
   rows: ChatGptCredentialRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: ChatGptCredentialSummary;
 };
 
 export type ChatGptCredentialDetailPayload = {

@@ -89,6 +89,7 @@ export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+const MAX_KEYS_PAGE_SIZE = 5000;
 
 export function isAccountExtractorAccountType(value: unknown): value is AccountExtractorAccountType {
   return value === "outlook" || value === "hotmail" || value === "unlimited";
@@ -1811,7 +1812,7 @@ export class AppDatabase {
     pageSize?: number;
   }): { rows: MicrosoftAccountRecord[]; total: number; summary: { ready: number; linked: number; failed: number; disabled: number } } {
     const page = Math.max(1, filters.page || 1);
-    const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
+    const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, filters.pageSize || 20));
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
@@ -2133,7 +2134,7 @@ export class AppDatabase {
     pageSize?: number;
   }): { rows: ApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
-    const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
+    const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, filters.pageSize || 20));
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
@@ -3895,16 +3896,25 @@ export class AppDatabase {
   }
 
   listChatGptCredentials(filters?: {
-    limit?: number;
+    page?: number;
+    pageSize?: number;
     sortBy?: "createdAt" | "expiresAt";
     sortDir?: "desc" | "asc";
     q?: string;
     expiryStatus?: "valid" | "expired" | "noExpiry";
-  }): ChatGptCredentialRecord[] {
-    const safeLimit = Math.max(1, Math.min(200, Math.trunc(filters?.limit || 20)));
+  }): {
+    rows: ChatGptCredentialRecord[];
+    total: number;
+    page: number;
+    pageSize: number;
+    summary: { valid: number; expired: number; noExpiry: number };
+  } {
+    const page = Math.max(1, Math.trunc(filters?.page || 1));
+    const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, Math.trunc(filters?.pageSize || 20)));
     const orderClause = resolveChatGptCredentialOrderClause(filters?.sortBy, filters?.sortDir);
     const where: string[] = [];
     const params: unknown[] = [];
+    const now = nowIso();
     if (filters?.q?.trim()) {
       const pattern = `%${filters.q.trim().toLowerCase()}%`;
       where.push("(LOWER(email) LIKE ? OR LOWER(account_id) LIKE ?)");
@@ -3912,18 +3922,45 @@ export class AppDatabase {
     }
     if (filters?.expiryStatus === "valid") {
       where.push("expires_at IS NOT NULL AND expires_at > ?");
-      params.push(nowIso());
+      params.push(now);
     } else if (filters?.expiryStatus === "expired") {
       where.push("expires_at IS NOT NULL AND expires_at <= ?");
-      params.push(nowIso());
+      params.push(now);
     } else if (filters?.expiryStatus === "noExpiry") {
       where.push("expires_at IS NULL");
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const summaryRow = this.db
+      .query(`
+        SELECT
+          COUNT(*) AS total,
+          SUM(CASE WHEN expires_at IS NOT NULL AND expires_at > ? THEN 1 ELSE 0 END) AS valid_count,
+          SUM(CASE WHEN expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END) AS expired_count,
+          SUM(CASE WHEN expires_at IS NULL THEN 1 ELSE 0 END) AS no_expiry_count
+        FROM chatgpt_credentials
+        ${whereSql}
+      `)
+      .get(...([now, now, ...(params as any[])] as any[])) as {
+      total?: number;
+      valid_count?: number;
+      expired_count?: number;
+      no_expiry_count?: number;
+    } | null;
+    const total = Number(summaryRow?.total || 0);
     const rows = this.db
-      .query(`SELECT * FROM chatgpt_credentials ${whereSql} ${orderClause} LIMIT ?`)
-      .all(...([...(params as any[]), safeLimit] as any[])) as Record<string, unknown>[];
-    return rows.map(mapChatGptCredentialRow);
+      .query(`SELECT * FROM chatgpt_credentials ${whereSql} ${orderClause} LIMIT ? OFFSET ?`)
+      .all(...([...(params as any[]), pageSize, (page - 1) * pageSize] as any[])) as Record<string, unknown>[];
+    return {
+      rows: rows.map(mapChatGptCredentialRow),
+      total,
+      page,
+      pageSize,
+      summary: {
+        valid: Number(summaryRow?.valid_count || 0),
+        expired: Number(summaryRow?.expired_count || 0),
+        noExpiry: Number(summaryRow?.no_expiry_count || 0),
+      },
+    };
   }
 
   getChatGptCredential(credentialId: number): ChatGptCredentialRecord | null {

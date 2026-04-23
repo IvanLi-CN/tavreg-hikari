@@ -18,7 +18,7 @@
 ### Goals
 
 - 将顶层导航收敛为 `Tavily / Grok / ChatGPT / Microsoft / 代理节点` 五项。
-- 把 Tavily / Grok / ChatGPT 的 Keys 能力收纳到各自模块内，以站内子视图形式进入。
+- 把 Tavily / Grok / ChatGPT 的 Keys 能力收纳到各自模块内，以当前站点的 Keys 视图形式进入。
 - 把 Microsoft 邮箱查看收纳到账号池模块内，通过右侧抽屉直接查看对应账号邮箱，并在每次打开时自动刷新一次。
 - 保留旧 `/keys`、`/api-keys`、`/mailboxes` 与 `/mailboxes/settings` 深链兼容能力，但不再作为顶层主导航入口。
 - 将 Microsoft 模块“展开工具列 / 收起工具列”状态持久化到浏览器存储，并允许 Storybook 显式覆盖初始态。
@@ -35,7 +35,7 @@
 ### In scope
 
 - `AppShell` 顶栏标签、说明文案与 page 映射收敛。
-- `KeysView` 拆分为 Tavily / Grok / ChatGPT 可复用 pane，并支持站内 keys 子视图。
+- `KeysView` 拆分为 Tavily / Grok / ChatGPT 可复用 pane，并支持站点 Keys 视图。
 - Tavily / Grok / ChatGPT 主控页新增 `查看 Keys` 入口与返回主控页入口。
 - Microsoft 账号页内的 mailbox drawer、Graph 设置入口与 drawer auto-refresh。
 - Microsoft 工具列展开态的 localStorage 持久化。
@@ -54,8 +54,8 @@
 - 顶层导航必须只显示 `Tavily / Grok / ChatGPT / Microsoft / 代理节点`。
 - `/accounts` 必须继续作为 Microsoft 模块主路由，owner-facing 标签改为 `Microsoft`。
 - `/keys` 与 `/api-keys` 必须继续可访问，并映射到站点对应的 keys 兼容页。
-- Tavily / Grok / ChatGPT 主控页必须各自提供站内 `查看 Keys` 入口，并能显式返回原主控页。
-- ChatGPT 的“补号设置”必须继续保留在 ChatGPT keys 子视图中。
+- Tavily / Grok / ChatGPT 主控页必须各自提供 `查看 Keys` 入口，并能显式返回原主控页。
+- ChatGPT 的“补号设置”必须继续保留在 ChatGPT keys 视图中。
 - Microsoft 账号列表点击“收件箱”后，必须留在 `accounts` 模块并打开右侧抽屉，不再切到独立顶栏页。
 - 抽屉每次打开时必须自动触发一次 mailbox `sync + messages refresh`，但同一次打开周期内不得重复抖动刷新。
 - Microsoft 工具列展开态必须在刷新后恢复，并支持 Storybook 通过显式初始 props 覆盖。
@@ -64,7 +64,7 @@
 
 - 旧 `/mailboxes?accountId=<id>`、`/mailboxes/settings` 深链应自动落到新的 `accounts` 模块上下文。
 - Microsoft 抽屉对 `available / invalidated / locked / 未授权 / 无 mailbox` 都应给出稳定反馈，而不是跳回旧路由。
-- Storybook 应覆盖五项导航、三个站点 keys 子视图、Microsoft 抽屉主要状态与工具列初始态。
+- Storybook 应覆盖五项导航、三个站点 Keys 视图、Microsoft 抽屉主要状态与工具列初始态。
 
 ### COULD
 
@@ -78,11 +78,11 @@
 - `/mailboxes`、`/mailboxes/settings` 继续可访问，但前端 page key 统一映射到 `accounts`。
 - `/keys`、`/api-keys` 继续作为兼容入口；若 query 中带 `site=grok|chatgpt`，应落到对应站点 keys 视图，否则默认落到 Tavily。
 
-### 站点内 Keys 子视图
+### 站点 Keys 视图
 
 - Tavily / Grok / ChatGPT 主控页顶部提供 `查看 Keys` 按钮。
-- 点击后进入当前站点的 `?view=keys` 子视图，并显示“返回任务控制”按钮。
-- 子视图继续复用既有 keys 数据能力与导出交互；ChatGPT 子视图继续提供“补号设置”。
+- 点击后进入当前站点的 `?view=keys` Keys 视图，并显示“返回任务控制”按钮。
+- 该视图继续复用既有 keys 数据能力与导出交互；ChatGPT 视图继续提供“补号设置”。
 - 旧兼容 `/keys` 页继续使用组合版 `KeysView`，但不再出现在顶层导航中。
 
 ### Microsoft 邮箱抽屉
@@ -116,9 +116,9 @@
 
 - Given 用户位于 Tavily / Grok / ChatGPT 主控页
   When 点击 `查看 Keys`
-  Then 页面进入当前站点 keys 子视图，并可通过“返回任务控制”回到原主控页。
+  Then 页面进入当前站点 Keys 视图，并可通过“返回任务控制”回到原主控页。
 
-- Given 用户位于 ChatGPT keys 子视图
+- Given 用户位于 ChatGPT Keys 视图
   When 页面渲染完成
   Then 仍可直接打开“补号设置”，不需要返回旧统一 Keys 顶栏页。
 
@@ -145,7 +145,7 @@
 ### Testing
 
 - Unit tests: 路由映射覆盖 `/keys`、`/api-keys`、`/mailboxes`、`/mailboxes/settings` 与 query 解析。
-- E2E / interaction: Storybook `play` 覆盖站内 keys 返回、ChatGPT 补号设置入口、Microsoft 抽屉主要状态与工具列初始态。
+- E2E / interaction: Storybook `play` 覆盖站点 Keys 返回、ChatGPT 补号设置入口、Microsoft 抽屉主要状态与工具列初始态。
 
 ### UI / Storybook (if applicable)
 
@@ -182,8 +182,8 @@
 - source_type: `storybook_canvas`
   story_id_or_title: `Views/SiteKeysView/Chat Gpt Keys`
   state: `chatgpt embedded keys`
-  evidence_note: 验证 ChatGPT 的 keys 已收纳到站内子视图，保留“返回任务控制”与“补号设置”入口，不再依赖顶层 Keys 导航。
-  ![ChatGPT 站内 Keys 子视图](./assets/site-keys-chatgpt.png)
+  evidence_note: 验证 ChatGPT 的 Keys 已收纳到当前站点视图，保留“返回任务控制”与“补号设置”入口，不再依赖顶层 Keys 导航。
+  ![ChatGPT 站点 Keys 视图](./assets/site-keys-chatgpt.png)
 
 - source_type: `storybook_canvas`
   story_id_or_title: `Views/MailboxDrawer/Overlay Preview`
@@ -200,16 +200,16 @@
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 顶层导航与兼容路由收敛完成
-- [x] M2: Tavily / Grok / ChatGPT 站内 Keys 子视图完成
+- [x] M2: Tavily / Grok / ChatGPT 站点 Keys 视图完成
 - [x] M3: Microsoft mailbox drawer 与 Graph 设置入口收敛完成
 - [x] M4: Storybook、视觉证据、验证链路与 PR merge-ready 收敛完成
 
 ## 方案概述（Approach, high-level）
 
 - 保持后端与数据模型不动，只收敛前端信息架构与路由语义。
-- 以可复用 pane 的方式拆分 Keys 页面，让站内 keys 子视图和兼容 `/keys` 页面共用同一套展示组件。
+- 以可复用 pane 的方式拆分 Keys 页面，让站点 Keys 视图和兼容 `/keys` 页面共用同一套展示组件。
 - 通过 `accounts` 模块下的 query state 驱动 Microsoft drawer / Graph settings，使刷新与返回路径都绑定在同一路由语义上。
-- 使用 Storybook 作为视觉证据主源，确保 drawer、导航和站内 keys 子视图都有稳定 mock 场景。
+- 使用 Storybook 作为视觉证据主源，确保 drawer、导航和站点 Keys 视图都有稳定 mock 场景。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
@@ -219,7 +219,7 @@
 
 ## 变更记录（Change log）
 
-- 2026-04-19: 创建规格，冻结导航收敛、站内 keys 子视图、Microsoft mailbox drawer 与工具列持久化范围。
+- 2026-04-19: 创建规格，冻结导航收敛、站点 Keys 视图、Microsoft mailbox drawer 与工具列持久化范围。
 - 2026-04-19: 完成 codex review 收敛、Storybook/验证链路与 PR #54 merge-ready 收口，同步兼容 `/keys?site=` tab 切换回归覆盖。
 
 ## 参考（References）

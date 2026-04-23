@@ -259,12 +259,19 @@ export class ChatGptJobScheduler {
   }
 
   getRecentCredentials(filters?: {
-    limit?: number;
+    page?: number;
+    pageSize?: number;
     sortBy?: "createdAt" | "expiresAt";
     sortDir?: "desc" | "asc";
     q?: string;
     expiryStatus?: "valid" | "expired" | "noExpiry";
-  }): ChatGptCredentialRecord[] {
+  }): {
+    rows: ChatGptCredentialRecord[];
+    total: number;
+    page: number;
+    pageSize: number;
+    summary: { valid: number; expired: number; noExpiry: number };
+  } {
     return this.db.listChatGptCredentials(filters);
   }
 

@@ -394,36 +394,36 @@ describe("AppDatabase account import", () => {
     appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T12:00:00.000Z", "2020-04-08T09:30:00.000Z", betaCredential.id);
     appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T10:00:00.000Z", null, gammaCredential.id);
 
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "createdAt", sortDir: "desc" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
       "sort-gamma@mail.example.test",
       "sort-alpha@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "createdAt", sortDir: "asc" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
       "sort-gamma@mail.example.test",
       "sort-beta@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "expiresAt", sortDir: "desc" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
       "sort-beta@mail.example.test",
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "expiresAt", sortDir: "asc" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
       "sort-alpha@mail.example.test",
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, q: "gamma" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, q: "gamma" }).rows.map((row) => row.email)).toEqual([
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "noExpiry" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "noExpiry" }).rows.map((row) => row.email)).toEqual([
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "expired" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "expired" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "valid" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "valid" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
     ]);
 

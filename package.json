@@ -33,6 +33,7 @@
     "@radix-ui/react-tooltip": "^1.2.8",
     "@resvg/resvg-js": "^2.6.2",
     "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/react-virtual": "^3.13.24",
     "@vitejs/plugin-react": "^6.0.1",
     "better-sqlite3": "^12.8.0",
     "class-variance-authority": "^0.7.1",

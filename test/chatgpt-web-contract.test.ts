@@ -15,7 +15,7 @@ test("chatgpt page still uses implemented job and credential endpoints", async (
   const appSource = await readFile(path.join(repoRoot, "web/src/App.tsx"), "utf8");
   expect(appSource).toContain("/api/jobs/current?site=");
   expect(appSource).toContain("/api/chatgpt/credentials?");
-  expect(appSource).toContain("/api/chatgpt/credentials/${credential.id}?includeSecrets=1");
+  expect(appSource).toContain("/api/chatgpt/credentials/${credentialId}?includeSecrets=1");
 });
 
 test("parallel helper no longer depends on the removed chatgpt draft api", async () => {

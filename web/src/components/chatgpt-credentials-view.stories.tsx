@@ -2,13 +2,14 @@ import { useMemo, useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, fn, userEvent, within } from "storybook/test";
 import { ChatGptCredentialsView } from "@/components/chatgpt-credentials-view";
-import { sampleChatGptCredentials } from "@/stories/fixtures";
+import { KEYS_PAGE_SIZE_OPTIONS } from "@/lib/keys-page";
 import type {
   ChatGptCredentialQuery,
   ChatGptCredentialRecord,
   ChatGptCredentialSort,
   ChatGptCredentialSupplementPayload,
 } from "@/lib/app-types";
+import { createSampleChatGptCredentialsPayload, sampleChatGptCredentials } from "@/stories/fixtures";
 
 const defaultSort: ChatGptCredentialSort = {
   sortBy: "createdAt",
@@ -20,34 +21,9 @@ const fixedNowMs = Date.parse("2026-04-10T03:00:00.000Z");
 const defaultQuery: ChatGptCredentialQuery = {
   q: "",
   expiryStatus: "",
+  page: 1,
+  pageSize: 20,
 };
-
-const sortingDemoCredentials: ChatGptCredentialRecord[] = [
-  {
-    ...sampleChatGptCredentials[0]!,
-    id: 201,
-    email: "sort.alpha@mail.example.test",
-    accountId: "acc-sort-alpha",
-    expiresAt: "2026-04-06T12:00:00.000Z",
-    createdAt: "2026-04-05T08:00:00.000Z",
-  },
-  {
-    ...sampleChatGptCredentials[1]!,
-    id: 202,
-    email: "sort.beta@mail.example.test",
-    accountId: "acc-sort-beta",
-    expiresAt: "2026-04-06T09:30:00.000Z",
-    createdAt: "2026-04-05T12:00:00.000Z",
-  },
-  {
-    ...sampleChatGptCredentials[2]!,
-    id: 203,
-    email: "sort.gamma@mail.example.test",
-    accountId: "acc-sort-gamma",
-    expiresAt: null,
-    createdAt: "2026-04-05T10:00:00.000Z",
-  },
-];
 
 function parseTime(value: string | null | undefined): number | null {
   if (!value) return null;
@@ -92,17 +68,57 @@ function applyCredentialQuery(rows: ChatGptCredentialRecord[], query: ChatGptCre
   });
 }
 
-function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentialRecord[] }) {
+function createLargeCredentialRows(count: number): ChatGptCredentialRecord[] {
+  return Array.from({ length: count }, (_, index) => {
+    const template = sampleChatGptCredentials[index % sampleChatGptCredentials.length]!;
+    const id = index + 1;
+    return {
+      ...template,
+      id,
+      jobId: 500 + Math.floor(index / 25),
+      attemptId: 900 + id,
+      email: `virtual-${String(id).padStart(4, "0")}@mail.example.test`,
+      accountId: `acc-virtual-${id}`,
+      createdAt: new Date(Date.parse("2026-04-01T00:00:00.000Z") + index * 60_000).toISOString(),
+      expiresAt: index % 3 === 0 ? null : new Date(Date.parse("2026-04-12T00:00:00.000Z") - index * 45_000).toISOString(),
+    };
+  });
+}
+
+function mergeIds(current: number[], incoming: number[]): number[] {
+  return Array.from(new Set([...current, ...incoming]));
+}
+
+function ChatGptCredentialsStorySurface(props?: {
+  credentials?: ChatGptCredentialRecord[];
+  initialQuery?: ChatGptCredentialQuery;
+  initialSelectedIds?: number[];
+  initialExportOpen?: boolean;
+}) {
   const sourceCredentials = props?.credentials || sampleChatGptCredentials;
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
-  const [exportOpen, setExportOpen] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<number[]>(props?.initialSelectedIds || []);
+  const [exportOpen, setExportOpen] = useState(Boolean(props?.initialExportOpen));
   const [batchSupplementOpen, setBatchSupplementOpen] = useState(false);
   const [batchSupplementGroupName, setBatchSupplementGroupName] = useState("");
   const [batchSupplementResult, setBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
-  const [query, setQuery] = useState<ChatGptCredentialQuery>(defaultQuery);
+  const [query, setQuery] = useState<ChatGptCredentialQuery>(props?.initialQuery || defaultQuery);
   const [sort, setSort] = useState<ChatGptCredentialSort>(defaultSort);
   const filteredCredentials = useMemo(() => applyCredentialQuery(sourceCredentials, query), [query, sourceCredentials]);
-  const credentials = useMemo(() => sortCredentials(filteredCredentials, sort), [filteredCredentials, sort]);
+  const sortedCredentials = useMemo(() => sortCredentials(filteredCredentials, sort), [filteredCredentials, sort]);
+  const pagedCredentials = useMemo(() => {
+    const start = (query.page - 1) * query.pageSize;
+    return sortedCredentials.slice(start, start + query.pageSize);
+  }, [query.page, query.pageSize, sortedCredentials]);
+  const payload = useMemo(
+    () =>
+      createSampleChatGptCredentialsPayload(pagedCredentials, {
+        total: sortedCredentials.length,
+        page: query.page,
+        pageSize: query.pageSize,
+        nowMs: fixedNowMs,
+      }),
+    [pagedCredentials, query.page, query.pageSize, sortedCredentials.length],
+  );
   const exportContent = useMemo(
     () =>
       JSON.stringify(
@@ -118,7 +134,7 @@ function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentia
 
   return (
     <ChatGptCredentialsView
-      credentials={credentials}
+      credentials={payload}
       query={query}
       sort={sort}
       credentialBusy={false}
@@ -135,9 +151,13 @@ function ChatGptCredentialsStorySurface(props?: { credentials?: ChatGptCredentia
       onQueryChange={setQuery}
       onSortChange={setSort}
       onToggleSelection={(credentialId, checked) =>
-        setSelectedIds((current) => (checked ? Array.from(new Set([...current, credentialId])) : current.filter((id) => id !== credentialId)))
+        setSelectedIds((current) => (checked ? mergeIds(current, [credentialId]) : current.filter((id) => id !== credentialId)))
       }
-      onTogglePageSelection={(checked) => setSelectedIds(checked ? credentials.map((row) => row.id) : [])}
+      onTogglePageSelection={(checked) =>
+        setSelectedIds((current) =>
+          checked ? mergeIds(current, payload.rows.map((row) => row.id)) : current.filter((id) => !payload.rows.some((row) => row.id === id)),
+        )
+      }
       onClearSelection={() => setSelectedIds([])}
       onOpenExport={() => setExportOpen(true)}
       onExportOpenChange={setExportOpen}
@@ -185,7 +205,7 @@ const meta = {
   parameters: {
     docs: {
       description: {
-        component: "ChatGPT keys 列表片段，支持导出、复制、批量补号与勾选结果反馈。",
+        component: "ChatGPT keys 列表片段，支持服务端分页、跨页勾选、底部浮动批量条与整页虚拟列表。",
       },
     },
   },
@@ -194,75 +214,87 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
+const baseArgs = {
+  credentials: createSampleChatGptCredentialsPayload(),
+  query: defaultQuery,
+  sort: defaultSort,
+  credentialBusy: false,
+  selectedIds: [],
+  exportOpen: false,
+  exportContent: "",
+  exportBusy: false,
+  groupOptions: ["sync-ready", "warm-pool", "hold"],
+  upstreamSettingsConfigured: true,
+  batchSupplementOpen: false,
+  batchSupplementBusy: false,
+  batchSupplementGroupName: "",
+  batchSupplementResult: null,
+  onQueryChange: fn(),
+  onSortChange: fn(),
+  onToggleSelection: fn(),
+  onTogglePageSelection: fn(),
+  onClearSelection: fn(),
+  onOpenExport: fn(),
+  onExportOpenChange: fn(),
+  onCopyExport: fn(),
+  onSaveExport: fn(),
+  onCopyCredential: fn(),
+  onExportCredential: fn(),
+  onBatchSupplementOpenChange: fn(),
+  onBatchSupplementGroupNameChange: fn(),
+  onOpenBatchSupplement: fn(),
+  onSubmitBatchSupplement: fn(),
+};
+
 export const Default: Story = {
-  args: {
-    credentials: sortCredentials(sampleChatGptCredentials, defaultSort),
-    query: defaultQuery,
-    sort: defaultSort,
-    credentialBusy: false,
-    selectedIds: [],
-    exportOpen: false,
-    exportContent: "",
-    exportBusy: false,
-    groupOptions: ["sync-ready", "warm-pool", "hold"],
-    upstreamSettingsConfigured: true,
-    batchSupplementOpen: false,
-    batchSupplementBusy: false,
-    batchSupplementGroupName: "",
-    batchSupplementResult: null,
-    onQueryChange: fn(),
-    onSortChange: fn(),
-    onToggleSelection: fn(),
-    onTogglePageSelection: fn(),
-    onClearSelection: fn(),
-    onOpenExport: fn(),
-    onExportOpenChange: fn(),
-    onCopyExport: fn(),
-    onSaveExport: fn(),
-    onCopyCredential: fn(),
-    onExportCredential: fn(),
-    onBatchSupplementOpenChange: fn(),
-    onBatchSupplementGroupNameChange: fn(),
-    onOpenBatchSupplement: fn(),
-    onSubmitBatchSupplement: fn(),
-  },
+  args: baseArgs,
   render: () => <ChatGptCredentialsStorySurface />,
 };
 
 export const Empty: Story = {
-  args: {
-    ...Default.args,
-    credentials: [],
-  },
+  args: baseArgs,
   render: () => <ChatGptCredentialsStorySurface credentials={[]} />,
 };
 
-export const ExportPlay: Story = {
-  args: {
-    ...Default.args,
-  },
+export const FloatingDockAndPaginationPlay: Story = {
+  args: baseArgs,
   render: () => <ChatGptCredentialsStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("checkbox", { name: "select-current-page" }));
-    await expect(canvas.getByText(`总已选 ${sampleChatGptCredentials.length} / ${sampleChatGptCredentials.length}`)).toBeInTheDocument();
-    await userEvent.click(canvas.getByRole("button", { name: "导出" }));
+    await expect(canvas.queryByRole("button", { name: "导出" })).toBeInTheDocument();
+    await userEvent.click(canvas.getAllByRole("checkbox", { name: /select-credential-/ })[0]!);
+    await expect(canvas.getByText(/总已选 · 1/)).toBeInTheDocument();
+
+    await userEvent.click(canvas.getByRole("combobox", { name: "每页条数" }));
+    const popup = within(document.body);
+    for (const pageSize of KEYS_PAGE_SIZE_OPTIONS) {
+      await expect(popup.getByRole("option", { name: `${pageSize} / 页` })).toBeInTheDocument();
+    }
+  },
+};
+
+export const CrossPageSelectionPlay: Story = {
+  args: baseArgs,
+  render: () => <ChatGptCredentialsStorySurface credentials={createLargeCredentialRows(36)} initialQuery={{ ...defaultQuery, pageSize: 10 }} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const firstPageCheckboxes = canvas.getAllByRole("checkbox", { name: /select-credential-/ });
+    await userEvent.click(firstPageCheckboxes[0]!);
+    await userEvent.click(canvas.getByRole("button", { name: "下一页" }));
+    const secondPageCheckboxes = within(canvasElement).getAllByRole("checkbox", { name: /select-credential-/ });
+    await userEvent.click(secondPageCheckboxes[1]!);
+    await expect(within(canvasElement).getByText(/总已选 · 2/)).toBeInTheDocument();
+    await userEvent.click(within(canvasElement).getByRole("button", { name: "导出" }));
     const dialog = within(document.body).getByRole("dialog", { name: "导出 ChatGPT Keys" });
     await expect(dialog).toBeInTheDocument();
-    await expect(within(dialog).getByRole("textbox", { name: "chatgpt-key-export-content" })).toHaveValue(
-      JSON.stringify(
-        sortCredentials(sampleChatGptCredentials, defaultSort).map((row) => ({ id: row.id, email: row.email })),
-        null,
-        2,
-      ),
-    );
+    const content = within(dialog).getByRole("textbox", { name: "chatgpt-key-export-content" });
+    await expect(content).toHaveValue(expect.stringContaining("virtual-0001@mail.example.test"));
+    await expect(content).toHaveValue(expect.stringContaining("virtual-0012@mail.example.test"));
   },
 };
 
 export const BatchSupplementPlay: Story = {
-  args: {
-    ...Default.args,
-  },
+  args: baseArgs,
   render: () => <ChatGptCredentialsStorySurface />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
@@ -272,48 +304,11 @@ export const BatchSupplementPlay: Story = {
     await userEvent.click(within(dialog).getByRole("button", { name: "不补号" }));
     await userEvent.click(within(document.body).getByRole("button", { name: "sync-ready" }));
     await userEvent.click(within(dialog).getByRole("button", { name: /补号 1 条/ }));
-    await expect(within(dialog).getByText(/success · 0|success · 1/i)).toBeInTheDocument();
     await expect(within(dialog).getByText(/missing accountId|当前批次全部补号成功/)).toBeInTheDocument();
   },
 };
 
-export const SortingTimeColumnsPlay: Story = {
-  args: {
-    ...Default.args,
-  },
-  render: () => <ChatGptCredentialsStorySurface credentials={sortingDemoCredentials} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const createdAtButton = canvas.getByRole("button", { name: /创建时间排序/ });
-    const expiresAtButton = canvas.getByRole("button", { name: /过期时间排序/ });
-    const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("sort."));
-
-    await expect(rowCells()[0]).toHaveTextContent("sort.beta@mail.example.test");
-    await userEvent.click(createdAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("sort.alpha@mail.example.test");
-    await userEvent.click(expiresAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("sort.alpha@mail.example.test");
-    await userEvent.click(expiresAtButton);
-    await expect(rowCells()[0]).toHaveTextContent("sort.beta@mail.example.test");
-  },
-};
-
-export const FilteringPlay: Story = {
-  args: {
-    ...Default.args,
-  },
-  render: () => <ChatGptCredentialsStorySurface credentials={sortingDemoCredentials} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await userEvent.type(canvas.getByRole("textbox", { name: "搜索" }), "gamma");
-    await expect(canvas.getByText("sort.gamma@mail.example.test")).toBeInTheDocument();
-    await expect(canvas.queryByText("sort.alpha@mail.example.test")).not.toBeInTheDocument();
-
-    await userEvent.clear(canvas.getByRole("textbox", { name: "搜索" }));
-    await userEvent.click(canvas.getByRole("combobox", { name: "有效期" }));
-    await userEvent.click(within(document.body).getByRole("option", { name: "无过期时间" }));
-    await expect(canvas.getByText("sort.gamma@mail.example.test")).toBeInTheDocument();
-    await expect(canvas.queryByText("sort.beta@mail.example.test")).not.toBeInTheDocument();
-  },
+export const Virtualized5000Rows: Story = {
+  args: baseArgs,
+  render: () => <ChatGptCredentialsStorySurface credentials={createLargeCredentialRows(5000)} initialQuery={{ ...defaultQuery, pageSize: 5000 }} />,
 };

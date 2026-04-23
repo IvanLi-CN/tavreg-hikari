@@ -19,6 +19,7 @@ import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
+import { DEFAULT_KEYS_PAGE_SIZE } from "@/lib/keys-page";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -267,7 +268,14 @@ export function App() {
     maxAttempts: 1,
     upstreamGroupName: "",
   });
-  const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialsPayload>({
+    ok: true,
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
+    summary: { valid: 0, expired: 0, noExpiry: 0 },
+  });
   const [chatGptUpstreamSettings, setChatGptUpstreamSettings] = useState<ChatGptUpstreamSettings>(createEmptyChatGptUpstreamSettings);
   const [chatGptUpstreamSettingsOpen, setChatGptUpstreamSettingsOpen] = useState(false);
   const [chatGptUpstreamSettingsDraft, setChatGptUpstreamSettingsDraft] = useState<ChatGptUpstreamSettingsDialogDraft>(() =>
@@ -279,13 +287,12 @@ export function App() {
   const [chatGptBatchSupplementGroupName, setChatGptBatchSupplementGroupName] = useState("");
   const [chatGptBatchSupplementBusy, setChatGptBatchSupplementBusy] = useState(false);
   const [chatGptBatchSupplementResult, setChatGptBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
-  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [grokApiKeys, setGrokApiKeys] = useState<GrokApiKeysPayload>({
     ok: true,
     rows: [],
     total: 0,
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
     summary: { active: 0, revoked: 0 },
   });
   const [accounts, setAccounts] = useState<AccountsPayload>({
@@ -300,7 +307,7 @@ export function App() {
     rows: [],
     total: 0,
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
     summary: { active: 0, revoked: 0 },
     groups: [],
   });
@@ -401,7 +408,7 @@ export function App() {
     sortBy: "extractedAt",
     sortDir: "desc",
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [grokApiKeyQuery, setGrokApiKeyQuery] = useState<GrokApiKeyQuery>({
     q: "",
@@ -409,11 +416,13 @@ export function App() {
     sortBy: "extractedAt",
     sortDir: "desc",
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [chatGptCredentialQuery, setChatGptCredentialQuery] = useState<ChatGptCredentialQuery>({
     q: "",
     expiryStatus: "",
+    page: 1,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [chatGptCredentialSort, setChatGptCredentialSort] = useState<ChatGptCredentialSort>({
     sortBy: "createdAt",
@@ -525,10 +534,16 @@ export function App() {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.expiryStatus) params.set("expiryStatus", nextQuery.expiryStatus);
+    params.set("page", String(nextQuery.page));
+    params.set("pageSize", String(nextQuery.pageSize));
     params.set("sortBy", nextSort.sortBy);
     params.set("sortDir", nextSort.sortDir);
     const payload = await api<ChatGptCredentialsPayload>(`/api/chatgpt/credentials?${params.toString()}`);
-    setChatGptCredentials(payload.rows);
+    if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
+      setChatGptCredentialQuery((current) => ({ ...current, page: current.page - 1 }));
+      return;
+    }
+    setChatGptCredentials(payload);
   };
   const refreshChatGptUpstreamSettings = async () => {
     const payload = await api<ChatGptUpstreamSettingsPayload>("/api/chatgpt/upstream-settings");
@@ -692,12 +707,16 @@ export function App() {
     await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
   };
 
+  const loadChatGptCredentialDetail = async (credentialId: number): Promise<ChatGptCredentialRecord> => {
+    const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
+    return payload.credential;
+  };
+
   const ensureChatGptCredentialDetail = async (credential: ChatGptCredentialRecord): Promise<ChatGptCredentialRecord> => {
     if (credential.accessToken && credential.refreshToken && credential.idToken) {
       return credential;
     }
-    const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credential.id}?includeSecrets=1`);
-    return payload.credential;
+    return loadChatGptCredentialDetail(credential.id);
   };
 
   const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
@@ -768,8 +787,7 @@ export function App() {
     try {
       setChatGptCredentialBusy(true);
       setError(null);
-      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
-      setRevealedChatGptCredential(payload.credential);
+      await loadChatGptCredentialDetail(credentialId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -818,7 +836,7 @@ export function App() {
   };
 
   const handleToggleChatGptCredentialPageSelection = (checked: boolean) => {
-    const currentPageCredentialIds = chatGptCredentials.map((row) => row.id);
+    const currentPageCredentialIds = chatGptCredentials.rows.map((row) => row.id);
     if (checked) {
       setSelectedChatGptCredentialIds((current) => mergeIds(current, currentPageCredentialIds));
       return;
@@ -834,9 +852,12 @@ export function App() {
       const detailRows = (
         await Promise.all(
           selectedChatGptCredentialIds.map(async (credentialId) => {
-            const credential = chatGptCredentials.find((row) => row.id === credentialId);
-            if (!credential) return null;
-            return await ensureChatGptCredentialDetail(credential);
+            try {
+              const credential = chatGptCredentials.rows.find((row) => row.id === credentialId);
+              return credential ? await ensureChatGptCredentialDetail(credential) : await loadChatGptCredentialDetail(credentialId);
+            } catch {
+              return null;
+            }
           }),
         )
       ).filter((row): row is ChatGptCredentialRecord => Boolean(row));
@@ -1260,16 +1281,6 @@ export function App() {
   useEffect(() => {
     void refreshChatGptCredentials(chatGptCredentialQuery, chatGptCredentialSort).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [chatGptCredentialQuery, chatGptCredentialSort]);
-
-  useEffect(() => {
-    const existingIds = new Set(grokApiKeys.rows.map((row) => row.id));
-    setSelectedGrokApiKeyIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [grokApiKeys]);
-
-  useEffect(() => {
-    const existingIds = new Set(chatGptCredentials.map((row) => row.id));
-    setSelectedChatGptCredentialIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [chatGptCredentials]);
 
   useEffect(() => {
     void refreshExtractorHistory(extractorHistoryQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -2213,8 +2224,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="Tavily"
-            description="这里收纳 Tavily 提取结果；返回后继续处理 Tavily 主流程与自动补号。"
-            badgeText={`总计 ${apiKeys.total}`}
             onBack={() => handleCloseSiteKeys("tavily")}
           >
             <TavilyKeysPane {...tavilyKeysProps} />
@@ -2244,8 +2253,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="Grok"
-            description="这里集中查看 Grok 站点的 SSO 与导出结果；返回后继续 Grok 批量任务。"
-            badgeText={`总计 ${grokApiKeys.total}`}
             onBack={() => handleCloseSiteKeys("grok")}
           >
             <GrokKeysPane {...grokKeysProps} />
@@ -2274,8 +2281,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="ChatGPT"
-            description="这里集中查看 ChatGPT keys，并保留站内补号设置入口；返回后继续 ChatGPT 任务控制。"
-            badgeText={`总计 ${chatGptCredentials.length}`}
             onBack={() => handleCloseSiteKeys("chatgpt")}
           >
             <ChatGptKeysPane {...chatGptKeysProps} />

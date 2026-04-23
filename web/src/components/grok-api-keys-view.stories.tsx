@@ -172,6 +172,11 @@ export const ExportDialog: Story = {
   render: () => <StorySurface initialSelectedIds={[11, 12]} initialExportOpen />,
 };
 
+export const ActionsOnly: Story = {
+  args: baseArgs,
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+};
+
 export const CopyActionPlay: Story = {
   args: baseArgs,
   render: () => <StorySurface />,

@@ -1,17 +1,22 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertCircle, ArrowDown, ArrowUp, ArrowUpDown, Check, Copy } from "lucide-react";
+import { KeysPagination } from "@/components/keys-pagination";
+import { SelectionDock } from "@/components/selection-dock";
+import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { StatusBadge } from "@/components/status-badge";
+import { WindowVirtualList } from "@/components/window-virtual-list";
 import type { GrokApiKeyQuery, GrokApiKeySortBy, GrokApiKeysPayload } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+const desktopGridClass =
+  "grid min-w-[980px] grid-cols-[3rem_12rem_9rem_15rem_7rem_6rem_8rem_8rem]";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -30,40 +35,36 @@ function resolveSortState(
   return query.sortDir;
 }
 
-function SortableTimeHead(props: {
+function SortableTimeButton(props: {
   label: string;
   column: GrokApiKeySortBy;
   query: GrokApiKeyQuery;
   onQueryChange: (value: GrokApiKeyQuery) => void;
-  className?: string;
 }) {
   const state = resolveSortState(props.query, props.column);
-  const ariaSort = state === "asc" ? "ascending" : state === "desc" ? "descending" : "none";
   const nextQuery: GrokApiKeyQuery =
     state === "desc"
       ? { ...props.query, sortBy: props.column, sortDir: "asc", page: 1 }
       : { ...props.query, sortBy: props.column, sortDir: "desc", page: 1 };
 
   return (
-    <TableHead aria-sort={ariaSort} className={props.className}>
-      <button
-        type="button"
-        className={cn(
-          "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
-          state === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
-        )}
-        onClick={() => props.onQueryChange(nextQuery)}
-      >
-        <span>{props.label}</span>
-        {state === "desc" ? (
-          <ArrowDown className="size-3.5" aria-hidden="true" />
-        ) : state === "asc" ? (
-          <ArrowUp className="size-3.5" aria-hidden="true" />
-        ) : (
-          <ArrowUpDown className="size-3.5" aria-hidden="true" />
-        )}
-      </button>
-    </TableHead>
+    <button
+      type="button"
+      className={cn(
+        "inline-flex items-center gap-2 rounded-xl px-1 py-1 text-left transition-colors",
+        state === "inactive" ? "text-slate-400 hover:text-slate-100" : "text-cyan-200 hover:text-cyan-100",
+      )}
+      onClick={() => props.onQueryChange(nextQuery)}
+    >
+      <span>{props.label}</span>
+      {state === "desc" ? (
+        <ArrowDown className="size-3.5" aria-hidden="true" />
+      ) : state === "asc" ? (
+        <ArrowUp className="size-3.5" aria-hidden="true" />
+      ) : (
+        <ArrowUpDown className="size-3.5" aria-hidden="true" />
+      )}
+    </button>
   );
 }
 
@@ -163,7 +164,6 @@ export function GrokApiKeysView({
     field: CopyField | null;
     status: "idle" | "copied" | "failed";
   }>({ apiKeyId: null, field: null, status: "idle" });
-  const pageCount = Math.max(1, Math.ceil(Math.max(1, apiKeys.total) / Math.max(1, query.pageSize)));
   const selectedOnPage = apiKeys.rows.filter((row) => selectedIds.includes(row.id)).length;
   const allCurrentPageSelected = apiKeys.rows.length > 0 && selectedOnPage === apiKeys.rows.length;
 
@@ -217,34 +217,10 @@ export function GrokApiKeysView({
   return (
     <>
       <Card>
-        <CardContent className="space-y-4">
+        <CardContent className={cn("space-y-4", selectedIds.length > 0 && "pb-28")}>
           {headerSlot ? <div>{headerSlot}</div> : null}
 
-          <div className="flex flex-col gap-3 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-400">
-              <span>当前页已选 {selectedOnPage} / {apiKeys.rows.length}</span>
-              <span>总已选 {selectedIds.length} / {apiKeys.total}</span>
-            </div>
-            <label className="flex items-center gap-3 text-sm text-slate-300 xl:hidden">
-              <Checkbox
-                checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
-                onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
-                aria-label="select-current-page-mobile"
-                disabled={apiKeys.rows.length === 0}
-              />
-              <span>全选当前页</span>
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <Button variant="secondary" onClick={onClearSelection} disabled={selectedIds.length === 0 || exportBusy}>
-                清空勾选
-              </Button>
-              <Button onClick={onOpenExport} disabled={selectedIds.length === 0 || exportBusy}>
-                {exportBusy ? "导出中…" : "导出"}
-              </Button>
-            </div>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2">
             <FilterField label="搜索">
               <Input
                 name="grok-api-key-query"
@@ -266,20 +242,19 @@ export function GrokApiKeysView({
                 </SelectContent>
               </Select>
             </FilterField>
-            <FilterField label="每页条数">
-              <Select value={String(query.pageSize)} onValueChange={(value) => onQueryChange({ ...query, pageSize: Number(value), page: 1 })}>
-                <SelectTrigger>
-                  <SelectValue placeholder="每页条数" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10 / 页</SelectItem>
-                  <SelectItem value="20">20 / 页</SelectItem>
-                  <SelectItem value="50">50 / 页</SelectItem>
-                  <SelectItem value="100">100 / 页</SelectItem>
-                </SelectContent>
-              </Select>
-            </FilterField>
           </div>
+
+          {apiKeys.rows.length > 0 ? (
+            <label className="flex items-center gap-3 text-sm text-slate-300 xl:hidden">
+              <Checkbox
+                checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
+                onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
+                aria-label="select-current-page-mobile"
+                disabled={apiKeys.rows.length === 0}
+              />
+              <span>全选当前页（{apiKeys.rows.length} 条）</span>
+            </label>
+          ) : null}
 
           {apiKeys.rows.length === 0 ? (
             <div className="rounded-3xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-8 text-center text-sm text-slate-500">
@@ -287,101 +262,116 @@ export function GrokApiKeysView({
             </div>
           ) : (
             <>
-              <div className="space-y-3 xl:hidden">
-                {apiKeys.rows.map((row) => (
-                  <article key={row.id} className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
-                    <div className="flex items-start gap-3">
-                      <Checkbox
-                        checked={selectedIds.includes(row.id)}
-                        onCheckedChange={(checked) => onToggleSelection(row.id, checked === true)}
-                        aria-label={`select-${row.email}`}
-                      />
-                      <div className="min-w-0 flex-1 overflow-hidden">
-                        <div className="flex min-w-0 items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1 break-all pr-1 text-sm font-medium text-white">{row.email}</div>
-                          <div className="flex shrink-0 items-center gap-2">
-                            <CopyValueButton
-                              status={getCopyStatus(row.id, "email")}
-                              ariaLabel={`复制 ${row.email} 邮箱`}
-                              onClick={() => void handleCopyField(row.id, "email")}
-                            />
-                            <StatusBadge status={row.status} />
-                          </div>
-                        </div>
-                        <dl className="mt-4 grid gap-3 text-sm text-slate-300">
-                          <div className="grid gap-3 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="text-slate-500">出口 IP</dt>
-                              <dd className="min-w-0 text-right font-mono text-[0.92rem] text-slate-100">{row.extractedIp || "—"}</dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="text-slate-500">提取时间</dt>
-                              <dd className="pl-4 text-right">{formatDate(row.extractedAt)}</dd>
-                            </div>
-                            <div className="flex items-center justify-between gap-3">
-                              <dt className="text-slate-500">最近验证</dt>
-                              <dd className="pl-4 text-right">{formatDate(row.lastVerifiedAt)}</dd>
-                            </div>
-                          </div>
-                          <div className="grid gap-2 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <dt className="text-slate-500">密码</dt>
-                              <CopyValueButton
-                                status={getCopyStatus(row.id, "password")}
-                                ariaLabel={`复制 ${row.email} 的密码`}
-                                onClick={() => void handleCopyField(row.id, "password")}
-                              />
-                            </div>
-                            <dd className="min-w-0 break-all font-mono text-[0.92rem] text-slate-100">{row.password}</dd>
-                          </div>
-                          <div className="grid gap-2 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
-                            <div className="flex items-center justify-between gap-2">
-                              <dt className="text-slate-500">SSO</dt>
-                              <CopyValueButton
-                                status={getCopyStatus(row.id, "sso")}
-                                ariaLabel={`复制 ${row.email} 的 SSO`}
-                                onClick={() => void handleCopyField(row.id, "sso")}
-                              />
-                            </div>
-                            <dd className="min-w-0 break-all font-mono text-[0.92rem] text-slate-100">{row.sso}</dd>
-                          </div>
-                        </dl>
-                      </div>
-                    </div>
-                  </article>
-                ))}
-              </div>
-              <div className="hidden xl:block">
-                <Table className="w-full table-fixed text-[0.8rem]">
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-12 px-3">
-                        <Checkbox
-                          checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
-                          onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
-                          aria-label="select-current-page"
-                        />
-                      </TableHead>
-                      <TableHead className="w-[12rem] px-3">邮箱</TableHead>
-                      <TableHead className="w-[9rem] px-3">密码</TableHead>
-                      <TableHead className="w-[15rem] px-3">SSO</TableHead>
-                      <TableHead className="w-[7rem] px-3">出口 IP</TableHead>
-                      <TableHead className="w-[5.5rem] px-3">状态</TableHead>
-                      <SortableTimeHead label="提取时间" column="extractedAt" query={query} onQueryChange={onQueryChange} className="w-[8rem] px-3" />
-                      <SortableTimeHead label="最近验证" column="lastVerifiedAt" query={query} onQueryChange={onQueryChange} className="w-[8rem] px-3" />
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {apiKeys.rows.map((row) => (
-                      <TableRow key={row.id}>
-                        <TableCell className="px-3">
+              <div className="xl:hidden">
+                <WindowVirtualList
+                  items={apiKeys.rows}
+                  getKey={(row) => row.id}
+                  estimateSize={() => 380}
+                  renderItem={(row) => (
+                    <article key={row.id} className="px-0 pb-3">
+                      <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
+                        <div className="flex items-start gap-3">
                           <Checkbox
                             checked={selectedIds.includes(row.id)}
                             onCheckedChange={(checked) => onToggleSelection(row.id, checked === true)}
                             aria-label={`select-${row.email}`}
                           />
-                        </TableCell>
-                        <TableCell className="w-[12rem] overflow-hidden px-3">
+                          <div className="min-w-0 flex-1 overflow-hidden">
+                            <div className="flex min-w-0 items-start justify-between gap-2">
+                              <div className="min-w-0 flex-1 break-all pr-1 text-sm font-medium text-white">{row.email}</div>
+                              <div className="flex shrink-0 items-center gap-2">
+                                <CopyValueButton
+                                  status={getCopyStatus(row.id, "email")}
+                                  ariaLabel={`复制 ${row.email} 邮箱`}
+                                  onClick={() => void handleCopyField(row.id, "email")}
+                                />
+                                <StatusBadge status={row.status} />
+                              </div>
+                            </div>
+                            <dl className="mt-4 grid gap-3 text-sm text-slate-300">
+                              <div className="grid gap-3 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <dt className="text-slate-500">出口 IP</dt>
+                                  <dd className="min-w-0 text-right font-mono text-[0.92rem] text-slate-100">{row.extractedIp || "—"}</dd>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <dt className="text-slate-500">提取时间</dt>
+                                  <dd className="pl-4 text-right">{formatDate(row.extractedAt)}</dd>
+                                </div>
+                                <div className="flex items-center justify-between gap-3">
+                                  <dt className="text-slate-500">最近验证</dt>
+                                  <dd className="pl-4 text-right">{formatDate(row.lastVerifiedAt)}</dd>
+                                </div>
+                              </div>
+                              <div className="grid gap-2 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                  <dt className="text-slate-500">密码</dt>
+                                  <CopyValueButton
+                                    status={getCopyStatus(row.id, "password")}
+                                    ariaLabel={`复制 ${row.email} 的密码`}
+                                    onClick={() => void handleCopyField(row.id, "password")}
+                                  />
+                                </div>
+                                <dd className="min-w-0 break-all font-mono text-[0.92rem] text-slate-100">{row.password}</dd>
+                              </div>
+                              <div className="grid gap-2 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
+                                <div className="flex items-center justify-between gap-2">
+                                  <dt className="text-slate-500">SSO</dt>
+                                  <CopyValueButton
+                                    status={getCopyStatus(row.id, "sso")}
+                                    ariaLabel={`复制 ${row.email} 的 SSO`}
+                                    onClick={() => void handleCopyField(row.id, "sso")}
+                                  />
+                                </div>
+                                <dd className="min-w-0 break-all font-mono text-[0.92rem] text-slate-100">{row.sso}</dd>
+                              </div>
+                            </dl>
+                          </div>
+                        </div>
+                      </div>
+                    </article>
+                  )}
+                />
+              </div>
+
+              <div className="hidden xl:block">
+                <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+                  <div className={cn(desktopGridClass, "border-b border-white/8 bg-white/[0.03] text-xs font-medium uppercase tracking-[0.14em] text-slate-400")}>
+                    <div className="px-3 py-3">
+                      <Checkbox
+                        checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
+                        onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
+                        aria-label="select-current-page"
+                      />
+                    </div>
+                    <div className="px-3 py-3">邮箱</div>
+                    <div className="px-3 py-3">密码</div>
+                    <div className="px-3 py-3">SSO</div>
+                    <div className="px-3 py-3">出口 IP</div>
+                    <div className="px-3 py-3">状态</div>
+                    <div className="px-3 py-3">
+                      <SortableTimeButton label="提取时间" column="extractedAt" query={query} onQueryChange={onQueryChange} />
+                    </div>
+                    <div className="px-3 py-3">
+                      <SortableTimeButton label="最近验证" column="lastVerifiedAt" query={query} onQueryChange={onQueryChange} />
+                    </div>
+                  </div>
+                  <WindowVirtualList
+                    items={apiKeys.rows}
+                    className="min-w-[980px]"
+                    compactQuery="(max-width: 0px)"
+                    getKey={(row) => row.id}
+                    estimateSize={() => 63}
+                    renderItem={(row) => (
+                      <div className={cn(desktopGridClass, "border-b border-white/8 text-[0.8rem] text-slate-100 transition duration-200 hover:bg-white/[0.03]")}>
+                        <div className="px-3 py-3">
+                          <Checkbox
+                            checked={selectedIds.includes(row.id)}
+                            onCheckedChange={(checked) => onToggleSelection(row.id, checked === true)}
+                            aria-label={`select-${row.email}`}
+                          />
+                        </div>
+                        <div className="overflow-hidden px-3 py-3">
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="min-w-0 flex-1 truncate whitespace-nowrap" title={row.email}>
                               {row.email}
@@ -392,8 +382,8 @@ export function GrokApiKeysView({
                               onClick={() => void handleCopyField(row.id, "email")}
                             />
                           </div>
-                        </TableCell>
-                        <TableCell className="w-[9rem] overflow-hidden px-3">
+                        </div>
+                        <div className="overflow-hidden px-3 py-3">
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[0.92rem]" title={row.password}>
                               {row.password}
@@ -404,8 +394,8 @@ export function GrokApiKeysView({
                               onClick={() => void handleCopyField(row.id, "password")}
                             />
                           </div>
-                        </TableCell>
-                        <TableCell className="w-[15rem] overflow-hidden px-3">
+                        </div>
+                        <div className="overflow-hidden px-3 py-3">
                           <div className="flex min-w-0 items-center gap-2">
                             <span className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[0.92rem]" title={row.sso}>
                               {row.sso}
@@ -416,45 +406,49 @@ export function GrokApiKeysView({
                               onClick={() => void handleCopyField(row.id, "sso")}
                             />
                           </div>
-                        </TableCell>
-                        <TableCell className="w-[7rem] overflow-hidden px-3">
+                        </div>
+                        <div className="overflow-hidden px-3 py-3">
                           <span className="block truncate whitespace-nowrap font-mono text-[0.92rem]" title={row.extractedIp || "—"}>
                             {row.extractedIp || "—"}
                           </span>
-                        </TableCell>
-                        <TableCell className="px-3"><StatusBadge status={row.status} /></TableCell>
-                        <TableCell className="w-[8rem] overflow-hidden px-3">
+                        </div>
+                        <div className="px-3 py-3"><StatusBadge status={row.status} /></div>
+                        <div className="overflow-hidden px-3 py-3">
                           <span className="block truncate whitespace-nowrap" title={formatDate(row.extractedAt)}>
                             {formatDate(row.extractedAt)}
                           </span>
-                        </TableCell>
-                        <TableCell className="w-[8rem] overflow-hidden px-3">
+                        </div>
+                        <div className="overflow-hidden px-3 py-3">
                           <span className="block truncate whitespace-nowrap" title={formatDate(row.lastVerifiedAt)}>
                             {formatDate(row.lastVerifiedAt)}
                           </span>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              <div className="flex flex-col gap-3 border-t border-white/8 pt-4 lg:flex-row lg:items-center lg:justify-between">
-                <div className="text-sm text-slate-400">
-                  第 {query.page} / {pageCount} 页，每页 {query.pageSize} 条。
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button variant="secondary" onClick={() => onQueryChange({ ...query, page: Math.max(1, query.page - 1) })} disabled={query.page <= 1}>
-                    上一页
-                  </Button>
-                  <Button variant="secondary" onClick={() => onQueryChange({ ...query, page: Math.min(pageCount, query.page + 1) })} disabled={query.page >= pageCount}>
-                    下一页
-                  </Button>
+                        </div>
+                      </div>
+                    )}
+                  />
                 </div>
               </div>
+
+              <KeysPagination
+                page={query.page}
+                pageSize={query.pageSize}
+                total={apiKeys.total}
+                onPageChange={(page) => onQueryChange({ ...query, page })}
+                onPageSizeChange={(pageSize) => onQueryChange({ ...query, pageSize, page: 1 })}
+              />
             </>
           )}
         </CardContent>
       </Card>
+
+      <SelectionDock open={selectedIds.length > 0} selectedOnPage={selectedOnPage} totalSelected={selectedIds.length} totalCount={apiKeys.total}>
+        <Button variant="secondary" onClick={onClearSelection} disabled={selectedIds.length === 0 || exportBusy}>
+          清空勾选
+        </Button>
+        <Button onClick={onOpenExport} disabled={selectedIds.length === 0 || exportBusy}>
+          {exportBusy ? "导出中…" : "导出"}
+        </Button>
+      </SelectionDock>
 
       <Dialog open={exportOpen} onOpenChange={onExportOpenChange}>
         <DialogContent className="w-[min(96vw,62rem)]">
