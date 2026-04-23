@@ -216,14 +216,17 @@
 
 - `storybook_canvas` · `Views/ApiAccessSettingsView/Default`
   - 证明 `/settings` → `API Access` 默认列表态已具备多 key 审计摘要、状态徽标与 create / rotate / revoke 入口。
+  - PR: include
   - ![API Access 默认列表态](./assets/api-access-default.png)
 
 - `storybook_canvas` · `Views/ApiAccessSettingsView/RevealDialogVisible`
   - 证明 API key create / rotate 后的一次性明文展示弹层、复制入口与“关闭后不可再次取回”的提示已落地。
+  - PR: include
   - ![API Access 一次性明文弹层](./assets/api-access-reveal-dialog.png)
 
 - `storybook_canvas` · `Shell/AppShell/SettingsActive`
   - 证明壳层新增“设置”导航入口，且 Forward Auth / integration api 标识已出现在 owner-facing 顶栏。
+  - PR: include
   - ![AppShell 设置导航态](./assets/app-shell-settings.png)
 
 ## Related PRs
