@@ -23,6 +23,7 @@ import {
 import { pickAutoProxyNode } from "../src/server/proxy-node-allocation.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
+import { buildIntegrationApiKeyPrefix, hashIntegrationApiKey } from "../src/server/integration-api-keys.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
@@ -3472,6 +3473,134 @@ describe("scheduler runtime spec", () => {
         activeAttempts: [{ proxyNode: "Tokyo-02", proxyIp: null }],
       })?.nodeName,
     ).toBe("Tokyo-01");
+
+    appDb.close();
+  });
+});
+
+describe("integration api access", () => {
+  test("creates, authenticates, rotates and revokes integration api keys", async () => {
+    const { appDb } = await createTempDb();
+    const plainTextKey = "thki_demo_secret_1";
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-east",
+      notes: "primary relay",
+      keyHash: hashIntegrationApiKey(plainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+    });
+
+    expect(created).toMatchObject({
+      label: "relay-east",
+      status: "active",
+      keyPrefix: "thki_demo_secret",
+    });
+
+    const authed = appDb.authenticateIntegrationApiKey(plainTextKey, "203.0.113.7");
+    expect(authed).toMatchObject({
+      id: created.id,
+      lastUsedIp: "203.0.113.7",
+    });
+
+    const rotatedPlainTextKey = "thki_demo_secret_rotated";
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      label: "relay-east-v2",
+      notes: "rotated",
+      keyHash: hashIntegrationApiKey(rotatedPlainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(rotatedPlainTextKey),
+    });
+    expect(rotated).toMatchObject({
+      label: "relay-east-v2",
+      status: "active",
+    });
+    expect(appDb.authenticateIntegrationApiKey(plainTextKey)).toBeNull();
+    expect(appDb.authenticateIntegrationApiKey(rotatedPlainTextKey)?.id).toBe(created.id);
+
+    const revoked = appDb.revokeIntegrationApiKey(created.id);
+    expect(revoked.status).toBe("revoked");
+    expect(appDb.authenticateIntegrationApiKey(rotatedPlainTextKey)).toMatchObject({
+      id: created.id,
+      status: "revoked",
+    });
+
+    appDb.close();
+  });
+
+  test("stores tavily account service access snapshots", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "service@example.test", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    const apiKey = appDb.recordApiKey(accountId, "tvly-service-key", "198.51.100.8");
+
+    const snapshot = appDb.upsertAccountServiceAccess({
+      accountId,
+      service: "tavily",
+      apiKeyId: apiKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot: [{ name: "session", value: "cookie" }],
+        browserFingerprintSnapshot: { navigatorUserAgent: "demo" },
+      }),
+    });
+
+    expect(snapshot).toMatchObject({
+      accountId,
+      service: "tavily",
+      apiKeyId: apiKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+    });
+    expect(JSON.parse(snapshot.snapshotJson)).toMatchObject({
+      cookiesSnapshot: [{ name: "session", value: "cookie" }],
+    });
+
+    appDb.close();
+  });
+
+  test("rotating integration api keys can clear notes explicitly", async () => {
+    const { appDb } = await createTempDb();
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-east",
+      notes: "to be cleared",
+      keyHash: hashIntegrationApiKey("thki_demo_secret_to_clear"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_to_clear"),
+    });
+
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      keyHash: hashIntegrationApiKey("thki_demo_secret_cleared"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_cleared"),
+      notes: null,
+    });
+
+    expect(rotated.notes).toBeNull();
+
+    appDb.close();
+  });
+
+  test("reassigning a duplicate api key clears stale service-access snapshots from the previous owner", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "first-owner@example.test", password: "pass-a" },
+      { email: "second-owner@example.test", password: "pass-b" },
+    ]);
+    const [firstAccountId, secondAccountId] = imported.affectedIds;
+    const firstKey = appDb.recordApiKey(firstAccountId, "tvly-shared-key", "198.51.100.8");
+
+    appDb.upsertAccountServiceAccess({
+      accountId: firstAccountId,
+      service: "tavily",
+      apiKeyId: firstKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot: [{ name: "session", value: "cookie" }],
+      }),
+    });
+
+    const reassignedKey = appDb.recordApiKey(secondAccountId, "tvly-shared-key", "203.0.113.9");
+
+    expect(reassignedKey.id).toBe(firstKey.id);
+    expect(appDb.getAccountServiceAccess(firstAccountId, "tavily")).toBeNull();
 
     appDb.close();
   });

@@ -29,6 +29,7 @@ test("getPageFromPathname maps trailing-slash routes to the intended page", () =
   expect(getPageFromPathname("/keys/", "?site=grok")).toBe("grok");
   expect(getPageFromPathname("/api-keys/", "?site=chatgpt")).toBe("chatgpt");
   expect(getPageFromPathname("/proxies/")).toBe("proxies");
+  expect(getPageFromPathname("/settings/")).toBe("settings");
   expect(getPageFromPathname("/unknown/")).toBe("tavily");
 });
 

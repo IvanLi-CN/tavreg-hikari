@@ -82,6 +82,31 @@ export const ChatGptActiveCleanState: Story = {
   },
 };
 
+export const SettingsActive: Story = {
+  args: {
+    activePage: "settings",
+    error: null,
+    onNavigate: fn(),
+    children: null,
+  },
+  render: (args) => {
+    const [page, setPage] = useState<PageKey>(args.activePage);
+    return (
+      <AppShell {...args} activePage={page} onNavigate={setPage}>
+        <div className="rounded-[32px] border border-white/10 bg-[#09111f]/80 p-8 text-sm text-slate-300">
+          {page} content
+        </div>
+      </AppShell>
+    );
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("tab", { name: "设置", selected: true })).toBeInTheDocument();
+    await expect(canvas.getByText("forward auth")).toBeInTheDocument();
+    await expect(canvas.getByText("integration api")).toBeInTheDocument();
+  },
+};
+
 export const NavigationPlay: Story = {
   args: {
     activePage: "tavily",
@@ -106,5 +131,8 @@ export const NavigationPlay: Story = {
     await expect(canvas.getByRole("tab", { name: "Microsoft" })).toBeInTheDocument();
     await userEvent.click(canvas.getByRole("tab", { name: "Microsoft" }));
     await expect(args.onNavigate).toHaveBeenCalledWith("accounts");
+    await expect(canvas.getByRole("tab", { name: "设置" })).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("tab", { name: "设置" }));
+    await expect(args.onNavigate).toHaveBeenCalledWith("settings");
   },
 };

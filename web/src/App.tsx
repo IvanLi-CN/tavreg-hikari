@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
+import { ApiAccessSettingsView, type RevealedIntegrationApiSecret } from "@/components/api-access-settings-view";
 import { AppShell } from "@/components/app-shell";
 import {
   ChatGptUpstreamSettingsDialog,
@@ -36,6 +37,9 @@ import type {
   AccountUpdatePayload,
   AccountQuery,
   AccountsPayload,
+  IntegrationApiKeyMutationPayload,
+  IntegrationApiKeyRecord,
+  IntegrationApiKeysPayload,
   ChatGptCredentialDetailPayload,
   ChatGptCredentialRecord,
   ChatGptCredentialQuery,
@@ -461,6 +465,9 @@ export function App() {
   const [grokJobBusy, setGrokJobBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
+  const [integrationApiKeys, setIntegrationApiKeys] = useState<IntegrationApiKeyRecord[]>([]);
+  const [apiAccessMutatingId, setApiAccessMutatingId] = useState<number | "create" | null>(null);
+  const [revealedIntegrationSecret, setRevealedIntegrationSecret] = useState<RevealedIntegrationApiSecret | null>(null);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname, search), [pathname, search]);
   const isLegacyKeysPage = useMemo(() => isKeysCompatPath(pathname), [pathname]);
@@ -583,6 +590,10 @@ export function App() {
       return;
     }
     setApiKeys(payload);
+  };
+  const refreshIntegrationApiKeys = async () => {
+    const payload = await api<IntegrationApiKeysPayload>("/api/settings/api-access/keys");
+    setIntegrationApiKeys(payload.rows);
   };
   const refreshGrokApiKeys = async (nextQuery = grokApiKeyQueryRef.current) => {
     const params = new URLSearchParams();
@@ -949,6 +960,70 @@ export function App() {
     }
   };
 
+  const handleCreateIntegrationApiKey = async (input: { label: string; notes: string | null }) => {
+    try {
+      setApiAccessMutatingId("create");
+      setError(null);
+      const payload = await api<IntegrationApiKeyMutationPayload>("/api/settings/api-access/keys", {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+      await refreshIntegrationApiKeys();
+      if (payload.plainTextKey) {
+        setRevealedIntegrationSecret({
+          mode: "create",
+          record: payload.record,
+          plainTextKey: payload.plainTextKey,
+        });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
+  const handleRotateIntegrationApiKey = async (
+    record: IntegrationApiKeyRecord,
+    input: { label: string; notes: string | null },
+  ) => {
+    try {
+      setApiAccessMutatingId(record.id);
+      setError(null);
+      const payload = await api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/rotate`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+      await refreshIntegrationApiKeys();
+      if (payload.plainTextKey) {
+        setRevealedIntegrationSecret({
+          mode: "rotate",
+          record: payload.record,
+          plainTextKey: payload.plainTextKey,
+        });
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
+  const handleRevokeIntegrationApiKey = async (record: IntegrationApiKeyRecord) => {
+    try {
+      setApiAccessMutatingId(record.id);
+      setError(null);
+      await api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/revoke`, {
+        method: "POST",
+      });
+      await refreshIntegrationApiKeys();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
   useEffect(() => {
     void Promise.all([
       refreshJob("tavily"),
@@ -958,6 +1033,7 @@ export function App() {
       refreshChatGptUpstreamSettings(),
       refreshAccounts(),
       refreshApiKeys(),
+      refreshIntegrationApiKeys(),
       refreshGrokApiKeys(),
       refreshProxies(),
       refreshExtractorSettings(),
@@ -2434,6 +2510,22 @@ export function App() {
           onSaveProxySettings={handleSaveProxySettings}
           onCheckScope={handleProxyCheck}
           onCheckNode={handleCheckSingleNode}
+        />
+      ) : null}
+
+      {activePage === "settings" ? (
+        <ApiAccessSettingsView
+          rows={integrationApiKeys}
+          mutatingId={apiAccessMutatingId}
+          revealedSecret={revealedIntegrationSecret}
+          onCreate={handleCreateIntegrationApiKey}
+          onRotate={handleRotateIntegrationApiKey}
+          onRevoke={handleRevokeIntegrationApiKey}
+          onRevealedSecretOpenChange={(open) => {
+            if (!open) {
+              setRevealedIntegrationSecret(null);
+            }
+          }}
         />
       ) : null}
 

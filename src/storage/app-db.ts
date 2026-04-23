@@ -2,6 +2,10 @@ import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import {
+  buildIntegrationApiKeyPrefix,
+  compareIntegrationApiKeyHash,
+} from "../server/integration-api-keys.js";
 
 const require = createRequire(import.meta.url);
 
@@ -89,6 +93,9 @@ export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+export type IntegrationApiKeyStatus = "active" | "revoked";
+export type AccountServiceAccessService = "tavily";
+export type AccountServiceAccessStatus = "succeeded" | "failed";
 
 export function isAccountExtractorAccountType(value: unknown): value is AccountExtractorAccountType {
   return value === "outlook" || value === "hotmail" || value === "unlimited";
@@ -365,6 +372,34 @@ export interface MicrosoftMailMessageRecord {
   bodyPreview: string;
   bodyContent: string;
   webLink: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface IntegrationApiKeyRecord {
+  id: number;
+  label: string;
+  notes: string | null;
+  keyHash: string;
+  keyPrefix: string;
+  status: IntegrationApiKeyStatus;
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+}
+
+export interface AccountServiceAccessRecord {
+  id: number;
+  accountId: number;
+  service: AccountServiceAccessService;
+  status: AccountServiceAccessStatus;
+  apiKeyId: number | null;
+  snapshotJson: string;
+  extractedIp: string | null;
+  lastSuccessAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -741,6 +776,38 @@ function mapApiKeyRow(row: Record<string, unknown>): ApiKeyRecord {
     extractedAt: String(row.extracted_at),
     extractedIp: row.extracted_ip == null ? null : String(row.extracted_ip),
     lastVerifiedAt: row.last_verified_at == null ? null : String(row.last_verified_at),
+  };
+}
+
+function mapIntegrationApiKeyRow(row: Record<string, unknown>): IntegrationApiKeyRecord {
+  return {
+    id: Number(row.id),
+    label: String(row.label || ""),
+    notes: row.notes == null ? null : String(row.notes),
+    keyHash: String(row.key_hash || ""),
+    keyPrefix: String(row.key_prefix || ""),
+    status: String(row.status || "active") as IntegrationApiKeyStatus,
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
+    rotatedAt: row.rotated_at == null ? null : String(row.rotated_at),
+    revokedAt: row.revoked_at == null ? null : String(row.revoked_at),
+    lastUsedAt: row.last_used_at == null ? null : String(row.last_used_at),
+    lastUsedIp: row.last_used_ip == null ? null : String(row.last_used_ip),
+  };
+}
+
+function mapAccountServiceAccessRow(row: Record<string, unknown>): AccountServiceAccessRecord {
+  return {
+    id: Number(row.id),
+    accountId: Number(row.account_id),
+    service: String(row.service || "tavily") as AccountServiceAccessService,
+    status: String(row.status || "succeeded") as AccountServiceAccessStatus,
+    apiKeyId: row.api_key_id == null ? null : Number(row.api_key_id),
+    snapshotJson: String(row.snapshot_json || "{}"),
+    extractedIp: row.extracted_ip == null ? null : String(row.extracted_ip),
+    lastSuccessAt: row.last_success_at == null ? null : String(row.last_success_at),
+    createdAt: String(row.created_at || ""),
+    updatedAt: String(row.updated_at || ""),
   };
 }
 
@@ -1259,8 +1326,40 @@ export class AppDatabase {
         UNIQUE(mailbox_id, graph_message_id)
       );
 
+      CREATE TABLE IF NOT EXISTS integration_api_keys (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        label TEXT NOT NULL,
+        notes TEXT,
+        key_hash TEXT NOT NULL UNIQUE,
+        key_prefix TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        rotated_at TEXT,
+        revoked_at TEXT,
+        last_used_at TEXT,
+        last_used_ip TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS account_service_access (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id INTEGER NOT NULL REFERENCES microsoft_accounts(id) ON DELETE CASCADE,
+        service TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'succeeded',
+        api_key_id INTEGER REFERENCES api_keys(id) ON DELETE SET NULL,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        extracted_ip TEXT,
+        last_success_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        UNIQUE(account_id, service)
+      );
+
       CREATE INDEX IF NOT EXISTS chatgpt_credentials_created_idx ON chatgpt_credentials(created_at DESC);
       CREATE INDEX IF NOT EXISTS grok_api_keys_extracted_idx ON grok_api_keys(extracted_at DESC);
+      CREATE INDEX IF NOT EXISTS integration_api_keys_status_idx ON integration_api_keys(status, id DESC);
+      CREATE INDEX IF NOT EXISTS integration_api_keys_used_idx ON integration_api_keys(last_used_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS account_service_access_account_idx ON account_service_access(account_id, service);
     `);
 
     const signupTaskTableExists = this.hasSignupTasksTable();
@@ -2203,6 +2302,196 @@ export class AppDatabase {
     }
     const byId = new Map(rows.map((row) => [Number(row.id), mapApiKeyRow(row)]));
     return uniqueIds.map((id) => byId.get(id)).filter((row): row is ApiKeyRecord => Boolean(row));
+  }
+
+  getApiKey(keyId: number): ApiKeyRecord | null {
+    const row = this.db
+      .query(`
+        SELECT k.*, a.microsoft_email, a.group_name
+        FROM api_keys k
+        JOIN microsoft_accounts a ON a.id = k.account_id
+        WHERE k.id = ?
+      `)
+      .get(keyId) as Record<string, unknown> | null;
+    return row ? mapApiKeyRow(row) : null;
+  }
+
+  listIntegrationApiKeys(): IntegrationApiKeyRecord[] {
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM integration_api_keys
+        ORDER BY
+          CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+          created_at DESC,
+          id DESC
+      `)
+      .all() as Record<string, unknown>[];
+    return rows.map(mapIntegrationApiKeyRow);
+  }
+
+  getIntegrationApiKey(keyId: number): IntegrationApiKeyRecord | null {
+    const row = this.db.query("SELECT * FROM integration_api_keys WHERE id = ?").get(keyId) as Record<string, unknown> | null;
+    return row ? mapIntegrationApiKeyRow(row) : null;
+  }
+
+  createIntegrationApiKey(input: {
+    label: string;
+    notes?: string | null;
+    keyHash: string;
+    keyPrefix?: string;
+  }): IntegrationApiKeyRecord {
+    const now = nowIso();
+    const label = input.label.trim();
+    if (!label) {
+      throw new Error("integration api key label is required");
+    }
+    const keyHash = input.keyHash.trim();
+    if (!keyHash) {
+      throw new Error("integration api key hash is required");
+    }
+    const notes = input.notes?.trim() || null;
+    const keyPrefix = (input.keyPrefix?.trim() || buildIntegrationApiKeyPrefix(keyHash)).trim();
+    const row = this.db
+      .query(`
+        INSERT INTO integration_api_keys (
+          label, notes, key_hash, key_prefix, status, created_at, updated_at, rotated_at, revoked_at, last_used_at, last_used_ip
+        ) VALUES (?, ?, ?, ?, 'active', ?, ?, NULL, NULL, NULL, NULL)
+        RETURNING *
+      `)
+      .get(label, notes, keyHash, keyPrefix, now, now) as Record<string, unknown>;
+    return mapIntegrationApiKeyRow(row);
+  }
+
+  rotateIntegrationApiKey(
+    keyId: number,
+    input: {
+      keyHash: string;
+      keyPrefix?: string;
+      label?: string;
+      notes?: string | null;
+    },
+  ): IntegrationApiKeyRecord {
+    const current = this.getIntegrationApiKey(keyId);
+    if (!current) {
+      throw new Error(`integration api key not found: ${keyId}`);
+    }
+    const now = nowIso();
+    const label = input.label?.trim() || current.label;
+    const notes = input.notes === undefined ? current.notes : input.notes?.trim() || null;
+    const keyHash = input.keyHash.trim();
+    if (!keyHash) {
+      throw new Error("integration api key hash is required");
+    }
+    const keyPrefix = (input.keyPrefix?.trim() || buildIntegrationApiKeyPrefix(keyHash)).trim();
+    this.db
+      .query(`
+        UPDATE integration_api_keys
+        SET label = ?,
+            notes = ?,
+            key_hash = ?,
+            key_prefix = ?,
+            status = 'active',
+            updated_at = ?,
+            rotated_at = ?,
+            revoked_at = NULL
+        WHERE id = ?
+      `)
+      .run(label, notes, keyHash, keyPrefix, now, now, keyId);
+    return this.getIntegrationApiKey(keyId)!;
+  }
+
+  revokeIntegrationApiKey(keyId: number): IntegrationApiKeyRecord {
+    const current = this.getIntegrationApiKey(keyId);
+    if (!current) {
+      throw new Error(`integration api key not found: ${keyId}`);
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE integration_api_keys
+        SET status = 'revoked',
+            updated_at = ?,
+            revoked_at = COALESCE(revoked_at, ?)
+        WHERE id = ?
+      `)
+      .run(now, now, keyId);
+    return this.getIntegrationApiKey(keyId)!;
+  }
+
+  authenticateIntegrationApiKey(secret: string, clientIp?: string | null): IntegrationApiKeyRecord | null {
+    const normalizedSecret = secret.trim();
+    if (!normalizedSecret) return null;
+    const rows = this.db.query("SELECT * FROM integration_api_keys").all() as Record<string, unknown>[];
+    const matched = rows.map(mapIntegrationApiKeyRow).find((row) => compareIntegrationApiKeyHash(normalizedSecret, row.keyHash));
+    if (!matched) {
+      return null;
+    }
+    if (matched.status !== "active") {
+      return matched;
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE integration_api_keys
+        SET last_used_at = ?,
+            last_used_ip = ?,
+            updated_at = ?
+        WHERE id = ?
+      `)
+      .run(now, clientIp?.trim() || null, now, matched.id);
+    return this.getIntegrationApiKey(matched.id)!;
+  }
+
+  getAccountServiceAccess(accountId: number, service: AccountServiceAccessService): AccountServiceAccessRecord | null {
+    const row = this.db
+      .query("SELECT * FROM account_service_access WHERE account_id = ? AND service = ?")
+      .get(accountId, service) as Record<string, unknown> | null;
+    return row ? mapAccountServiceAccessRow(row) : null;
+  }
+
+  listAccountServiceAccess(accountId: number): AccountServiceAccessRecord[] {
+    const rows = this.db
+      .query("SELECT * FROM account_service_access WHERE account_id = ? ORDER BY updated_at DESC, id DESC")
+      .all(accountId) as Record<string, unknown>[];
+    return rows.map(mapAccountServiceAccessRow);
+  }
+
+  upsertAccountServiceAccess(input: {
+    accountId: number;
+    service: AccountServiceAccessService;
+    status?: AccountServiceAccessStatus;
+    apiKeyId?: number | null;
+    snapshotJson?: string;
+    extractedIp?: string | null;
+    lastSuccessAt?: string | null;
+  }): AccountServiceAccessRecord {
+    const now = nowIso();
+    this.db
+      .query(`
+        INSERT INTO account_service_access (
+          account_id, service, status, api_key_id, snapshot_json, extracted_ip, last_success_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, service) DO UPDATE SET
+          status = excluded.status,
+          api_key_id = excluded.api_key_id,
+          snapshot_json = excluded.snapshot_json,
+          extracted_ip = excluded.extracted_ip,
+          last_success_at = excluded.last_success_at,
+          updated_at = excluded.updated_at
+      `)
+      .run(
+        input.accountId,
+        input.service,
+        input.status || "succeeded",
+        input.apiKeyId ?? null,
+        input.snapshotJson ?? "{}",
+        input.extractedIp?.trim() || null,
+        input.lastSuccessAt ?? now,
+        now,
+        now,
+      );
+    return this.getAccountServiceAccess(input.accountId, input.service)!;
   }
 
   listGrokApiKeys(filters: {
@@ -3659,6 +3948,13 @@ export class AppDatabase {
       if (previousAccountId && previousAccountId !== accountId) {
         this.db
           .query(`
+            DELETE FROM account_service_access
+            WHERE account_id = ?
+              AND api_key_id = ?
+          `)
+          .run(previousAccountId, keyId);
+        this.db
+          .query(`
             UPDATE microsoft_accounts
             SET has_api_key = 0,
                 api_key_id = NULL,
@@ -3698,13 +3994,19 @@ export class AppDatabase {
     });
   }
 
-  completeAttemptSuccess(jobId: number, attemptId: number, accountId: number, apiKey: string, signupTask?: Record<string, unknown> | null): { job: JobRecord; attempt: JobAttemptRecord } {
+  completeAttemptSuccess(
+    jobId: number,
+    attemptId: number,
+    accountId: number,
+    apiKey: string,
+    signupTask?: Record<string, unknown> | null,
+  ): { job: JobRecord; attempt: JobAttemptRecord; apiKeyRecord: ApiKeyRecord } {
     const now = nowIso();
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
     const currentAttempt = this.getAttempt(attemptId);
     const extractedIp = signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null;
-    this.recordApiKey(accountId, apiKey, extractedIp);
+    const apiKeyRecord = this.recordApiKey(accountId, apiKey, extractedIp);
     const startedAt = currentAttempt?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const attempt = this.updateAttempt(attemptId, {
@@ -3760,7 +4062,7 @@ export class AppDatabase {
           ? "completing"
           : currentJob.status,
     });
-    return { job, attempt };
+    return { job, attempt, apiKeyRecord };
   }
 
   recordChatGptCredential(input: {
