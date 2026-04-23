@@ -108,6 +108,35 @@ export const sampleJob: JobSnapshot = {
   },
 };
 
+const defaultBusinessFlowAvailability = {
+  headless: true as const,
+  headed: true,
+  fingerprint: true,
+  headedReason: null,
+  fingerprintReason: null,
+  deAvailable: true,
+};
+
+const defaultBusinessFlowState = null;
+
+const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState">>): AccountRecord => ({
+  businessFlowAvailability: defaultBusinessFlowAvailability,
+  businessFlowState: defaultBusinessFlowState,
+  ...row,
+});
+
+const makeMailbox = (row: Omit<MailboxRecord, "latestVerificationCode"> & Partial<Pick<MailboxRecord, "latestVerificationCode">>): MailboxRecord => ({
+  latestVerificationCode: null,
+  ...row,
+});
+
+const makeMailboxMessage = (
+  row: Omit<MailboxMessageSummary, "verificationCode"> & Partial<Pick<MailboxMessageSummary, "verificationCode">>,
+): MailboxMessageSummary => ({
+  verificationCode: null,
+  ...row,
+});
+
 export const sampleEvents: EventRecord[] = [
   {
     type: "attempt.updated",
@@ -141,7 +170,7 @@ export const sampleAccounts = {
   },
   groups: ["default", "linked", "failed-pool", "manual-hold", "retry-pool"],
   rows: [
-    {
+    makeAccountRow({
       id: 1,
       microsoftEmail: "alpha@example.test",
       passwordPlaintext: "pass-456",
@@ -185,8 +214,8 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T07:00:00.000Z",
         updatedAt: "2026-03-18T07:23:00.000Z",
       },
-    },
-    {
+    }),
+    makeAccountRow({
       id: 2,
       microsoftEmail: "beta@example.test",
       passwordPlaintext: "pass-789",
@@ -230,8 +259,8 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T06:55:00.000Z",
         updatedAt: "2026-03-18T07:16:00.000Z",
       },
-    },
-    {
+    }),
+    makeAccountRow({
       id: 3,
       microsoftEmail: "gamma@example.test",
       passwordPlaintext: "pass-111",
@@ -275,8 +304,8 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T06:30:00.000Z",
         updatedAt: "2026-03-18T07:05:00.000Z",
       },
-    },
-    {
+    }),
+    makeAccountRow({
       id: 4,
       microsoftEmail: "delta@example.test",
       passwordPlaintext: "pass-999",
@@ -320,8 +349,8 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T06:20:00.000Z",
         updatedAt: "2026-03-18T07:02:00.000Z",
       },
-    },
-    {
+    }),
+    makeAccountRow({
       id: 5,
       microsoftEmail: "omega@example.test",
       passwordPlaintext: "pass-222",
@@ -365,8 +394,8 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T06:10:00.000Z",
         updatedAt: "2026-03-18T06:48:00.000Z",
       },
-    },
-    {
+    }),
+    makeAccountRow({
       id: 6,
       microsoftEmail: "manual-hold@example.test",
       passwordPlaintext: "pass-333",
@@ -410,7 +439,7 @@ export const sampleAccounts = {
         createdAt: "2026-03-18T05:55:00.000Z",
         updatedAt: "2026-03-18T06:46:00.000Z",
       },
-    },
+    }),
   ],
 } satisfies AccountsPayload;
 
@@ -423,7 +452,7 @@ export const sampleMicrosoftGraphSettings: MicrosoftGraphSettings = {
 };
 
 export const sampleMailboxes: MailboxRecord[] = [
-  {
+  makeMailbox({
     id: 101,
     accountId: 1,
     microsoftEmail: "alpha@example.test",
@@ -445,8 +474,8 @@ export const sampleMailboxes: MailboxRecord[] = [
     createdAt: "2026-03-18T07:00:00.000Z",
     updatedAt: "2026-03-18T07:23:00.000Z",
     isAuthorized: false,
-  },
-  {
+  }),
+  makeMailbox({
     id: 102,
     accountId: 2,
     microsoftEmail: "beta@example.test",
@@ -468,8 +497,13 @@ export const sampleMailboxes: MailboxRecord[] = [
     createdAt: "2026-03-18T06:55:00.000Z",
     updatedAt: "2026-03-18T07:16:00.000Z",
     isAuthorized: true,
-  },
-  {
+    latestVerificationCode: {
+      code: "824631",
+      provider: "microsoft",
+      evidence: "Use 824631 as your Microsoft account verification code.",
+    },
+  }),
+  makeMailbox({
     id: 103,
     accountId: 3,
     microsoftEmail: "gamma@example.test",
@@ -491,11 +525,11 @@ export const sampleMailboxes: MailboxRecord[] = [
     createdAt: "2026-03-18T06:30:00.000Z",
     updatedAt: "2026-03-18T07:05:00.000Z",
     isAuthorized: true,
-  },
+  }),
 ];
 
 export const sampleMailboxMessages: MailboxMessageSummary[] = [
-  {
+  makeMailboxMessage({
     id: 301,
     mailboxId: 102,
     graphMessageId: "graph-msg-301",
@@ -511,8 +545,13 @@ export const sampleMailboxMessages: MailboxMessageSummary[] = [
     bodyPreview: "Use 824631 as your Microsoft account verification code.",
     webLink: "https://outlook.office.com/mail/id/graph-msg-301",
     updatedAt: "2026-03-18T07:15:10.000Z",
-  },
-  {
+    verificationCode: {
+      code: "824631",
+      provider: "microsoft",
+      evidence: "Use 824631 as your Microsoft account verification code.",
+    },
+  }),
+  makeMailboxMessage({
     id: 302,
     mailboxId: 102,
     graphMessageId: "graph-msg-302",
@@ -528,7 +567,7 @@ export const sampleMailboxMessages: MailboxMessageSummary[] = [
     bodyPreview: "Thanks for trying the new inbox experience.",
     webLink: "https://outlook.office.com/mail/id/graph-msg-302",
     updatedAt: "2026-03-18T06:00:05.000Z",
-  },
+  }),
 ];
 
 const firstSampleMailboxMessage = sampleMailboxMessages[0]!;

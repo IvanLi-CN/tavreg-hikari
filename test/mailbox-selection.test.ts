@@ -24,6 +24,7 @@ const mailbox = (overrides: Partial<MailboxRecord>): MailboxRecord => ({
   createdAt: "2026-04-19T00:00:00.000Z",
   updatedAt: "2026-04-19T00:00:00.000Z",
   isAuthorized: false,
+  latestVerificationCode: null,
   ...overrides,
 });
 

@@ -88,6 +88,16 @@ import {
   toMailboxFailureStatus,
   type MicrosoftGraphSettingsInput,
 } from "./microsoft-mail.js";
+import {
+  AccountBusinessFlowManager,
+  detectAccountBusinessFlowAvailability,
+  type AccountBusinessFlowMode,
+  type AccountBusinessFlowSite,
+} from "./account-business-flow.js";
+import {
+  matchMailboxVerificationCodeForMessage,
+  pickLatestMailboxVerificationCode,
+} from "./microsoft-mailbox-verification.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -97,6 +107,13 @@ const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
 const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;
+let appDbRef: AppDatabase | null = null;
+let accountBusinessFlowManager: AccountBusinessFlowManager | null = null;
+
+function detectDefaultAccountBusinessFlowAvailability() {
+  return detectAccountBusinessFlowAvailability(process.env);
+}
+
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -359,6 +376,10 @@ function getRuntimeServerBinding(settings: AppSettings): { host: string; port: n
 }
 
 function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> {
+  const businessFlow = accountBusinessFlowManager?.serializeAccount(row) ?? {
+    businessFlowAvailability: detectDefaultAccountBusinessFlowAvailability(),
+    businessFlowState: null,
+  };
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
@@ -387,6 +408,8 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     mailboxLastErrorCode: row.mailboxLastErrorCode,
     mailboxUnreadCount: row.mailboxUnreadCount,
     browserSession: serializeBrowserSession(row),
+    businessFlowAvailability: businessFlow.businessFlowAvailability,
+    businessFlowState: businessFlow.businessFlowState,
   };
 }
 
@@ -424,7 +447,44 @@ function serializeBrowserSession(account: Pick<MicrosoftAccountRecord, "browserS
   };
 }
 
-function serializeMailbox(row: MicrosoftMailboxRecord): Record<string, unknown> {
+function toVerificationCodeMessage(message: Pick<MicrosoftMailMessageRecord, "subject" | "fromName" | "fromAddress" | "bodyPreview" | "bodyContent" | "receivedAt">) {
+  return {
+    subject: message.subject,
+    fromName: message.fromName,
+    fromAddress: message.fromAddress,
+    bodyPreview: message.bodyPreview,
+    bodyContent: message.bodyContent,
+    receivedAt: message.receivedAt,
+  };
+}
+
+function resolveLatestMailboxVerificationCode(mailboxId: number) {
+  if (!appDbRef) return null;
+  return pickLatestMailboxVerificationCode(
+    appDbRef.listMailboxMessagesForVerification(mailboxId, { limit: 500 }).map((message) => toVerificationCodeMessage(message)),
+  );
+}
+
+function resolveLatestMailboxVerificationCodes(mailboxes: readonly MicrosoftMailboxRecord[]) {
+  const latestByMailboxId = new Map<number, ReturnType<typeof pickLatestMailboxVerificationCode>>();
+  if (!appDbRef || mailboxes.length === 0) return latestByMailboxId;
+  const grouped = appDbRef.listMailboxMessagesForVerificationBatch(
+    mailboxes.map((mailbox) => mailbox.id),
+    { limitPerMailbox: 500 },
+  );
+  for (const mailbox of mailboxes) {
+    latestByMailboxId.set(
+      mailbox.id,
+      pickLatestMailboxVerificationCode((grouped.get(mailbox.id) || []).map((message) => toVerificationCodeMessage(message))),
+    );
+  }
+  return latestByMailboxId;
+}
+
+function serializeMailbox(
+  row: MicrosoftMailboxRecord,
+  latestVerificationCode = resolveLatestMailboxVerificationCode(row.id),
+): Record<string, unknown> {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -447,10 +507,19 @@ function serializeMailbox(row: MicrosoftMailboxRecord): Record<string, unknown> 
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     isAuthorized: Boolean(row.refreshToken),
+    latestVerificationCode,
   };
 }
 
 function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  const verificationCode = matchMailboxVerificationCodeForMessage({
+    subject: row.subject,
+    fromName: row.fromName,
+    fromAddress: row.fromAddress,
+    bodyPreview: row.bodyPreview,
+    bodyContent: row.bodyContent,
+    receivedAt: row.receivedAt,
+  });
   return {
     id: row.id,
     mailboxId: row.mailboxId,
@@ -467,14 +536,24 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
     bodyPreview: row.bodyPreview,
     webLink: row.webLink,
     updatedAt: row.updatedAt,
+    verificationCode,
   };
 }
 
 function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  const verificationCode = matchMailboxVerificationCodeForMessage({
+    subject: row.subject,
+    fromName: row.fromName,
+    fromAddress: row.fromAddress,
+    bodyPreview: row.bodyPreview,
+    bodyContent: row.bodyContent,
+    receivedAt: row.receivedAt,
+  });
   return {
     ...serializeMailboxMessageSummary(row),
     bodyContent: row.bodyContent,
     createdAt: row.createdAt,
+    verificationCode,
   };
 }
 
@@ -632,6 +711,16 @@ function parseJobSite(value: string | null | undefined): JobSite {
   if (value === "chatgpt") return "chatgpt";
   if (value === "grok") return "grok";
   return "tavily";
+}
+
+function parseAccountBusinessFlowSite(value: unknown): AccountBusinessFlowSite | null {
+  if (value === "chatgpt" || value === "grok" || value === "tavily") return value;
+  return null;
+}
+
+function parseAccountBusinessFlowMode(value: unknown): AccountBusinessFlowMode | null {
+  if (value === "headless" || value === "headed" || value === "fingerprint") return value;
+  return null;
 }
 
 type SiteScheduler = {
@@ -1246,6 +1335,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
 
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
+  appDbRef = db;
   const settingsDefaults = buildSettingsCodeDefaults();
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
@@ -1437,6 +1527,7 @@ async function main(): Promise<void> {
       }
     },
   });
+  accountBusinessFlowManager = new AccountBusinessFlowManager(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, serverHttpJson);
   const getSchedulerBySite = (site: JobSite) => {
     if (site === "chatgpt") return chatgptScheduler;
     if (site === "grok") return grokScheduler;
@@ -1471,6 +1562,7 @@ async function main(): Promise<void> {
       const url = new URL(req.url);
       const pathname = url.pathname;
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
+      const accountBusinessFlowStartMatch = pathname.match(/^\/api\/accounts\/(\d+)\/business-flow\/start$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
@@ -1829,6 +1921,35 @@ async function main(): Promise<void> {
           }
           return badRequest(message);
         }
+      }
+
+      if (accountBusinessFlowStartMatch && req.method === "POST") {
+        const accountId = Number.parseInt(accountBusinessFlowStartMatch[1] || "", 10);
+        if (!Number.isInteger(accountId) || accountId < 1) {
+          return badRequest("invalid account id");
+        }
+        const body = (await req.json().catch(() => null)) as { site?: unknown; mode?: unknown } | null;
+        const site = parseAccountBusinessFlowSite(body?.site);
+        const mode = parseAccountBusinessFlowMode(body?.mode);
+        if (!site) {
+          return badRequest("invalid business flow site");
+        }
+        if (!mode) {
+          return badRequest("invalid business flow mode");
+        }
+        const account = db.getAccount(accountId);
+        if (!account) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
+        try {
+          await accountBusinessFlowManager?.start({ accountId, site, mode });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+        return json({
+          ok: true,
+          account: serializeAccount(db.getAccount(accountId) || account),
+        });
       }
 
       if (accountSessionRebootstrapMatch && req.method === "POST") {
@@ -2228,9 +2349,11 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/microsoft-mail/mailboxes" && req.method === "GET") {
+        const mailboxes = db.listMailboxes({ connectedOnly: true });
+        const latestVerificationCodes = resolveLatestMailboxVerificationCodes(mailboxes);
         return json({
           ok: true,
-          rows: db.listMailboxes({ connectedOnly: true }).map((row) => serializeMailbox(row)),
+          rows: mailboxes.map((row) => serializeMailbox(row, latestVerificationCodes.get(row.id) || null)),
         });
       }
 

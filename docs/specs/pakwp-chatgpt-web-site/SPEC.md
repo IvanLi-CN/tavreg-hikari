@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-05
-- Last: 2026-04-19
+- Last: 2026-04-23
 
 ## 背景 / 问题陈述
 
@@ -24,6 +24,7 @@
 ### Non-goals
 
 - 不把 `微软账号 / 微软邮箱 / API Keys / 代理节点` 页面改造成多站点通用页。
+- 不把微软账号页单账号 launcher 的 Microsoft 登录支持回写到 ChatGPT 批量 job 主链。
 - 不接受仅登录成功或仅拿到 session access token 的降级成功定义。
 
 ## 范围（Scope）
@@ -47,6 +48,7 @@
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
 - ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，并明确说明 attempt 资料由服务端自动生成。
 - ChatGPT 必须支持 `runMode=headed|headless` 显式配置；当当前运行环境不支持有头浏览器时，界面不得错误提供 `headed` 选项，后端也必须拒绝显式 `headed` 启动。
+- 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `fingerprint` 只在 DE 环境可用，并在登录成功后保留浏览器供人工接管。
 - ChatGPT 每个 attempt 的邮箱必须由服务端通过 cf-mail provision/ensure 生成，且每个 attempt 都要拿到独立资料。
 - ChatGPT 成功结果必须包含 `access_token / refresh_token / id_token / account_id / email / exp(expires_at)`；缺少 `refresh_token` 视为失败。
 - 当 ChatGPT 批量任务派发 attempt 时，服务端必须为该 attempt 生成新的 cf-mail 邮箱、密码、昵称与生日，避免跨 attempt 共享资料，也不得为未实际派发的预算预占邮箱。
@@ -64,6 +66,7 @@
 - 用户进入 `/chatgpt` 时，前端展示批量控制与自动生成说明，不暴露单次 attempt 的邮箱 / 密码 / 昵称 / 出生日期输入框。
 - 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，并携带 `need / parallel / maxAttempts`。
 - 后端按当前请求与环境能力创建 ChatGPT job，并在每个 attempt 实际启动前生成独立的 cf-mail 邮箱、随机密码、随机昵称与 `1990-01-01` 至 `2005-12-31` 之间的生日。
+- 当请求来自微软账号页单账号 launcher 且 auth provider 为 Microsoft 时，worker 先点击 `Continue with Microsoft`，再复用统一 Microsoft 登录状态机；如站点在 SSO 后追加验证码或资料页，则继续使用站点 draft builder 完成补全。
 - 调度器按 `site` 分流：Tavily 继续沿用现有 worker；ChatGPT 走独立 runtime，产出完整凭据后写入 `chatgpt_credentials` 并把 attempt 标记成功。
 - 用户在 ChatGPT 页查看最近凭据时，只看到掩码值；显式 reveal/export 时再读取完整凭据 JSON。
 
@@ -113,6 +116,10 @@
 - Given ChatGPT worker 成功拿到完整凭据
   When 用户在 ChatGPT 页查看最近结果
   Then 可看到 `access_token / refresh_token / id_token / account_id / email / exp` 的完整语义，且默认以掩码形式展示。
+
+- Given 用户从微软账号页以 `fingerprint` 模式启动 ChatGPT 单账号业务流
+  When Microsoft SSO 与站点补资料完成到可接管状态
+  Then 浏览器会保留打开，并把 `browserRetained=true` 回传到账号页业务流状态。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 

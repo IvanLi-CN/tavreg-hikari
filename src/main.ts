@@ -11563,9 +11563,28 @@ async function runSingleMode(
     const keepOnExit = toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false);
     const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
     if (!keepOnExit && !keepOnFailure) return;
+    const fingerprintBusinessFlow = String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
+    const retainPath = String(process.env.ACCOUNT_BUSINESS_FLOW_RETAIN_PATH || "").trim();
+    const fingerprintRetainedSuccess = fingerprintBusinessFlow && !keepOnFailure;
 
     const holdUrl = page ? page.url() : "unknown";
-    const reason = keepOnFailure && !keepOnExit ? "failure" : "exit";
+    const reason = keepOnFailure ? "failure" : "exit";
+
+    if (fingerprintBusinessFlow && retainPath) {
+      await mkdir(path.dirname(retainPath), { recursive: true }).catch(() => {});
+      await writeFile(
+        retainPath,
+        `${JSON.stringify({
+          retainedAt: new Date().toISOString(),
+          success: fingerprintRetainedSuccess,
+          reason,
+          stage: failureStage,
+          currentUrl: holdUrl,
+          error: fingerprintRetainedSuccess ? null : localErrorMessage || "fingerprint business flow failed before handoff",
+        }, null, 2)}\n`,
+        "utf8",
+      ).catch(() => {});
+    }
 
     if (process.stdin.isTTY && process.stdout.isTTY) {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -11578,7 +11597,11 @@ async function runSingleMode(
     }
 
     const configuredHoldMs = toInt(process.env.KEEP_BROWSER_OPEN_MS, keepOnFailure ? 0 : 15 * 60_000);
-    const holdMs = keepOnFailure && !keepOnExit ? Math.max(0, configuredHoldMs) : Math.max(30_000, configuredHoldMs);
+    const holdMs = keepOnFailure && !keepOnExit
+      ? Math.max(0, configuredHoldMs)
+      : fingerprintBusinessFlow
+        ? Math.max(0, configuredHoldMs)
+        : Math.max(30_000, configuredHoldMs);
     if (holdMs > 0) {
       log(`keep browser open on ${reason} for ${holdMs}ms at stage=${failureStage} url=${holdUrl}`);
       await delay(holdMs);
@@ -12686,17 +12709,20 @@ async function runSingleMode(
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     stopTaskWatchers();
+    const preserveBrowserForFingerprint =
+      mode === "headed" && String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
     const preserveBrowserOnFailure = mode === "headed" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
+    const preserveBrowserCleanup = preserveBrowserForFingerprint || preserveBrowserOnFailure;
     await waitForBrowserInspection();
-    if (!preserveBrowserOnFailure && context && !useNativeChrome) {
+    if (!preserveBrowserCleanup && context && !useNativeChrome) {
       await awaitCleanupBestEffort(context.close(), 5_000);
     }
-    if (!preserveBrowserOnFailure && useNativeChrome && nativeChromeStop != null) {
+    if (!preserveBrowserCleanup && useNativeChrome && nativeChromeStop != null) {
       await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
-    } else if (!preserveBrowserOnFailure && browser) {
+    } else if (!preserveBrowserCleanup && browser) {
       await awaitCleanupBestEffort(browser.close(), 5_000);
     }
-    if (!preserveBrowserOnFailure && !useNativeChrome && nativeChromeStop != null) {
+    if (!preserveBrowserCleanup && !useNativeChrome && nativeChromeStop != null) {
       await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
     }
     if (!existingMihomoController) {

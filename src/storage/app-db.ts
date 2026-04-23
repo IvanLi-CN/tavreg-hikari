@@ -2334,7 +2334,14 @@ export class AppDatabase {
 
   getCurrentJob(site: JobSite = "tavily"): JobRecord | null {
     const row = this.db
-      .query("SELECT * FROM jobs WHERE site = ? ORDER BY id DESC LIMIT 1")
+      .query(`
+        SELECT *
+        FROM jobs
+        WHERE site = ?
+          AND COALESCE(json_extract(payload_json, '$.hidden'), 0) <> 1
+        ORDER BY id DESC
+        LIMIT 1
+      `)
       .get(site) as Record<string, unknown> | null;
     return row ? mapJobRow(row) : null;
   }
@@ -3268,6 +3275,72 @@ export class AppDatabase {
       rows: rows.map(mapMailboxMessageRow),
       total,
     };
+  }
+
+  listMailboxMessagesForVerification(mailboxId: number, options?: { limit?: number }): MicrosoftMailMessageRecord[] {
+    const limit = Math.max(1, Math.min(500, Math.trunc(options?.limit || 500)));
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM microsoft_mail_messages
+        WHERE mailbox_id = ?
+        ORDER BY
+          CASE WHEN received_at IS NULL THEN 1 ELSE 0 END,
+          received_at DESC,
+          id DESC
+        LIMIT ?
+      `)
+      .all(mailboxId, limit) as Record<string, unknown>[];
+    return rows.map(mapMailboxMessageRow);
+  }
+
+  listMailboxMessagesForVerificationBatch(
+    mailboxIds: number[],
+    options?: { limitPerMailbox?: number },
+  ): Map<number, MicrosoftMailMessageRecord[]> {
+    const normalizedMailboxIds = Array.from(
+      new Set(mailboxIds.map((mailboxId) => Math.trunc(mailboxId)).filter((mailboxId) => mailboxId > 0)),
+    );
+    const grouped = new Map<number, MicrosoftMailMessageRecord[]>();
+    if (normalizedMailboxIds.length === 0) return grouped;
+
+    const limitPerMailbox = Math.max(1, Math.min(500, Math.trunc(options?.limitPerMailbox || 500)));
+    const placeholders = normalizedMailboxIds.map(() => "?").join(", ");
+    const rows = this.db
+      .query(`
+        SELECT *
+        FROM (
+          SELECT
+            m.*,
+            ROW_NUMBER() OVER (
+              PARTITION BY mailbox_id
+              ORDER BY
+                CASE WHEN received_at IS NULL THEN 1 ELSE 0 END,
+                received_at DESC,
+                id DESC
+            ) AS row_num
+          FROM microsoft_mail_messages m
+          WHERE mailbox_id IN (${placeholders})
+        )
+        WHERE row_num <= ?
+        ORDER BY
+          mailbox_id ASC,
+          CASE WHEN received_at IS NULL THEN 1 ELSE 0 END,
+          received_at DESC,
+          id DESC
+      `)
+      .all(...normalizedMailboxIds, limitPerMailbox) as Record<string, unknown>[];
+
+    for (const row of rows) {
+      const mapped = mapMailboxMessageRow(row);
+      const current = grouped.get(mapped.mailboxId);
+      if (current) {
+        current.push(mapped);
+      } else {
+        grouped.set(mapped.mailboxId, [mapped]);
+      }
+    }
+    return grouped;
   }
 
   getMailboxMessage(messageId: number): MicrosoftMailMessageRecord | null {

@@ -172,6 +172,7 @@ const baseArgs = {
   onExtractorHistoryQueryChange: fn(),
   onRefreshExtractorHistory: fn(async () => undefined),
   onOpenMailbox: fn(),
+  onStartBusinessFlow: fn(async () => undefined),
   onOpenMailboxSettings: fn(),
   onOpenStandaloneMailboxWorkspace: fn(),
 };
@@ -310,6 +311,7 @@ type AccountsStorySurfaceProps = {
   onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
+  onStartBusinessFlow?: (accountId: number, site: "tavily" | "grok" | "chatgpt", mode: "headless" | "headed" | "fingerprint") => Promise<void>;
   onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onRunExtractor?: () => Promise<void>;
   onStopExtractor?: () => Promise<void>;
@@ -521,6 +523,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onExtractorHistoryQueryChange={setExtractorHistoryQuery}
         onRefreshExtractorHistory={async () => undefined}
         onOpenMailbox={() => undefined}
+        onStartBusinessFlow={props.onStartBusinessFlow ?? (async () => undefined)}
         onOpenMailboxSettings={() => undefined}
         onOpenStandaloneMailboxWorkspace={() => undefined}
       />
@@ -1498,5 +1501,95 @@ export const MailWorkspaceEntryPlay: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole("button", { name: "微软邮箱" })).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "Graph 设置" })).toBeInTheDocument();
+  },
+};
+
+export const BusinessFlowLauncherPopoverPlay: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      accounts={{
+        ...sampleAccounts,
+        rows: sampleAccounts.rows.map((row, index) =>
+          index === 0
+            ? {
+                ...row,
+                businessFlowState: {
+                  site: "chatgpt",
+                  mode: "fingerprint",
+                  status: "succeeded",
+                  browserRetained: true,
+                  lastError: null,
+                  startedAt: "2026-04-23T06:40:00.000Z",
+                  updatedAt: "2026-04-23T06:42:00.000Z",
+                  retainedAt: "2026-04-23T06:42:00.000Z",
+                },
+              }
+            : row,
+        ),
+      }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "打开单账号业务流 launcher，验证 Tavily / Grok / ChatGPT 按钮与 headless / headed / fingerprint 三态切换同时可见。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: /打开 alpha@example\\.test 的业务流工具/ }));
+    await expect(within(document.body).getByText("单账号业务流")).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "Tavily" })).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "Grok" })).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "ChatGPT" })).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "无头" })).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "有头" })).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "指纹" })).toBeInTheDocument();
+    await expect(within(document.body).getByText(/浏览器已保留/)).toBeInTheDocument();
+  },
+};
+
+export const BusinessFlowLauncherHeadlessOnlyPlay: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      accounts={{
+        ...sampleAccounts,
+        rows: sampleAccounts.rows.map((row, index) =>
+          index === 0
+            ? {
+                ...row,
+                businessFlowAvailability: {
+                  headless: true,
+                  headed: false,
+                  fingerprint: false,
+                  headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
+                  fingerprintReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动指纹浏览器。",
+                  deAvailable: false,
+                },
+              }
+            : row,
+        ),
+      }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "在无 DE 环境下打开 launcher，验证 headed / fingerprint 自动禁用并提示原因。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: /打开 alpha@example\\.test 的业务流工具/ }));
+    await expect(within(document.body).getByRole("button", { name: "无头" })).toBeEnabled();
+    await expect(within(document.body).getByRole("button", { name: "有头" })).toBeDisabled();
+    await expect(within(document.body).getByRole("button", { name: "指纹" })).toBeDisabled();
+    await expect(within(document.body).getByText(/WAYLAND_DISPLAY/)).toBeInTheDocument();
   },
 };

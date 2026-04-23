@@ -9,7 +9,10 @@ import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMa
 import { assertUsableFingerprintChromiumExecutablePath } from "../fingerprint-browser.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
-import { launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
+import { completeMicrosoftLogin, launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
+import {
+  waitForMicrosoftMailboxVerificationCode,
+} from "./microsoft-mailbox-verification.js";
 
 const OAUTH_ISSUER = "https://auth.openai.com";
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -32,6 +35,8 @@ interface WorkerPayload {
   birthDate: string;
   mailboxId: string;
 }
+
+type ChatGptAuthProvider = "email" | "microsoft";
 
 type WorkerRunMode = AppConfig["runMode"];
 
@@ -109,6 +114,15 @@ function requireEnv(name: string): string {
   const value = String(process.env[name] || "").trim();
   if (!value) throw new Error(`missing_env:${name}`);
   return value;
+}
+
+function optionalEnv(name: string): string | null {
+  const value = String(process.env[name] || "").trim();
+  return value || null;
+}
+
+function getChatGptAuthProvider(): ChatGptAuthProvider {
+  return String(process.env.CHATGPT_AUTH_PROVIDER || "").trim().toLowerCase() === "microsoft" ? "microsoft" : "email";
 }
 
 function parsePayload(): WorkerPayload {
@@ -520,6 +534,47 @@ async function activateAction(page: any, names: RegExp[]): Promise<boolean> {
   if (await clickByRoleName(page, "link", names)) return true;
   if (await clickVisibleText(page, names)) return true;
   return false;
+}
+
+async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
+  return await activateAction(page, [
+    /continue with microsoft/i,
+    /sign in with microsoft/i,
+    /^microsoft$/i,
+  ]);
+}
+
+function getRetainPath(): string | null {
+  return optionalEnv("ACCOUNT_BUSINESS_FLOW_RETAIN_PATH");
+}
+
+function isFingerprintBusinessFlow(): boolean {
+  return String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
+}
+
+async function holdBrowserForBusinessFlowHandoff(
+  page: any,
+  browser: any,
+  outputDir: string,
+  stage: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const retainPath = getRetainPath();
+  if (!retainPath) return;
+  await writeJson(retainPath, {
+    retainedAt: nowIso(),
+    stage,
+    currentUrl: page ? String(page.url?.() || "") : "",
+    ...extra,
+  }).catch(() => {});
+  const currentUrl = page ? String(page.url?.() || "") : "";
+  log(`holding browser for fingerprint handoff stage=${stage} url=${currentUrl}`);
+  while (true) {
+    const pageClosed = !page || (typeof page.isClosed === "function" ? page.isClosed() : false);
+    const browserClosed = !browser || (typeof browser.isConnected === "function" ? !browser.isConnected() : false);
+    if (pageClosed || browserClosed) return;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
 }
 
 async function requestSubmitVisibleAuthForm(page: any): Promise<string | null> {
@@ -1512,8 +1567,10 @@ async function run(): Promise<void> {
     mailboxId: payload.mailboxId,
   });
   const args = parseArgs(process.argv.slice(2));
+  const authProvider = getChatGptAuthProvider();
   await writeStageMarker(outputDir, "bootstrap:args_loaded", {
     proxyNode: args.proxyNode || null,
+    authProvider,
   });
   log(`worker bootstrap start email=${payload.email} mailbox=${payload.mailboxId}`);
   const cfg = loadConfig();
@@ -1626,6 +1683,24 @@ async function run(): Promise<void> {
     await writeStageMarker(outputDir, "oauth:authorize_loaded", {
       currentUrl: String(page.url() || ""),
     });
+    if (authProvider === "microsoft") {
+      failureStage = "oauth_microsoft_provider";
+      const clickedMicrosoftProvider = await clickMicrosoftProviderEntry(page);
+      if (!clickedMicrosoftProvider) {
+        throw new Error("chatgpt_microsoft_provider_missing");
+      }
+      await page.waitForTimeout(1200);
+      page = await completeMicrosoftLogin(page, cfg, mihomo.proxyServer, {
+        completionUrlPatterns: [
+          /^https:\/\/auth\.openai\.com\//i,
+          new RegExp(`^${CALLBACK_URL.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`, "i"),
+        ],
+        passkeyRecoveryUrl: authorizeUrl,
+      });
+      await writeStageMarker(outputDir, "oauth:microsoft_completed", {
+        currentUrl: String(page.url() || ""),
+      });
+    }
 
     let otpRequestedAt = nowIso();
     let callbackFromNavigation: CallbackResult | null = null;
@@ -1993,14 +2068,38 @@ async function run(): Promise<void> {
           }
         }
         try {
-          log(`polling cf-mail for otp mailbox=${payload.mailboxId || ""} notBefore=${otpRequestedAt} timeoutMs=${otpResendCount === 0 ? 60_000 : 75_000}`);
-          const code = await waitForCfMailOtp({
-            address: payload.email,
-            mailboxId: payload.mailboxId,
-            notBefore: otpRequestedAt,
-            timeoutMs: otpResendCount === 0 ? 60_000 : 75_000,
-            pollMs: 2500,
-          });
+          const timeoutMs = otpResendCount === 0 ? 60_000 : 75_000;
+          const code =
+            authProvider === "microsoft"
+              ? (log(`polling Microsoft mailbox for otp mailbox=${optionalEnv("MICROSOFT_MAILBOX_ID") || ""} notBefore=${otpRequestedAt} timeoutMs=${timeoutMs}`),
+                (
+                  await waitForMicrosoftMailboxVerificationCode({
+                    graphSettings: {
+                      clientId: requireEnv("MICROSOFT_GRAPH_CLIENT_ID"),
+                      clientSecret: requireEnv("MICROSOFT_GRAPH_CLIENT_SECRET"),
+                      redirectUri: requireEnv("MICROSOFT_GRAPH_REDIRECT_URI"),
+                      authority: optionalEnv("MICROSOFT_GRAPH_AUTHORITY") || "common",
+                    },
+                    mailbox: {
+                      refreshToken: optionalEnv("MICROSOFT_MAILBOX_REFRESH_TOKEN"),
+                      accessToken: optionalEnv("MICROSOFT_MAILBOX_ACCESS_TOKEN"),
+                      accessTokenExpiresAt: optionalEnv("MICROSOFT_MAILBOX_ACCESS_TOKEN_EXPIRES_AT"),
+                      authority: optionalEnv("MICROSOFT_MAILBOX_AUTHORITY"),
+                    },
+                    notBefore: otpRequestedAt,
+                    timeoutMs,
+                    pollMs: 2500,
+                    providers: ["chatgpt", "generic"],
+                  })
+                ).code)
+              : (log(`polling cf-mail for otp mailbox=${payload.mailboxId || ""} notBefore=${otpRequestedAt} timeoutMs=${timeoutMs}`),
+                await waitForCfMailOtp({
+                  address: payload.email,
+                  mailboxId: payload.mailboxId,
+                  notBefore: otpRequestedAt,
+                  timeoutMs,
+                  pollMs: 2500,
+                }));
           if (!allowOtpReplay && code === lastConsumedOtpCode && Date.now() - lastConsumedOtpAt < 45_000) {
             log("received duplicate email otp too soon; waiting before retry");
             await page.waitForTimeout(2500);
@@ -2234,6 +2333,11 @@ async function run(): Promise<void> {
         `proxy=${args.proxyNode || (await mihomo.getGroupSelection().catch(() => null)) || "default"}`,
       ],
     }));
+    if (isFingerprintBusinessFlow()) {
+      await holdBrowserForBusinessFlowHandoff(page, browser, outputDir, "chatgpt_login_ready", {
+        success: true,
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeFailureArtifacts(outputDir, page, failureStage);
@@ -2241,6 +2345,12 @@ async function run(): Promise<void> {
       error: message,
       failureStage,
     });
+    if (isFingerprintBusinessFlow()) {
+      await holdBrowserForBusinessFlowHandoff(page, browser, outputDir, failureStage, {
+        success: false,
+        error: message,
+      });
+    }
     await keepBrowserOpenOnFailure(page, browser, failureStage);
     throw error;
   } finally {

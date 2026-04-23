@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-04-16
+- Last: 2026-04-23
 
 ## 背景 / 问题陈述
 
@@ -167,6 +167,7 @@
 - `PATCH /api/accounts/:id`
 - `DELETE /api/accounts`
 - `GET /api/accounts`
+- `POST /api/accounts/:id/business-flow/start`
 - `GET /api/api-keys`
 - `GET /api/proxies`
 - `POST /api/proxies/settings`
@@ -198,6 +199,9 @@
 
 - 密码默认以明文显示，便于人工校验
 - 支持跨分页勾选账号，并展示总记录数与已勾选数量
+- 每个账号操作列都提供单账号业务流 launcher，使用浮层展示 `Tavily / Grok / ChatGPT` 三个业务流按钮与 `headless / headed / fingerprint` 模式切换。
+- 业务流模式保存在前端本地存储中；当当前环境缺少 `DISPLAY / WAYLAND_DISPLAY` 时，`headed / fingerprint` 必须自动回退为 `headless`，并在 launcher 内明确展示禁用原因。
+- `headless / headed` 会直接完成单账号业务流并回收浏览器；`fingerprint` 只负责把浏览器带到目标站点的已登录可接管状态，并保留浏览器窗口。
 - 支持批量设置分组与批量删除
 - 导入成功后自动勾选刚刚新增或更新的账号
 - 分组选择器使用可搜索、可直接新建的组合框
@@ -235,6 +239,9 @@
 - Given 主流程页包含长 JSON 日志、长邮箱或较窄视口，When 页面渲染完成，Then 内容仍保持在 shell 宽度内，且只允许卡片或表格自身出现内部滚动。
 - Given 任务成功完成 Microsoft 登录与 Tavily Home 流程，When 成功提取 API key，Then 账号状态、API key 记录、job attempt 与 `signup_tasks` 都正确关联更新。
 - Given 用户打开代理页并执行节点检查，When 检查完成，Then 界面显示节点延迟、出口 IP、地理信息和检查结果。
+- Given 用户打开微软账号页某一行的业务流 launcher，When 浮层展开，Then 页面同时显示 `Tavily / Grok / ChatGPT` 与 `headless / headed / fingerprint`，并带出当前业务流状态与浏览器保留提示。
+- Given 当前环境缺少 `DISPLAY / WAYLAND_DISPLAY`，When 用户打开 launcher，Then `headed / fingerprint` 会禁用并提示原因，已记忆的模式也会自动夹回 `headless`。
+- Given 用户用 `fingerprint` 模式启动单账号业务流，When 自动化走到目标站点已登录页面或命中可接管 challenge，Then 浏览器保持打开且账号状态回传 `browserRetained=true`。
 - Given ChatGPT / Grok / Tavily 存在多个健康代理节点，When 任务以并发方式启动，Then 调度器优先分散节点与出口 IP，并且不会读取任何全局选中节点状态。
 - Given 当前实现完成，When 执行 `bun run typecheck`、`bun test` 与前端构建，Then 全部通过。
 
@@ -252,6 +259,28 @@
 ![Accounts last used ascending sort](./assets/accounts-sort-last-used-asc.png)
 
 ![Accounts proof mailbox cfmail dialog](./assets/accounts-proof-mailbox-cfmail-dialog.png)
+
+![Accounts business flow launcher popover](./assets/accounts-business-flow-launcher-popover.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/BusinessFlowLauncherPopoverPlay
+- state: desktop account row launcher with site buttons + mode switch
+- evidence_note: 验证微软账号表格每行新增单账号业务流 launcher，点开后同时显示 `Tavily / Grok / ChatGPT` 与 `headless / headed / fingerprint`，并回显当前业务流状态。
+
+![Accounts business flow headless-only](./assets/accounts-business-flow-headless-only.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/BusinessFlowLauncherHeadlessOnlyPlay
+- state: de-unavailable launcher fallback
+- evidence_note: 验证缺少 `DISPLAY / WAYLAND_DISPLAY` 时，launcher 会把 `headed / fingerprint` 禁用并展示明确原因，同时保留 `headless` 可启动状态。
 
 ## 里程碑
 

@@ -1,6 +1,6 @@
 import DOMPurify from "dompurify";
-import { ChevronLeft, Inbox, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ChevronLeft, Inbox, KeyRound, RefreshCw } from "lucide-react";
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type SyntheticEvent } from "react";
 import { CopyIconButton, type CopyButtonStatus } from "@/components/ui/copy-icon-button";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -21,15 +21,29 @@ function MetaRow(props: { label: string; value: string }) {
   );
 }
 
+function handleSelectableRowKeyDown(event: ReactKeyboardEvent<HTMLElement>, onSelect: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  onSelect();
+}
+
+function stopSelectableRowEvent(event: SyntheticEvent<HTMLElement>) {
+  event.stopPropagation();
+}
+
 function MessageListItem(props: {
   message: MailboxMessageSummary;
   selected: boolean;
   onSelect: () => void;
+  verificationCopyStatus: CopyButtonStatus;
+  onCopyVerificationCode: (anchorElement: HTMLElement) => void;
 }) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={props.onSelect}
+      onKeyDown={(event) => handleSelectableRowKeyDown(event, props.onSelect)}
       className={cn(
         "w-full cursor-pointer rounded-xl border px-3 py-3 text-left transition-colors duration-200",
         props.selected
@@ -45,12 +59,26 @@ function MessageListItem(props: {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {props.message.verificationCode ? (
+            <div onClick={stopSelectableRowEvent} onKeyDown={stopSelectableRowEvent}>
+              <CopyIconButton
+                label={`${props.message.subject || "邮件"} 验证码`}
+                copyStatus={props.verificationCopyStatus}
+                onCopy={props.onCopyVerificationCode}
+                size="dense"
+                idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+                feedbackSubject="验证码"
+                feedbackValue={props.message.verificationCode.code}
+                successMessage="验证码已复制"
+              />
+            </div>
+          ) : null}
           {!props.message.isRead ? <Badge variant="info">未读</Badge> : null}
           <span className="text-[11px] text-slate-500">{formatDate(props.message.receivedAt)}</span>
         </div>
       </div>
       <div className="mt-2 line-clamp-2 text-sm leading-5 text-slate-300">{props.message.bodyPreview || "无预览"}</div>
-    </button>
+    </div>
   );
 }
 
@@ -101,6 +129,7 @@ export function MailboxDrawer(props: {
     displayName: "idle",
     email: "idle",
   });
+  const [verificationCopyStatus, setVerificationCopyStatus] = useState<Record<string, CopyButtonStatus>>({});
   const [feedbackPortalContainer, setFeedbackPortalContainer] = useState<HTMLDivElement | null>(null);
   const [isCompactLayout, setIsCompactLayout] = useState(() => (typeof window !== "undefined" ? window.matchMedia("(max-width: 1023px)").matches : false));
   const [compactPane, setCompactPane] = useState<"list" | "detail">("list");
@@ -167,6 +196,20 @@ export function MailboxDrawer(props: {
     }
   };
 
+  const getVerificationCopyStatus = (key: string): CopyButtonStatus => verificationCopyStatus[key] || "idle";
+
+  const handleCopyVerificationCode = async (key: string, code: string) => {
+    try {
+      await copyTextToClipboard(code);
+      setVerificationCopyStatus((current) => ({ ...current, [key]: "copied" }));
+    } catch {
+      setVerificationCopyStatus((current) => ({ ...current, [key]: "failed" }));
+    }
+    window.setTimeout(() => {
+      setVerificationCopyStatus((current) => (current[key] ? { ...current, [key]: "idle" } : current));
+    }, 1800);
+  };
+
   const listPane = (
     <Card className="min-h-0 border-white/10 bg-slate-950/55 shadow-none">
       <CardHeader className="border-b border-white/8 px-4 py-4">
@@ -199,6 +242,19 @@ export function MailboxDrawer(props: {
                 feedbackPortalContainer={feedbackPortalContainer}
                 onCopy={(anchorElement) => void handleCopyValue("email", mailboxLabel, anchorElement)}
               />
+              {props.mailbox?.latestVerificationCode ? (
+                <CopyIconButton
+                  label={`${mailboxLabel} 最新验证码`}
+                  copyStatus={getVerificationCopyStatus(`mailbox:${props.mailbox.id}`)}
+                  feedbackSubject="验证码"
+                  feedbackValue={props.mailbox.latestVerificationCode.code}
+                  successMessage="验证码已复制"
+                  size="dense"
+                  idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+                  feedbackPortalContainer={feedbackPortalContainer}
+                  onCopy={() => void handleCopyVerificationCode(`mailbox:${props.mailbox!.id}`, props.mailbox!.latestVerificationCode!.code)}
+                />
+              ) : null}
             </div>
             <p className="text-[11px] text-slate-500">{props.mailbox ? `共 ${props.messagesTotal} 封 · ` : ""}最后更新：{lastUpdatedText}</p>
           </div>
@@ -235,6 +291,12 @@ export function MailboxDrawer(props: {
                   message={message}
                   selected={props.selectedMessageId === message.id}
                   onSelect={() => void handleSelectMessage(message.id)}
+                  verificationCopyStatus={getVerificationCopyStatus(`message:${message.id}`)}
+                  onCopyVerificationCode={() => {
+                    if (message.verificationCode) {
+                      void handleCopyVerificationCode(`message:${message.id}`, message.verificationCode.code);
+                    }
+                  }}
                 />
               ))}
               {props.messagesBusy ? (
@@ -288,8 +350,23 @@ export function MailboxDrawer(props: {
           </div>
         ) : props.messageDetail ? (
           <div className="space-y-4">
-            <div className="space-y-2 border-b border-white/8 pb-3">
-              <div className="text-lg font-semibold text-white">{props.messageDetail.subject || "(无主题)"}</div>
+              <div className="space-y-2 border-b border-white/8 pb-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="text-lg font-semibold text-white">{props.messageDetail.subject || "(无主题)"}</div>
+                {props.messageDetail.verificationCode ? (
+                  <CopyIconButton
+                    label={`${props.messageDetail.subject || "邮件"} 验证码`}
+                    copyStatus={getVerificationCopyStatus(`detail:${props.messageDetail.id}`)}
+                    feedbackSubject="验证码"
+                    feedbackValue={props.messageDetail.verificationCode.code}
+                    successMessage="验证码已复制"
+                    size="dense"
+                    idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+                    feedbackPortalContainer={feedbackPortalContainer}
+                    onCopy={() => void handleCopyVerificationCode(`detail:${props.messageDetail!.id}`, props.messageDetail!.verificationCode!.code)}
+                  />
+                ) : null}
+              </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={props.messageDetail.isRead ? "neutral" : "info"}>
                   {props.messageDetail.isRead ? "已读" : "未读"}

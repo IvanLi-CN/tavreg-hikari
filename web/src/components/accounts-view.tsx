@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -25,6 +25,8 @@ import { CopyIconButton } from "@/components/ui/copy-icon-button";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
   AccountBatchBootstrapMode,
+  AccountBusinessFlowMode,
+  AccountBusinessFlowSite,
   AccountBatchBootstrapPreviewPayload,
   AccountExtractorAccountType,
   AccountExtractorHistoryPayload,
@@ -73,6 +75,24 @@ const MAILBOX_STATUS_OPTIONS = [
   { value: "locked", label: "locked" },
 ] as const satisfies Array<{ value: MailboxStatus; label: string }>;
 const DESKTOP_TOOLS_STORAGE_KEY = "tavreg-hikari.accounts.desktopToolsCollapsed";
+const ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY = "tavreg-hikari.accounts.businessFlowMode";
+const ACCOUNT_BUSINESS_FLOW_MODE_OPTIONS = [
+  { value: "headless", label: "无头", description: "自动完成业务流，浏览器不保留。" },
+  { value: "headed", label: "有头", description: "自动完成业务流，并在 DE 环境里可见。" },
+  { value: "fingerprint", label: "指纹", description: "只完成登录并保留浏览器，便于接管。" },
+] as const satisfies Array<{
+  value: AccountBusinessFlowMode;
+  label: string;
+  description: string;
+}>;
+const ACCOUNT_BUSINESS_FLOW_SITE_OPTIONS = [
+  { value: "tavily", label: "Tavily" },
+  { value: "grok", label: "Grok" },
+  { value: "chatgpt", label: "ChatGPT" },
+] as const satisfies Array<{
+  value: AccountBusinessFlowSite;
+  label: string;
+}>;
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
@@ -165,6 +185,28 @@ function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">
 
 function formatProxyLatency(latencyMs: number | null | undefined): string {
   return latencyMs == null ? "—" : `${Math.max(0, Math.trunc(latencyMs))} ms`;
+}
+
+function clampBusinessFlowMode(mode: AccountBusinessFlowMode, account: Pick<AccountRecord, "businessFlowAvailability"> | null | undefined): AccountBusinessFlowMode {
+  if (!account) return mode;
+  if (mode === "headed" && !account.businessFlowAvailability.headed) return "headless";
+  if (mode === "fingerprint" && !account.businessFlowAvailability.fingerprint) return "headless";
+  return mode;
+}
+
+function getBusinessFlowModeDisabledReason(mode: AccountBusinessFlowMode, account: Pick<AccountRecord, "businessFlowAvailability">): string | null {
+  if (mode === "headed") return account.businessFlowAvailability.headed ? null : account.businessFlowAvailability.headedReason;
+  if (mode === "fingerprint") return account.businessFlowAvailability.fingerprint ? null : account.businessFlowAvailability.fingerprintReason;
+  return null;
+}
+
+function describeBusinessFlowState(account: Pick<AccountRecord, "businessFlowState">): string {
+  if (!account.businessFlowState) return "未启动";
+  const retainedText = account.businessFlowState.browserRetained ? " · 浏览器保留中" : "";
+  if (account.businessFlowState.status === "failed" && account.businessFlowState.lastError) {
+    return `${account.businessFlowState.site}/${account.businessFlowState.mode} · ${account.businessFlowState.lastError}`;
+  }
+  return `${account.businessFlowState.site}/${account.businessFlowState.mode}${retainedText}`;
 }
 
 type AccountCopyField = "email" | "password" | "proofMailboxAddress";
@@ -580,6 +622,7 @@ export function AccountsView({
   onExtractorHistoryQueryChange,
   onRefreshExtractorHistory,
   onOpenMailbox,
+  onStartBusinessFlow,
   onOpenMailboxSettings,
   onOpenStandaloneMailboxWorkspace,
 }: {
@@ -641,6 +684,7 @@ export function AccountsView({
   onExtractorHistoryQueryChange: (value: AccountExtractorHistoryQuery) => void;
   onRefreshExtractorHistory: () => Promise<void>;
   onOpenMailbox: (accountId: number) => void;
+  onStartBusinessFlow: (accountId: number, site: AccountBusinessFlowSite, mode: AccountBusinessFlowMode) => Promise<void>;
   onOpenMailboxSettings: () => void;
   onOpenStandaloneMailboxWorkspace: () => void;
 }) {
@@ -692,6 +736,13 @@ export function AccountsView({
   const extractorActionTimerRef = useRef<number | null>(null);
   const [extractorActionCooldown, setExtractorActionCooldown] = useState<"start" | "cancel" | null>(null);
   const [extractorActionPending, setExtractorActionPending] = useState<"start" | "cancel" | null>(null);
+  const [businessFlowLauncherKey, setBusinessFlowLauncherKey] = useState<string | null>(null);
+  const [businessFlowPendingKey, setBusinessFlowPendingKey] = useState<string | null>(null);
+  const [businessFlowMode, setBusinessFlowMode] = useState<AccountBusinessFlowMode>(() => {
+    if (typeof window === "undefined") return "headless";
+    const rawValue = window.localStorage.getItem(ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY);
+    return rawValue === "headed" || rawValue === "fingerprint" ? rawValue : "headless";
+  });
   const [desktopToolsCollapsed, setDesktopToolsCollapsed] = useState(() => {
     if (typeof initialDesktopToolsCollapsed === "boolean") {
       return initialDesktopToolsCollapsed;
@@ -748,6 +799,28 @@ export function AccountsView({
   useEffect(() => {
     setExtractorMaxWaitInput(String(extractorRunDraft.maxWaitSec));
   }, [extractorRunDraft.maxWaitSec]);
+
+  const businessFlowModeGuardAccount = useMemo(
+    () => accounts.rows.find((row) => row.businessFlowAvailability) || null,
+    [accounts.rows],
+  );
+
+  useEffect(() => {
+    if (!businessFlowModeGuardAccount) return;
+    const nextMode = clampBusinessFlowMode(businessFlowMode, businessFlowModeGuardAccount);
+    if (nextMode !== businessFlowMode) {
+      setBusinessFlowMode(nextMode);
+    }
+  }, [businessFlowMode, businessFlowModeGuardAccount]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY, businessFlowMode);
+    } catch {
+      // ignore storage failures
+    }
+  }, [businessFlowMode]);
 
   const queueCopyFeedbackReset = () => {
     if (copyFeedbackResetTimerRef.current != null) {
@@ -940,6 +1013,18 @@ export function AccountsView({
     }
   };
 
+  const handleStartBusinessFlowClick = async (account: AccountRecord, site: AccountBusinessFlowSite) => {
+    const effectiveMode = clampBusinessFlowMode(businessFlowMode, account);
+    const pendingKey = `${account.id}:${site}`;
+    try {
+      setBusinessFlowPendingKey(pendingKey);
+      await onStartBusinessFlow(account.id, site, effectiveMode);
+      setBusinessFlowLauncherKey(null);
+    } finally {
+      setBusinessFlowPendingKey((current) => (current === pendingKey ? null : current));
+    }
+  };
+
   const openSessionProxyDialog = (account: AccountRecord) => {
     setSessionProxyAccountId(account.id);
     setSessionProxyActionError(null);
@@ -1086,7 +1171,7 @@ export function AccountsView({
       ? "提号中…"
       : "开始提号 + 自动 Bootstrap";
 
-  const renderAccountActions = (row: AccountRecord) => {
+  const renderAccountActions = (row: AccountRecord, surface: "mobile" | "desktop") => {
     const connectDisabled = resolveConnectButtonDisabled(row, {
       graphSettingsConfigured,
       batchBusy,
@@ -1094,6 +1179,20 @@ export function AccountsView({
       connectingAccountIds,
     });
     const connectLabel = `对 ${row.microsoftEmail} ${getConnectActionLabel(row, connectingAccountIds.includes(row.id))}`;
+    const launcherKey = `${surface}:${row.id}`;
+    const effectiveBusinessFlowMode = clampBusinessFlowMode(businessFlowMode, row);
+    const businessFlowRunning = row.businessFlowState?.status === "starting" || row.businessFlowState?.status === "running";
+    const activeBusinessFlowKey = row.businessFlowState ? `${row.id}:${row.businessFlowState.site}` : null;
+    const pendingForThisRow = businessFlowPendingKey?.startsWith(`${row.id}:`) ?? false;
+    const businessFlowActionDisabled = batchBusy || connectBusy || pendingForThisRow || businessFlowRunning;
+    const selectedModeReason =
+      effectiveBusinessFlowMode !== businessFlowMode
+        ? getBusinessFlowModeDisabledReason(businessFlowMode, row)
+        : getBusinessFlowModeDisabledReason(effectiveBusinessFlowMode, row);
+    const headlessOnlyReason =
+      !row.businessFlowAvailability.deAvailable
+        ? row.businessFlowAvailability.fingerprintReason || row.businessFlowAvailability.headedReason
+        : null;
 
     return (
       <div className="flex flex-wrap items-center justify-end gap-1">
@@ -1118,11 +1217,11 @@ export function AccountsView({
           <IconActionButton
             label={`恢复 ${row.microsoftEmail} 可用`}
             icon={<RotateCcw className="size-4" aria-hidden="true" />}
-            onClick={() => void handleRestoreAvailability(row)}
-            variant="secondary"
-            size="compact"
-            className="size-7 rounded-lg"
-          />
+          onClick={() => void handleRestoreAvailability(row)}
+          variant="secondary"
+          size="compact"
+          className="size-7 rounded-lg"
+        />
         ) : (
           <IconActionButton
             label={`标记 ${row.microsoftEmail} 不可用`}
@@ -1141,6 +1240,102 @@ export function AccountsView({
           size="compact"
           className="size-7 rounded-lg"
         />
+        <Popover
+          open={businessFlowLauncherKey === launcherKey}
+          onOpenChange={(open) => setBusinessFlowLauncherKey((current) => (open ? launcherKey : current === launcherKey ? null : current))}
+        >
+          <PopoverAnchor className="inline-flex">
+            <button
+              type="button"
+              className={cn(buttonVariants({ variant: "outline", size: "icon" }), "size-7 shrink-0 rounded-lg")}
+              aria-label={`打开 ${row.microsoftEmail} 的业务流工具`}
+              aria-haspopup="dialog"
+              aria-expanded={businessFlowLauncherKey === launcherKey}
+              onClick={() => setBusinessFlowLauncherKey((current) => (current === launcherKey ? null : launcherKey))}
+            >
+              <SlidersHorizontal className="size-4" aria-hidden="true" />
+            </button>
+          </PopoverAnchor>
+          <PopoverContent align="end" className="w-[22rem] p-0">
+            <div className="space-y-4 p-4">
+              <div className="space-y-1">
+                <div className="text-sm font-semibold text-white">单账号业务流</div>
+                <div className="truncate text-xs text-slate-400">{row.microsoftEmail}</div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">模式</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {ACCOUNT_BUSINESS_FLOW_MODE_OPTIONS.map((option) => {
+                    const disabledReason = getBusinessFlowModeDisabledReason(option.value, row);
+                    const selected = effectiveBusinessFlowMode === option.value;
+                    return (
+                      <Button
+                        key={option.value}
+                        type="button"
+                        size="sm"
+                        variant={selected ? "default" : "outline"}
+                        disabled={Boolean(disabledReason)}
+                        onClick={() => setBusinessFlowMode(option.value)}
+                        className="h-auto min-h-10 rounded-xl px-3 py-2 text-xs"
+                      >
+                        {option.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-2 text-xs leading-5 text-slate-300">
+                  {ACCOUNT_BUSINESS_FLOW_MODE_OPTIONS.find((option) => option.value === effectiveBusinessFlowMode)?.description}
+                  {selectedModeReason || headlessOnlyReason ? (
+                    <div className="mt-1 text-amber-200">{selectedModeReason || headlessOnlyReason}</div>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">业务流</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {ACCOUNT_BUSINESS_FLOW_SITE_OPTIONS.map((option) => {
+                    const pending = businessFlowPendingKey === `${row.id}:${option.value}`;
+                    const currentState = row.businessFlowState?.site === option.value ? row.businessFlowState : null;
+                    return (
+                      <Button
+                        key={option.value}
+                        type="button"
+                        size="sm"
+                        variant={currentState ? "secondary" : "outline"}
+                        disabled={businessFlowActionDisabled}
+                        onClick={() => void handleStartBusinessFlowClick(row, option.value)}
+                        className="h-auto min-h-10 rounded-xl px-3 py-2 text-xs"
+                      >
+                        {pending ? "启动中…" : currentState?.status === "running" || currentState?.status === "starting" ? "运行中…" : option.label}
+                      </Button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-white/8 bg-[#0b1423]/80 px-3 py-2 text-xs leading-5 text-slate-300">
+                <div className="flex items-center gap-2 text-slate-100">
+                  <StatusBadge status={row.businessFlowState?.status || "idle"} />
+                  <span className="truncate">{describeBusinessFlowState(row)}</span>
+                </div>
+                {row.businessFlowState?.browserRetained ? (
+                  <div className="mt-1 text-emerald-200">浏览器已保留，可继续接管。</div>
+                ) : null}
+                {row.businessFlowState?.status === "failed" && row.businessFlowState.lastError ? (
+                  <div className="mt-1 text-rose-200">{row.businessFlowState.lastError}</div>
+                ) : null}
+                {!row.businessFlowState ? (
+                  <div className="mt-1 text-slate-400">当前选择 {effectiveBusinessFlowMode}，点击上方站点即可启动。</div>
+                ) : null}
+                {activeBusinessFlowKey && businessFlowActionDisabled && !businessFlowPendingKey ? (
+                  <div className="mt-1 text-slate-400">已有业务流在运行，完成后才能重新启动。</div>
+                ) : null}
+              </div>
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
     );
   };
@@ -1741,7 +1936,7 @@ export function AccountsView({
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start justify-between gap-3">
                             <div className="min-w-0 flex-1">{renderAccountIdentityCell(row)}</div>
-                            <div className="shrink-0">{renderAccountActions(row)}</div>
+                            <div className="shrink-0">{renderAccountActions(row, "mobile")}</div>
                           </div>
                           <div className="mt-4 grid gap-4 sm:grid-cols-2">
                             <div className="min-w-0">{renderSessionCell(row, "right")}</div>
@@ -1876,7 +2071,7 @@ export function AccountsView({
                           <TableCell className="py-2 align-top">{renderDesktopStatusCell(row)}</TableCell>
                           <TableCell className="py-2 align-top">{renderDesktopTimeCell(row)}</TableCell>
                           <TableCell className="py-2 align-top text-right">
-                            <div className="ml-auto flex w-max flex-nowrap justify-end">{renderAccountActions(row)}</div>
+                            <div className="ml-auto flex w-max flex-nowrap justify-end">{renderAccountActions(row, "desktop")}</div>
                           </TableCell>
                         </TableRow>
                       ))}
