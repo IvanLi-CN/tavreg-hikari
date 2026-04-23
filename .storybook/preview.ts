@@ -36,6 +36,13 @@ const customViewports = {
       height: "812px",
     },
   },
+  keysTablet700: {
+    name: "Keys Tablet 700",
+    styles: {
+      width: "700px",
+      height: "1180px",
+    },
+  },
 };
 
 const preview: Preview = {

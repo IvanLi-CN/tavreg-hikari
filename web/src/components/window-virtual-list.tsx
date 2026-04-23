@@ -18,7 +18,7 @@ export function WindowVirtualList<T>({
   getKey,
   estimateSize,
   renderItem,
-  compactQuery = "(max-width: 767px)",
+  compactQuery = "(max-width: 639px)",
   overscan = 6,
   className,
   measureItems = false,

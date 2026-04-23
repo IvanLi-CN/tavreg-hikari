@@ -100,6 +100,7 @@
 - 三套列表使用窗口虚拟化，仅渲染视口附近行。
 - 纵向滚动继续依赖 `window`；列表内只允许横向溢出滚动。
 - 桌面端使用“静态列头 + 虚拟化行层”；移动端继续显示卡片化记录，但也走同一虚拟化数据窗口。
+- 三套 keys 列表统一在 `sm` 以下才切换为卡片布局；`sm` 及以上继续优先保留表格布局。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -173,6 +174,12 @@
   state: `chatgpt virtualized large dataset`
   evidence_note: 验证 ChatGPT keys 支持大页尺寸与整页窗口虚拟列表。
   ![ChatGPT Keys 5000 条虚拟列表](./assets/chatgpt-virtualized-5000-rows.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/GrokApiKeysView/TabletTableLayout`
+  state: `grok keeps table layout above sm`
+  evidence_note: 验证 Grok keys 在 700px 视口仍保持表格布局，只在 `sm` 以下切到卡片。
+  ![Grok Keys 700px 仍保持表格布局](./assets/grok-tablet-table-layout.png)
 
 ## 方案概述（Approach）
 

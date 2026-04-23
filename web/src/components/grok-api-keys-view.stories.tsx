@@ -177,6 +177,21 @@ export const ActionsOnly: Story = {
   render: () => <StorySurface initialSelectedIds={[11]} />,
 };
 
+export const TabletTableLayout: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysTablet700", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
+    await expect(canvas.getByText("邮箱")).toBeInTheDocument();
+    await expect(canvas.getByText("SSO")).toBeInTheDocument();
+  },
+};
+
 export const CopyActionPlay: Story = {
   args: baseArgs,
   render: () => <StorySurface />,

@@ -174,7 +174,7 @@ export function ChatGptCredentialsView({
         <CardContent className={cn("space-y-4", selectedIds.length > 0 && "pb-28")}>
           {headerSlot ? <div>{headerSlot}</div> : null}
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2">
             <FilterField label="搜索">
               <Input
                 name="chatgpt-key-query"
@@ -208,7 +208,7 @@ export function ChatGptCredentialsView({
           </div>
 
           {credentials.rows.length > 0 ? (
-            <label className="flex items-center gap-3 text-sm text-slate-300 md:hidden">
+            <label className="flex items-center gap-3 text-sm text-slate-300 sm:hidden">
               <Checkbox
                 checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
                 onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
@@ -225,7 +225,7 @@ export function ChatGptCredentialsView({
             </div>
           ) : (
             <>
-              <div className="md:hidden">
+              <div className="sm:hidden">
                 <WindowVirtualList
                   items={credentials.rows}
                   getKey={(credential) => credential.id}
@@ -282,7 +282,7 @@ export function ChatGptCredentialsView({
                 />
               </div>
 
-              <div className="hidden md:block">
+              <div className="hidden sm:block">
                 <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                   <div className={cn(desktopGridClass, "border-b border-white/8 bg-white/[0.03] text-xs font-medium uppercase tracking-[0.14em] text-slate-400")}>
                     <div className="px-4 py-3">

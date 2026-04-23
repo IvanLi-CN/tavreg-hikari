@@ -16,7 +16,7 @@ import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const desktopGridClass =
-  "grid min-w-[980px] grid-cols-[3rem_12rem_9rem_15rem_7rem_6rem_8rem_8rem]";
+  "grid min-w-[900px] grid-cols-[3rem_minmax(11rem,1.1fr)_minmax(8rem,0.92fr)_minmax(14rem,1.55fr)_minmax(6.5rem,0.72fr)_6rem_8rem_8rem]";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -220,7 +220,7 @@ export function GrokApiKeysView({
         <CardContent className={cn("space-y-4", selectedIds.length > 0 && "pb-28")}>
           {headerSlot ? <div>{headerSlot}</div> : null}
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2">
             <FilterField label="搜索">
               <Input
                 name="grok-api-key-query"
@@ -245,7 +245,7 @@ export function GrokApiKeysView({
           </div>
 
           {apiKeys.rows.length > 0 ? (
-            <label className="flex items-center gap-3 text-sm text-slate-300 xl:hidden">
+            <label className="flex items-center gap-3 text-sm text-slate-300 sm:hidden">
               <Checkbox
                 checked={allCurrentPageSelected ? true : selectedOnPage > 0 ? "indeterminate" : false}
                 onCheckedChange={(checked) => onTogglePageSelection(checked === true)}
@@ -262,7 +262,7 @@ export function GrokApiKeysView({
             </div>
           ) : (
             <>
-              <div className="xl:hidden">
+              <div className="sm:hidden">
                 <WindowVirtualList
                   items={apiKeys.rows}
                   getKey={(row) => row.id}
@@ -334,7 +334,7 @@ export function GrokApiKeysView({
                 />
               </div>
 
-              <div className="hidden xl:block">
+              <div className="hidden sm:block">
                 <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                   <div className={cn(desktopGridClass, "border-b border-white/8 bg-white/[0.03] text-xs font-medium uppercase tracking-[0.14em] text-slate-400")}>
                     <div className="px-3 py-3">
@@ -358,7 +358,7 @@ export function GrokApiKeysView({
                   </div>
                   <WindowVirtualList
                     items={apiKeys.rows}
-                    className="min-w-[980px]"
+                    className="min-w-[900px]"
                     compactQuery="(max-width: 0px)"
                     getKey={(row) => row.id}
                     estimateSize={() => 63}
