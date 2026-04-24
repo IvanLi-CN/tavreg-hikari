@@ -19,6 +19,7 @@ import {
 } from "./proxy-check-coordinator.js";
 import {
   AppDatabase,
+  type IntegrationApiKeyRecord,
   normalizeAccountExtractorAccountType,
   normalizeJobMaxAttempts,
   type AccountExtractorProvider,
@@ -31,6 +32,13 @@ import {
   type MicrosoftAccountRecord,
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
+import {
+  authenticateTrustedForwardAuth,
+  buildServerAuthConfig,
+  classifyRequestPath,
+  extractIntegrationApiKey,
+  resolveClientIp,
+} from "./auth-gate.js";
 import {
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
@@ -71,6 +79,13 @@ import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
 import {
+  IntegrationApiKeyStateError,
+  buildIntegrationApiKeyPrefix,
+  generateIntegrationApiKeySecret,
+  hashIntegrationApiKey,
+} from "./integration-api-keys.js";
+import { handleIntegrationApiRequest } from "./integration-api.js";
+import {
   assertMicrosoftGraphSettings,
   buildMicrosoftAuthorizeUrl,
   createMicrosoftOauthState,
@@ -88,6 +103,7 @@ import {
   toMailboxFailureStatus,
   type MicrosoftGraphSettingsInput,
 } from "./microsoft-mail.js";
+import { parseMailboxVerificationCodes } from "./verification-codes.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -467,14 +483,39 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
     bodyPreview: row.bodyPreview,
     webLink: row.webLink,
     updatedAt: row.updatedAt,
+    parsedVerificationCodes: parseMailboxVerificationCodes({
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+    }),
   };
 }
 
 function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<string, unknown> {
   return {
     ...serializeMailboxMessageSummary(row),
+    parsedVerificationCodes: parseMailboxVerificationCodes({
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+      bodyContent: row.bodyContent,
+    }),
     bodyContent: row.bodyContent,
     createdAt: row.createdAt,
+  };
+}
+
+function serializeIntegrationApiKey(row: IntegrationApiKeyRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    label: row.label,
+    notes: row.notes,
+    keyPrefix: row.keyPrefix,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    rotatedAt: row.rotatedAt,
+    revokedAt: row.revokedAt,
+    lastUsedAt: row.lastUsedAt,
+    lastUsedIp: row.lastUsedIp,
   };
 }
 
@@ -1251,6 +1292,7 @@ async function main(): Promise<void> {
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);
   const runtimeBinding = getRuntimeServerBinding(defaults);
+  const authConfig = buildServerAuthConfig(process.env);
   const clients = new Set<any>();
   const accountEventSubscribers = new Set<(event: ServerEvent) => void>();
   const proxyEventSubscribers = new Set<(event: ServerEvent) => void>();
@@ -1470,9 +1512,13 @@ async function main(): Promise<void> {
     async fetch(req, server) {
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const authScope = classifyRequestPath(pathname);
+      const clientIp = resolveClientIp(req, authConfig, server.requestIP(req)?.address ?? null);
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
+      const apiAccessKeyRotateMatch = pathname.match(/^\/api\/settings\/api-access\/keys\/(\d+)\/rotate$/);
+      const apiAccessKeyRevokeMatch = pathname.match(/^\/api\/settings\/api-access\/keys\/(\d+)\/revoke$/);
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
       const mailboxDetailMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)$/);
       const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
@@ -1480,6 +1526,44 @@ async function main(): Promise<void> {
       const mailboxMessageDetailMatch = pathname.match(/^\/api\/microsoft-mail\/messages\/(\d+)$/);
 
       try {
+        if (authScope === "internal") {
+          const trustedForwardAuth = authenticateTrustedForwardAuth(req, authConfig);
+          if (!trustedForwardAuth.ok) {
+            if (trustedForwardAuth.reason === "misconfigured_secret") {
+              return badRequest("forward auth secret not configured", 503);
+            }
+            if (trustedForwardAuth.reason === "missing_identity") {
+              return badRequest("forward auth identity required", 401);
+            }
+            return badRequest("trusted forward auth required", 401);
+          }
+        }
+
+        if (authScope === "integration") {
+          const secret = extractIntegrationApiKey(req);
+          if (!secret) {
+            return badRequest("integration api key required", 401);
+          }
+          const integrationKey = db.authenticateIntegrationApiKey(secret, clientIp);
+          if (!integrationKey) {
+            return badRequest("invalid integration api key", 401);
+          }
+          if (integrationKey.status !== "active") {
+            return badRequest("integration api key revoked", 403);
+          }
+          const integrationResponse = await handleIntegrationApiRequest({
+            req,
+            pathname,
+            url,
+            db,
+            readSettings,
+          });
+          if (integrationResponse) {
+            return integrationResponse;
+          }
+          return badRequest(`integration route not found: ${pathname}`, 404);
+        }
+
         if (pathname === "/api/events/ws") {
           if (server.upgrade(req)) {
             return new Response(null);
@@ -2187,6 +2271,88 @@ async function main(): Promise<void> {
           ok: true,
           settings: serializeMicrosoftGraphSettings(readSettings()),
         });
+      }
+
+      if (pathname === "/api/settings/api-access/keys" && req.method === "GET") {
+        return json({
+          ok: true,
+          rows: db.listIntegrationApiKeys().map((row) => serializeIntegrationApiKey(row)),
+        });
+      }
+
+      if (pathname === "/api/settings/api-access/keys" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { label?: unknown; notes?: unknown } | null;
+        const label = typeof body?.label === "string" ? body.label.trim() : "";
+        const notes = typeof body?.notes === "string" ? body.notes : null;
+        if (!label) {
+          return badRequest("label is required");
+        }
+        const plainTextKey = generateIntegrationApiKeySecret();
+        const record = db.createIntegrationApiKey({
+          label,
+          notes,
+          keyHash: hashIntegrationApiKey(plainTextKey),
+          keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+        });
+        return json({
+          ok: true,
+          record: serializeIntegrationApiKey(record),
+          plainTextKey,
+        });
+      }
+
+      if (apiAccessKeyRotateMatch && req.method === "POST") {
+        const keyId = Number.parseInt(apiAccessKeyRotateMatch[1] || "", 10);
+        if (!Number.isInteger(keyId) || keyId < 1) {
+          return badRequest("invalid api access key id");
+        }
+        const body = (await req.json().catch(() => null)) as { label?: unknown; notes?: unknown } | null;
+        const nextNotes =
+          body && Object.prototype.hasOwnProperty.call(body, "notes")
+            ? typeof body.notes === "string"
+              ? body.notes
+              : body.notes === null
+                ? null
+                : undefined
+            : undefined;
+        const plainTextKey = generateIntegrationApiKeySecret();
+        try {
+          const record = db.rotateIntegrationApiKey(keyId, {
+            label: typeof body?.label === "string" ? body.label : undefined,
+            notes: nextNotes,
+            keyHash: hashIntegrationApiKey(plainTextKey),
+            keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+          });
+          return json({
+            ok: true,
+            record: serializeIntegrationApiKey(record),
+            plainTextKey,
+          });
+        } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
+          return badRequest(error instanceof Error ? error.message : String(error), 404);
+        }
+      }
+
+      if (apiAccessKeyRevokeMatch && req.method === "POST") {
+        const keyId = Number.parseInt(apiAccessKeyRevokeMatch[1] || "", 10);
+        if (!Number.isInteger(keyId) || keyId < 1) {
+          return badRequest("invalid api access key id");
+        }
+        try {
+          const record = db.revokeIntegrationApiKey(keyId);
+          return json({
+            ok: true,
+            record: serializeIntegrationApiKey(record),
+          });
+        } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
+          return badRequest(error instanceof Error ? error.message : String(error), 404);
+        }
       }
 
       if (pathname === "/api/microsoft-mail/settings" && req.method === "POST") {

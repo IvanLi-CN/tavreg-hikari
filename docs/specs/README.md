@@ -36,3 +36,4 @@
 | zxuvb | Microsoft proof 补邮箱分支修复与多语言诊断加固 | 已完成 | `zxuvb-microsoft-proof-surface-locale-hardening/SPEC.md` | 2026-04-18 | 101 热修上线并完成 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归；zh-TW `/proofs/Add` auto-provision 已恢复 |
 | vhvds | ChatGPT 补号到 codex-vibe-monitor 分组 | 已完成 | `vhvds-chatgpt-upstream-account-supplement/SPEC.md` | 2026-04-18 | 自动补号 + Keys 批量补号 + 设置入口收敛到 Keys > ChatGPT |
 | 8qyzh | Web 管理台导航收敛与 Microsoft 信箱抽屉整合 | 已完成 | `8qyzh-nav-keys-mailbox-consolidation/SPEC.md` | 2026-04-19 | PR #54 merge-ready；顶栏五项、站内 Keys 子视图、Microsoft drawer、工具列记忆与视觉证据已收口 |
+| 3aqn8 | HTTP 外部接入与鉴权收口（v1） | active | `3aqn8-http-integration-auth-v1/SPEC.md` | 2026-04-24 | Forward Auth、integration v1、API Access UI 与服务接入快照进行中 |
