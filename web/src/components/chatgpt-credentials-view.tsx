@@ -230,6 +230,7 @@ export function ChatGptCredentialsView({
                   items={credentials.rows}
                   getKey={(credential) => credential.id}
                   estimateSize={() => 220}
+                  measureItems
                   renderItem={(credential) => (
                     <article key={credential.id} className="px-0 pb-3">
                       <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">

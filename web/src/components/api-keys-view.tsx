@@ -277,6 +277,7 @@ export function ApiKeysView({
                   items={apiKeys.rows}
                   getKey={(row) => row.id}
                   estimateSize={() => 232}
+                  measureItems
                   renderItem={(row) => (
                     <article key={row.id} className="px-0 pb-3">
                       <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
