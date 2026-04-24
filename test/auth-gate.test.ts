@@ -152,8 +152,21 @@ describe("auth gate helpers", () => {
     expect(resolveClientIp(proxiedReq, config, "127.0.0.1")).toBe("198.51.100.7");
   });
 
-  test("uses forwarded client ip for trusted proxy peers even without the auth secret", () => {
+  test("does not trust loopback forwarded client ip by default without the auth secret", () => {
     const config = buildServerAuthConfig({});
+    const proxiedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
+      headers: {
+        "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
+      },
+    });
+    expect(resolveClientIp(proxiedReq, config, "127.0.0.1")).toBe("127.0.0.1");
+    expect(resolveClientIp(proxiedReq, config, "::ffff:127.0.0.1")).toBe("127.0.0.1");
+  });
+
+  test("uses forwarded client ip for explicitly trusted proxy peers even without the auth secret", () => {
+    const config = buildServerAuthConfig({
+      TRUSTED_PROXY_CIDRS: "127.0.0.0/8,::1/128",
+    } as NodeJS.ProcessEnv);
     const proxiedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
       headers: {
         "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
@@ -164,7 +177,9 @@ describe("auth gate helpers", () => {
   });
 
   test("ignores malformed forwarded client ip tokens before using audit data", () => {
-    const config = buildServerAuthConfig({});
+    const config = buildServerAuthConfig({
+      TRUSTED_PROXY_CIDRS: "127.0.0.0/8",
+    } as NodeJS.ProcessEnv);
     const proxiedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
       headers: {
         "X-Forwarded-For": "unknown, 198.51.100.7",

@@ -49,9 +49,7 @@ function normalizeIpAddress(value: string | null | undefined): string | null {
 
 function parseTrustedProxyCidrs(value: string | undefined): string[] {
   const normalized = String(value || "").trim();
-  if (!normalized) {
-    return ["127.0.0.0/8", "::1/128"];
-  }
+  if (!normalized) return [];
   return normalized
     .split(",")
     .map((item) => item.trim())

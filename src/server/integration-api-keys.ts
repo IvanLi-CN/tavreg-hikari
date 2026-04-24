@@ -2,6 +2,20 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 const INTEGRATION_API_KEY_PREFIX = "thki_";
 
+export class IntegrationApiKeyNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IntegrationApiKeyNotFoundError";
+  }
+}
+
+export class IntegrationApiKeyStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IntegrationApiKeyStateError";
+  }
+}
+
 export function generateIntegrationApiKeySecret(): string {
   return `${INTEGRATION_API_KEY_PREFIX}${randomBytes(24).toString("base64url")}`;
 }

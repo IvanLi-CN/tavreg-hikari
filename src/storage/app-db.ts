@@ -3,6 +3,8 @@ import { access, mkdir, readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
+  IntegrationApiKeyNotFoundError,
+  IntegrationApiKeyStateError,
   buildIntegrationApiKeyPrefix,
   compareIntegrationApiKeyHash,
 } from "../server/integration-api-keys.js";
@@ -2374,10 +2376,10 @@ export class AppDatabase {
   ): IntegrationApiKeyRecord {
     const current = this.getIntegrationApiKey(keyId);
     if (!current) {
-      throw new Error(`integration api key not found: ${keyId}`);
+      throw new IntegrationApiKeyNotFoundError(`integration api key not found: ${keyId}`);
     }
     if (current.status !== "active") {
-      throw new Error(`integration api key is not rotatable: ${current.status}`);
+      throw new IntegrationApiKeyStateError(`integration api key is not rotatable: ${current.status}`);
     }
     const now = nowIso();
     const label = input.label?.trim() || current.label;
@@ -2409,7 +2411,7 @@ export class AppDatabase {
   revokeIntegrationApiKey(keyId: number): IntegrationApiKeyRecord {
     const current = this.getIntegrationApiKey(keyId);
     if (!current) {
-      throw new Error(`integration api key not found: ${keyId}`);
+      throw new IntegrationApiKeyNotFoundError(`integration api key not found: ${keyId}`);
     }
     const now = nowIso();
     this.db

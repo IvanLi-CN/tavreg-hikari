@@ -78,7 +78,12 @@ import { GrokJobScheduler } from "./grok-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
-import { generateIntegrationApiKeySecret, hashIntegrationApiKey, buildIntegrationApiKeyPrefix } from "./integration-api-keys.js";
+import {
+  IntegrationApiKeyStateError,
+  buildIntegrationApiKeyPrefix,
+  generateIntegrationApiKeySecret,
+  hashIntegrationApiKey,
+} from "./integration-api-keys.js";
 import { handleIntegrationApiRequest } from "./integration-api.js";
 import {
   assertMicrosoftGraphSettings,
@@ -2324,6 +2329,9 @@ async function main(): Promise<void> {
             plainTextKey,
           });
         } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
           return badRequest(error instanceof Error ? error.message : String(error), 404);
         }
       }
@@ -2340,6 +2348,9 @@ async function main(): Promise<void> {
             record: serializeIntegrationApiKey(record),
           });
         } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
           return badRequest(error instanceof Error ? error.message : String(error), 404);
         }
       }
