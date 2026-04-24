@@ -3577,6 +3577,58 @@ describe("integration api access", () => {
     appDb.close();
   });
 
+  test("rotating integration api keys resets last-used audit fields", async () => {
+    const { appDb } = await createTempDb();
+    const plainTextKey = "thki_demo_secret_reset_usage";
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-reset",
+      notes: "with usage",
+      keyHash: hashIntegrationApiKey(plainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+    });
+
+    const authed = appDb.authenticateIntegrationApiKey(plainTextKey, "203.0.113.9");
+    expect(authed).toMatchObject({
+      id: created.id,
+      lastUsedIp: "203.0.113.9",
+    });
+    expect(authed?.lastUsedAt).toBeTruthy();
+
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      keyHash: hashIntegrationApiKey("thki_demo_secret_after_reset"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_after_reset"),
+    });
+
+    expect(rotated.lastUsedAt).toBeNull();
+    expect(rotated.lastUsedIp).toBeNull();
+
+    appDb.close();
+  });
+
+  test("revoked integration api keys cannot be rotated back to active", async () => {
+    const { appDb } = await createTempDb();
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-revoked",
+      keyHash: hashIntegrationApiKey("thki_demo_secret_revoked"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_revoked"),
+    });
+
+    appDb.revokeIntegrationApiKey(created.id);
+
+    expect(() =>
+      appDb.rotateIntegrationApiKey(created.id, {
+        keyHash: hashIntegrationApiKey("thki_demo_secret_revoked_new"),
+        keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_revoked_new"),
+      }),
+    ).toThrow("integration api key is not rotatable: revoked");
+
+    expect(appDb.getIntegrationApiKey(created.id)).toMatchObject({
+      status: "revoked",
+    });
+
+    appDb.close();
+  });
+
   test("reassigning a duplicate api key clears stale service-access snapshots from the previous owner", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([

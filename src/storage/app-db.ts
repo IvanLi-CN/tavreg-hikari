@@ -2376,6 +2376,9 @@ export class AppDatabase {
     if (!current) {
       throw new Error(`integration api key not found: ${keyId}`);
     }
+    if (current.status !== "active") {
+      throw new Error(`integration api key is not rotatable: ${current.status}`);
+    }
     const now = nowIso();
     const label = input.label?.trim() || current.label;
     const notes = input.notes === undefined ? current.notes : input.notes?.trim() || null;
@@ -2394,7 +2397,9 @@ export class AppDatabase {
             status = 'active',
             updated_at = ?,
             rotated_at = ?,
-            revoked_at = NULL
+            revoked_at = NULL,
+            last_used_at = NULL,
+            last_used_ip = NULL
         WHERE id = ?
       `)
       .run(label, notes, keyHash, keyPrefix, now, now, keyId);
