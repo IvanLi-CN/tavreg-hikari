@@ -37,6 +37,8 @@
   - `FORWARD_AUTH_SECRET_HEADER`
 - 共享密钥通过 `.env.local` 提供：
   - `FORWARD_AUTH_SECRET`
+- 若 integration 流量经过本机/内网受信任反向代理，但该代理不会额外附带 `X-Forwarded-Auth-Secret` 到 integration 请求，可通过 `.env.local` 声明受信任代理网段：
+  - `TRUSTED_PROXY_CIDRS`（默认 `127.0.0.0/8,::1/128`）
 - 若未配置 `FORWARD_AUTH_SECRET`，内部入口会 fail closed 并返回 `503`，避免直连请求伪造 Forward Auth 头绕过鉴权。
 - `WEB_HOST` 只控制监听地址，不再等价于“localhost 免鉴权”；即使监听在 `127.0.0.1`，内部入口仍要求 Forward Auth。
 - 外部实例接入 `/api/integration/v1/*` 时，可使用：

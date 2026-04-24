@@ -1,3 +1,5 @@
+import { BlockList, isIP } from "node:net";
+
 export type ServerAuthScope = "public" | "internal" | "integration";
 
 export interface ServerAuthConfig {
@@ -5,6 +7,8 @@ export interface ServerAuthConfig {
   forwardedEmailHeader: string;
   forwardedSecretHeader: string;
   forwardedSecret: string | null;
+  trustedProxyCidrs: string[];
+  trustedProxyList: BlockList;
 }
 
 export interface ForwardedIdentity {
@@ -33,6 +37,55 @@ function readTrimmedHeader(headers: Headers, name: string): string | null {
   return value?.trim() ? value.trim() : null;
 }
 
+function normalizeIpAddress(value: string | null | undefined): string | null {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return null;
+  const zoneIndex = trimmed.indexOf("%");
+  const withoutZone = zoneIndex >= 0 ? trimmed.slice(0, zoneIndex) : trimmed;
+  const mappedV4Match = withoutZone.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  const normalized = mappedV4Match?.[1] || withoutZone;
+  return isIP(normalized) ? normalized : null;
+}
+
+function parseTrustedProxyCidrs(value: string | undefined): string[] {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return ["127.0.0.0/8", "::1/128"];
+  }
+  return normalized
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function buildTrustedProxyList(cidrs: string[]): BlockList {
+  const list = new BlockList();
+  for (const entry of cidrs) {
+    const match = entry.match(/^(.+)\/(\d{1,3})$/);
+    if (match) {
+      const address = normalizeIpAddress(match[1]);
+      const prefix = Number.parseInt(match[2] || "", 10);
+      if (!address || !Number.isInteger(prefix) || prefix < 0) {
+        continue;
+      }
+      try {
+        list.addSubnet(address, prefix, isIP(address) === 6 ? "ipv6" : "ipv4");
+      } catch {
+        continue;
+      }
+      continue;
+    }
+    const address = normalizeIpAddress(entry);
+    if (!address) continue;
+    try {
+      list.addAddress(address, isIP(address) === 6 ? "ipv6" : "ipv4");
+    } catch {
+      continue;
+    }
+  }
+  return list;
+}
+
 function readForwardedClientIp(req: Request): string | null {
   const forwardedFor = readTrimmedHeader(req.headers, "x-forwarded-for");
   if (forwardedFor) {
@@ -58,13 +111,24 @@ function hasTrustedForwardedSecret(req: Request, config: ServerAuthConfig): bool
   return Boolean(providedSecret && providedSecret === config.forwardedSecret);
 }
 
+function isTrustedProxyPeer(peerAddress: string | null | undefined, config: ServerAuthConfig): boolean {
+  const normalizedPeerAddress = normalizeIpAddress(peerAddress);
+  if (!normalizedPeerAddress) {
+    return false;
+  }
+  return config.trustedProxyList.check(normalizedPeerAddress, isIP(normalizedPeerAddress) === 6 ? "ipv6" : "ipv4");
+}
+
 export function buildServerAuthConfig(env: NodeJS.ProcessEnv = process.env): ServerAuthConfig {
   const forwardedSecret = String(env.FORWARD_AUTH_SECRET || "").trim();
+  const trustedProxyCidrs = parseTrustedProxyCidrs(env.TRUSTED_PROXY_CIDRS);
   return {
     forwardedUserHeader: normalizeHeaderName(env.FORWARD_AUTH_USER_HEADER, "X-Forwarded-User"),
     forwardedEmailHeader: normalizeHeaderName(env.FORWARD_AUTH_EMAIL_HEADER, "X-Forwarded-Email"),
     forwardedSecretHeader: normalizeHeaderName(env.FORWARD_AUTH_SECRET_HEADER, "X-Forwarded-Auth-Secret"),
     forwardedSecret: forwardedSecret || null,
+    trustedProxyCidrs,
+    trustedProxyList: buildTrustedProxyList(trustedProxyCidrs),
   };
 }
 
@@ -138,12 +202,11 @@ export function resolveClientIp(
     typeof configOrTrustedPeerAddress === "string" || configOrTrustedPeerAddress == null
       ? configOrTrustedPeerAddress
       : trustedPeerAddress;
-  if (config && hasTrustedForwardedSecret(req, config)) {
+  if (config && (hasTrustedForwardedSecret(req, config) || isTrustedProxyPeer(peerAddress, config))) {
     const forwardedIp = readForwardedClientIp(req);
     if (forwardedIp) {
       return forwardedIp;
     }
   }
-  const normalizedPeerAddress = String(peerAddress || "").trim();
-  return normalizedPeerAddress || null;
+  return normalizeIpAddress(peerAddress);
 }

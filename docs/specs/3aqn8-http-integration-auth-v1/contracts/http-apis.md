@@ -21,6 +21,7 @@
   - default forwarded user header: `X-Forwarded-User`
   - default forwarded email header: `X-Forwarded-Email`
   - default trusted proxy secret header: `X-Forwarded-Auth-Secret`
+  - trusted proxy cidr env: `TRUSTED_PROXY_CIDRS` (default `127.0.0.0/8,::1/128`)
   - header names can be overridden by env
   - shared secret env: `FORWARD_AUTH_SECRET`
   - if `FORWARD_AUTH_SECRET` is missing, internal requests fail closed with `503 { error: "forward auth secret not configured" }`
@@ -47,6 +48,7 @@
 - Audit:
   - `lastUsedIp` records the direct peer address by default
   - when a reverse proxy also presents the configured trusted proxy secret header, forwarded client IP headers may be used for audit attribution
+  - trusted proxy peers that match `TRUSTED_PROXY_CIDRS` may also contribute forwarded client IP attribution for integration API audit trails
 
 ### `POST /api/settings/api-access/keys/:id/rotate`
 

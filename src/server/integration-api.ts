@@ -579,14 +579,23 @@ export async function handleIntegrationApiRequest(input: {
     const limit = normalizePage(input.url.searchParams.get("limit"), 50, 100);
     const offset = Math.max(0, Number.parseInt(String(input.url.searchParams.get("offset") || "0"), 10) || 0);
     const payload = input.db.listMailboxMessages(mailboxId, { limit, offset });
+    const hydratedRows = await Promise.all(
+      payload.rows.map((row) =>
+        hydrateMailboxMessageDetail({
+          db: input.db,
+          message: row,
+          readSettings: input.readSettings,
+        }),
+      ),
+    );
     return json({
       ok: true,
       mailbox: serializeMailboxRecord(mailbox),
-      rows: payload.rows.map((row) => serializeMailboxMessageSummary(row)),
+      rows: hydratedRows.map((row) => serializeMailboxMessageSummary(row)),
       limit,
       offset,
       total: payload.total,
-      hasMore: offset + payload.rows.length < payload.total,
+      hasMore: offset + hydratedRows.length < payload.total,
     });
   }
 
