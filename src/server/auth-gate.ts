@@ -3,6 +3,8 @@ export type ServerAuthScope = "public" | "internal" | "integration";
 export interface ServerAuthConfig {
   forwardedUserHeader: string;
   forwardedEmailHeader: string;
+  forwardedSecretHeader: string;
+  forwardedSecret: string | null;
 }
 
 export interface ForwardedIdentity {
@@ -10,6 +12,16 @@ export interface ForwardedIdentity {
   email: string | null;
   principal: string;
 }
+
+export type TrustedForwardAuthResult =
+  | {
+      ok: true;
+      identity: ForwardedIdentity;
+    }
+  | {
+      ok: false;
+      reason: "missing_identity" | "missing_secret" | "invalid_secret" | "misconfigured_secret";
+    };
 
 function normalizeHeaderName(value: string | undefined, fallback: string): string {
   const normalized = String(value || "").trim();
@@ -22,9 +34,12 @@ function readTrimmedHeader(headers: Headers, name: string): string | null {
 }
 
 export function buildServerAuthConfig(env: NodeJS.ProcessEnv = process.env): ServerAuthConfig {
+  const forwardedSecret = String(env.FORWARD_AUTH_SECRET || "").trim();
   return {
     forwardedUserHeader: normalizeHeaderName(env.FORWARD_AUTH_USER_HEADER, "X-Forwarded-User"),
     forwardedEmailHeader: normalizeHeaderName(env.FORWARD_AUTH_EMAIL_HEADER, "X-Forwarded-Email"),
+    forwardedSecretHeader: normalizeHeaderName(env.FORWARD_AUTH_SECRET_HEADER, "X-Forwarded-Auth-Secret"),
+    forwardedSecret: forwardedSecret || null,
   };
 }
 
@@ -49,6 +64,30 @@ export function readForwardedIdentity(req: Request, config: ServerAuthConfig): F
     user,
     email,
     principal,
+  };
+}
+
+export function authenticateTrustedForwardAuth(req: Request, config: ServerAuthConfig): TrustedForwardAuthResult {
+  if (!config.forwardedSecret) {
+    return { ok: false, reason: "misconfigured_secret" };
+  }
+
+  const providedSecret = readTrimmedHeader(req.headers, config.forwardedSecretHeader);
+  if (!providedSecret) {
+    return { ok: false, reason: "missing_secret" };
+  }
+  if (providedSecret !== config.forwardedSecret) {
+    return { ok: false, reason: "invalid_secret" };
+  }
+
+  const identity = readForwardedIdentity(req, config);
+  if (!identity) {
+    return { ok: false, reason: "missing_identity" };
+  }
+
+  return {
+    ok: true,
+    identity,
   };
 }
 

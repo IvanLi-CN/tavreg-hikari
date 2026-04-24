@@ -17,6 +17,17 @@ export interface FinalizeIntegrationApiKeyMutationResult {
   refreshError: Error | null;
 }
 
+export interface ExecuteIntegrationApiKeyMutationInput {
+  mode: "create" | "rotate";
+  mutate: () => Promise<IntegrationApiKeyMutationPayload>;
+  refresh: () => Promise<void>;
+}
+
+export interface ExecuteIntegrationApiKeyMutationResult extends FinalizeIntegrationApiKeyMutationResult {
+  mutationError: Error | null;
+  shouldCloseEditor: boolean;
+}
+
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -41,6 +52,31 @@ export async function finalizeIntegrationApiKeyMutation(
     return {
       revealedSecret,
       refreshError: toError(error),
+    };
+  }
+}
+
+export async function executeIntegrationApiKeyMutation(
+  input: ExecuteIntegrationApiKeyMutationInput,
+): Promise<ExecuteIntegrationApiKeyMutationResult> {
+  try {
+    const payload = await input.mutate();
+    const finalized = await finalizeIntegrationApiKeyMutation({
+      mode: input.mode,
+      payload,
+      refresh: input.refresh,
+    });
+    return {
+      ...finalized,
+      mutationError: null,
+      shouldCloseEditor: true,
+    };
+  } catch (error) {
+    return {
+      revealedSecret: null,
+      refreshError: null,
+      mutationError: toError(error),
+      shouldCloseEditor: false,
     };
   }
 }

@@ -20,7 +20,7 @@ import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
-import { finalizeIntegrationApiKeyMutation } from "@/lib/api-access";
+import { executeIntegrationApiKeyMutation } from "@/lib/api-access";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -965,23 +965,29 @@ export function App() {
     try {
       setApiAccessMutatingId("create");
       setError(null);
-      const payload = await api<IntegrationApiKeyMutationPayload>("/api/settings/api-access/keys", {
-        method: "POST",
-        body: JSON.stringify(input),
-      });
-      const result = await finalizeIntegrationApiKeyMutation({
+      const result = await executeIntegrationApiKeyMutation({
         mode: "create",
-        payload,
+        mutate: () =>
+          api<IntegrationApiKeyMutationPayload>("/api/settings/api-access/keys", {
+            method: "POST",
+            body: JSON.stringify(input),
+          }),
         refresh: refreshIntegrationApiKeys,
       });
+      if (result.mutationError) {
+        setError(result.mutationError.message);
+        return result.shouldCloseEditor;
+      }
       if (result.revealedSecret) {
         setRevealedIntegrationSecret(result.revealedSecret);
       }
       if (result.refreshError) {
         setError(result.refreshError.message);
       }
+      return result.shouldCloseEditor;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setApiAccessMutatingId(null);
     }
@@ -994,23 +1000,29 @@ export function App() {
     try {
       setApiAccessMutatingId(record.id);
       setError(null);
-      const payload = await api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/rotate`, {
-        method: "POST",
-        body: JSON.stringify(input),
-      });
-      const result = await finalizeIntegrationApiKeyMutation({
+      const result = await executeIntegrationApiKeyMutation({
         mode: "rotate",
-        payload,
+        mutate: () =>
+          api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/rotate`, {
+            method: "POST",
+            body: JSON.stringify(input),
+          }),
         refresh: refreshIntegrationApiKeys,
       });
+      if (result.mutationError) {
+        setError(result.mutationError.message);
+        return result.shouldCloseEditor;
+      }
       if (result.revealedSecret) {
         setRevealedIntegrationSecret(result.revealedSecret);
       }
       if (result.refreshError) {
         setError(result.refreshError.message);
       }
+      return result.shouldCloseEditor;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     } finally {
       setApiAccessMutatingId(null);
     }

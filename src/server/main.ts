@@ -33,10 +33,10 @@ import {
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
 import {
+  authenticateTrustedForwardAuth,
   buildServerAuthConfig,
   classifyRequestPath,
   extractIntegrationApiKey,
-  readForwardedIdentity,
   resolveClientIp,
 } from "./auth-gate.js";
 import {
@@ -1517,8 +1517,17 @@ async function main(): Promise<void> {
       const mailboxMessageDetailMatch = pathname.match(/^\/api\/microsoft-mail\/messages\/(\d+)$/);
 
       try {
-        if (authScope === "internal" && !readForwardedIdentity(req, authConfig)) {
-          return badRequest("forward auth identity required", 401);
+        if (authScope === "internal") {
+          const trustedForwardAuth = authenticateTrustedForwardAuth(req, authConfig);
+          if (!trustedForwardAuth.ok) {
+            if (trustedForwardAuth.reason === "misconfigured_secret") {
+              return badRequest("forward auth secret not configured", 503);
+            }
+            if (trustedForwardAuth.reason === "missing_identity") {
+              return badRequest("forward auth identity required", 401);
+            }
+            return badRequest("trusted forward auth required", 401);
+          }
         }
 
         if (authScope === "integration") {

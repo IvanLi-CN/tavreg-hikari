@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { finalizeIntegrationApiKeyMutation } from "../web/src/lib/api-access.ts";
+import { executeIntegrationApiKeyMutation, finalizeIntegrationApiKeyMutation } from "../web/src/lib/api-access.ts";
 import type { IntegrationApiKeyMutationPayload } from "../web/src/lib/app-types.ts";
 
 const payload: IntegrationApiKeyMutationPayload = {
@@ -49,5 +49,38 @@ describe("api access mutation finalize helper", () => {
       plainTextKey: "thki_demo_secret_123",
     });
     expect(result.refreshError).toBeNull();
+  });
+
+  test("keeps the editor open when the mutation itself fails", async () => {
+    const result = await executeIntegrationApiKeyMutation({
+      mode: "create",
+      mutate: async () => {
+        throw new Error("create failed");
+      },
+      refresh: async () => {},
+    });
+
+    expect(result.shouldCloseEditor).toBe(false);
+    expect(result.mutationError?.message).toBe("create failed");
+    expect(result.revealedSecret).toBeNull();
+    expect(result.refreshError).toBeNull();
+  });
+
+  test("still closes the editor when the mutation succeeds but refresh fails", async () => {
+    const result = await executeIntegrationApiKeyMutation({
+      mode: "rotate",
+      mutate: async () => payload,
+      refresh: async () => {
+        throw new Error("refresh failed");
+      },
+    });
+
+    expect(result.shouldCloseEditor).toBe(true);
+    expect(result.mutationError).toBeNull();
+    expect(result.revealedSecret).toMatchObject({
+      mode: "rotate",
+      plainTextKey: "thki_demo_secret_123",
+    });
+    expect(result.refreshError?.message).toBe("refresh failed");
   });
 });

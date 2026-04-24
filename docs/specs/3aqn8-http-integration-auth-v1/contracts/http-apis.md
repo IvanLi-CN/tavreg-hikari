@@ -20,7 +20,10 @@
 - Auth:
   - default forwarded user header: `X-Forwarded-User`
   - default forwarded email header: `X-Forwarded-Email`
+  - default trusted proxy secret header: `X-Forwarded-Auth-Secret`
   - header names can be overridden by env
+  - shared secret env: `FORWARD_AUTH_SECRET`
+  - if `FORWARD_AUTH_SECRET` is missing, internal requests fail closed with `503 { error: "forward auth secret not configured" }`
 
 ## Internal settings APIs
 

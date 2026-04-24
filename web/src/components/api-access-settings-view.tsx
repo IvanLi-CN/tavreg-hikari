@@ -51,8 +51,11 @@ export function ApiAccessSettingsView(props: {
   loading?: boolean;
   mutatingId?: number | "create" | null;
   revealedSecret: RevealedIntegrationApiSecret | null;
-  onCreate: (input: { label: string; notes: string | null }) => void | Promise<void>;
-  onRotate: (record: IntegrationApiKeyRecord, input: { label: string; notes: string | null }) => void | Promise<void>;
+  onCreate: (input: { label: string; notes: string | null }) => boolean | void | Promise<boolean | void>;
+  onRotate: (
+    record: IntegrationApiKeyRecord,
+    input: { label: string; notes: string | null },
+  ) => boolean | void | Promise<boolean | void>;
   onRevoke: (record: IntegrationApiKeyRecord) => void | Promise<void>;
   onRevealedSecretOpenChange: (open: boolean) => void;
 }) {
@@ -84,10 +87,12 @@ export function ApiAccessSettingsView(props: {
     const trimmedLabel = label.trim();
     if (!trimmedLabel || !editor) return;
     const nextNotes = notes.trim() || null;
-    if (editor.kind === "create") {
-      await props.onCreate({ label: trimmedLabel, notes: nextNotes });
-    } else {
-      await props.onRotate(editor.record, { label: trimmedLabel, notes: nextNotes });
+    const shouldClose =
+      editor.kind === "create"
+        ? await props.onCreate({ label: trimmedLabel, notes: nextNotes })
+        : await props.onRotate(editor.record, { label: trimmedLabel, notes: nextNotes });
+    if (shouldClose === false) {
+      return;
     }
     setEditor(null);
   };

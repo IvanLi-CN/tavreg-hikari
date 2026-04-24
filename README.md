@@ -29,9 +29,15 @@
 - `internal` 默认读取以下头：
   - `X-Forwarded-User`
   - `X-Forwarded-Email`
+- `internal` 还要求一个受信任代理共享密钥头，默认读取：
+  - `X-Forwarded-Auth-Secret`
 - 头名可通过 `.env.local` 覆盖：
   - `FORWARD_AUTH_USER_HEADER`
   - `FORWARD_AUTH_EMAIL_HEADER`
+  - `FORWARD_AUTH_SECRET_HEADER`
+- 共享密钥通过 `.env.local` 提供：
+  - `FORWARD_AUTH_SECRET`
+- 若未配置 `FORWARD_AUTH_SECRET`，内部入口会 fail closed 并返回 `503`，避免直连请求伪造 Forward Auth 头绕过鉴权。
 - `WEB_HOST` 只控制监听地址，不再等价于“localhost 免鉴权”；即使监听在 `127.0.0.1`，内部入口仍要求 Forward Auth。
 - 外部实例接入 `/api/integration/v1/*` 时，可使用：
   - `Authorization: Bearer <plainTextKey>`

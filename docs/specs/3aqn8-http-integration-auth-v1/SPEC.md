@@ -60,7 +60,7 @@
 
 - 所有请求必须先被分类为 `public | internal | integration`，再进入对应 gate。
 - `internal` gate 必须覆盖内部 SPA 静态资源、内部 HTTP API、SSE 与 WebSocket upgrade；loopback 直连默认不豁免。
-- `internal` gate 必须使用 Forward Auth 头，默认读取 `X-Forwarded-User` 与 `X-Forwarded-Email`，并允许通过 env 改写头名。
+- `internal` gate 必须使用受信任的 Forward Auth 头，默认读取 `X-Forwarded-User`、`X-Forwarded-Email` 与 `X-Forwarded-Auth-Secret`，并允许通过 env 改写头名。
 - `integration` gate 只能接受 API Key，不得回落到 Forward Auth。
 - `public` allowlist 在 v1 只能保留：`/api/health`、`/api/microsoft-mail/oauth/callback` 与 `/api/integration/v1/*` namespace。
 - `integration_api_keys` 只能存 `hash/prefix` 与元数据，明文 key 只允许在创建/轮换响应里返回一次。
@@ -100,8 +100,10 @@
 - 默认读取：
   - `X-Forwarded-User`
   - `X-Forwarded-Email`
+  - `X-Forwarded-Auth-Secret`
 - 允许 env 改写头名。
-- `internal` 请求若缺少有效用户标识，必须返回拒绝，不得再尝试 localhost 特判。
+- `internal` 请求若缺少有效用户标识或缺少可信代理共享密钥，必须返回拒绝，不得再尝试 localhost 特判。
+- 若 `FORWARD_AUTH_SECRET` 未配置，`internal` gate 必须 fail closed。
 
 ### Integration API Key lifecycle
 
