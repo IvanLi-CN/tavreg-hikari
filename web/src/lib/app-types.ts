@@ -1,4 +1,4 @@
-export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "proxies";
+export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "proxies" | "settings";
 export type JobSite = "tavily" | "grok" | "chatgpt";
 export type SortDir = "desc" | "asc";
 
@@ -120,6 +120,7 @@ export type MailboxMessageSummary = {
   bodyPreview: string;
   webLink: string | null;
   updatedAt: string;
+  parsedVerificationCodes?: ParsedVerificationCode[];
 };
 
 export type MailboxMessagesPayload = {
@@ -138,6 +139,38 @@ export type MailboxMessageDetail = MailboxMessageSummary & {
   bodyContentType: "html" | "text";
   bodyContent: string;
   webLink: string | null;
+};
+
+export type ParsedVerificationCode = {
+  code: string;
+  kind: "numeric" | "alphanumeric" | "microsoftProof";
+  source: "subject" | "bodyPreview" | "bodyContent" | "cfmailSummary" | "cfmailDetail";
+  snippet: string;
+};
+
+export type IntegrationApiKeyRecord = {
+  id: number;
+  label: string;
+  notes: string | null;
+  keyPrefix: string;
+  status: "active" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+};
+
+export type IntegrationApiKeysPayload = {
+  ok: true;
+  rows: IntegrationApiKeyRecord[];
+};
+
+export type IntegrationApiKeyMutationPayload = {
+  ok: true;
+  record: IntegrationApiKeyRecord;
+  plainTextKey?: string;
 };
 
 export type MailboxMessageDetailPayload = {

@@ -1260,7 +1260,20 @@ export class JobScheduler {
     signal: NodeJS.Signals | null,
     active: ActiveAttempt,
   ): Promise<void> {
-    const result = await readJsonFile<{ apiKey?: string | null; email?: string; password?: string }>(path.join(outputDir, "result.json"));
+    const result = await readJsonFile<{
+      apiKey?: string | null;
+      email?: string;
+      password?: string;
+      serviceAccess?: {
+        tavily?: {
+          cookiesSnapshot?: unknown[];
+          browserFingerprintSnapshot?: unknown;
+          extractedIp?: string | null;
+          lastSuccessAt?: string;
+          apiKeyPrefix?: string | null;
+        };
+      };
+    }>(path.join(outputDir, "result.json"));
     const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
     const signupTask = this.db.getLatestSignupTask(jobId, accountId);
     const apiKey =
@@ -1302,7 +1315,24 @@ export class JobScheduler {
       return;
     }
     if (code === 0 && signal == null && apiKey) {
-      const { job, attempt } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
+      const { job, attempt, apiKeyRecord } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
+      const tavilyAccess = result?.serviceAccess?.tavily;
+      if (tavilyAccess) {
+        this.db.upsertAccountServiceAccess({
+          accountId,
+          service: "tavily",
+          status: "succeeded",
+          apiKeyId: apiKeyRecord.id,
+          snapshotJson: JSON.stringify({
+            cookiesSnapshot: Array.isArray(tavilyAccess.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+            browserFingerprintSnapshot: tavilyAccess.browserFingerprintSnapshot || null,
+            extractedIp: tavilyAccess.extractedIp || null,
+            apiKeyPrefix: tavilyAccess.apiKeyPrefix || null,
+          }),
+          extractedIp: tavilyAccess.extractedIp || null,
+          lastSuccessAt: tavilyAccess.lastSuccessAt || attempt.completedAt || nowIso(),
+        });
+      }
       this.emit("attempt.updated", { attempt });
       this.emit("account.updated", { account: this.db.getAccount(accountId) });
       this.emit("job.updated", { job });
