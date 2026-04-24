@@ -106,6 +106,15 @@ function normalizePage(value: string | null, fallback: number, max: number): num
   return Math.min(max, parsed);
 }
 
+function parseOptionalPositiveInteger(value: string | null): number | null {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return null;
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return null;
+  return parsed;
+}
+
 function parseSnapshotJson(record: AccountServiceAccessRecord | null): JsonRecord {
   if (!record?.snapshotJson?.trim()) return {};
   try {
@@ -454,10 +463,14 @@ export async function handleIntegrationApiRequest(input: {
   if (input.pathname === "/api/integration/v1/mailboxes" && input.req.method === "GET") {
     const page = normalizePage(input.url.searchParams.get("page"), 1, 500);
     const pageSize = normalizePage(input.url.searchParams.get("pageSize"), 20, 100);
-    const accountId = normalizePage(input.url.searchParams.get("accountId"), 0, Number.MAX_SAFE_INTEGER);
+    const rawAccountId = input.url.searchParams.get("accountId");
+    const accountId = parseOptionalPositiveInteger(rawAccountId);
+    if (rawAccountId != null && accountId == null) {
+      return badRequest("invalid accountId");
+    }
     const rows = input.db
       .listMailboxes({ connectedOnly: true })
-      .filter((row) => (accountId > 0 ? row.accountId === accountId : true));
+      .filter((row) => (accountId != null ? row.accountId === accountId : true));
     const offset = (page - 1) * pageSize;
     const pagedRows = rows.slice(offset, offset + pageSize);
     return json({

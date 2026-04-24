@@ -206,4 +206,22 @@ describe("integration api", () => {
       appDb.close();
     }
   });
+
+  test("rejects malformed mailbox accountId filters", async () => {
+    const { appDb } = await createTempDb();
+    await seedAccount(appDb);
+    const req = new Request("https://console.example.test/api/integration/v1/mailboxes?accountId=abc");
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(400);
+    await expect(resp!.json()).resolves.toMatchObject({
+      error: "invalid accountId",
+    });
+    appDb.close();
+  });
 });

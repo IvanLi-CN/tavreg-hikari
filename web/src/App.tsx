@@ -20,6 +20,7 @@ import { buildApiKeyExportFilename } from "@/lib/api-key-export";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
+import { finalizeIntegrationApiKeyMutation } from "@/lib/api-access";
 import type {
   AccountBatchBootstrapMode,
   AccountBatchBootstrapPreviewPayload,
@@ -968,13 +969,16 @@ export function App() {
         method: "POST",
         body: JSON.stringify(input),
       });
-      await refreshIntegrationApiKeys();
-      if (payload.plainTextKey) {
-        setRevealedIntegrationSecret({
-          mode: "create",
-          record: payload.record,
-          plainTextKey: payload.plainTextKey,
-        });
+      const result = await finalizeIntegrationApiKeyMutation({
+        mode: "create",
+        payload,
+        refresh: refreshIntegrationApiKeys,
+      });
+      if (result.revealedSecret) {
+        setRevealedIntegrationSecret(result.revealedSecret);
+      }
+      if (result.refreshError) {
+        setError(result.refreshError.message);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -994,13 +998,16 @@ export function App() {
         method: "POST",
         body: JSON.stringify(input),
       });
-      await refreshIntegrationApiKeys();
-      if (payload.plainTextKey) {
-        setRevealedIntegrationSecret({
-          mode: "rotate",
-          record: payload.record,
-          plainTextKey: payload.plainTextKey,
-        });
+      const result = await finalizeIntegrationApiKeyMutation({
+        mode: "rotate",
+        payload,
+        refresh: refreshIntegrationApiKeys,
+      });
+      if (result.revealedSecret) {
+        setRevealedIntegrationSecret(result.revealedSecret);
+      }
+      if (result.refreshError) {
+        setError(result.refreshError.message);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
