@@ -2012,6 +2012,26 @@ async function main(): Promise<void> {
         });
       }
 
+      if (pathname === "/api/chatgpt/credentials/export" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
+        const requestedIds = Array.isArray(body?.ids)
+          ? body.ids
+              .map((value) => (typeof value === "number" ? value : Number.parseInt(String(value), 10)))
+              .filter((value): value is number => Number.isInteger(value) && value > 0)
+          : [];
+        if (requestedIds.length === 0) {
+          return badRequest("at least one credential id is required");
+        }
+        const credentials = db.listChatGptCredentialsByIds(requestedIds);
+        const foundIds = new Set(credentials.map((credential) => credential.id));
+        const missingIds = requestedIds.filter((credentialId) => !foundIds.has(credentialId));
+        return json({
+          ok: true,
+          credentials: credentials.map((credential) => serializeChatGptCredential(credential, true)),
+          missingIds,
+        });
+      }
+
       if (pathname === "/api/chatgpt/attempt-draft" && req.method === "POST") {
         const draft = await buildChatGptDraft({
           apiKey: (process.env.CFMAIL_API_KEY || "").trim(),

@@ -3970,6 +3970,19 @@ export class AppDatabase {
     return row ? mapChatGptCredentialRow(row) : null;
   }
 
+  listChatGptCredentialsByIds(credentialIds: number[]): ChatGptCredentialRecord[] {
+    const normalizedIds = Array.from(
+      new Set(credentialIds.filter((credentialId) => Number.isInteger(credentialId) && credentialId > 0).map((credentialId) => Math.trunc(credentialId))),
+    );
+    if (normalizedIds.length === 0) return [];
+    const placeholders = normalizedIds.map(() => "?").join(", ");
+    const rows = this.db
+      .query(`SELECT * FROM chatgpt_credentials WHERE id IN (${placeholders})`)
+      .all(...(normalizedIds as any[])) as Record<string, unknown>[];
+    const rowById = new Map(rows.map((row) => [Number(row.id), mapChatGptCredentialRow(row)]));
+    return normalizedIds.map((credentialId) => rowById.get(credentialId)).filter((row): row is ChatGptCredentialRecord => Boolean(row));
+  }
+
   completeChatGptAttemptSuccess(
     jobId: number,
     attemptId: number,

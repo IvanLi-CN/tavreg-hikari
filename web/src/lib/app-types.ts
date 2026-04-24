@@ -444,6 +444,12 @@ export type ChatGptCredentialDetailPayload = {
   credential: ChatGptCredentialRecord;
 };
 
+export type ChatGptCredentialExportPayload = {
+  ok: true;
+  credentials: ChatGptCredentialRecord[];
+  missingIds: number[];
+};
+
 export type ChatGptUpstreamSettingsSource = "db" | "env" | "unset";
 
 export type ChatGptUpstreamSettings = {

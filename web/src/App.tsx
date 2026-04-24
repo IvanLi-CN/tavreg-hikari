@@ -38,6 +38,7 @@ import type {
   AccountQuery,
   AccountsPayload,
   ChatGptCredentialDetailPayload,
+  ChatGptCredentialExportPayload,
   ChatGptCredentialRecord,
   ChatGptCredentialQuery,
   ChatGptCredentialSort,
@@ -850,27 +851,19 @@ export function App() {
     try {
       setChatGptExportBusy(true);
       setError(null);
-      const detailResults = await Promise.all(
-        selectedChatGptCredentialIds.map(async (credentialId) => {
-          try {
-            const credential = chatGptCredentials.rows.find((row) => row.id === credentialId);
-            const detail = credential ? await ensureChatGptCredentialDetail(credential) : await loadChatGptCredentialDetail(credentialId);
-            return { credentialId, detail } as const;
-          } catch {
-            return { credentialId, detail: null } as const;
-          }
-        }),
-      );
-      const failedCredentialIds = detailResults.filter((result) => !result.detail).map((result) => result.credentialId);
-      if (failedCredentialIds.length > 0) {
+      const payload = await api<ChatGptCredentialExportPayload>("/api/chatgpt/credentials/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedChatGptCredentialIds }),
+      });
+      if (payload.missingIds.length > 0) {
         setError(
-          failedCredentialIds.length === selectedChatGptCredentialIds.length
+          payload.missingIds.length === selectedChatGptCredentialIds.length
             ? "选中的 ChatGPT keys 已不存在"
-            : `有 ${failedCredentialIds.length} 条 ChatGPT keys 已不存在或读取失败，请刷新列表后重试导出`,
+            : `有 ${payload.missingIds.length} 条 ChatGPT keys 已不存在或读取失败，请刷新列表后重试导出`,
         );
         return;
       }
-      const detailRows = detailResults.map((result) => result.detail).filter((row): row is ChatGptCredentialRecord => Boolean(row));
+      const detailRows = payload.credentials;
 
       if (detailRows.length === 0) {
         setError("选中的 ChatGPT keys 已不存在");
