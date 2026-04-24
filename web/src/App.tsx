@@ -16,7 +16,7 @@ import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { SiteKeysView } from "@/components/site-keys-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
-import { buildApiKeyExportFilename, countMissingExportIds } from "@/lib/api-key-export";
+import { buildApiKeyExportFilename, countMissingExportIds, getMissingExportIds } from "@/lib/api-key-export";
 import { executeIntegrationApiKeyMutation } from "@/lib/api-access";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
@@ -867,19 +867,17 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ids: selectedChatGptCredentialIds }),
       });
-      if (payload.missingIds.length > 0) {
-        setError(
-          payload.missingIds.length === selectedChatGptCredentialIds.length
-            ? "选中的 ChatGPT keys 已不存在"
-            : `有 ${payload.missingIds.length} 条 ChatGPT keys 已不存在或读取失败，请刷新列表后重试导出`,
-        );
-        return;
-      }
       const detailRows = payload.credentials;
 
       if (detailRows.length === 0) {
+        setSelectedChatGptCredentialIds((current) => current.filter((id) => !payload.missingIds.includes(id)));
         setError("选中的 ChatGPT keys 已不存在");
         return;
+      }
+
+      if (payload.missingIds.length > 0) {
+        setSelectedChatGptCredentialIds((current) => current.filter((id) => !payload.missingIds.includes(id)));
+        setError(`有 ${payload.missingIds.length} 条 ChatGPT keys 已不存在或读取失败，已导出剩余 ${detailRows.length} 条`);
       }
 
       const content = JSON.stringify(
@@ -1789,13 +1787,14 @@ export function App() {
         body: JSON.stringify({ ids: selectedApiKeyIds }),
       });
       const missingCount = countMissingExportIds(selectedApiKeyIds, payload.items);
+      const missingIds = getMissingExportIds(selectedApiKeyIds, payload.items);
       if (missingCount > 0) {
-        setError(
-          missingCount === selectedApiKeyIds.length
-            ? "选中的 API key 已不存在"
-            : `有 ${missingCount} 条 API key 已不存在，请刷新列表后重试导出`,
-        );
-        return;
+        setSelectedApiKeyIds((current) => current.filter((id) => !missingIds.includes(id)));
+        if (payload.items.length === 0) {
+          setError("选中的 API key 已不存在");
+          return;
+        }
+        setError(`有 ${missingCount} 条 API key 已不存在，已导出剩余 ${payload.items.length} 条`);
       }
       setApiKeyExportContent(payload.content);
       setApiKeyExportOpen(true);
@@ -1852,13 +1851,14 @@ export function App() {
         body: JSON.stringify({ ids: selectedGrokApiKeyIds }),
       });
       const missingCount = countMissingExportIds(selectedGrokApiKeyIds, payload.items);
+      const missingIds = getMissingExportIds(selectedGrokApiKeyIds, payload.items);
       if (missingCount > 0) {
-        setError(
-          missingCount === selectedGrokApiKeyIds.length
-            ? "选中的 Grok API key 已不存在"
-            : `有 ${missingCount} 条 Grok API key 已不存在，请刷新列表后重试导出`,
-        );
-        return;
+        setSelectedGrokApiKeyIds((current) => current.filter((id) => !missingIds.includes(id)));
+        if (payload.items.length === 0) {
+          setError("选中的 Grok API key 已不存在");
+          return;
+        }
+        setError(`有 ${missingCount} 条 Grok API key 已不存在，已导出剩余 ${payload.items.length} 条`);
       }
       setGrokApiKeyExportContent(payload.content);
       setGrokApiKeyExportOpen(true);

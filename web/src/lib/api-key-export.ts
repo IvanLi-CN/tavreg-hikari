@@ -16,12 +16,19 @@ export function countMissingExportIds(
   requestedIds: ReadonlyArray<number>,
   returnedItems: ReadonlyArray<{ id: number }>,
 ): number {
+  return getMissingExportIds(requestedIds, returnedItems).length;
+}
+
+export function getMissingExportIds(
+  requestedIds: ReadonlyArray<number>,
+  returnedItems: ReadonlyArray<{ id: number }>,
+): number[] {
   const normalizedRequestedIds = Array.from(
     new Set(requestedIds.filter((id) => Number.isInteger(id) && id > 0)),
   );
   if (normalizedRequestedIds.length === 0) {
-    return 0;
+    return [];
   }
   const returnedIds = new Set(returnedItems.map((item) => item.id));
-  return normalizedRequestedIds.reduce((missingCount, id) => missingCount + (returnedIds.has(id) ? 0 : 1), 0);
+  return normalizedRequestedIds.filter((id) => !returnedIds.has(id));
 }
