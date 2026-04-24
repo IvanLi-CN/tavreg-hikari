@@ -101,6 +101,7 @@
 - 纵向滚动继续依赖 `window`；列表内只允许横向溢出滚动。
 - 桌面端使用“静态列头 + 虚拟化行层”；移动端继续显示卡片化记录，但也走同一虚拟化数据窗口。
 - 三套 keys 列表统一在 `md` 以下才切换为卡片布局；`md` 及以上继续优先保留表格布局。
+- 在小屏卡片布局中，Grok keys 不再显示 `出口 IP` 字段，以优先保留邮箱、密码、SSO 与时间信息。
 - Grok 桌面表格在 `md ~ lg` 使用更紧凑的列模板，在 `lg+` 恢复更宽的列模板，并优先把剩余宽度分配给 `SSO` 列，避免右侧空间利用不均衡。
 
 ## 验收标准（Acceptance Criteria）
@@ -179,7 +180,7 @@
 - source_type: `storybook_canvas`
   story_id_or_title: `Views/GrokApiKeysView/CompactBelowMd`
   state: `grok keeps card layout below md`
-  evidence_note: 验证 Grok keys 在 700px 视口仍处于 `md` 以下，因此使用卡片布局。
+  evidence_note: 验证 Grok keys 在 700px 视口仍处于 `md` 以下，因此使用卡片布局，且小屏不再显示 `出口 IP`。
   ![Grok Keys 700px 卡片布局](./assets/grok-compact-below-md.png)
 
 - source_type: `storybook_canvas`

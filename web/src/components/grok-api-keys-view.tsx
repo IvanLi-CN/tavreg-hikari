@@ -266,7 +266,7 @@ export function GrokApiKeysView({
                 <WindowVirtualList
                   items={apiKeys.rows}
                   getKey={(row) => row.id}
-                  estimateSize={() => 380}
+                  estimateSize={() => 332}
                   renderItem={(row) => (
                     <article key={row.id} className="px-0 pb-3">
                       <div className="rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
@@ -290,10 +290,6 @@ export function GrokApiKeysView({
                             </div>
                             <dl className="mt-4 grid gap-3 text-sm text-slate-300">
                               <div className="grid gap-3 rounded-2xl border border-white/6 bg-white/[0.02] p-3">
-                                <div className="flex items-center justify-between gap-3">
-                                  <dt className="text-slate-500">出口 IP</dt>
-                                  <dd className="min-w-0 text-right font-mono text-[0.92rem] text-slate-100">{row.extractedIp || "—"}</dd>
-                                </div>
                                 <div className="flex items-center justify-between gap-3">
                                   <dt className="text-slate-500">提取时间</dt>
                                   <dd className="pl-4 text-right">{formatDate(row.extractedAt)}</dd>

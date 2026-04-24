@@ -187,7 +187,8 @@ export const CompactBelowMd: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole("checkbox", { name: "select-current-page-mobile" })).toBeInTheDocument();
     await expect(canvas.queryByRole("checkbox", { name: "select-current-page" })).toBeNull();
-    await expect(canvas.queryByText("SSO")).toBeNull();
+    await expect(canvas.queryByText("出口 IP")).toBeNull();
+    await expect(canvas.getAllByText("SSO").length).toBeGreaterThan(0);
   },
 };
 
