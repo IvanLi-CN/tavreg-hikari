@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.14.0",
+  "base_stable_version": "0.13.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-24T07:54:26Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.14.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "4aaf8ec0a2143cb5877409ebc3b72c92ad1896fe",
+  "pr_number": 59,
+  "pr_title": "feat: tighten HTTP auth boundaries and expose integration API v1",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.14.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.14.0",
+  "target_sha": "d6777a4a6989a98283dc5b024b0d5c953f1e7e47",
+  "type_label": "type:minor"
+}
