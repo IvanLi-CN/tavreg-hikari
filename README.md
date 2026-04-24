@@ -79,6 +79,9 @@
 - `POST /api/proxies/settings` 现在只接受代理字段：`subscriptionUrl`、`groupName`、`routeGroupName`、`checkUrl`、`timeoutMs`、`maxLatencyMs`、`apiPort`、`mixedPort`。
 - 代理页再次保存订阅地址时，不会再把 `defaultRunMode` 等无关设置一起写回。
 - 仓库已补齐 release-intent labels 与质量门禁：`type:*` + `channel:*`、`Review Policy Gate`、`CI PR`、`CI Main`、`Release`、release snapshot、PR release comment。
+- 对外发布到 GHCR 的稳定 tag（例如 `v*` 与 `latest`）现在必须解析为**公开可读**的 single-platform image index / manifest list，而不是单 manifest 镜像对象。
+- 上述公开 tag 必须至少暴露一个 `linux/amd64` 平台描述符，供外部检测链直接读取架构；镜像本体仍保持 amd64-only，不因此承诺 arm64。
+- `candidate-*` 仍只作为 release pipeline 内部中间产物使用，不属于对外稳定契约的一部分。
 
 ## Linked Worktree Bootstrap
 

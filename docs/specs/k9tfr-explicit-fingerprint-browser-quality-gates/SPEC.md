@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-07
-- Last: 2026-04-19
+- Last: 2026-04-25
 
 ## 背景 / 问题陈述
 
@@ -75,6 +75,10 @@
 - `CI PR` 必须提供：`Typecheck & Quality Gates`、`Bun Tests`、`Web Build`、`Storybook Build`、`Docker Smoke`。
 - `CI Main` 在上述检查全部通过后，额外生成 immutable release snapshot。
 - `Release` 读取 release snapshot，发布 GHCR 镜像、git tag、GitHub Release，并在对应 PR 上 upsert 单条 marker 评论：`<!-- tavreg-hikari-release-version-comment -->`。
+- 公开发布到 GHCR 的稳定 tag（`v*` 与 `latest`）必须发布为 image index / manifest list，即使当前只包含单个平台镜像，也必须对外暴露 `manifests[].platform`。
+- 当前仓库 Docker 产物仍保持 amd64-only；公开 tag 至少要暴露 `linux/amd64` 平台描述符，但本次不引入真实多架构镜像。
+- `Release` 必须在发布后以匿名读取方式校验 GHCR 公开 tag：未登录也能 raw inspect 到 index/list 顶层 media type 与 `linux/amd64` 描述符；若返回 `403`、私有包或缺失平台元数据，则 fail closed。
+- `candidate-*` 只作为 release pipeline 的中间产物存在，不属于对外稳定发布契约，也不要求匿名读取。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -85,6 +89,7 @@
 - Given 多个 worker 并发读取相同 Mihomo 订阅，When 第一个 worker 正在刷新缓存，Then 其他 worker 会等待或复用共享缓存，不会全部直连上游重拉订阅。
 - Given 仓库创建指向 `main` 的 PR，When 没有设置正确的 `type:*` 与 `channel:*` labels，Then `Validate PR labels` 会 fail closed。
 - Given `main` 上有通过 CI Main 的提交，When Release 运行，Then 会生成 Git tag、GitHub Release、GHCR 镜像，并在对应 PR 上维护单条 release version comment。
+- Given 稳定 release 发布完成，When 未登录 GHCR 对公开 tag 执行 raw inspect，Then 返回结果的顶层 media type 必须是 image index / manifest list，且 `manifests[].platform` 至少包含 `linux/amd64`。
 - Given Docker 镜像构建完成，When 运行容器内 browser smoke，Then `/opt/fingerprint-browser/chrome` 可执行且 `playwright-core` 能成功打开最小页面。
 
 ## Visual Evidence
@@ -103,9 +108,14 @@
 - [x] M3: 为 Mihomo 订阅增加共享缓存与锁，降低并发上游请求
 - [x] M4: 补齐 GitHub 质量门禁、Release 流程与 live branch rules
 - [x] M5: 完成本地验证、视觉证据、PR / merge / release / 101 smoke 收口
+- [x] M6: GHCR 公开 tag 改为匿名可读的 single-platform image index / manifest list，并补齐 `linux/amd64` 元数据门禁
 
 ## 文档更新（Docs to Update）
 
 - `docs/specs/README.md`
 - `README.md`
 - `docs/specs/k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md`
+
+## 历史
+
+- 2026-04-25: 将公开 GHCR tag 收敛为匿名可读的 image index / manifest list，新增 `linux/amd64` 平台元数据匿名校验门禁；`candidate-*` 继续保留为内部中间产物。
