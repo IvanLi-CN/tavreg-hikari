@@ -36,10 +36,17 @@ const customViewports = {
       height: "812px",
     },
   },
-  keysTablet700: {
-    name: "Keys Tablet 700",
+  keysCompact700: {
+    name: "Keys Compact 700",
     styles: {
       width: "700px",
+      height: "1180px",
+    },
+  },
+  keysMedium820: {
+    name: "Keys Medium 820",
+    styles: {
+      width: "820px",
       height: "1180px",
     },
   },

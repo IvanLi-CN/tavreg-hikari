@@ -177,10 +177,24 @@ export const ActionsOnly: Story = {
   render: () => <StorySurface initialSelectedIds={[11]} />,
 };
 
-export const TabletTableLayout: Story = {
+export const CompactBelowMd: Story = {
   args: baseArgs,
   parameters: {
-    viewport: { value: "keysTablet700", isRotated: false },
+    viewport: { value: "keysCompact700", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page-mobile" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page" })).toBeNull();
+    await expect(canvas.queryByText("SSO")).toBeNull();
+  },
+};
+
+export const MediumTableLayout: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysMedium820", isRotated: false },
   },
   render: () => <StorySurface initialSelectedIds={[11]} />,
   play: async ({ canvasElement }) => {
