@@ -138,4 +138,30 @@ describe("auth gate helpers", () => {
     expect(resolveClientIp(spoofedReq)).toBeNull();
     expect(resolveClientIp(spoofedReq, "192.0.2.55")).toBe("192.0.2.55");
   });
+
+  test("uses trusted forwarded client ip when the proxy secret matches", () => {
+    const config = buildServerAuthConfig({
+      FORWARD_AUTH_SECRET: "shared-secret",
+    } as NodeJS.ProcessEnv);
+    const proxiedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
+      headers: {
+        "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
+        "X-Forwarded-Auth-Secret": "shared-secret",
+      },
+    });
+    expect(resolveClientIp(proxiedReq, config, "127.0.0.1")).toBe("198.51.100.7");
+  });
+
+  test("falls back to peer ip when the forwarded secret is invalid", () => {
+    const config = buildServerAuthConfig({
+      FORWARD_AUTH_SECRET: "shared-secret",
+    } as NodeJS.ProcessEnv);
+    const spoofedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
+      headers: {
+        "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
+        "X-Forwarded-Auth-Secret": "wrong-secret",
+      },
+    });
+    expect(resolveClientIp(spoofedReq, config, "127.0.0.1")).toBe("127.0.0.1");
+  });
 });

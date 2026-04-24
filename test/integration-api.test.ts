@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { handleIntegrationApiRequest } from "../src/server/integration-api.ts";
-import { AppDatabase } from "../src/storage/app-db.ts";
+import { AppDatabase, type AppSettings } from "../src/storage/app-db.ts";
 
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
@@ -254,6 +254,99 @@ describe("integration api", () => {
       code: "456123",
     });
     appDb.close();
+  });
+
+  test("hydrates integration message detail before parsing verification codes", async () => {
+    const { appDb } = await createTempDb();
+    const { mailboxId } = await seedAccount(appDb);
+    appDb.upsertMailboxMessages(mailboxId, [
+      {
+        graphMessageId: "graph-1",
+        subject: "Microsoft account security alert",
+        bodyPreview: "Preview copy without the final code.",
+        bodyContent: "",
+        receivedAt: "2026-04-24T10:12:00.000Z",
+      },
+    ]);
+    const mailboxMessages = appDb.listMailboxMessages(mailboxId, { limit: 10, offset: 0 });
+    const messageId = mailboxMessages.rows[0]!.id;
+    const graphSettings: AppSettings = {
+      subscriptionUrl: "",
+      groupName: "",
+      routeGroupName: "",
+      checkUrl: "",
+      timeoutMs: 10_000,
+      maxLatencyMs: 5_000,
+      apiPort: 7890,
+      mixedPort: 7891,
+      serverHost: "127.0.0.1",
+      serverPort: 9090,
+      defaultRunMode: "headless",
+      defaultNeed: 1,
+      defaultParallel: 1,
+      defaultMaxAttempts: 5,
+      extractorZhanghaoyaKey: "",
+      extractorShanyouxiangKey: "",
+      extractorShankeyunKey: "",
+      extractorHotmail666Key: "",
+      defaultAutoExtractSources: [],
+      defaultAutoExtractQuantity: 1,
+      defaultAutoExtractMaxWaitSec: 60,
+      defaultAutoExtractAccountType: "outlook",
+      microsoftGraphClientId: "client-id",
+      microsoftGraphClientSecret: "client-secret",
+      microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
+      microsoftGraphAuthority: "common",
+    };
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      expect(url).toContain("/me/messages/graph-1?");
+      return new Response(
+        JSON.stringify({
+          id: "graph-1",
+          internetMessageId: "<graph-1@example.test>",
+          conversationId: "conversation-1",
+          subject: "Microsoft account security alert",
+          from: {
+            emailAddress: {
+              name: "Microsoft",
+              address: "account-security-noreply@accountprotection.microsoft.com",
+            },
+          },
+          receivedDateTime: "2026-04-24T10:12:00.000Z",
+          isRead: false,
+          hasAttachments: false,
+          bodyPreview: "Preview copy without the final code.",
+          body: {
+            contentType: "text",
+            content: "Use security code 654321 to finish verifying your Microsoft account.",
+          },
+          webLink: "https://graph.example.test/messages/graph-1",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      const req = new Request(`https://console.example.test/api/integration/v1/messages/${messageId}`);
+      const resp = await handleIntegrationApiRequest({
+        req,
+        pathname: new URL(req.url).pathname,
+        url: new URL(req.url),
+        db: appDb,
+        readSettings: () => graphSettings,
+      });
+
+      expect(resp?.status).toBe(200);
+      const payload = await resp!.json();
+      expect(payload.message.bodyContent).toContain("654321");
+      expect(payload.message.parsedVerificationCodes[0]).toMatchObject({
+        code: "654321",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      appDb.close();
+    }
   });
 
   test("reads proof mailbox codes from cfmail", async () => {

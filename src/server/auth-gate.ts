@@ -33,6 +33,31 @@ function readTrimmedHeader(headers: Headers, name: string): string | null {
   return value?.trim() ? value.trim() : null;
 }
 
+function readForwardedClientIp(req: Request): string | null {
+  const forwardedFor = readTrimmedHeader(req.headers, "x-forwarded-for");
+  if (forwardedFor) {
+    const first = forwardedFor
+      .split(",")
+      .map((item) => item.trim())
+      .find(Boolean);
+    if (first) return first;
+  }
+  return (
+    readTrimmedHeader(req.headers, "x-real-ip") ||
+    readTrimmedHeader(req.headers, "cf-connecting-ip") ||
+    readTrimmedHeader(req.headers, "fly-client-ip") ||
+    null
+  );
+}
+
+function hasTrustedForwardedSecret(req: Request, config: ServerAuthConfig): boolean {
+  if (!config.forwardedSecret) {
+    return false;
+  }
+  const providedSecret = readTrimmedHeader(req.headers, config.forwardedSecretHeader);
+  return Boolean(providedSecret && providedSecret === config.forwardedSecret);
+}
+
 export function buildServerAuthConfig(env: NodeJS.ProcessEnv = process.env): ServerAuthConfig {
   const forwardedSecret = String(env.FORWARD_AUTH_SECRET || "").trim();
   return {
@@ -76,7 +101,7 @@ export function authenticateTrustedForwardAuth(req: Request, config: ServerAuthC
   if (!providedSecret) {
     return { ok: false, reason: "missing_secret" };
   }
-  if (providedSecret !== config.forwardedSecret) {
+  if (!hasTrustedForwardedSecret(req, config)) {
     return { ok: false, reason: "invalid_secret" };
   }
 
@@ -102,7 +127,23 @@ export function extractIntegrationApiKey(req: Request): string | null {
   return readTrimmedHeader(req.headers, "x-api-key");
 }
 
-export function resolveClientIp(_req: Request, trustedPeerAddress?: string | null): string | null {
-  const peerAddress = String(trustedPeerAddress || "").trim();
-  return peerAddress || null;
+export function resolveClientIp(
+  req: Request,
+  configOrTrustedPeerAddress?: ServerAuthConfig | string | null,
+  trustedPeerAddress?: string | null,
+): string | null {
+  const config =
+    configOrTrustedPeerAddress && typeof configOrTrustedPeerAddress === "object" ? configOrTrustedPeerAddress : null;
+  const peerAddress =
+    typeof configOrTrustedPeerAddress === "string" || configOrTrustedPeerAddress == null
+      ? configOrTrustedPeerAddress
+      : trustedPeerAddress;
+  if (config && hasTrustedForwardedSecret(req, config)) {
+    const forwardedIp = readForwardedClientIp(req);
+    if (forwardedIp) {
+      return forwardedIp;
+    }
+  }
+  const normalizedPeerAddress = String(peerAddress || "").trim();
+  return normalizedPeerAddress || null;
 }

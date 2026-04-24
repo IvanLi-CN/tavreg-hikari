@@ -10,11 +10,18 @@ import {
 import {
   type AccountServiceAccessRecord,
   type ApiKeyRecord,
+  type AppSettings,
   type AppDatabase,
   type MicrosoftAccountRecord,
   type MicrosoftMailboxRecord,
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
+import {
+  assertMicrosoftGraphSettings,
+  fetchMicrosoftMessageDetail,
+  isMicrosoftTokenExpired,
+  refreshMicrosoftAccessToken,
+} from "./microsoft-mail.js";
 import {
   parseMailboxVerificationCodes,
   parseProofMailboxVerificationCodes,
@@ -201,6 +208,83 @@ function buildSuccessfulServices(
   return services;
 }
 
+function readMicrosoftGraphSettings(settings: AppSettings): {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  authority: string;
+} {
+  return {
+    clientId: settings.microsoftGraphClientId,
+    clientSecret: settings.microsoftGraphClientSecret,
+    redirectUri: settings.microsoftGraphRedirectUri,
+    authority: settings.microsoftGraphAuthority || "common",
+  };
+}
+
+async function ensureMailboxAccessToken(
+  db: AppDatabase,
+  mailbox: MicrosoftMailboxRecord,
+  readSettings: () => AppSettings,
+): Promise<{ mailbox: MicrosoftMailboxRecord; accessToken: string }> {
+  if (mailbox.accessToken && !isMicrosoftTokenExpired(mailbox.accessTokenExpiresAt)) {
+    return {
+      mailbox,
+      accessToken: mailbox.accessToken,
+    };
+  }
+  if (!mailbox.refreshToken) {
+    throw new Error("mailbox_not_authorized");
+  }
+  const graphSettings = readMicrosoftGraphSettings(readSettings());
+  assertMicrosoftGraphSettings(graphSettings);
+  const token = await refreshMicrosoftAccessToken({
+    clientId: graphSettings.clientId,
+    clientSecret: graphSettings.clientSecret,
+    redirectUri: graphSettings.redirectUri,
+    authority: mailbox.authority || graphSettings.authority,
+    refreshToken: mailbox.refreshToken,
+  });
+  const nextMailbox = db.updateMailboxTokens(mailbox.id, {
+    refreshToken: token.refreshToken || mailbox.refreshToken,
+    accessToken: token.accessToken,
+    accessTokenExpiresAt: token.expiresAt,
+    authority: mailbox.authority || graphSettings.authority,
+  });
+  if (!token.accessToken) {
+    throw new Error("mailbox_access_token_missing");
+  }
+  return {
+    mailbox: nextMailbox,
+    accessToken: token.accessToken,
+  };
+}
+
+async function hydrateMailboxMessageDetail(input: {
+  db: AppDatabase;
+  message: MicrosoftMailMessageRecord;
+  readSettings?: (() => AppSettings) | undefined;
+}): Promise<MicrosoftMailMessageRecord> {
+  if (input.message.bodyContent.trim() || !input.readSettings) {
+    return input.message;
+  }
+  const mailbox = input.db.getMailbox(input.message.mailboxId);
+  if (!mailbox || (!mailbox.refreshToken && !mailbox.accessToken)) {
+    return input.message;
+  }
+  try {
+    const { accessToken } = await ensureMailboxAccessToken(input.db, mailbox, input.readSettings);
+    const detail = await fetchMicrosoftMessageDetail({
+      accessToken,
+      graphMessageId: input.message.graphMessageId,
+    });
+    input.db.upsertMailboxMessages(mailbox.id, [detail], { keepLatest: 500 });
+    return input.db.getMailboxMessageByGraphId(mailbox.id, input.message.graphMessageId) || input.message;
+  } catch {
+    return input.message;
+  }
+}
+
 function serializeIntegrationMicrosoftAccount(input: {
   account: MicrosoftAccountRecord;
   mailbox: MicrosoftMailboxRecord | null;
@@ -383,6 +467,7 @@ export async function handleIntegrationApiRequest(input: {
   pathname: string;
   url: URL;
   db: AppDatabase;
+  readSettings?: () => AppSettings;
 }): Promise<Response | null> {
   const accountDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)$/);
   const proofMailboxCodesMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)\/proof-mailbox\/codes$/);
@@ -510,7 +595,14 @@ export async function handleIntegrationApiRequest(input: {
     if (!Number.isInteger(messageId) || messageId < 1) {
       return badRequest("invalid message id");
     }
-    const message = input.db.getMailboxMessage(messageId);
+    const storedMessage = input.db.getMailboxMessage(messageId);
+    const message = storedMessage
+      ? await hydrateMailboxMessageDetail({
+          db: input.db,
+          message: storedMessage,
+          readSettings: input.readSettings,
+        })
+      : null;
     if (!message) {
       return badRequest(`message not found: ${messageId}`, 404);
     }

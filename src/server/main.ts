@@ -1504,7 +1504,7 @@ async function main(): Promise<void> {
       const url = new URL(req.url);
       const pathname = url.pathname;
       const authScope = classifyRequestPath(pathname);
-      const clientIp = resolveClientIp(req, server.requestIP(req)?.address ?? null);
+      const clientIp = resolveClientIp(req, authConfig, server.requestIP(req)?.address ?? null);
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
@@ -1547,6 +1547,7 @@ async function main(): Promise<void> {
             pathname,
             url,
             db,
+            readSettings,
           });
           if (integrationResponse) {
             return integrationResponse;

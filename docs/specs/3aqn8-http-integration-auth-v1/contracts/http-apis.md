@@ -45,7 +45,8 @@
   - `record: IntegrationApiKeyRecord`
   - `plainTextKey: string` (one-time only)
 - Audit:
-  - `lastUsedIp` records the trusted peer address observed by Bun, not caller-supplied forwarding headers
+  - `lastUsedIp` records the direct peer address by default
+  - when a reverse proxy also presents the configured trusted proxy secret header, forwarded client IP headers may be used for audit attribution
 
 ### `POST /api/settings/api-access/keys/:id/rotate`
 
