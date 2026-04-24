@@ -206,6 +206,21 @@ export const MediumTableLayout: Story = {
   },
 };
 
+export const WideTableLayout: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysWide1120", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
+    await expect(canvas.getByText("提取时间")).toBeInTheDocument();
+    await expect(canvas.getByText("最近验证")).toBeInTheDocument();
+  },
+};
+
 export const CopyActionPlay: Story = {
   args: baseArgs,
   render: () => <StorySurface />,

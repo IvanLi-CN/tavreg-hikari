@@ -16,7 +16,7 @@ import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const desktopGridClass =
-  "grid min-w-[900px] grid-cols-[3rem_minmax(11rem,1.1fr)_minmax(8rem,0.92fr)_minmax(14rem,1.55fr)_minmax(6.5rem,0.72fr)_6rem_8rem_8rem]";
+  "grid w-full min-w-[860px] grid-cols-[2.75rem_minmax(10rem,1.15fr)_minmax(6.5rem,0.78fr)_minmax(11rem,1.85fr)_minmax(5.75rem,0.72fr)_5.5rem_minmax(6.5rem,0.92fr)_minmax(6.5rem,0.92fr)] lg:min-w-[980px] lg:grid-cols-[3rem_minmax(11rem,1.08fr)_minmax(7.5rem,0.82fr)_minmax(14rem,1.7fr)_minmax(6.25rem,0.78fr)_6rem_minmax(7.5rem,0.92fr)_minmax(7.5rem,0.92fr)]";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -358,7 +358,7 @@ export function GrokApiKeysView({
                   </div>
                   <WindowVirtualList
                     items={apiKeys.rows}
-                    className="min-w-[900px]"
+                    className="w-full min-w-[860px] lg:min-w-[980px]"
                     compactQuery="(max-width: 0px)"
                     getKey={(row) => row.id}
                     estimateSize={() => 63}

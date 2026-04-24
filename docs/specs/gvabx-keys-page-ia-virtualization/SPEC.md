@@ -101,6 +101,7 @@
 - 纵向滚动继续依赖 `window`；列表内只允许横向溢出滚动。
 - 桌面端使用“静态列头 + 虚拟化行层”；移动端继续显示卡片化记录，但也走同一虚拟化数据窗口。
 - 三套 keys 列表统一在 `md` 以下才切换为卡片布局；`md` 及以上继续优先保留表格布局。
+- Grok 桌面表格在 `md ~ lg` 使用更紧凑的列模板，在 `lg+` 恢复更宽的列模板，并优先把剩余宽度分配给 `SSO` 列，避免右侧空间利用不均衡。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -186,6 +187,12 @@
   state: `grok keeps table layout at md and above`
   evidence_note: 验证 Grok keys 在 820px 视口已进入 `md`，恢复表格布局。
   ![Grok Keys 820px 表格布局](./assets/grok-tablet-table-layout.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/GrokApiKeysView/WideTableLayout`
+  state: `grok wide table uses right-side space more efficiently`
+  evidence_note: 验证 Grok keys 在更宽桌面视口下会把更多剩余空间分配给 SSO 和时间列，减少右侧空间浪费感。
+  ![Grok Keys 1120px 宽表格布局](./assets/grok-wide-table-layout.png)
 
 ## 方案概述（Approach）
 

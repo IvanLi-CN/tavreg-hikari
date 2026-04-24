@@ -50,6 +50,13 @@ const customViewports = {
       height: "1180px",
     },
   },
+  keysWide1120: {
+    name: "Keys Wide 1120",
+    styles: {
+      width: "1120px",
+      height: "1180px",
+    },
+  },
 };
 
 const preview: Preview = {
