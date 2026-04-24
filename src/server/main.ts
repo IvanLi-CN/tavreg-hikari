@@ -113,6 +113,7 @@ const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
 const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;
+const MAX_KEYS_PAGE_SIZE = 5000;
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -1964,9 +1965,9 @@ async function main(): Promise<void> {
         return json({ ok: true, ...result });
       }
 
-        if (pathname === "/api/api-keys" && req.method === "GET") {
+      if (pathname === "/api/api-keys" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
-        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const data = db.listApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
@@ -2007,7 +2008,7 @@ async function main(): Promise<void> {
 
       if ((pathname === "/api/grok/keys" || pathname === "/api/grok/accounts") && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
-        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const data = db.listGrokApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
@@ -2078,14 +2079,40 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
-        const limit = Math.max(1, Math.min(100, toInt(url.searchParams.get("limit") || undefined, 20)));
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const sortBy = (url.searchParams.get("sortBy") as "createdAt" | "expiresAt" | null) || "createdAt";
         const sortDir = (url.searchParams.get("sortDir") as "desc" | "asc" | null) || "desc";
         const q = url.searchParams.get("q") || undefined;
         const expiryStatus = (url.searchParams.get("expiryStatus") as "valid" | "expired" | "noExpiry" | null) || undefined;
+        const data = chatgptScheduler.getRecentCredentials({ page, pageSize, sortBy, sortDir, q, expiryStatus });
         return json({
           ok: true,
-          rows: chatgptScheduler.getRecentCredentials({ limit, sortBy, sortDir, q, expiryStatus }).map((row) => serializeChatGptCredential(row)),
+          rows: data.rows.map((row) => serializeChatGptCredential(row)),
+          total: data.total,
+          page: data.page,
+          pageSize: data.pageSize,
+          summary: data.summary,
+        });
+      }
+
+      if (pathname === "/api/chatgpt/credentials/export" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
+        const requestedIds = Array.isArray(body?.ids)
+          ? body.ids
+              .map((value) => (typeof value === "number" ? value : Number.parseInt(String(value), 10)))
+              .filter((value): value is number => Number.isInteger(value) && value > 0)
+          : [];
+        if (requestedIds.length === 0) {
+          return badRequest("at least one credential id is required");
+        }
+        const credentials = db.listChatGptCredentialsByIds(requestedIds);
+        const foundIds = new Set(credentials.map((credential) => credential.id));
+        const missingIds = requestedIds.filter((credentialId) => !foundIds.has(credentialId));
+        return json({
+          ok: true,
+          credentials: credentials.map((credential) => serializeChatGptCredential(credential, true)),
+          missingIds,
         });
       }
 

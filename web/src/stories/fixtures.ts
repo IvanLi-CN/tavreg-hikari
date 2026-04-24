@@ -778,6 +778,37 @@ export const sampleChatGptCredentials: ChatGptCredentialRecord[] = sampleChatGpt
   }),
 );
 
+export function createSampleChatGptCredentialsPayload(
+  rows: ChatGptCredentialRecord[] = sampleChatGptCredentials,
+  options?: { total?: number; page?: number; pageSize?: number; nowMs?: number },
+) {
+  const nowMs = options?.nowMs ?? Date.parse("2026-04-10T03:00:00.000Z");
+  const summary = rows.reduce(
+    (accumulator, row) => {
+      if (!row.expiresAt) {
+        accumulator.noExpiry += 1;
+        return accumulator;
+      }
+      const expiresAt = Date.parse(row.expiresAt);
+      if (Number.isFinite(expiresAt) && expiresAt > nowMs) {
+        accumulator.valid += 1;
+        return accumulator;
+      }
+      accumulator.expired += 1;
+      return accumulator;
+    },
+    { valid: 0, expired: 0, noExpiry: 0 },
+  );
+  return {
+    ok: true as const,
+    rows,
+    total: options?.total ?? rows.length,
+    page: options?.page ?? 1,
+    pageSize: options?.pageSize ?? 20,
+    summary,
+  };
+}
+
 export const sampleRevealedChatGptCredential: ChatGptCredentialRecord = {
   ...sampleChatGptCredentials[0]!,
   accessToken: "access-token-demo",
