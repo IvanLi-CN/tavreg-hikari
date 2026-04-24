@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "../src/server/api-key-export.ts";
-import { buildApiKeyExportFilename } from "../web/src/lib/api-key-export.ts";
+import { buildApiKeyExportFilename, countMissingExportIds } from "../web/src/lib/api-key-export.ts";
 
 describe("api key export helpers", () => {
   test("formats export content as key | ip lines while preserving empty ip slots", () => {
@@ -42,5 +42,18 @@ describe("api key export helpers", () => {
         },
       ]),
     ).toBe("sso_live_alpha\nsso_live_beta");
+  });
+
+  test("counts missing export ids against the requested selection", () => {
+    expect(
+      countMissingExportIds(
+        [3, 2, 2, 1],
+        [
+          { id: 2 },
+          { id: 3 },
+        ],
+      ),
+    ).toBe(1);
+    expect(countMissingExportIds([7, 8], [{ id: 7 }, { id: 8 }, { id: 99 }])).toBe(0);
   });
 });

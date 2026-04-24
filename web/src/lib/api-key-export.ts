@@ -11,3 +11,17 @@ export function buildApiKeyExportFilename(now = new Date()): string {
   const seconds = pad(now.getSeconds());
   return `tavily-api-keys-${year}${month}${day}-${hours}${minutes}${seconds}.txt`;
 }
+
+export function countMissingExportIds(
+  requestedIds: ReadonlyArray<number>,
+  returnedItems: ReadonlyArray<{ id: number }>,
+): number {
+  const normalizedRequestedIds = Array.from(
+    new Set(requestedIds.filter((id) => Number.isInteger(id) && id > 0)),
+  );
+  if (normalizedRequestedIds.length === 0) {
+    return 0;
+  }
+  const returnedIds = new Set(returnedItems.map((item) => item.id));
+  return normalizedRequestedIds.reduce((missingCount, id) => missingCount + (returnedIds.has(id) ? 0 : 1), 0);
+}

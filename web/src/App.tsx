@@ -15,7 +15,7 @@ import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { SiteKeysView } from "@/components/site-keys-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
-import { buildApiKeyExportFilename } from "@/lib/api-key-export";
+import { buildApiKeyExportFilename, countMissingExportIds } from "@/lib/api-key-export";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
@@ -1693,8 +1693,13 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ids: selectedApiKeyIds }),
       });
-      if (payload.items.length === 0) {
-        setError("选中的 API key 已不存在");
+      const missingCount = countMissingExportIds(selectedApiKeyIds, payload.items);
+      if (missingCount > 0) {
+        setError(
+          missingCount === selectedApiKeyIds.length
+            ? "选中的 API key 已不存在"
+            : `有 ${missingCount} 条 API key 已不存在，请刷新列表后重试导出`,
+        );
         return;
       }
       setApiKeyExportContent(payload.content);
@@ -1751,8 +1756,13 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ids: selectedGrokApiKeyIds }),
       });
-      if (payload.items.length === 0) {
-        setError("选中的 Grok API key 已不存在");
+      const missingCount = countMissingExportIds(selectedGrokApiKeyIds, payload.items);
+      if (missingCount > 0) {
+        setError(
+          missingCount === selectedGrokApiKeyIds.length
+            ? "选中的 Grok API key 已不存在"
+            : `有 ${missingCount} 条 Grok API key 已不存在，请刷新列表后重试导出`,
+        );
         return;
       }
       setGrokApiKeyExportContent(payload.content);
