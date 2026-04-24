@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { WindowVirtualList } from "@/components/window-virtual-list";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import type {
   ChatGptCredentialQuery,
   ChatGptCredentialsPayload,
@@ -149,6 +150,7 @@ export function ChatGptCredentialsView({
   const exportTextareaRef = useRef<HTMLTextAreaElement>(null);
   const selectedOnPage = credentials.rows.filter((row) => selectedIds.includes(row.id)).length;
   const allCurrentPageSelected = credentials.rows.length > 0 && selectedOnPage === credentials.rows.length;
+  const isCompactLayout = useMediaQuery("(max-width: 767px)", false);
 
   useEffect(() => {
     if (!exportOpen || !exportContent) return;
@@ -225,7 +227,7 @@ export function ChatGptCredentialsView({
             </div>
           ) : (
             <>
-              <div className="md:hidden">
+              {isCompactLayout ? (
                 <WindowVirtualList
                   items={credentials.rows}
                   getKey={(credential) => credential.id}
@@ -281,9 +283,7 @@ export function ChatGptCredentialsView({
                     </article>
                   )}
                 />
-              </div>
-
-              <div className="hidden md:block">
+              ) : (
                 <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                   <div className={cn(desktopGridClass, "border-b border-white/8 bg-white/[0.03] text-xs font-medium uppercase tracking-[0.14em] text-slate-400")}>
                     <div className="px-4 py-3">
@@ -348,7 +348,7 @@ export function ChatGptCredentialsView({
                     )}
                   />
                 </div>
-              </div>
+              )}
 
               <KeysPagination
                 page={query.page}

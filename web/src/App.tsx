@@ -539,8 +539,9 @@ export function App() {
     params.set("sortBy", nextSort.sortBy);
     params.set("sortDir", nextSort.sortDir);
     const payload = await api<ChatGptCredentialsPayload>(`/api/chatgpt/credentials?${params.toString()}`);
-    if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
-      setChatGptCredentialQuery((current) => ({ ...current, page: current.page - 1 }));
+    const lastPage = Math.max(1, Math.ceil(payload.total / nextQuery.pageSize));
+    if (nextQuery.page > lastPage) {
+      setChatGptCredentialQuery((current) => ({ ...current, page: lastPage }));
       return;
     }
     setChatGptCredentials(payload);
@@ -849,18 +850,27 @@ export function App() {
     try {
       setChatGptExportBusy(true);
       setError(null);
-      const detailRows = (
-        await Promise.all(
-          selectedChatGptCredentialIds.map(async (credentialId) => {
-            try {
-              const credential = chatGptCredentials.rows.find((row) => row.id === credentialId);
-              return credential ? await ensureChatGptCredentialDetail(credential) : await loadChatGptCredentialDetail(credentialId);
-            } catch {
-              return null;
-            }
-          }),
-        )
-      ).filter((row): row is ChatGptCredentialRecord => Boolean(row));
+      const detailResults = await Promise.all(
+        selectedChatGptCredentialIds.map(async (credentialId) => {
+          try {
+            const credential = chatGptCredentials.rows.find((row) => row.id === credentialId);
+            const detail = credential ? await ensureChatGptCredentialDetail(credential) : await loadChatGptCredentialDetail(credentialId);
+            return { credentialId, detail } as const;
+          } catch {
+            return { credentialId, detail: null } as const;
+          }
+        }),
+      );
+      const failedCredentialIds = detailResults.filter((result) => !result.detail).map((result) => result.credentialId);
+      if (failedCredentialIds.length > 0) {
+        setError(
+          failedCredentialIds.length === selectedChatGptCredentialIds.length
+            ? "选中的 ChatGPT keys 已不存在"
+            : `有 ${failedCredentialIds.length} 条 ChatGPT keys 已不存在或读取失败，请刷新列表后重试导出`,
+        );
+        return;
+      }
+      const detailRows = detailResults.map((result) => result.detail).filter((row): row is ChatGptCredentialRecord => Boolean(row));
 
       if (detailRows.length === 0) {
         setError("选中的 ChatGPT keys 已不存在");

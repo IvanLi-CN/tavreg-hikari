@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { WindowVirtualList } from "@/components/window-virtual-list";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import type { GrokApiKeyQuery, GrokApiKeySortBy, GrokApiKeysPayload } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -166,6 +167,7 @@ export function GrokApiKeysView({
   }>({ apiKeyId: null, field: null, status: "idle" });
   const selectedOnPage = apiKeys.rows.filter((row) => selectedIds.includes(row.id)).length;
   const allCurrentPageSelected = apiKeys.rows.length > 0 && selectedOnPage === apiKeys.rows.length;
+  const isCompactLayout = useMediaQuery("(max-width: 767px)", false);
 
   useEffect(() => {
     if (!exportOpen || !exportContent) return;
@@ -262,7 +264,7 @@ export function GrokApiKeysView({
             </div>
           ) : (
             <>
-              <div className="md:hidden">
+              {isCompactLayout ? (
                 <WindowVirtualList
                   items={apiKeys.rows}
                   getKey={(row) => row.id}
@@ -329,9 +331,7 @@ export function GrokApiKeysView({
                     </article>
                   )}
                 />
-              </div>
-
-              <div className="hidden md:block">
+              ) : (
                 <div className="w-full overflow-x-auto rounded-[24px] border border-white/8 bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                   <div className={cn(desktopGridClass, "border-b border-white/8 bg-white/[0.03] text-xs font-medium uppercase tracking-[0.14em] text-slate-400")}>
                     <div className="px-3 py-3">
@@ -424,7 +424,7 @@ export function GrokApiKeysView({
                     )}
                   />
                 </div>
-              </div>
+              )}
 
               <KeysPagination
                 page={query.page}
