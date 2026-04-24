@@ -204,6 +204,7 @@ export const MediumTableLayout: Story = {
     await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
     await expect(canvas.getByText("邮箱")).toBeInTheDocument();
     await expect(canvas.getByText("SSO")).toBeInTheDocument();
+    await expect(canvas.queryByText("出口 IP")).toBeNull();
   },
 };
 
@@ -217,6 +218,7 @@ export const WideTableLayout: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole("checkbox", { name: "select-current-page" })).toBeInTheDocument();
     await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
+    await expect(canvas.getByText("出口 IP")).toBeInTheDocument();
     await expect(canvas.getByText("提取时间")).toBeInTheDocument();
     await expect(canvas.getByText("最近验证")).toBeInTheDocument();
   },

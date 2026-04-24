@@ -16,7 +16,7 @@ import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const desktopGridClass =
-  "grid w-full min-w-[860px] grid-cols-[2.75rem_minmax(10rem,1.15fr)_minmax(6.5rem,0.78fr)_minmax(11rem,1.85fr)_minmax(5.75rem,0.72fr)_5.5rem_minmax(6.5rem,0.92fr)_minmax(6.5rem,0.92fr)] lg:min-w-[980px] lg:grid-cols-[3rem_minmax(11rem,1.08fr)_minmax(7.5rem,0.82fr)_minmax(14rem,1.7fr)_minmax(6.25rem,0.78fr)_6rem_minmax(7.5rem,0.92fr)_minmax(7.5rem,0.92fr)]";
+  "grid w-full min-w-[768px] grid-cols-[2.75rem_minmax(10.5rem,1.18fr)_minmax(6.5rem,0.82fr)_minmax(12rem,2.05fr)_5.5rem_minmax(6.5rem,0.95fr)_minmax(6.5rem,0.95fr)] lg:min-w-[980px] lg:grid-cols-[3rem_minmax(11rem,1.08fr)_minmax(7.5rem,0.82fr)_minmax(14rem,1.7fr)_minmax(6.25rem,0.78fr)_6rem_minmax(7.5rem,0.92fr)_minmax(7.5rem,0.92fr)]";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -343,7 +343,7 @@ export function GrokApiKeysView({
                     <div className="px-3 py-3">邮箱</div>
                     <div className="px-3 py-3">密码</div>
                     <div className="px-3 py-3">SSO</div>
-                    <div className="px-3 py-3">出口 IP</div>
+                    <div className="hidden px-3 py-3 lg:block">出口 IP</div>
                     <div className="px-3 py-3">状态</div>
                     <div className="px-3 py-3">
                       <SortableTimeButton label="提取时间" column="extractedAt" query={query} onQueryChange={onQueryChange} />
@@ -354,7 +354,7 @@ export function GrokApiKeysView({
                   </div>
                   <WindowVirtualList
                     items={apiKeys.rows}
-                    className="w-full min-w-[860px] lg:min-w-[980px]"
+                    className="w-full min-w-[768px] lg:min-w-[980px]"
                     compactQuery="(max-width: 0px)"
                     getKey={(row) => row.id}
                     estimateSize={() => 63}
@@ -403,7 +403,7 @@ export function GrokApiKeysView({
                             />
                           </div>
                         </div>
-                        <div className="overflow-hidden px-3 py-3">
+                        <div className="hidden overflow-hidden px-3 py-3 lg:block">
                           <span className="block truncate whitespace-nowrap font-mono text-[0.92rem]" title={row.extractedIp || "—"}>
                             {row.extractedIp || "—"}
                           </span>
