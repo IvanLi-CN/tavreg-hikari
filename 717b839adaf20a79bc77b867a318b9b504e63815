@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.15.0",
+  "base_stable_version": "0.14.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-24T14:01:24Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.15.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "c45613dd47e132d5525a4129e0b8b63f0747fe2b",
+  "pr_number": 60,
+  "pr_title": "Refine keys page pagination, virtualization, and responsive layouts",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.15.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.15.0",
+  "target_sha": "717b839adaf20a79bc77b867a318b9b504e63815",
+  "type_label": "type:minor"
+}
