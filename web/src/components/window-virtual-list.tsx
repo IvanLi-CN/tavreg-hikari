@@ -29,13 +29,39 @@ export function WindowVirtualList<T>({
 
   useLayoutEffect(() => {
     if (typeof window === "undefined") return;
+    let frameId = 0;
     const updateOffset = () => {
-      const nextOffset = containerRef.current?.offsetTop ?? 0;
-      setScrollMargin(nextOffset);
+      frameId = 0;
+      const container = containerRef.current;
+      const nextOffset = container ? container.getBoundingClientRect().top + window.scrollY : 0;
+      setScrollMargin((current) => (current === nextOffset ? current : nextOffset));
     };
-    updateOffset();
-    window.addEventListener("resize", updateOffset);
-    return () => window.removeEventListener("resize", updateOffset);
+
+    const scheduleOffsetUpdate = () => {
+      if (frameId !== 0) return;
+      frameId = window.requestAnimationFrame(updateOffset);
+    };
+
+    scheduleOffsetUpdate();
+    window.addEventListener("resize", scheduleOffsetUpdate);
+
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => scheduleOffsetUpdate());
+    if (resizeObserver) {
+      let current: Element | null = containerRef.current;
+      while (current) {
+        resizeObserver.observe(current);
+        current = current.parentElement;
+      }
+    }
+
+    return () => {
+      if (frameId !== 0) {
+        window.cancelAnimationFrame(frameId);
+      }
+      window.removeEventListener("resize", scheduleOffsetUpdate);
+      resizeObserver?.disconnect();
+    };
   }, [isCompactLayout, items.length]);
 
   const itemKeys = useMemo(() => items.map((item, index) => getKey(item, index)), [getKey, items]);
