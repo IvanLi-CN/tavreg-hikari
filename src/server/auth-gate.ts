@@ -102,19 +102,7 @@ export function extractIntegrationApiKey(req: Request): string | null {
   return readTrimmedHeader(req.headers, "x-api-key");
 }
 
-export function resolveClientIp(req: Request): string | null {
-  const forwardedFor = readTrimmedHeader(req.headers, "x-forwarded-for");
-  if (forwardedFor) {
-    const first = forwardedFor
-      .split(",")
-      .map((item) => item.trim())
-      .find(Boolean);
-    if (first) return first;
-  }
-  return (
-    readTrimmedHeader(req.headers, "x-real-ip") ||
-    readTrimmedHeader(req.headers, "cf-connecting-ip") ||
-    readTrimmedHeader(req.headers, "fly-client-ip") ||
-    null
-  );
+export function resolveClientIp(_req: Request, trustedPeerAddress?: string | null): string | null {
+  const peerAddress = String(trustedPeerAddress || "").trim();
+  return peerAddress || null;
 }

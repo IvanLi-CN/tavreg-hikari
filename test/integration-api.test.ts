@@ -203,6 +203,38 @@ describe("integration api", () => {
     appDb.close();
   });
 
+  test("lists unavailable mailboxes in the mailbox index", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId, mailboxId } = await seedAccount(appDb);
+    appDb.markMailboxStatus(mailboxId, {
+      status: "failed",
+      unreadCount: 0,
+      lastSyncedAt: "2026-04-24T10:15:00.000Z",
+      lastErrorCode: "graph_sync_failed",
+      lastErrorMessage: "sync failed",
+    });
+
+    const req = new Request(`https://console.example.test/api/integration/v1/mailboxes?accountId=${accountId}`);
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(200);
+    const payload = await resp!.json();
+    expect(payload.rows).toHaveLength(1);
+    expect(payload.rows[0]).toMatchObject({
+      id: mailboxId,
+      accountId,
+      status: "failed",
+      lastErrorCode: "graph_sync_failed",
+      lastErrorMessage: "sync failed",
+    });
+    appDb.close();
+  });
+
   test("returns parsed verification codes for message detail", async () => {
     const { appDb } = await createTempDb();
     const { mailboxId } = await seedAccount(appDb);

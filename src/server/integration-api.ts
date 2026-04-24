@@ -470,9 +470,7 @@ export async function handleIntegrationApiRequest(input: {
     if (rawAccountId != null && accountId == null) {
       return badRequest("invalid accountId");
     }
-    const rows = input.db
-      .listMailboxes({ connectedOnly: true })
-      .filter((row) => (accountId != null ? row.accountId === accountId : true));
+    const rows = input.db.listMailboxes().filter((row) => (accountId != null ? row.accountId === accountId : true));
     const offset = (page - 1) * pageSize;
     const pagedRows = rows.slice(offset, offset + pageSize);
     return json({

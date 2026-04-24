@@ -44,6 +44,8 @@
   - `ok: true`
   - `record: IntegrationApiKeyRecord`
   - `plainTextKey: string` (one-time only)
+- Audit:
+  - `lastUsedIp` records the trusted peer address observed by Bun, not caller-supplied forwarding headers
 
 ### `POST /api/settings/api-access/keys/:id/rotate`
 
@@ -116,6 +118,8 @@
   - `page`
   - `pageSize`
   - `total`
+- Notes:
+  - list returns mailbox rows for the account even when the mailbox is currently unavailable (`pending | failed | locked | disabled`)
 
 ### `GET /api/integration/v1/mailboxes/:mailboxId/messages`
 

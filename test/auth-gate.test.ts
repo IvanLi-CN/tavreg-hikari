@@ -128,19 +128,14 @@ describe("auth gate helpers", () => {
     expect(extractIntegrationApiKey(headerReq)).toBe("thki_secret_456");
   });
 
-  test("resolves client ip from forwarding headers", () => {
-    const req = new Request("https://console.example.test/api/accounts", {
+  test("resolves client ip from the trusted peer address only", () => {
+    const spoofedReq = new Request("https://console.example.test/api/accounts", {
       headers: {
         "X-Forwarded-For": "198.51.100.7, 10.0.0.1",
-      },
-    });
-    expect(resolveClientIp(req)).toBe("198.51.100.7");
-
-    const realIpReq = new Request("https://console.example.test/api/accounts", {
-      headers: {
         "X-Real-IP": "203.0.113.9",
       },
     });
-    expect(resolveClientIp(realIpReq)).toBe("203.0.113.9");
+    expect(resolveClientIp(spoofedReq)).toBeNull();
+    expect(resolveClientIp(spoofedReq, "192.0.2.55")).toBe("192.0.2.55");
   });
 });
