@@ -148,6 +148,61 @@ describe("integration api", () => {
     appDb.close();
   });
 
+  test("treats failed mailboxes as unavailable in microsoft account summaries", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId } = await seedAccount(appDb);
+    const mailbox = appDb.getMailboxByAccountId(accountId);
+    expect(mailbox).toBeTruthy();
+    appDb.markMailboxStatus(mailbox!.id, {
+      status: "failed",
+      unreadCount: 0,
+      lastSyncedAt: mailbox!.lastSyncedAt,
+      lastErrorCode: "graph_sync_failed",
+      lastErrorMessage: "sync failed",
+    });
+
+    const listReq = new Request("https://console.example.test/api/integration/v1/microsoft-accounts?page=1&pageSize=20");
+    const listResp = await handleIntegrationApiRequest({
+      req: listReq,
+      pathname: new URL(listReq.url).pathname,
+      url: new URL(listReq.url),
+      db: appDb,
+    });
+
+    expect(listResp?.status).toBe(200);
+    const listPayload = await listResp!.json();
+    expect(listPayload.rows[0]).toMatchObject({
+      id: accountId,
+      successfulServices: ["tavily"],
+      serviceSummary: {
+        microsoftMail: {
+          available: false,
+          status: "failed",
+        },
+      },
+    });
+
+    const detailReq = new Request(`https://console.example.test/api/integration/v1/microsoft-accounts/${accountId}`);
+    const detailResp = await handleIntegrationApiRequest({
+      req: detailReq,
+      pathname: new URL(detailReq.url).pathname,
+      url: new URL(detailReq.url),
+      db: appDb,
+    });
+
+    expect(detailResp?.status).toBe(200);
+    const detailPayload = await detailResp!.json();
+    expect(detailPayload.account).toMatchObject({
+      successfulServices: ["tavily"],
+      microsoftMail: {
+        available: false,
+        status: "failed",
+      },
+    });
+
+    appDb.close();
+  });
+
   test("returns parsed verification codes for message detail", async () => {
     const { appDb } = await createTempDb();
     const { mailboxId } = await seedAccount(appDb);

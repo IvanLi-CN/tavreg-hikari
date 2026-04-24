@@ -183,6 +183,10 @@ function serializeMailboxRecord(row: MicrosoftMailboxRecord): Record<string, unk
   };
 }
 
+function isMailboxServiceAvailable(mailbox: MicrosoftMailboxRecord | null): boolean {
+  return Boolean(mailbox && mailbox.status === "available" && (mailbox.refreshToken || mailbox.oauthConnectedAt || mailbox.lastSyncedAt));
+}
+
 function buildSuccessfulServices(
   tavilyAccess: AccountServiceAccessRecord | null,
   mailbox: MicrosoftMailboxRecord | null,
@@ -191,7 +195,7 @@ function buildSuccessfulServices(
   if (tavilyAccess?.lastSuccessAt) {
     services.push("tavily");
   }
-  if (mailbox && (mailbox.refreshToken || mailbox.oauthConnectedAt || mailbox.lastSyncedAt)) {
+  if (isMailboxServiceAvailable(mailbox)) {
     services.push("microsoftMail");
   }
   return services;
@@ -249,7 +253,7 @@ function serializeIntegrationMicrosoftAccount(input: {
         apiKeyPrefix: apiKeyPrefix || null,
       },
       microsoftMail: {
-        available: Boolean(input.mailbox && (input.mailbox.refreshToken || input.mailbox.oauthConnectedAt || input.mailbox.lastSyncedAt)),
+        available: isMailboxServiceAvailable(input.mailbox),
         mailboxId: input.mailbox?.id ?? null,
         status: input.mailbox?.status ?? null,
         unreadCount: input.mailbox?.unreadCount ?? 0,
@@ -271,7 +275,7 @@ function serializeIntegrationMicrosoftAccount(input: {
       browserFingerprintSnapshot,
     };
     result.microsoftMail = {
-      available: Boolean(input.mailbox && (input.mailbox.refreshToken || input.mailbox.oauthConnectedAt || input.mailbox.lastSyncedAt)),
+      available: isMailboxServiceAvailable(input.mailbox),
       mailboxId: input.mailbox?.id ?? null,
       status: input.mailbox?.status ?? null,
       syncEnabled: input.mailbox?.syncEnabled ?? false,

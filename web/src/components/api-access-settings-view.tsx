@@ -174,7 +174,7 @@ export function ApiAccessSettingsView(props: {
                         type="button"
                         variant="outline"
                         size="sm"
-                        disabled={rowBusy}
+                        disabled={rowBusy || row.status !== "active"}
                         onClick={() => setEditor({ kind: "rotate", record: row })}
                       >
                         <RefreshCcw className="size-3.5" aria-hidden="true" />
