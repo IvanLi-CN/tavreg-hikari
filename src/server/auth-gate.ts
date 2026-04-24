@@ -91,14 +91,14 @@ function readForwardedClientIp(req: Request): string | null {
   if (forwardedFor) {
     const first = forwardedFor
       .split(",")
-      .map((item) => item.trim())
+      .map((item) => normalizeIpAddress(item))
       .find(Boolean);
     if (first) return first;
   }
   return (
-    readTrimmedHeader(req.headers, "x-real-ip") ||
-    readTrimmedHeader(req.headers, "cf-connecting-ip") ||
-    readTrimmedHeader(req.headers, "fly-client-ip") ||
+    normalizeIpAddress(readTrimmedHeader(req.headers, "x-real-ip")) ||
+    normalizeIpAddress(readTrimmedHeader(req.headers, "cf-connecting-ip")) ||
+    normalizeIpAddress(readTrimmedHeader(req.headers, "fly-client-ip")) ||
     null
   );
 }

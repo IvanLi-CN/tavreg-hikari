@@ -163,6 +163,17 @@ describe("auth gate helpers", () => {
     expect(resolveClientIp(proxiedReq, config, "::ffff:127.0.0.1")).toBe("198.51.100.7");
   });
 
+  test("ignores malformed forwarded client ip tokens before using audit data", () => {
+    const config = buildServerAuthConfig({});
+    const proxiedReq = new Request("https://console.example.test/api/integration/v1/mailboxes", {
+      headers: {
+        "X-Forwarded-For": "unknown, 198.51.100.7",
+        "X-Real-IP": "not-an-ip",
+      },
+    });
+    expect(resolveClientIp(proxiedReq, config, "127.0.0.1")).toBe("198.51.100.7");
+  });
+
   test("falls back to peer ip when the forwarded secret is invalid", () => {
     const config = buildServerAuthConfig({
       FORWARD_AUTH_SECRET: "shared-secret",

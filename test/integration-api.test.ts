@@ -349,9 +349,17 @@ describe("integration api", () => {
     }
   });
 
-  test("hydrates integration mailbox message list before parsing verification codes", async () => {
+  test("does not hydrate integration mailbox message list when only full-body fetch could reveal codes", async () => {
     const { appDb } = await createTempDb();
     const { mailboxId } = await seedAccount(appDb);
+    const mailbox = appDb.getMailbox(mailboxId);
+    expect(mailbox).toBeTruthy();
+    appDb.updateMailboxTokens(mailboxId, {
+      accessToken: "expired-access-token",
+      accessTokenExpiresAt: "2026-04-20T10:00:00.000Z",
+      refreshToken: mailbox!.refreshToken,
+      authority: mailbox!.authority,
+    });
     appDb.upsertMailboxMessages(mailboxId, [
       {
         graphMessageId: "graph-1",
@@ -389,31 +397,11 @@ describe("integration api", () => {
       microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
       microsoftGraphAuthority: "common",
     };
-    globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          id: "graph-1",
-          internetMessageId: "<graph-1@example.test>",
-          conversationId: "conversation-1",
-          subject: "Microsoft account security alert",
-          from: {
-            emailAddress: {
-              name: "Microsoft",
-              address: "account-security-noreply@accountprotection.microsoft.com",
-            },
-          },
-          receivedDateTime: "2026-04-24T10:12:00.000Z",
-          isRead: false,
-          hasAttachments: false,
-          bodyPreview: "Preview copy without the final code.",
-          body: {
-            contentType: "text",
-            content: "Use security code 654321 to finish verifying your Microsoft account.",
-          },
-          webLink: "https://graph.example.test/messages/graph-1",
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      )) as unknown as typeof fetch;
+    let fetchCount = 0;
+    globalThis.fetch = (async () => {
+      fetchCount += 1;
+      throw new Error("mailbox list should not fetch message details");
+    }) as unknown as typeof fetch;
 
     try {
       const req = new Request(`https://console.example.test/api/integration/v1/mailboxes/${mailboxId}/messages?limit=50&offset=0`);
@@ -427,9 +415,39 @@ describe("integration api", () => {
 
       expect(resp?.status).toBe(200);
       const payload = await resp!.json();
-      expect(payload.rows[0].parsedVerificationCodes[0]).toMatchObject({
-        code: "654321",
+      expect(fetchCount).toBe(0);
+      expect(payload.rows[0].parsedVerificationCodes).toEqual([]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      appDb.close();
+    }
+  });
+
+  test("keeps full-body verification snippets out of integration mailbox message list summaries", async () => {
+    const { appDb } = await createTempDb();
+    const { mailboxId } = await seedAccount(appDb);
+    appDb.upsertMailboxMessages(mailboxId, [
+      {
+        graphMessageId: "graph-1",
+        subject: "Microsoft account security alert",
+        bodyPreview: "Preview copy without the final code.",
+        bodyContent: "Use security code 654321 to finish verifying your Microsoft account.",
+        receivedAt: "2026-04-24T10:12:00.000Z",
+      },
+    ]);
+
+    try {
+      const req = new Request(`https://console.example.test/api/integration/v1/mailboxes/${mailboxId}/messages?limit=50&offset=0`);
+      const resp = await handleIntegrationApiRequest({
+        req,
+        pathname: new URL(req.url).pathname,
+        url: new URL(req.url),
+        db: appDb,
       });
+
+      expect(resp?.status).toBe(200);
+      const payload = await resp!.json();
+      expect(payload.rows[0].parsedVerificationCodes).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
       appDb.close();

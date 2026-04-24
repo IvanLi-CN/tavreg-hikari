@@ -481,7 +481,6 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
     parsedVerificationCodes: parseMailboxVerificationCodes({
       subject: row.subject,
       bodyPreview: row.bodyPreview,
-      bodyContent: row.bodyContent,
     }),
   };
 }
@@ -489,6 +488,11 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
 function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<string, unknown> {
   return {
     ...serializeMailboxMessageSummary(row),
+    parsedVerificationCodes: parseMailboxVerificationCodes({
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+      bodyContent: row.bodyContent,
+    }),
     bodyContent: row.bodyContent,
     createdAt: row.createdAt,
   };
