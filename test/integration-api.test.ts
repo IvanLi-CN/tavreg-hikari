@@ -88,6 +88,34 @@ afterEach(async () => {
 });
 
 describe("integration api", () => {
+  test("returns account summaries without plaintext passwords or local profile paths", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId } = await seedAccount(appDb);
+    const req = new Request("https://console.example.test/api/integration/v1/microsoft-accounts?page=1&pageSize=20");
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(200);
+    const payload = await resp!.json();
+    expect(payload.rows).toHaveLength(1);
+    expect(payload.rows[0]).toMatchObject({
+      id: accountId,
+      microsoftEmail: "relay@example.test",
+      serviceSummary: {
+        tavily: {
+          available: true,
+        },
+      },
+    });
+    expect(payload.rows[0]).not.toHaveProperty("passwordPlaintext");
+    expect(payload.rows[0].session).not.toHaveProperty("profilePath");
+    appDb.close();
+  });
+
   test("returns microsoft account detail with tavily and mailbox summaries", async () => {
     const { appDb } = await createTempDb();
     const { accountId } = await seedAccount(appDb);
@@ -104,6 +132,7 @@ describe("integration api", () => {
     expect(payload.account).toMatchObject({
       id: accountId,
       microsoftEmail: "relay@example.test",
+      passwordPlaintext: "relay-pass",
       successfulServices: ["tavily", "microsoftMail"],
       tavily: {
         apiKey: "tvly-demo-secret",
@@ -115,6 +144,7 @@ describe("integration api", () => {
       },
     });
     expect(payload.account.tavily.cookiesSnapshot).toHaveLength(1);
+    expect(payload.account.session).not.toHaveProperty("profilePath");
     appDb.close();
   });
 

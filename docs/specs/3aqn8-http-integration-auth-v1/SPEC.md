@@ -76,6 +76,7 @@
 
 - `integration` gate 应同时兼容 `Authorization: Bearer <key>` 与 `X-API-Key: <key>` 两种传递方式，方便实例间接入。
 - Microsoft 账号列表与 Mailbox 列表接口应返回分页摘要，不在列表接口返回大体积 cookies / fingerprint 载荷。
+- Microsoft 账号列表接口不应返回 plaintext password、浏览器 profile path 等主机内部敏感细节。
 - 外部 API 的错误语义应稳定收敛为 `401/403/404/409/422` 与统一 `{ error }` 结构。
 - 账号详情里的“已成功登录哪些服务”在 v1 至少覆盖 `tavily` 与 `microsoftMail`。
 

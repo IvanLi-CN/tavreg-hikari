@@ -78,6 +78,9 @@
   - `page`
   - `pageSize`
   - `total`
+- Notes:
+  - summary rows omit `passwordPlaintext`
+  - summary/session data omit host-local browser `profilePath`
 
 ### `GET /api/integration/v1/microsoft-accounts/:id`
 
@@ -85,6 +88,9 @@
 - Response:
   - `ok: true`
   - `account: IntegrationMicrosoftAccountRecord`
+- Notes:
+  - detail keeps `passwordPlaintext`
+  - session summary omits host-local browser `profilePath`
 
 ### `GET /api/integration/v1/microsoft-accounts/:id/proof-mailbox/codes`
 

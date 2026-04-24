@@ -26,7 +26,7 @@ type JsonRecord = Record<string, unknown>;
 export interface IntegrationMicrosoftAccountRecord {
   id: number;
   microsoftEmail: string;
-  passwordPlaintext: string;
+  passwordPlaintext?: string;
   proofMailbox: {
     provider: "cfmail";
     address: string;
@@ -34,7 +34,6 @@ export interface IntegrationMicrosoftAccountRecord {
   } | null;
   session: {
     status: string;
-    profilePath: string;
     proxyNode: string | null;
     proxyIp: string | null;
     proxyCountry: string | null;
@@ -219,7 +218,6 @@ function serializeIntegrationMicrosoftAccount(input: {
   const result: IntegrationMicrosoftAccountRecord = {
     id: input.account.id,
     microsoftEmail: input.account.microsoftEmail,
-    passwordPlaintext: input.account.passwordPlaintext,
     proofMailbox:
       input.account.proofMailboxProvider && input.account.proofMailboxAddress
         ? {
@@ -231,7 +229,6 @@ function serializeIntegrationMicrosoftAccount(input: {
     session: input.account.browserSession
       ? {
           status: input.account.browserSession.status,
-          profilePath: input.account.browserSession.profilePath,
           proxyNode: input.account.browserSession.proxyNode,
           proxyIp: input.account.browserSession.proxyIp,
           proxyCountry: input.account.browserSession.proxyCountry,
@@ -263,6 +260,7 @@ function serializeIntegrationMicrosoftAccount(input: {
   };
 
   if (input.detailed) {
+    result.passwordPlaintext = input.account.passwordPlaintext;
     result.tavily = {
       available: Boolean(lastSuccessAt),
       apiKey: input.currentApiKey?.apiKey || null,
