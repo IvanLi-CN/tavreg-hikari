@@ -373,6 +373,29 @@ def validate_release(workflow: dict[str, Any]) -> None:
     build = job_by_name(workflow, "Build + Smoke + Push Candidate", "release.yml")
     require_run_contains(step_named(build, "Smoke test image", "release.yml.jobs.build-candidate"), ".github/scripts/smoke-test-image.sh", "release.yml Build + Smoke + Push Candidate")
     publish = job_by_name(workflow, "Release Publish", "release.yml")
+    require_run_contains(
+        step_named(publish, "Publish release tags as image indexes", "release.yml.jobs.release-publish"),
+        "docker buildx imagetools create --prefer-index=true",
+        "release.yml Publish release tags as image indexes",
+    )
+    require_run_contains(
+        step_named(
+            publish,
+            "Verify published tags expose linux/amd64 metadata anonymously",
+            "release.yml.jobs.release-publish",
+        ),
+        "verify_release_manifest.py",
+        "release.yml Verify published tags expose linux/amd64 metadata anonymously",
+    )
+    require_run_contains(
+        step_named(
+            publish,
+            "Verify published tags expose linux/amd64 metadata anonymously",
+            "release.yml.jobs.release-publish",
+        ),
+        "--max-attempts 6",
+        "release.yml Verify published tags expose linux/amd64 metadata anonymously retry budget",
+    )
     require_script_contains(step_named(publish, "Create GitHub Release", "release.yml.jobs.release-publish"), "github.rest.repos.createRelease", "release.yml Create GitHub Release")
     require_script_contains(step_named(publish, "Upsert PR release version comment", "release.yml.jobs.release-publish"), "tavreg-hikari-release-version-comment", "release.yml PR release version comment")
 

@@ -270,19 +270,35 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish release tags from candidate image
+      - name: Publish release tags as image indexes
         shell: bash
         env:
           CANDIDATE_TAG: ${{ env.REGISTRY }}/${{ needs.release-meta.outputs.image_name_lower }}:candidate-${{ needs.release-meta.outputs.candidate_suffix }}
           TAGS_CSV: ${{ needs.release-meta.outputs.tags_csv }}
         run: |
           set -euo pipefail
-          docker pull "$CANDIDATE_TAG"
           IFS=',' read -r -a tags <<< "${TAGS_CSV}"
           for tag in "${tags[@]}"; do
             [[ -z "${tag}" ]] && continue
-            docker tag "$CANDIDATE_TAG" "$tag"
-            docker push "$tag"
+            docker buildx imagetools create --prefer-index=true --tag "$tag" "$CANDIDATE_TAG"
+          done
+
+      - name: Verify published tags expose linux/amd64 metadata anonymously
+        shell: bash
+        env:
+          TAGS_CSV: ${{ needs.release-meta.outputs.tags_csv }}
+          EXPECTED_PLATFORM: ${{ env.PLATFORM_AMD64 }}
+        run: |
+          set -euo pipefail
+          IFS=',' read -r -a tags <<< "${TAGS_CSV}"
+          for tag in "${tags[@]}"; do
+            [[ -z "${tag}" ]] && continue
+            python3 .github/scripts/verify_release_manifest.py \
+              --ref "$tag" \
+              --expected-platform "${EXPECTED_PLATFORM}" \
+              --max-attempts 6 \
+              --retry-delay-seconds 5 \
+              --anonymous
           done
 
       - name: Create and push git tag
