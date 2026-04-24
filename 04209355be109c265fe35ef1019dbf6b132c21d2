@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.15.1",
+  "base_stable_version": "0.15.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-24T17:12:26Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.15.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "21a739645333c799a1d3e1a9b68d38045effc68f",
+  "pr_number": 61,
+  "pr_title": "fix: publish GHCR stable tags as public image indexes",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.15.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.15.1",
+  "target_sha": "04209355be109c265fe35ef1019dbf6b132c21d2",
+  "type_label": "type:patch"
+}
