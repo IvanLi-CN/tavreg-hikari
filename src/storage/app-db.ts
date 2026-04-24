@@ -2215,7 +2215,7 @@ export class AppDatabase {
     pageSize?: number;
   }): { rows: GrokApiKeyRecord[]; total: number; summary: { active: number; revoked: number } } {
     const page = Math.max(1, filters.page || 1);
-    const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
+    const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, filters.pageSize || 20));
     const where: string[] = [];
     const params: unknown[] = [];
     if (filters.q?.trim()) {
@@ -3975,10 +3975,16 @@ export class AppDatabase {
       new Set(credentialIds.filter((credentialId) => Number.isInteger(credentialId) && credentialId > 0).map((credentialId) => Math.trunc(credentialId))),
     );
     if (normalizedIds.length === 0) return [];
-    const placeholders = normalizedIds.map(() => "?").join(", ");
-    const rows = this.db
-      .query(`SELECT * FROM chatgpt_credentials WHERE id IN (${placeholders})`)
-      .all(...(normalizedIds as any[])) as Record<string, unknown>[];
+    const rows: Record<string, unknown>[] = [];
+    const chunkSize = 500;
+    for (let offset = 0; offset < normalizedIds.length; offset += chunkSize) {
+      const chunk = normalizedIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const chunkRows = this.db
+        .query(`SELECT * FROM chatgpt_credentials WHERE id IN (${placeholders})`)
+        .all(...(chunk as any[])) as Record<string, unknown>[];
+      rows.push(...chunkRows);
+    }
     const rowById = new Map(rows.map((row) => [Number(row.id), mapChatGptCredentialRow(row)]));
     return normalizedIds.map((credentialId) => rowById.get(credentialId)).filter((row): row is ChatGptCredentialRecord => Boolean(row));
   }

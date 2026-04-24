@@ -430,6 +430,46 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("returns selected ChatGPT credentials for export in request order and chunks large selections", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({
+      site: "chatgpt",
+      runMode: "headed",
+      need: 520,
+      parallel: 1,
+      maxAttempts: 520,
+      payloadJson: {},
+    });
+    const credentialIds = [];
+    for (let index = 0; index < 520; index += 1) {
+      const attempt = appDb.createAttempt(job.id, {
+        accountEmail: `chatgpt-export-${index}@example.test`,
+        outputDir: path.join(process.cwd(), `tmp-chatgpt-export-${index}`),
+      });
+      const credential = appDb.recordChatGptCredential({
+        jobId: job.id,
+        attemptId: attempt.id,
+        email: `chatgpt-export-${index}@example.test`,
+        accountId: `acc-chatgpt-export-${index}`,
+        accessToken: `access-${index}`,
+        refreshToken: `refresh-${index}`,
+        idToken: `id-${index}`,
+        expiresAt: null,
+        credentialJson: "{}",
+      });
+      credentialIds.push(credential.id);
+    }
+
+    const selected = credentialIds.slice().reverse();
+    const exported = appDb.listChatGptCredentialsByIds(selected);
+
+    expect(exported).toHaveLength(520);
+    expect(exported[0]?.id).toBe(selected[0]);
+    expect(exported.at(-1)?.id).toBe(selected.at(-1));
+
+    appDb.close();
+  });
+
   test("searches accounts by email, password, and group", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts(
@@ -3543,6 +3583,10 @@ describe("AppDatabase grok api keys", () => {
       checkoutUrl: "https://checkout.example.test/demo",
       birthDate: "1995-06-18T16:00:00.000Z",
     });
+
+    const paged = appDb.listGrokApiKeys({ page: 1, pageSize: 5000 });
+    expect(paged.rows).toHaveLength(1);
+    expect(paged.total).toBe(1);
 
     appDb.close();
   });
