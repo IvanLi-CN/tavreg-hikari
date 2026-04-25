@@ -146,6 +146,7 @@
 - Given mailbox 已授权但尚未同步，When 首次进入 `/mailboxes` 并选中它，Then 自动触发一次同步；成功后状态变为 `available`。
 - Given Graph 返回授权失效类错误，When 刷新 token 或同步失败，Then mailbox 状态转为 `invalidated`，账号页与邮箱页都会暴露该状态。
 - Given 邮件正文是 HTML，When 右栏展示正文，Then 内容必须经过净化后再渲染。
+- Given 本地缓存的邮件正文为空但 mailbox 仍持有可用 access token，When integration detail API 读取单封邮件，Then 必须先从 Graph 拉取完整正文再解析验证码，且测试不得依赖会随日期过期的固定 token 时间。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
 ## Visual Evidence
@@ -233,5 +234,6 @@ PR: include
 
 ## Change log
 
+- 2026-04-26: 补充 OAuth 成功后 integration detail API 从 Graph 补齐正文与日期无关 token 过期测试边界。
 - 2026-04-07: 账号页统一改用 Bootstrap 术语，并补充默认/强制批量 Bootstrap、状态筛选与对应视觉证据。
 - 2026-03-31: 修复微软账号页桌面表格操作列按钮挤压回归，为操作列补齐稳定最小宽度、按钮单行约束和 Storybook 回归证据。

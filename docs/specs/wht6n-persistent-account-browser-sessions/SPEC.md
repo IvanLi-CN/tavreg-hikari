@@ -121,6 +121,7 @@
 - Given 账号页桌面态空间不足，When 点击“收起工具列”，Then 左侧提号器与导入区整列收起，右侧账号池占满主体宽度，并保留“展开工具列”入口。
 - Given 在账号页设置 `Session` 或 `收信状态` 筛选，When 触发查询，Then 过滤作用于筛选后的全量结果集，而不是当前页前端假过滤。
 - Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 仅未成功 Bootstrap 的账号会进入队列；When 触发“强制 Bootstrap”，Then 已成功账号也可重新进入队列。
+- Given mailbox OAuth 已写入 token 且相关验证测试需要读取 integration detail API，When 当前日期晚于旧固定样例过期时间，Then 测试必须使用相对未来的 access-token 过期时间，避免误走 refresh 分支掩盖实际 bootstrap 行为。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -226,6 +227,7 @@ None
 
 ## 变更记录（Change log）
 
+- 2026-04-26: 补充 Graph OAuth/收信 integration detail API 的 token 过期测试边界，避免日期推进导致验证误判。
 - 2026-04-07: 补充账号页桌面态工具列收起、`Session / 收信状态` 服务端筛选，以及批量 Bootstrap preview / 强制模式的收口说明与视觉证据。
 - 2026-03-31: 初版 spec，冻结账号持久会话、代理复用与 profile 落库改造范围。
 
