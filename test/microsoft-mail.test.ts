@@ -51,6 +51,12 @@ describe("Microsoft mail failure helpers", () => {
         "https://console.example.test/api/microsoft-mail/oauth/callback",
       ),
     ).toBe(true);
+    expect(
+      isMicrosoftOauthCompletionUrl(
+        "https://sso.example.test/?rd=https%3A%2F%2Fconsole.example.test%2Fmailboxes%3FaccountId%3D12%26oauth%3Dsuccess&rm=GET",
+        "https://console.example.test/api/microsoft-mail/oauth/callback",
+      ),
+    ).toBe(true);
   });
 
   test("rejects unrelated intermediate URLs as incomplete OAuth results", () => {
@@ -89,5 +95,11 @@ describe("Microsoft mail failure helpers", () => {
         redirectUri,
       ),
     ).toBe("error");
+    expect(
+      getMicrosoftOauthBrowserOutcome(
+        "https://sso.example.test/?rd=https%3A%2F%2Fconsole.example.test%2Fmailboxes%3FaccountId%3D12%26oauth%3Dsuccess&rm=GET",
+        redirectUri,
+      ),
+    ).toBe("success");
   });
 });
