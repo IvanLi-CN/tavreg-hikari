@@ -1189,7 +1189,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       authUrl,
     });
     let refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
-    const oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
+    let oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
     input.broadcast({
       type: "mailbox.updated",
       payload: { mailboxIds: [refreshedMailbox.id], action: oauthOutcome === "success" ? "oauth_success" : "oauth_finished" },
@@ -1197,12 +1197,16 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     });
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
     if (!workerResult.ok && (refreshedMailbox.refreshToken || refreshedMailbox.oauthConnectedAt)) {
+      const successUrl = buildMailboxOauthOutcomeUrl(graphSettings.redirectUri, refreshedMailbox.accountId, "success");
       workerResult = {
         ...workerResult,
         ok: true,
-        finalUrl: workerResult.finalUrl || buildMailboxOauthOutcomeUrl(graphSettings.redirectUri, refreshedMailbox.accountId, "success"),
-        oauthOutcome: workerResult.oauthOutcome || "success",
+        finalUrl: isMicrosoftOauthCompletionUrl(workerResult.finalUrl || null, graphSettings.redirectUri)
+          ? workerResult.finalUrl
+          : successUrl,
+        oauthOutcome: "success",
       };
+      oauthOutcome = "success";
     }
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");

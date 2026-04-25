@@ -108,7 +108,7 @@
 - 导入账号成功后，如果 Graph 设置完整且该 mailbox 仍未授权、已失败或已失效，系统会自动排队触发一次浏览器授权。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
 - 浏览器自动化若最终没有回到 callback 或 `/mailboxes?...oauth=...`，必须判定为 OAuth 未完成并写入失败态，不能把中间页误当作成功。
-- 如果 callback 已成功写入 `refresh_token` / `oauth_connected_at`，该 DB 授权事实优先于浏览器最终 URL；即使浏览器最终停在 SSO 中继页，也必须按 OAuth success 收敛，不能覆盖为失败。
+- 如果 callback 已成功写入 `refresh_token` / `oauth_connected_at`，该 DB 授权事实优先于浏览器最终 URL；即使浏览器最终停在 SSO 中继页或 worker 回传了非完成态中间 URL，也必须改写为 OAuth success 收敛，不能覆盖为失败。
 - worker 回查本地 mailbox detail API 时必须携带受信任 Forward Auth 共享密钥与内部 worker 身份头，避免被 internal gate 拦截导致授权事实不可见。
 - 默认“批量 Bootstrap”只处理 `session != ready` 或 `mailbox != available` 的账号；“强制 Bootstrap”忽略这条成功判定，但两者都继续跳过锁定、禁用、占用中和当前 `bootstrapping` 的账号。
 

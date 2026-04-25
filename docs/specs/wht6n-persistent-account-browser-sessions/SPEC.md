@@ -85,7 +85,7 @@
 - 代理池中找不到原 IP：按 `proxy_region` 匹配健康节点 LRU；仍找不到则退到全池健康节点 LRU。
 - proxy inventory 不再包含历史 pinned/lease 节点时，必须自动清理陈旧引用。
 - bootstrap 任一步失败时保留账号与 session 行，状态写入 `failed` 或 `blocked`，允许后续重试。
-- 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；worker 的本地状态确认请求必须通过应用 internal gate。
+- 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
 
 ## 接口契约（Interfaces & Contracts）
 
