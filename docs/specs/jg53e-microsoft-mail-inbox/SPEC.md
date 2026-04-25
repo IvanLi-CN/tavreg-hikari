@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-28
-- Last: 2026-04-19
+- Last: 2026-04-26
 
 ## 背景 / 问题陈述
 
@@ -108,6 +108,8 @@
 - 导入账号成功后，如果 Graph 设置完整且该 mailbox 仍未授权、已失败或已失效，系统会自动排队触发一次浏览器授权。
 - callback 成功后写入 refresh token、access token、过期时间与 Graph 用户信息，并重定向回 `/mailboxes?accountId=<id>&oauth=<success|error>`。
 - 浏览器自动化若最终没有回到 callback 或 `/mailboxes?...oauth=...`，必须判定为 OAuth 未完成并写入失败态，不能把中间页误当作成功。
+- 如果 callback 已成功写入 `refresh_token` / `oauth_connected_at`，该 DB 授权事实优先于浏览器最终 URL；即使浏览器最终停在 SSO 中继页，也必须按 OAuth success 收敛，不能覆盖为失败。
+- worker 回查本地 mailbox detail API 时必须携带受信任 Forward Auth 共享密钥与内部 worker 身份头，避免被 internal gate 拦截导致授权事实不可见。
 - 默认“批量 Bootstrap”只处理 `session != ready` 或 `mailbox != available` 的账号；“强制 Bootstrap”忽略这条成功判定，但两者都继续跳过锁定、禁用、占用中和当前 `bootstrapping` 的账号。
 
 ### 收信状态语义
@@ -136,6 +138,7 @@
 
 - Given 新导入或重复导入同一微软账号，When 导入完成，Then `microsoft_mailboxes` 中对应账号始终只有一条记录，默认状态为 `preparing`，且不会清空已有 OAuth token。
 - Given Graph 设置已保存并点击 Bootstrap 邮箱，When 浏览器授权与 callback 成功，Then mailbox 会写入 refresh token 与 Graph 用户信息，并返回 `/mailboxes`。
+- Given OAuth callback 已写入 refresh token，但浏览器最终 URL 是 SSO 中继到 `/mailboxes?oauth=success`，When worker 收敛结果，Then mailbox/session 必须保持成功状态，不能被最终 URL 覆盖成 failed。
 - Given Graph 设置已保存并导入新微软账号，When mailbox 尚未授权，Then 系统会自动排队拉起浏览器完成 OAuth；如果失败，则 mailbox 状态转为 `failed` 或 `invalidated`。
 - Given 微软返回账号锁定错误，When 自动授权、手动 Bootstrap 或同步失败，Then mailbox 状态转为 `locked`，对应微软账号同步标记为不可用，且账号页 Bootstrap 按钮保持禁用。
 - Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 系统按服务端 preview 解析后的顺序逐个执行，并自动跳过已锁定、已禁用、占用中、进行中或已成功 Bootstrap 的账号。
