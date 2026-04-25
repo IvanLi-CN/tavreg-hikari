@@ -200,13 +200,31 @@ function buildMicrosoftOauthOutcomeUrl(
   return url.toString();
 }
 
+function buildLocalServerAuthHeaders(): HeadersInit {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  const secret = String(process.env.FORWARD_AUTH_SECRET || "").trim();
+  if (secret) {
+    const secretHeader = String(process.env.FORWARD_AUTH_SECRET_HEADER || "X-Forwarded-Auth-Secret").trim() || "X-Forwarded-Auth-Secret";
+    const userHeader = String(process.env.FORWARD_AUTH_USER_HEADER || "X-Forwarded-User").trim() || "X-Forwarded-User";
+    const emailHeader = String(process.env.FORWARD_AUTH_EMAIL_HEADER || "X-Forwarded-Email").trim() || "X-Forwarded-Email";
+    headers[secretHeader] = secret;
+    headers[userHeader] = "mailbox-oauth-worker";
+    headers[emailHeader] = "mailbox-oauth-worker@localhost";
+  }
+  return headers;
+}
+
 async function fetchLocalMailboxCompletion(
   localServerOrigin: string,
   mailboxId: number,
   redirectUri: string,
 ): Promise<{ finalUrl: string | null; oauthOutcome: "success" | "error" | null }> {
   try {
-    const response = await fetch(new URL(`/api/microsoft-mail/mailboxes/${mailboxId}`, localServerOrigin));
+    const response = await fetch(new URL(`/api/microsoft-mail/mailboxes/${mailboxId}`, localServerOrigin), {
+      headers: buildLocalServerAuthHeaders(),
+    });
     if (!response.ok) {
       return { finalUrl: null, oauthOutcome: null };
     }

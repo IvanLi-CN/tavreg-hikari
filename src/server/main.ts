@@ -555,6 +555,16 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
   return Response.redirect(target.toString(), 302);
 }
 
+function buildMailboxOauthOutcomeUrl(redirectUri: string, accountId: number | null, outcome: "success" | "error"): string {
+  const redirectTarget = new URL(redirectUri);
+  const target = new URL("/mailboxes", redirectTarget.origin);
+  if (accountId) {
+    target.searchParams.set("accountId", String(accountId));
+  }
+  target.searchParams.set("oauth", outcome);
+  return target.toString();
+}
+
 function getAccountConnectBlockMessage(
   account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "hasApiKey" | "mailboxStatus" | "browserSession">,
 ): string | null {
@@ -1186,6 +1196,14 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       timestamp: nowIso(),
     });
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+    if (!workerResult.ok && (refreshedMailbox.refreshToken || refreshedMailbox.oauthConnectedAt)) {
+      workerResult = {
+        ...workerResult,
+        ok: true,
+        finalUrl: workerResult.finalUrl || buildMailboxOauthOutcomeUrl(graphSettings.redirectUri, refreshedMailbox.accountId, "success"),
+        oauthOutcome: workerResult.oauthOutcome || "success",
+      };
+    }
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");
     }
