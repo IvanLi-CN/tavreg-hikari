@@ -210,7 +210,9 @@ test("microsoft account launcher can start without a preselected proxy node", as
   const { readFile } = await import("node:fs/promises");
   const flowSource = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
   const workerSource = await readFile(new URL("../src/server/microsoft-account-worker.ts", import.meta.url), "utf8");
-  expect(flowSource).toContain("const args = selectedProxyNode ? [...runtime.workerArgs, \"--proxy-node\", selectedProxyNode] : [...runtime.workerArgs]");
+  expect(flowSource).toContain("function buildWorkerScriptArgs(");
+  expect(flowSource).toContain('return runtime.bootstrapArgs[0] === "run" ? ["run", workerScriptPath] : ["--import", "tsx", workerScriptPath];');
+  expect(flowSource).toContain('const args = selectedProxyNode ? [...workerArgs, "--proxy-node", selectedProxyNode] : [...workerArgs]');
   expect(flowSource).not.toContain("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
   expect(workerSource).not.toContain("missing --proxy-node");
   expect(workerSource).toContain("if (args.proxyNode) {");

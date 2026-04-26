@@ -148,6 +148,13 @@ function normalizeBusinessFlowRunMode(mode: AccountBusinessFlowMode): "headed" |
   return mode === "headless" ? "headless" : "headed";
 }
 
+function buildWorkerScriptArgs(
+  runtime: Pick<ReturnType<typeof resolveWorkerRuntime>, "bootstrapArgs">,
+  workerScriptPath: string,
+): string[] {
+  return runtime.bootstrapArgs[0] === "run" ? ["run", workerScriptPath] : ["--import", "tsx", workerScriptPath];
+}
+
 function buildFlowKey(accountId: number, site: AccountBusinessFlowSite): string {
   return `${accountId}:${site}`;
 }
@@ -520,14 +527,15 @@ export class AccountBusinessFlowManager {
     try {
       portLeases = await reserveMihomoPortLeases();
       const runtime = process.versions.bun
-        ? { command: process.execPath || "bun", workerArgs: ["run", "src/server/microsoft-account-worker.ts"] }
-        : { command: resolveWorkerRuntime().command, workerArgs: ["--import", "tsx", "src/server/microsoft-account-worker.ts"] };
+        ? { command: process.execPath || "bun", bootstrapArgs: ["run", "src/server/microsoft-account-worker.ts"] }
+        : resolveWorkerRuntime();
+      const workerArgs = buildWorkerScriptArgs(runtime, "src/server/microsoft-account-worker.ts");
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
       if (selectedProxyNode) {
         this.db.touchProxyLease(selectedProxyNode);
       }
       await mkdir(outputDir, { recursive: true });
-      const args = selectedProxyNode ? [...runtime.workerArgs, "--proxy-node", selectedProxyNode] : [...runtime.workerArgs];
+      const args = selectedProxyNode ? [...workerArgs, "--proxy-node", selectedProxyNode] : [...workerArgs];
       const child = spawn(runtime.command, args, {
         ...buildAttemptSpawnOptions(this.repoRoot, {
           env: {
@@ -757,7 +765,7 @@ export class AccountBusinessFlowManager {
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-      const args = runtime.command === "bun" ? ["run", "src/server/chatgpt-worker.ts"] : ["--import", "tsx", "src/server/chatgpt-worker.ts"];
+      const args = buildWorkerScriptArgs(runtime, "src/server/chatgpt-worker.ts");
       if (selectedProxyNode?.trim()) {
         args.push("--proxy-node", selectedProxyNode.trim());
         this.db.touchProxyLease(selectedProxyNode.trim());
@@ -935,7 +943,7 @@ export class AccountBusinessFlowManager {
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-      const args = runtime.command === "bun" ? ["run", "src/server/grok-worker.ts"] : ["--import", "tsx", "src/server/grok-worker.ts"];
+      const args = buildWorkerScriptArgs(runtime, "src/server/grok-worker.ts");
       if (selectedProxyNode?.trim()) {
         args.push("--proxy-node", selectedProxyNode.trim());
         this.db.touchProxyLease(selectedProxyNode.trim());
