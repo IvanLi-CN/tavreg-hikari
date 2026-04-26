@@ -141,3 +141,12 @@ test("single-account business flows lease the account and clean up hidden setup 
   expect(source).toContain("rollbackAttemptBeforeLaunch");
   expect(source).toContain('site: "microsoft"');
 });
+
+test("single-account flow lease accepts linked Microsoft accounts", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/storage/app-db.ts", import.meta.url), "utf8");
+  const leaseSection = source.slice(source.indexOf("leaseAccountForJob"), source.indexOf("countEligibleAccounts"));
+  expect(leaseSection).not.toContain("a.has_api_key = 0");
+  expect(leaseSection).toContain("a.lease_job_id IS NULL");
+  expect(leaseSection).toContain("s.status = 'ready'");
+});

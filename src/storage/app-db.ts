@@ -2475,8 +2475,6 @@ export class AppDatabase {
           JOIN account_browser_sessions s ON s.account_id = a.id
           WHERE a.id = ?
             AND a.disabled_at IS NULL
-            AND a.has_api_key = 0
-            AND COALESCE(a.skip_reason, '') = ''
             AND a.lease_job_id IS NULL
             AND s.status = 'ready'
           LIMIT 1
