@@ -3007,6 +3007,7 @@ async function run(): Promise<void> {
     });
     if (isFingerprintBusinessFlow()) {
       await holdBrowserForBusinessFlowHandoff(page, browser, "grok_failed", {
+        success: false,
         error: message,
         failureStage,
       });
