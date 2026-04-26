@@ -6731,6 +6731,12 @@ export interface MicrosoftLoginCompletionOptions {
   passkeyRecoveryUrl?: string;
 }
 
+function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {
+  return /login\.live\.com|account\.live\.com|login\.microsoft\.com|login\.microsoftonline\.com|(?:^|\/\/)[a-z0-9.-]+\.b2clogin\.com(?:\/|$)/i.test(
+    rawUrl,
+  );
+}
+
 export async function completeMicrosoftLogin(
   page: any,
   cfg: AppConfig,
@@ -6790,7 +6796,40 @@ export async function completeMicrosoftLogin(
   page.on("dialog", dialogHandler);
   const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
   const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
-  const hasCompleted = (url: string): boolean => completionUrlPatterns.some((pattern) => pattern.test(url));
+  let visitedMicrosoftAccountSurface = isMicrosoftLoginFlowUrl(String(page.url?.() || ""));
+  const markVisitedMicrosoftAccountSurface = (rawUrl: string): void => {
+    if (!visitedMicrosoftAccountSurface && isMicrosoftLoginFlowUrl(rawUrl)) {
+      visitedMicrosoftAccountSurface = true;
+    }
+  };
+  const microsoftFlowObservers = {
+    framenavigated: (frame: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(frame?.url?.() || ""));
+      } catch {}
+    },
+    request: (request: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(request?.url?.() || ""));
+      } catch {}
+    },
+    response: (response: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(response?.url?.() || ""));
+      } catch {}
+    },
+    requestfailed: (request: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(request?.url?.() || ""));
+      } catch {}
+    },
+  } as const;
+  page.on("framenavigated", microsoftFlowObservers.framenavigated);
+  page.on("request", microsoftFlowObservers.request);
+  page.on("response", microsoftFlowObservers.response);
+  page.on("requestfailed", microsoftFlowObservers.requestfailed);
+  const hasCompleted = (url: string): boolean =>
+    completionUrlPatterns.some((pattern) => pattern.test(url)) && visitedMicrosoftAccountSurface;
 
   try {
     const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
@@ -6800,7 +6839,6 @@ export async function completeMicrosoftLogin(
     let networkRecoveryCount = 0;
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
-    let visitedMicrosoftAccountSurface = false;
     const microsoftLoginDeadline = Date.now() + 120_000;
     for (let step = 1; Date.now() < microsoftLoginDeadline; step += 1) {
       const currentUrl = page.url();
@@ -7030,7 +7068,11 @@ export async function completeMicrosoftLogin(
       await page.waitForTimeout(1_000);
     }
   } finally {
-    page.off("dialog", dialogHandler);
+    page.off?.("dialog", dialogHandler);
+    page.off?.("framenavigated", microsoftFlowObservers.framenavigated);
+    page.off?.("request", microsoftFlowObservers.request);
+    page.off?.("response", microsoftFlowObservers.response);
+    page.off?.("requestfailed", microsoftFlowObservers.requestfailed);
   }
 
   const terminalChromiumNetErrorCode = await detectChromiumNetErrorCode(page);
