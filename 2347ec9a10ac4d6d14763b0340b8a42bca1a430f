@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.15.2",
+  "base_stable_version": "0.15.1",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-26T03:17:06Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.15.2",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "b667876c1a0ef5cd134a530041a8cd02c47fb5d6",
+  "pr_number": 62,
+  "pr_title": "fix: stabilize Microsoft mailbox bootstrap completion",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.15.2",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.15.2",
+  "target_sha": "2347ec9a10ac4d6d14763b0340b8a42bca1a430f",
+  "type_label": "type:patch"
+}
