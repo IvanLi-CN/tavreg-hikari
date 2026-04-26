@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.16.0",
+  "base_stable_version": "0.15.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-26T21:00:27Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.16.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "15332825190338225632e24d212edd19d7386ec9",
+  "pr_number": 58,
+  "pr_title": "feat: add Microsoft account business flow launcher",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.16.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.16.0",
+  "target_sha": "f3c7b8e0706926ebcacc45a1b9bd9c90dd7d6548",
+  "type_label": "type:minor"
+}
