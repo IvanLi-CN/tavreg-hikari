@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   authenticateTrustedForwardAuth,
   buildServerAuthConfig,
+  buildTrustedForwardAuthHeaders,
   classifyRequestPath,
   extractIntegrationApiKey,
   readForwardedIdentity,
@@ -49,6 +50,22 @@ describe("auth gate helpers", () => {
     });
     expect(customConfig.forwardedSecretHeader).toBe("X-Auth-Secret");
     expect(customConfig.forwardedSecret).toBe("shared-secret");
+  });
+
+  test("builds trusted headers for internal workers", () => {
+    const config = buildServerAuthConfig({
+      FORWARD_AUTH_SECRET: "shared-secret",
+      FORWARD_AUTH_SECRET_HEADER: "X-Auth-Secret",
+      FORWARD_AUTH_USER_HEADER: "Remote-User",
+      FORWARD_AUTH_EMAIL_HEADER: "Remote-Email",
+    } as NodeJS.ProcessEnv);
+
+    expect(buildTrustedForwardAuthHeaders(config, { user: "mailbox-oauth-worker", email: "mailbox-oauth-worker@localhost" })).toEqual({
+      Accept: "application/json",
+      "X-Auth-Secret": "shared-secret",
+      "Remote-User": "mailbox-oauth-worker",
+      "Remote-Email": "mailbox-oauth-worker@localhost",
+    });
   });
 
   test("requires a trusted forward-auth secret before accepting identity headers", () => {

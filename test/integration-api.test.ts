@@ -259,6 +259,11 @@ describe("integration api", () => {
   test("hydrates integration message detail before parsing verification codes", async () => {
     const { appDb } = await createTempDb();
     const { mailboxId } = await seedAccount(appDb);
+    const futureAccessTokenExpiry = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    appDb.updateMailboxTokens(mailboxId, {
+      accessToken: "access-token",
+      accessTokenExpiresAt: futureAccessTokenExpiry,
+    });
     appDb.upsertMailboxMessages(mailboxId, [
       {
         graphMessageId: "graph-1",

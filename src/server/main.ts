@@ -555,6 +555,16 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
   return Response.redirect(target.toString(), 302);
 }
 
+function buildMailboxOauthOutcomeUrl(redirectUri: string, accountId: number | null, outcome: "success" | "error"): string {
+  const redirectTarget = new URL(redirectUri);
+  const target = new URL("/mailboxes", redirectTarget.origin);
+  if (accountId) {
+    target.searchParams.set("accountId", String(accountId));
+  }
+  target.searchParams.set("oauth", outcome);
+  return target.toString();
+}
+
 function getAccountConnectBlockMessage(
   account: Pick<MicrosoftAccountRecord, "leaseJobId" | "skipReason" | "lastErrorCode" | "disabledAt" | "hasApiKey" | "mailboxStatus" | "browserSession">,
 ): string | null {
@@ -1179,13 +1189,25 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       authUrl,
     });
     let refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
-    const oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
+    let oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
     input.broadcast({
       type: "mailbox.updated",
       payload: { mailboxIds: [refreshedMailbox.id], action: oauthOutcome === "success" ? "oauth_success" : "oauth_finished" },
       timestamp: nowIso(),
     });
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+    if (!workerResult.ok && (refreshedMailbox.refreshToken || refreshedMailbox.oauthConnectedAt)) {
+      const successUrl = buildMailboxOauthOutcomeUrl(graphSettings.redirectUri, refreshedMailbox.accountId, "success");
+      workerResult = {
+        ...workerResult,
+        ok: true,
+        finalUrl: isMicrosoftOauthCompletionUrl(workerResult.finalUrl || null, graphSettings.redirectUri)
+          ? workerResult.finalUrl
+          : successUrl,
+        oauthOutcome: "success",
+      };
+      oauthOutcome = "success";
+    }
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");
     }

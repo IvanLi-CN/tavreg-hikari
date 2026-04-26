@@ -154,6 +154,25 @@ export function readForwardedIdentity(req: Request, config: ServerAuthConfig): F
   };
 }
 
+
+export function buildTrustedForwardAuthHeaders(
+  config: Pick<ServerAuthConfig, "forwardedSecret" | "forwardedSecretHeader" | "forwardedUserHeader" | "forwardedEmailHeader">,
+  identity: { user?: string | null; email?: string | null } = {},
+): HeadersInit {
+  const headers: Record<string, string> = {
+    Accept: "application/json",
+  };
+  const secret = String(config.forwardedSecret || "").trim();
+  if (!secret) {
+    return headers;
+  }
+  const principal = String(identity.user || identity.email || "internal-worker").trim() || "internal-worker";
+  headers[config.forwardedSecretHeader] = secret;
+  headers[config.forwardedUserHeader] = principal;
+  headers[config.forwardedEmailHeader] = String(identity.email || `${principal}@localhost`).trim() || `${principal}@localhost`;
+  return headers;
+}
+
 export function authenticateTrustedForwardAuth(req: Request, config: ServerAuthConfig): TrustedForwardAuthResult {
   if (!config.forwardedSecret) {
     return { ok: false, reason: "misconfigured_secret" };
