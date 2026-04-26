@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, within } from "storybook/test";
+import { expect, userEvent, within } from "storybook/test";
 import { MailboxDrawer } from "@/components/mailbox-drawer";
 import { sampleAccounts, sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
 
@@ -59,6 +59,8 @@ export const AvailableMailbox: Story = {
     await expect(canvas.getByText("beta@example.test")).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "复制Beta 用户名" })).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "复制beta@example.test 邮箱" })).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: "复制beta@example.test 最新验证码" })).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: /复制 Your verification code 验证码/ })).toBeInTheDocument();
     await expect(canvas.queryByText("Inbox")).not.toBeInTheDocument();
     await expect(canvas.queryByText("邮箱账号")).not.toBeInTheDocument();
   },
@@ -207,5 +209,42 @@ export const CopyFailureFeedback: Story = {
   play: async () => {
     await expect(within(document.body).getByText("复制失败")).toBeInTheDocument();
     await expect(within(document.body).getByRole("textbox", { name: "完整内容（点击全选）" })).toHaveTextContent("beta@example.test");
+  },
+};
+
+export const VerificationCodeCopyFeedbackPlay: Story = {
+  args: {
+    account: findAccount(2),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 2) ?? null,
+    messages: sampleMailboxMessages,
+    messagesTotal: sampleMailboxMessages.length,
+    selectedMessageId: sampleMailboxMessages[0]?.id ?? null,
+    messageDetail: sampleMailboxMessageDetail,
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "点击钥匙按钮后展示验证码复制成功反馈，供抽屉视觉验收使用。",
+      },
+    },
+  },
+  play: async () => {
+    const originalClipboard = navigator.clipboard;
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: async () => undefined,
+      },
+    });
+    try {
+      const body = within(document.body);
+      await userEvent.click(body.getByRole("button", { name: "复制beta@example.test 最新验证码" }));
+      await expect(body.getByText("已复制")).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: originalClipboard,
+      });
+    }
   },
 };

@@ -73,7 +73,8 @@ import {
   normalizeChatGptUpstreamGroupName,
   readChatGptJobUpstreamGroupName,
 } from "./chatgpt-upstream-supplement.js";
-import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
+import { assertRunModeAvailable, clampRunModeToAvailability } from "./run-mode-availability.js";
+import { BrowserAvailabilityService } from "./browser-availability.js";
 import { GrokJobScheduler } from "./grok-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
@@ -103,6 +104,15 @@ import {
   toMailboxFailureStatus,
   type MicrosoftGraphSettingsInput,
 } from "./microsoft-mail.js";
+import {
+  AccountBusinessFlowManager,
+  type AccountBusinessFlowMode,
+  type AccountBusinessFlowSite,
+} from "./account-business-flow.js";
+import {
+  matchMailboxVerificationCodeForMessage,
+  pickLatestMailboxVerificationCode,
+} from "./microsoft-mailbox-verification.js";
 import { parseMailboxVerificationCodes } from "./verification-codes.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
@@ -113,6 +123,32 @@ const LEGACY_PROXY_USAGE_PATH = path.join(OUTPUT_ROOT, "proxy", "node-usage.json
 const DEFAULT_DB_PATH = resolveTaskLedgerDbPath(OUTPUT_ROOT, process.env.TASK_LEDGER_DB_PATH);
 const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
 const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;
+let appDbRef: AppDatabase | null = null;
+let accountBusinessFlowManager: AccountBusinessFlowManager | null = null;
+let browserAvailabilityService: BrowserAvailabilityService | null = null;
+
+async function ensureBrowserAvailabilityFresh(): Promise<void> {
+  await browserAvailabilityService?.ensureFresh();
+}
+
+function getBrowserRunModeAvailability() {
+  return browserAvailabilityService?.getRunModeAvailability() || {
+    headed: false,
+    headless: true as const,
+    headedReason: "正在检测当前环境的浏览器能力。",
+  };
+}
+
+function getDefaultAccountBusinessFlowAvailability() {
+  return browserAvailabilityService?.getAccountBusinessFlowAvailability() || {
+    headless: true as const,
+    headed: false,
+    fingerprint: false,
+    headedReason: "正在检测当前环境的浏览器能力。",
+    fingerprintReason: "正在检测当前环境的浏览器能力。",
+    deAvailable: false,
+  };
+}
 const MAX_KEYS_PAGE_SIZE = 5000;
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
@@ -376,6 +412,10 @@ function getRuntimeServerBinding(settings: AppSettings): { host: string; port: n
 }
 
 function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> {
+  const businessFlow = accountBusinessFlowManager?.serializeAccount(row) ?? {
+    businessFlowAvailability: getDefaultAccountBusinessFlowAvailability(),
+    businessFlowState: null,
+  };
   return {
     id: row.id,
     microsoftEmail: row.microsoftEmail,
@@ -404,6 +444,8 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     mailboxLastErrorCode: row.mailboxLastErrorCode,
     mailboxUnreadCount: row.mailboxUnreadCount,
     browserSession: serializeBrowserSession(row),
+    businessFlowAvailability: businessFlow.businessFlowAvailability,
+    businessFlowState: businessFlow.businessFlowState,
   };
 }
 
@@ -441,7 +483,44 @@ function serializeBrowserSession(account: Pick<MicrosoftAccountRecord, "browserS
   };
 }
 
-function serializeMailbox(row: MicrosoftMailboxRecord): Record<string, unknown> {
+function toVerificationCodeMessage(message: Pick<MicrosoftMailMessageRecord, "subject" | "fromName" | "fromAddress" | "bodyPreview" | "bodyContent" | "receivedAt">) {
+  return {
+    subject: message.subject,
+    fromName: message.fromName,
+    fromAddress: message.fromAddress,
+    bodyPreview: message.bodyPreview,
+    bodyContent: message.bodyContent,
+    receivedAt: message.receivedAt,
+  };
+}
+
+function resolveLatestMailboxVerificationCode(mailboxId: number) {
+  if (!appDbRef) return null;
+  return pickLatestMailboxVerificationCode(
+    appDbRef.listMailboxMessagesForVerification(mailboxId, { limit: 500 }).map((message) => toVerificationCodeMessage(message)),
+  );
+}
+
+function resolveLatestMailboxVerificationCodes(mailboxes: readonly MicrosoftMailboxRecord[]) {
+  const latestByMailboxId = new Map<number, ReturnType<typeof pickLatestMailboxVerificationCode>>();
+  if (!appDbRef || mailboxes.length === 0) return latestByMailboxId;
+  const grouped = appDbRef.listMailboxMessagesForVerificationBatch(
+    mailboxes.map((mailbox) => mailbox.id),
+    { limitPerMailbox: 500 },
+  );
+  for (const mailbox of mailboxes) {
+    latestByMailboxId.set(
+      mailbox.id,
+      pickLatestMailboxVerificationCode((grouped.get(mailbox.id) || []).map((message) => toVerificationCodeMessage(message))),
+    );
+  }
+  return latestByMailboxId;
+}
+
+function serializeMailbox(
+  row: MicrosoftMailboxRecord,
+  latestVerificationCode = resolveLatestMailboxVerificationCode(row.id),
+): Record<string, unknown> {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -464,10 +543,19 @@ function serializeMailbox(row: MicrosoftMailboxRecord): Record<string, unknown> 
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     isAuthorized: Boolean(row.refreshToken),
+    latestVerificationCode,
   };
 }
 
 function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  const verificationCode = matchMailboxVerificationCodeForMessage({
+    subject: row.subject,
+    fromName: row.fromName,
+    fromAddress: row.fromAddress,
+    bodyPreview: row.bodyPreview,
+    bodyContent: row.bodyContent,
+    receivedAt: row.receivedAt,
+  });
   return {
     id: row.id,
     mailboxId: row.mailboxId,
@@ -484,6 +572,7 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
     bodyPreview: row.bodyPreview,
     webLink: row.webLink,
     updatedAt: row.updatedAt,
+    verificationCode,
     parsedVerificationCodes: parseMailboxVerificationCodes({
       subject: row.subject,
       bodyPreview: row.bodyPreview,
@@ -492,6 +581,14 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
 }
 
 function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<string, unknown> {
+  const verificationCode = matchMailboxVerificationCodeForMessage({
+    subject: row.subject,
+    fromName: row.fromName,
+    fromAddress: row.fromAddress,
+    bodyPreview: row.bodyPreview,
+    bodyContent: row.bodyContent,
+    receivedAt: row.receivedAt,
+  });
   return {
     ...serializeMailboxMessageSummary(row),
     parsedVerificationCodes: parseMailboxVerificationCodes({
@@ -501,6 +598,7 @@ function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<
     }),
     bodyContent: row.bodyContent,
     createdAt: row.createdAt,
+    verificationCode,
   };
 }
 
@@ -686,6 +784,16 @@ function parseJobSite(value: string | null | undefined): JobSite {
   return "tavily";
 }
 
+function parseAccountBusinessFlowSite(value: unknown): AccountBusinessFlowSite | null {
+  if (value === "none" || value === "chatgpt" || value === "grok" || value === "tavily") return value;
+  return null;
+}
+
+function parseAccountBusinessFlowMode(value: unknown): AccountBusinessFlowMode | null {
+  if (value === "headless" || value === "headed" || value === "fingerprint") return value;
+  return null;
+}
+
 type SiteScheduler = {
   activeAttemptRows(): JobAttemptRecord[];
   getAutoExtractSnapshot(jobId: number): unknown;
@@ -704,8 +812,9 @@ function serializeJobRecordForApi(job: NonNullable<ReturnType<AppDatabase["getCu
   };
 }
 
-function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
-  const runModeAvailability = detectBrowserRunModeAvailability();
+async function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
+  await ensureBrowserAvailabilityFresh();
+  const runModeAvailability = getBrowserRunModeAvailability();
   const job = db.getCurrentJob(site);
   if (!job) {
     return {
@@ -1310,6 +1419,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
 
 async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
+  appDbRef = db;
   const settingsDefaults = buildSettingsCodeDefaults();
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
@@ -1502,6 +1612,17 @@ async function main(): Promise<void> {
       }
     },
   });
+  browserAvailabilityService = new BrowserAvailabilityService({ cwd: REPO_ROOT });
+  void browserAvailabilityService.ensureFresh().catch(() => {});
+  accountBusinessFlowManager = new AccountBusinessFlowManager(
+    db,
+    REPO_ROOT,
+    DEFAULT_DB_PATH,
+    readSettings,
+    broadcast,
+    serverHttpJson,
+    browserAvailabilityService,
+  );
   const getSchedulerBySite = (site: JobSite) => {
     if (site === "chatgpt") return chatgptScheduler;
     if (site === "grok") return grokScheduler;
@@ -1538,6 +1659,7 @@ async function main(): Promise<void> {
       const authScope = classifyRequestPath(pathname);
       const clientIp = resolveClientIp(req, authConfig, server.requestIP(req)?.address ?? null);
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
+      const accountBusinessFlowStartMatch = pathname.match(/^\/api\/accounts\/(\d+)\/business-flow\/start$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
       const apiAccessKeyRotateMatch = pathname.match(/^\/api\/settings\/api-access\/keys\/(\d+)\/rotate$/);
@@ -1791,7 +1913,7 @@ async function main(): Promise<void> {
         });
       }
 
-        if (pathname === "/api/accounts" && req.method === "GET") {
+      if (pathname === "/api/accounts" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({
@@ -1936,6 +2058,35 @@ async function main(): Promise<void> {
           }
           return badRequest(message);
         }
+      }
+
+      if (accountBusinessFlowStartMatch && req.method === "POST") {
+        const accountId = Number.parseInt(accountBusinessFlowStartMatch[1] || "", 10);
+        if (!Number.isInteger(accountId) || accountId < 1) {
+          return badRequest("invalid account id");
+        }
+        const body = (await req.json().catch(() => null)) as { site?: unknown; mode?: unknown } | null;
+        const site = parseAccountBusinessFlowSite(body?.site);
+        const mode = parseAccountBusinessFlowMode(body?.mode);
+        if (!site) {
+          return badRequest("invalid business flow site");
+        }
+        if (!mode) {
+          return badRequest("invalid business flow mode");
+        }
+        const account = db.getAccount(accountId);
+        if (!account) {
+          return badRequest(`account not found: ${accountId}`, 404);
+        }
+        try {
+          await accountBusinessFlowManager?.start({ accountId, site, mode });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 409);
+        }
+        return json({
+          ok: true,
+          account: serializeAccount(db.getAccount(accountId) || account),
+        });
       }
 
       if (accountSessionRebootstrapMatch && req.method === "POST") {
@@ -2097,7 +2248,7 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/jobs/current" && req.method === "GET") {
         const site = parseJobSite(url.searchParams.get("site"));
-        return json(serializeJobSnapshot(site, db, getSchedulerBySite(site)));
+        return json(await serializeJobSnapshot(site, db, getSchedulerBySite(site)));
       }
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
@@ -2443,9 +2594,11 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/microsoft-mail/mailboxes" && req.method === "GET") {
+        const mailboxes = db.listMailboxes({ connectedOnly: true });
+        const latestVerificationCodes = resolveLatestMailboxVerificationCodes(mailboxes);
         return json({
           ok: true,
-          rows: db.listMailboxes({ connectedOnly: true }).map((row) => serializeMailbox(row)),
+          rows: mailboxes.map((row) => serializeMailbox(row, latestVerificationCodes.get(row.id) || null)),
         });
       }
 
@@ -2696,7 +2849,8 @@ async function main(): Promise<void> {
         const scheduler = getSchedulerBySite(site);
         try {
           if (action === "start") {
-            const runModeAvailability = detectBrowserRunModeAvailability();
+            await ensureBrowserAvailabilityFresh();
+            const runModeAvailability = getBrowserRunModeAvailability();
             if (site === "chatgpt") {
               const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
               if (explicitRunMode) {

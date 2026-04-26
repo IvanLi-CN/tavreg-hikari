@@ -71,6 +71,13 @@ test("scheduled workers defer successful account finalization to the scheduler e
   expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
 });
 
+test("account business flows release Mihomo port listeners after worker spawn", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/account-business-flow.ts"), "utf8");
+  expect(source).toContain('child.once("spawn", () => {');
+  expect(source).toContain("portLeases.apiPort.releaseListener()");
+  expect(source).toContain("portLeases.mixedPort.releaseListener()");
+});
+
 test("proof surface flow shares classifier-based provisioning and explicit unknown diagnostics", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const proofSurface = await collectMicrosoftProofSurfaceClassification(page);");
@@ -447,8 +454,13 @@ test("home stabilization gives Tavily auth APIs extra time after Microsoft retur
 
 test("microsoft login returns Tavily social-signup continuations instead of re-submitting the provider", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  expect(source).toContain("let visitedMicrosoftAccountSurface = false;");
-  expect(source).toContain("visitedMicrosoftAccountSurface = true;");
+  expect(source).toContain("function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {");
+  expect(source).toContain("assumeVisitedMicrosoftAccountSurface?: boolean;");
+  expect(source).toContain("Boolean(options?.assumeVisitedMicrosoftAccountSurface) || isMicrosoftLoginFlowUrl(String(page.url?.() || \"\"))");
+  expect(source).toContain("page.on(\"request\", microsoftFlowObservers.request);");
+  expect(source).toContain("page.on(\"response\", microsoftFlowObservers.response);");
+  expect(source).toContain("const hasCompleted = (url: string): boolean =>");
+  expect(source).toContain("completionUrlPatterns.some((pattern) => pattern.test(url)) && visitedMicrosoftAccountSurface;");
   expect(source).toContain("const socialSignupContinuationPattern = /auth\\.tavily\\.com\\/u\\/(?:signup\\/identifier|signup\\/password|email-identifier\\/challenge)/i;");
   expect(source).toContain("if (visitedMicrosoftAccountSurface && socialSignupContinuationPattern.test(currentUrl)) {");
   expect(source).toContain('log(`login flow: returned to Tavily social signup continuation ${currentUrl}`);');

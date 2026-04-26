@@ -91,11 +91,13 @@
 - `POST /api/microsoft-mail/settings`
 - `GET /api/microsoft-mail/mailboxes`
   - 返回值限定为“已完成 Bootstrap 或已有有效收信状态”的 mailbox；仅 `preparing` 且从未完成 OAuth 的账号不会出现在收件箱工作台。
+  - mailbox 列表返回结构化 `latestVerificationCode`，供账号卡片与抽屉头部直接显示/复制最近验证码。
 - `POST /api/microsoft-mail/accounts/:accountId/oauth/start`
 - `GET /api/microsoft-mail/oauth/callback`
 - `POST /api/microsoft-mail/mailboxes/:mailboxId/sync`
 - `GET /api/microsoft-mail/mailboxes/:mailboxId/messages`
 - `GET /api/microsoft-mail/messages/:messageId`
+  - message summary / detail 都返回结构化 `verificationCode` 字段，来源于统一的验证码提取器，而不是前端自行正则扫描。
 
 ## 行为规格
 
@@ -125,6 +127,8 @@
 - 首次进入 `/mailboxes` 时，如果当前选中 mailbox 为 `preparing` 且已经完成 OAuth，但尚未成功同步，则前端自动触发一次同步。
 - 其余刷新只由用户点击“刷新”按钮触发。
 - 同步走 Graph Inbox delta 查询，落库后以本地缓存作为列表和正文的默认数据源。
+- 后端在 mailbox summary / message summary / message detail 三个层级统一提取验证码：优先识别 Microsoft proof、OpenAI / ChatGPT、Grok / 通用 verification code，并允许把 `ABC-123` 归一化为 `ABC123`。
+- 自动化登录等待验证码时必须直接复用同一套 live mailbox waiter 与验证码提取器，不依赖前端缓存列表。
 - 邮件 HTML 正文必须先经 `DOMPurify` 净化再渲染，禁止直接输出原始 Graph HTML。
 
 ### 界面
@@ -132,6 +136,7 @@
 - 账号页在桌面表格与移动卡片中都显示“收信状态”，并增加“收件箱”入口、单账号 Bootstrap 按钮以及批量串行 Bootstrap 工具栏。
 - `/mailboxes/settings` 负责维护 Graph `client id / client secret / redirect uri / authority`，并提供 callback 与权限范围提示。
 - 邮箱页左栏显示 mailbox 状态、未读数与最近异常，但不再提供 Bootstrap 入口；中栏显示 Inbox 列表；右栏显示正文与邮件头信息。
+- 当 mailbox 或消息存在结构化验证码时，左栏 mailbox 卡片、中栏 Inbox 消息项和账号页内的 MailboxDrawer 都显示钥匙图标复制按钮，并统一复用现有复制反馈浮层。
 - 未完成 Bootstrap 的账号不出现在邮箱页；若当前没有任何已完成 Bootstrap 的邮箱，页面显示“先去微软账号页完成 Bootstrap”的空态。
 
 ## 验收标准
@@ -146,6 +151,8 @@
 - Given mailbox 已授权但尚未同步，When 首次进入 `/mailboxes` 并选中它，Then 自动触发一次同步；成功后状态变为 `available`。
 - Given Graph 返回授权失效类错误，When 刷新 token 或同步失败，Then mailbox 状态转为 `invalidated`，账号页与邮箱页都会暴露该状态。
 - Given 邮件正文是 HTML，When 右栏展示正文，Then 内容必须经过净化后再渲染。
+- Given mailbox 或消息可提取到验证码，When 用户查看微软邮箱页或账号页内的 MailboxDrawer，Then 对应卡片 / 消息项会显示钥匙复制按钮，并沿用统一的复制反馈浮层。
+- Given 自动化登录正在等待 Microsoft / ChatGPT / Grok 验证码，When 新邮件进入 Inbox，Then 后端 live waiter 可以直接从结构化验证码字段拿到正确验证码，不需要前端再次解析正文。
 - Given 本地缓存的邮件正文为空但 mailbox 仍持有可用 access token，When integration detail API 读取单封邮件，Then 必须先从 Graph 拉取完整正文再解析验证码，且测试不得依赖会随日期过期的固定 token 时间。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
@@ -218,6 +225,28 @@ PR: include
 - story_id_or_title: Views/AccountsView/StatusFiltersPlay
 - state: session + mailbox filters
 - evidence_note: 验证微软账号页新增 `Session / 收信状态` 两个筛选，并且能够组合过滤到目标 mailbox 状态。
+
+![微软邮箱验证码钥匙按钮](./assets/mailboxes-verification-code-buttons.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/MailboxesView/VerificationCodeQuickCopyPlay
+- state: mailbox cards + inbox items with verification-code copy buttons
+- evidence_note: 验证微软邮箱三栏页会在 mailbox 卡片与 Inbox 消息项上直接显示钥匙图标复制按钮，用户无需打开正文再手抄验证码。
+
+![微软邮箱抽屉验证码复制反馈](./assets/mailbox-drawer-verification-code-feedback.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: browser-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/MailboxDrawer/VerificationCodeCopyFeedbackPlay
+- state: mailbox drawer verification-code copy feedback
+- evidence_note: 验证账号页 MailboxDrawer 头部与正文区域会复用同一套钥匙复制按钮和复制成功反馈，不再分叉另一套 tooltip/toast。
 
 ## 里程碑
 

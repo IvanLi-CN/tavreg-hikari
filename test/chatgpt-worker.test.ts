@@ -7,6 +7,7 @@ import path from "node:path";
 import type { AppConfig } from "../src/main.js";
 import {
   assertTrustedChatGptWorkerChromiumExecutable,
+  buildChatGptMicrosoftCompletionUrlPatterns,
   buildChatGptWorkerResult,
   launchChatGptWorkerBrowser,
 } from "../src/server/chatgpt-worker.js";
@@ -250,4 +251,18 @@ test("chatgpt worker keeps browser gate prefix for untrusted browser paths", () 
   expect(() => assertTrustedChatGptWorkerChromiumExecutable("/tmp/fingerprint-chrome")).toThrow(
     "chatgpt_browser_not_project_provided:",
   );
+});
+
+test("chatgpt microsoft completion patterns match the localhost callback", () => {
+  const patterns = buildChatGptMicrosoftCompletionUrlPatterns();
+  expect(patterns).toHaveLength(2);
+  expect(patterns[1]?.test("http://localhost:1455/auth/callback?code=demo&state=abc")).toBe(true);
+});
+
+test("chatgpt microsoft provider flow preserves fast callback navigation evidence", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/chatgpt-worker.ts", import.meta.url), "utf8");
+  expect(source).toContain("function watchMicrosoftProviderNavigation(page: any)");
+  expect(source).toContain("const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();");
+  expect(source).toContain("assumeVisitedMicrosoftAccountSurface: providerNavigationObserved");
 });

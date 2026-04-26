@@ -6729,6 +6729,13 @@ async function handleMicrosoftProofCodePrompt(
 export interface MicrosoftLoginCompletionOptions {
   completionUrlPatterns?: RegExp[];
   passkeyRecoveryUrl?: string;
+  assumeVisitedMicrosoftAccountSurface?: boolean;
+}
+
+export function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {
+  return /login\.live\.com|account\.live\.com|login\.microsoft\.com|login\.microsoftonline\.com|(?:^|\/\/)[a-z0-9.-]+\.b2clogin\.com(?:\/|$)/i.test(
+    rawUrl,
+  );
 }
 
 export async function completeMicrosoftLogin(
@@ -6790,7 +6797,41 @@ export async function completeMicrosoftLogin(
   page.on("dialog", dialogHandler);
   const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
   const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
-  const hasCompleted = (url: string): boolean => completionUrlPatterns.some((pattern) => pattern.test(url));
+  let visitedMicrosoftAccountSurface =
+    Boolean(options?.assumeVisitedMicrosoftAccountSurface) || isMicrosoftLoginFlowUrl(String(page.url?.() || ""));
+  const markVisitedMicrosoftAccountSurface = (rawUrl: string): void => {
+    if (!visitedMicrosoftAccountSurface && isMicrosoftLoginFlowUrl(rawUrl)) {
+      visitedMicrosoftAccountSurface = true;
+    }
+  };
+  const microsoftFlowObservers = {
+    framenavigated: (frame: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(frame?.url?.() || ""));
+      } catch {}
+    },
+    request: (request: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(request?.url?.() || ""));
+      } catch {}
+    },
+    response: (response: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(response?.url?.() || ""));
+      } catch {}
+    },
+    requestfailed: (request: any) => {
+      try {
+        markVisitedMicrosoftAccountSurface(String(request?.url?.() || ""));
+      } catch {}
+    },
+  } as const;
+  page.on("framenavigated", microsoftFlowObservers.framenavigated);
+  page.on("request", microsoftFlowObservers.request);
+  page.on("response", microsoftFlowObservers.response);
+  page.on("requestfailed", microsoftFlowObservers.requestfailed);
+  const hasCompleted = (url: string): boolean =>
+    completionUrlPatterns.some((pattern) => pattern.test(url)) && visitedMicrosoftAccountSurface;
 
   try {
     const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
@@ -6800,7 +6841,6 @@ export async function completeMicrosoftLogin(
     let networkRecoveryCount = 0;
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
-    let visitedMicrosoftAccountSurface = false;
     const microsoftLoginDeadline = Date.now() + 120_000;
     for (let step = 1; Date.now() < microsoftLoginDeadline; step += 1) {
       const currentUrl = page.url();
@@ -7030,7 +7070,11 @@ export async function completeMicrosoftLogin(
       await page.waitForTimeout(1_000);
     }
   } finally {
-    page.off("dialog", dialogHandler);
+    page.off?.("dialog", dialogHandler);
+    page.off?.("framenavigated", microsoftFlowObservers.framenavigated);
+    page.off?.("request", microsoftFlowObservers.request);
+    page.off?.("response", microsoftFlowObservers.response);
+    page.off?.("requestfailed", microsoftFlowObservers.requestfailed);
   }
 
   const terminalChromiumNetErrorCode = await detectChromiumNetErrorCode(page);
@@ -10815,7 +10859,7 @@ export async function launchNativeChromeCdp(
 export async function launchChromePersistent(
   cfg: AppConfig,
   mode: "headed" | "headless",
-  proxyServer: string,
+  proxyServer: string | undefined,
   locale: string,
   contextOptions: BrowserContextOptions,
 ): Promise<{
@@ -10832,7 +10876,6 @@ export async function launchChromePersistent(
       const launchOptions: any = {
         headless: mode === "headless",
         slowMo: Math.max(0, cfg.slowMoMs),
-        proxy: { server: proxyServer },
         ignoreDefaultArgs: ["--enable-automation"],
         args: [
           "--no-first-run",
@@ -10853,6 +10896,9 @@ export async function launchChromePersistent(
         extraHTTPHeaders: contextOptions.extraHTTPHeaders,
         timeout: 180_000,
       };
+      if (proxyServer?.trim()) {
+        launchOptions.proxy = { server: proxyServer.trim() };
+      }
       if (cfg.chromeExecutablePath) {
         launchOptions.executablePath = cfg.chromeExecutablePath;
       }
@@ -11595,9 +11641,28 @@ async function runSingleMode(
     const keepOnExit = toBool(process.env.KEEP_BROWSER_OPEN_ON_EXIT, false);
     const keepOnFailure = Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
     if (!keepOnExit && !keepOnFailure) return;
+    const fingerprintBusinessFlow = String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
+    const retainPath = String(process.env.ACCOUNT_BUSINESS_FLOW_RETAIN_PATH || "").trim();
+    const fingerprintRetainedSuccess = fingerprintBusinessFlow && !keepOnFailure;
 
     const holdUrl = page ? page.url() : "unknown";
-    const reason = keepOnFailure && !keepOnExit ? "failure" : "exit";
+    const reason = keepOnFailure ? "failure" : "exit";
+
+    if (fingerprintBusinessFlow && retainPath) {
+      await mkdir(path.dirname(retainPath), { recursive: true }).catch(() => {});
+      await writeFile(
+        retainPath,
+        `${JSON.stringify({
+          retainedAt: new Date().toISOString(),
+          success: fingerprintRetainedSuccess,
+          reason,
+          stage: failureStage,
+          currentUrl: holdUrl,
+          error: fingerprintRetainedSuccess ? null : localErrorMessage || "fingerprint business flow failed before handoff",
+        }, null, 2)}\n`,
+        "utf8",
+      ).catch(() => {});
+    }
 
     if (process.stdin.isTTY && process.stdout.isTTY) {
       const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -11610,7 +11675,11 @@ async function runSingleMode(
     }
 
     const configuredHoldMs = toInt(process.env.KEEP_BROWSER_OPEN_MS, keepOnFailure ? 0 : 15 * 60_000);
-    const holdMs = keepOnFailure && !keepOnExit ? Math.max(0, configuredHoldMs) : Math.max(30_000, configuredHoldMs);
+    const holdMs = keepOnFailure && !keepOnExit
+      ? Math.max(0, configuredHoldMs)
+      : fingerprintBusinessFlow
+        ? Math.max(0, configuredHoldMs)
+        : Math.max(30_000, configuredHoldMs);
     if (holdMs > 0) {
       log(`keep browser open on ${reason} for ${holdMs}ms at stage=${failureStage} url=${holdUrl}`);
       await delay(holdMs);
@@ -12739,17 +12808,20 @@ async function runSingleMode(
     throw new Error(`mode=${mode} stage=${failureStage} code=${localErrorCode || "unknown"}: ${message}`);
   } finally {
     stopTaskWatchers();
+    const preserveBrowserForFingerprint =
+      mode === "headed" && String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
     const preserveBrowserOnFailure = mode === "headed" && Boolean(localErrorMessage) && ctx.keepBrowserOpenOnFailure;
+    const preserveBrowserCleanup = preserveBrowserForFingerprint || preserveBrowserOnFailure;
     await waitForBrowserInspection();
-    if (!preserveBrowserOnFailure && context && !useNativeChrome) {
+    if (!preserveBrowserCleanup && context && !useNativeChrome) {
       await awaitCleanupBestEffort(context.close(), 5_000);
     }
-    if (!preserveBrowserOnFailure && useNativeChrome && nativeChromeStop != null) {
+    if (!preserveBrowserCleanup && useNativeChrome && nativeChromeStop != null) {
       await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
-    } else if (!preserveBrowserOnFailure && browser) {
+    } else if (!preserveBrowserCleanup && browser) {
       await awaitCleanupBestEffort(browser.close(), 5_000);
     }
-    if (!preserveBrowserOnFailure && !useNativeChrome && nativeChromeStop != null) {
+    if (!preserveBrowserCleanup && !useNativeChrome && nativeChromeStop != null) {
       await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
     }
     if (!existingMihomoController) {

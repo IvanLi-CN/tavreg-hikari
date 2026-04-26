@@ -250,4 +250,17 @@ describe("grok mail service", () => {
     });
     expect(mailbox.address).toBe("second@box-b.ivanli.asia");
   });
+
+  test("grok microsoft signup keeps the native profile-completion path before direct-post fallbacks", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("../src/server/grok-worker.ts", import.meta.url), "utf8");
+    expect(source).toContain('authProvider !== "microsoft" || !(await hasSsoCookie(page))');
+    expect(source).toContain('throw new Error("grok_microsoft_post_sso_profile_unhandled")');
+    expect(source).toContain('accounts:profile_completion_after_microsoft');
+    expect(source).toContain("const microsoftVerificationNotBefore = nowIso();");
+    expect(source).toContain("notBefore: microsoftVerificationNotBefore");
+    expect(source).toContain("function watchMicrosoftProviderNavigation(page: any)");
+    expect(source).toContain("const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();");
+    expect(source).toContain("assumeVisitedMicrosoftAccountSurface: providerNavigationObserved");
+  });
 });
