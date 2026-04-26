@@ -2626,6 +2626,7 @@ async function run(): Promise<void> {
 
     let verificationCode: string | null = null;
     if (authProvider === "microsoft") {
+      const microsoftVerificationNotBefore = nowIso();
       failureStage = "accounts_open_microsoft_login";
       const clickedMicrosoft = await clickMicrosoftProviderEntry(page);
       if (!clickedMicrosoft) {
@@ -2663,7 +2664,7 @@ async function run(): Promise<void> {
           },
           timeoutMs: 75_000,
           pollMs: 2500,
-          notBefore: nowIso(),
+          notBefore: microsoftVerificationNotBefore,
           providers: ["grok", "generic"],
         });
         verificationCode = verification.code;

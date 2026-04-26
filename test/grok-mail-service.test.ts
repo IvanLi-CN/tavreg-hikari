@@ -257,5 +257,7 @@ describe("grok mail service", () => {
     expect(source).toContain('authProvider !== "microsoft" || !(await hasSsoCookie(page))');
     expect(source).toContain('throw new Error("grok_microsoft_post_sso_profile_unhandled")');
     expect(source).toContain('accounts:profile_completion_after_microsoft');
+    expect(source).toContain("const microsoftVerificationNotBefore = nowIso();");
+    expect(source).toContain("notBefore: microsoftVerificationNotBefore");
   });
 });
