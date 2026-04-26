@@ -4,13 +4,14 @@
 
 - Status: 已完成
 - Created: 2026-04-17
-- Last: 2026-04-18
+- Last: 2026-04-26
 
 ## 背景 / 问题陈述
 
 - 线上 Microsoft Bootstrap 在 `account.live.com/proofs/Add` 的繁体中文变体下，会误落入通用 proof email handler，直接报 `microsoft_proof_mailbox_missing`。
 - 实际上 proof mailbox 应由 Bootstrap 在 add-surface 上自动 provision，并把 `proof_mailbox_provider/address/id` 回写到账号数据库。
 - 当前识别过度依赖英文/简体中文文案，未来新增语言或布局变体时，容易再次漏判，且失败会被误分类成“没有配置 proof mailbox”，不利于排查。
+- Tavily Microsoft OAuth 回跳会在 `login.live.com/oauth20_authorize.srf` 上直接呈现 `Verify your email` 确认邮箱页面；该页面同时带有 `Use your password` shortcut，必须先按 proof confirmation 处理，避免被通用密码 fallback 抢先接管并最终退化成 `stage_login_home`。
 
 ## 目标 / 非目标
 
@@ -20,6 +21,7 @@
 - 将 Microsoft proof surface 识别改成 URL / DOM 信号优先、文案兜底。
 - 为未知 proof surface 增加显式诊断与稳定错误码，避免静默落入错误 handler。
 - 保持 verify / confirm / code 等既有分支行为不回退。
+- 在 `login.live.com/oauth20_authorize.srf` OAuth 页面识别 confirm-email proof surface，并根据 masked recovery mailbox 与账号配置的 proof mailbox 决定继续收码或写入账号级硬阻断。
 
 ### Non-goals
 
@@ -70,12 +72,15 @@
 - classifier 根据 route + DOM 信号判断 surface kind：`add_method`、`add_email`、`confirm_email`、`verify_choice`、`code_entry` 或 `unclassified`。
 - `handleMicrosoftProofAddPrompt` 与 `handleMicrosoftProofMethodPrompt` 只在 classifier 判定为 add-surface 时触发，并允许自动 provision proof mailbox。
 - `handleMicrosoftProofEmailPrompt` / `handleMicrosoftProofConfirmationEmailPrompt` 仅在 classifier 判定为对应 surface 时继续；若是 proof route 但 classifier 无法归类，则直接抛显式诊断错误。
+- `login.live.com/oauth20_authorize.srf` 上的 `Verify your email`、`proof-confirmation-email-input`、`We'll send a code to ...` 等确认邮箱信号归类为 `confirm_email`，即使页面同时提供 `Use your password`。
+- confirm-email handler 在页面 masked recovery mailbox 与 `microsoft_accounts.proof_mailbox_address` 匹配时继续既有 code request / wait 流程；匹配判定以页面可见 local-part 前缀、mask 和 domain 为准。
+- confirm-email handler 在页面 masked recovery mailbox 与账号配置不匹配时抛出 `microsoft_unknown_recovery_email:<masked>`，由账号级硬阻断逻辑落库并阻止后续 job 继续租用该账号。
 - 进入 code surface 后仍沿用现有 proof code 拉取与提交逻辑。
 
 ### Edge cases / errors
 
 - 若 proof route 页面既不满足 add / verify / confirm / code 的 DOM/文本特征，程序抛 `microsoft_proof_surface_unclassified`，并附带 snapshot 摘要。
-- 若页面已明确是 verify / confirmation surface，但账号配置的 proof mailbox 与 challenge 不匹配，仍沿用 `microsoft_unknown_recovery_email` / `microsoft_account_locked` 等既有错误。
+- 若页面已明确是 verify / confirmation surface，但账号配置的 proof mailbox 与 challenge 不匹配，仍沿用 `microsoft_unknown_recovery_email` / `microsoft_account_locked` 等既有错误；confirm-email mismatch 不因存在 password fallback 而降级为可重试路径。
 - 若 add-surface 的邮箱输入缺失或提交按钮缺失，继续沿用 `microsoft_proof_add_email_input_missing` / `microsoft_proof_add_submit_missing`。
 
 ## 接口契约（Interfaces & Contracts）
@@ -96,6 +101,8 @@ None
 - Given zh-CN、zh-TW、英文 add-surface，When classifier 运行，Then 都会被归类为允许 auto-provision 的 add-flow。
 - Given verify / confirmation / code surface，When classifier 运行，Then 继续走既有 handler，不会因为放宽 add 判定而误建邮箱。
 - Given proof route 出现新的未知语言 / 布局，When classifier 无法归类，Then worker log / result.json 落下 `microsoft_proof_surface_unclassified`，且包含 URL、selector 命中与标题 / 正文摘要。
+- Given Tavily OAuth 在 `login.live.com/oauth20_authorize.srf` 呈现 confirm-email proof surface，When 页面要求确认已配置的 recovery mailbox，Then 登录状态机先执行 confirm-email handler 并等待 code，而不是先点击 `Use your password`。
+- Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
 - Given 101 上 `home-lab-tavreg-hikari` 更新到包含本修复的镜像，When 重新触发 `raidendaniella9161@hotmail.com` 的 mailbox bootstrap，Then worker log 出现 `provisioned Microsoft proof mailbox ...`，数据库 `proof_mailbox_provider/address/id` 不再为空。
 
@@ -164,6 +171,7 @@ None
 - 2026-04-17: 创建规格，冻结 proof surface locale hardening + diagnostics 的实现范围与验收口径。
 - 2026-04-17: 完成 classifier / handler / 诊断改动，并通过 `bun run typecheck`、`bun test` 与两轮本地 review 收敛。
 - 2026-04-18: 完成 101 热修上线与目标账号 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归，worker log 确认 `provisioned Microsoft proof mailbox ...`，数据库 proof mailbox 与 session 状态回到可用态。
+- 2026-04-26: 将 `login.live.com/oauth20_authorize.srf` 上的 Tavily OAuth confirm-email proof surface 纳入 confirm-email handler，确保 masked mailbox mismatch 写入 `microsoft_unknown_recovery_email:<masked>`，匹配场景继续等待 proof code。
 
 ## 参考（References）
 

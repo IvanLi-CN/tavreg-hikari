@@ -34,7 +34,7 @@
 | 55uxa | 默认邮箱生成收敛：provider-first + 真人风格兜底 | 已完成 | `55uxa-provider-first-default-mailboxes/SPEC.md` | 2026-04-12 | ChatGPT draft provider-first、DuckMail 共用真人风格 local-part，移除 `CHATGPT_CFMAIL_ROOT_DOMAIN` 依赖 |
 | 9p1fh | 微软账号页 Session Proxy 行内更换代理节点 | 已完成 | `9p1fh-account-session-proxy-switch/SPEC.md` | 2026-04-17 | 账号级代理切换弹窗、单节点测速复用、立即 rebootstrap；切换后列表/弹窗即时回显新节点并清空旧 IP |
 | bqa97 | 代理节点检查并发化与 SSE 进度流 | 已完成 | `bqa97-proxy-check-progress-stream/SPEC.md` | 2026-04-15 | `/api/proxies` 快照化、独立 proxy check coordinator、SSE 进度推送 |
-| zxuvb | Microsoft proof 补邮箱分支修复与多语言诊断加固 | 已完成 | `zxuvb-microsoft-proof-surface-locale-hardening/SPEC.md` | 2026-04-18 | 101 热修上线并完成 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归；zh-TW `/proofs/Add` auto-provision 已恢复 |
+| zxuvb | Microsoft proof 补邮箱分支修复与多语言诊断加固 | 已完成 | `zxuvb-microsoft-proof-surface-locale-hardening/SPEC.md` | 2026-04-26 | Tavily OAuth `login.live.com/oauth20_authorize.srf` confirm-email proof surface 先走 proof handler；mailbox mismatch 明确落到 `microsoft_unknown_recovery_email` |
 | vhvds | ChatGPT 补号到 codex-vibe-monitor 分组 | 已完成 | `vhvds-chatgpt-upstream-account-supplement/SPEC.md` | 2026-04-18 | 自动补号 + Keys 批量补号 + 设置入口收敛到 Keys > ChatGPT |
 | 8qyzh | Web 管理台导航收敛与 Microsoft 信箱抽屉整合 | 已完成 | `8qyzh-nav-keys-mailbox-consolidation/SPEC.md` | 2026-04-19 | PR #54 merge-ready；顶栏五项、站点 Keys 视图、Microsoft drawer、工具列记忆与视觉证据已收口 |
 | 3aqn8 | HTTP 外部接入与鉴权收口（v1） | active | `3aqn8-http-integration-auth-v1/SPEC.md` | 2026-04-24 | Forward Auth、integration v1、API Access UI 与服务接入快照进行中 |

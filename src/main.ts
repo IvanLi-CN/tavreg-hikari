@@ -28,6 +28,7 @@ import {
   MICROSOFT_PASSWORD_SUBMIT_LIMIT,
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftProofSurface,
+  classifyMicrosoftRecoveryChallenge,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftPasswordError,
   getMicrosoftRecoveryTerminalErrorCode,
@@ -5089,31 +5090,9 @@ async function classifyMicrosoftFlowInterruptFromPage(page: any) {
 async function collectMicrosoftRecoveryChallengeState(
   page: any,
   configuredAddress: string | null,
-): Promise<{
-  hintedMaskedEmail: string;
-  matchesConfiguredMailbox: boolean | null;
-  hasMismatchError: boolean;
-  hasPasswordFallback: boolean;
-  surfaceKind: "verify_email" | "identity_confirm" | "unknown";
-}> {
+): Promise<ReturnType<typeof classifyMicrosoftRecoveryChallenge>> {
   const payload = await page
-    .evaluate(({ configuredAddress: configuredAddressValue }: { configuredAddress: string | null }) => {
-      const normalize = (value: string | null | undefined) =>
-        String(value || "")
-          .replace(/[\u200e\u200f\u202a-\u202e]/g, "")
-          .replace(/\s+/g, " ")
-          .trim()
-          .toLowerCase();
-      const parseMaskedEmail = (value: string | null | undefined) => {
-        const match = normalize(value).match(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/i);
-        if (!match) return null;
-        return {
-          visibleLocal: (match[1] || "").toLowerCase(),
-          hasMask: !!match[2],
-          domain: (match[3] || "").toLowerCase(),
-        };
-      };
-      const configured = parseMaskedEmail(configuredAddressValue);
+    .evaluate(() => {
       const textParts = [
         document.title || "",
         document.body?.innerText || "",
@@ -5127,59 +5106,17 @@ async function collectMicrosoftRecoveryChallengeState(
           ].join(" "),
         ),
       ];
-      const combinedText = normalize(textParts.join(" "));
-      const matches = Array.from(combinedText.matchAll(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/gi));
-      let hinted: { visibleLocal: string; hasMask: boolean; domain: string } | null = null;
-      for (const match of matches) {
-        const candidate = {
-          visibleLocal: (match[1] || "").toLowerCase(),
-          hasMask: !!match[2],
-          domain: (match[3] || "").toLowerCase(),
-        };
-        if (!hinted || candidate.hasMask) {
-          hinted = candidate;
-        }
-        if (candidate.hasMask) {
-          break;
-        }
-      }
-      const hasMismatchError =
-        /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
-          combinedText,
-        );
-      const matchesConfiguredMailbox =
-        hinted && configured
-          ? hinted.domain === configured.domain && configured.visibleLocal.startsWith(hinted.visibleLocal)
-          : null;
-      const hasPasswordFallback =
-        /use\s+your\s+password|sign\s+in\s+with\s+password|使用密码|パスワードを使用する|パスワードでサインイン/i.test(
-          combinedText,
-        );
-      const surfaceKind = /help us protect your account|verify online|i don[’']?t have these any more|我不再拥有这些信息|オンラインで確認|これらはもうありません/i.test(
-        combinedText,
-      )
-        ? "identity_confirm"
-        : /verify your email|we[’']?ll send a code to|already received a code|验证你的电子邮件|メールをご確認ください|コードを送信します|既にコードを受け取りましたか/i.test(
-            combinedText,
-          )
-          ? "verify_email"
-          : "unknown";
       return {
-        hintedMaskedEmail: hinted ? `${hinted.visibleLocal}${hinted.hasMask ? "***" : ""}@${hinted.domain}` : "",
-        matchesConfiguredMailbox: hasMismatchError ? false : matchesConfiguredMailbox,
-        hasMismatchError,
-        hasPasswordFallback,
-        surfaceKind,
+        title: document.title || "",
+        bodyText: document.body?.innerText || "",
+        controlText: textParts.slice(2).join(" "),
       };
-    }, { configuredAddress })
-    .catch(() => ({
-      hintedMaskedEmail: "",
-      matchesConfiguredMailbox: null,
-      hasMismatchError: false,
-      hasPasswordFallback: false,
-      surfaceKind: "unknown" as const,
-    }));
-  return payload;
+    })
+    .catch(() => null);
+  if (!payload) {
+    return classifyMicrosoftRecoveryChallenge({ configuredAddress });
+  }
+  return classifyMicrosoftRecoveryChallenge({ configuredAddress, ...payload });
 }
 
 async function handleMicrosoftPasswordPrompt(
@@ -6332,6 +6269,10 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
   let proofMailboxError: Error | null = null;
   const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
   const confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  if (confirmationState.matchesConfiguredMailbox === false) {
+    const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
+    throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
+  }
   const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
     hasConfiguredMailbox: !!configuredProofAddress,
     configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
@@ -6349,10 +6290,6 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
         }`,
       );
       return true;
-    }
-    if (confirmationState.matchesConfiguredMailbox === false) {
-      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
-      throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
     }
   }
   if (
@@ -6989,10 +6926,6 @@ export async function completeMicrosoftLogin(
         }
       }
 
-      if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) {
-        proofState.postEmailPasswordPriorityUntil = null;
-        continue;
-      }
       if (await handleMicrosoftPasswordPrompt(page, password, passwordState)) {
         proofState.postEmailPasswordPriorityUntil = null;
         continue;
@@ -7022,6 +6955,10 @@ export async function completeMicrosoftLogin(
       if (await handleMicrosoftProofConfirmationEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState, proofSurface)) continue;
       if (await handleMicrosoftProofEmailPrompt(page, cfg, proxyUrl, proofState, password, passwordState, proofSurface)) continue;
       if (await handleMicrosoftProofCodePrompt(page, cfg, proxyUrl, proofState, proofSurface)) continue;
+      if (await handleMicrosoftUsePasswordShortcut(page, proofState, password, passwordState)) {
+        proofState.postEmailPasswordPriorityUntil = null;
+        continue;
+      }
       if (proofSurface.kind === "unclassified" && proofSurface.onProofRoute) {
         const stabilityKey = buildMicrosoftProofSurfaceStabilityKey(proofSurface);
         if (proofState.unclassifiedSurfaceKey !== stabilityKey) {
