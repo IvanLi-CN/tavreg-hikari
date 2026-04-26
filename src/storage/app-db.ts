@@ -2767,13 +2767,11 @@ export class AppDatabase {
     try {
       const row = this.db
         .query(`
-          SELECT a.id
+          SELECT id
           FROM microsoft_accounts a
-          JOIN account_browser_sessions s ON s.account_id = a.id
           WHERE a.id = ?
             AND a.disabled_at IS NULL
             AND a.lease_job_id IS NULL
-            AND s.status = 'ready'
           LIMIT 1
         `)
         .get(accountId) as { id?: number } | null;

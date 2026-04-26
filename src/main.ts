@@ -10815,7 +10815,7 @@ export async function launchNativeChromeCdp(
 export async function launchChromePersistent(
   cfg: AppConfig,
   mode: "headed" | "headless",
-  proxyServer: string,
+  proxyServer: string | undefined,
   locale: string,
   contextOptions: BrowserContextOptions,
 ): Promise<{
@@ -10832,7 +10832,6 @@ export async function launchChromePersistent(
       const launchOptions: any = {
         headless: mode === "headless",
         slowMo: Math.max(0, cfg.slowMoMs),
-        proxy: { server: proxyServer },
         ignoreDefaultArgs: ["--enable-automation"],
         args: [
           "--no-first-run",
@@ -10853,6 +10852,9 @@ export async function launchChromePersistent(
         extraHTTPHeaders: contextOptions.extraHTTPHeaders,
         timeout: 180_000,
       };
+      if (proxyServer?.trim()) {
+        launchOptions.proxy = { server: proxyServer.trim() };
+      }
       if (cfg.chromeExecutablePath) {
         launchOptions.executablePath = cfg.chromeExecutablePath;
       }

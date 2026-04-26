@@ -523,12 +523,11 @@ export class AccountBusinessFlowManager {
         ? { command: process.execPath || "bun", workerArgs: ["run", "src/server/microsoft-account-worker.ts"] }
         : { command: resolveWorkerRuntime().command, workerArgs: ["--import", "tsx", "src/server/microsoft-account-worker.ts"] };
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
-      if (!selectedProxyNode) {
-        throw new Error("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
+      if (selectedProxyNode) {
+        this.db.touchProxyLease(selectedProxyNode);
       }
-      this.db.touchProxyLease(selectedProxyNode);
       await mkdir(outputDir, { recursive: true });
-      const args = [...runtime.workerArgs, "--proxy-node", selectedProxyNode];
+      const args = selectedProxyNode ? [...runtime.workerArgs, "--proxy-node", selectedProxyNode] : [...runtime.workerArgs];
       const child = spawn(runtime.command, args, {
         ...buildAttemptSpawnOptions(this.repoRoot, {
           env: {

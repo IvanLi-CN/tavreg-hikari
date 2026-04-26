@@ -62,6 +62,25 @@ test("account business-flow availability reports missing fingerprint browser fro
   }
 });
 
+test("account business-flow availability stays conservative while the async probe is still pending", async () => {
+  const service = new BrowserAvailabilityService({
+    cwd: process.cwd(),
+    env: {} as NodeJS.ProcessEnv,
+    ttlMs: 0,
+    launchProbe: async () => {
+      throw new Error("probe should not run for the pending snapshot assertion");
+    },
+  });
+  expect(service.getAccountBusinessFlowAvailability()).toEqual({
+    headless: true,
+    headed: false,
+    fingerprint: false,
+    headedReason: "正在检测当前环境的浏览器能力。",
+    fingerprintReason: "正在检测当前环境的浏览器能力。",
+    deAvailable: false,
+  });
+});
+
 test("account business-flow availability enables headed and fingerprint after a successful launch probe", async () => {
   const install = await createFakeMacFingerprintBrowserInstall();
   try {
@@ -148,7 +167,8 @@ test("single-account flow lease accepts linked Microsoft accounts", async () => 
   const leaseSection = source.slice(source.indexOf("leaseAccountForJob"), source.indexOf("countEligibleAccounts"));
   expect(leaseSection).not.toContain("a.has_api_key = 0");
   expect(leaseSection).toContain("a.lease_job_id IS NULL");
-  expect(leaseSection).toContain("s.status = 'ready'");
+  expect(leaseSection).not.toContain("JOIN account_browser_sessions");
+  expect(leaseSection).not.toContain("s.status = 'ready'");
 });
 
 test("superseded fingerprint flow waits for the old child close before replacing tracking", async () => {
@@ -184,4 +204,14 @@ test("accounts listing does not trigger headed-browser availability probes", asy
   expect(accountsGetStart).toBeGreaterThan(-1);
   expect(accountsGetEnd).toBeGreaterThan(accountsGetStart);
   expect(accountsGetBlock).not.toContain("ensureAvailability()");
+});
+
+test("microsoft account launcher can start without a preselected proxy node", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const flowSource = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  const workerSource = await readFile(new URL("../src/server/microsoft-account-worker.ts", import.meta.url), "utf8");
+  expect(flowSource).toContain("const args = selectedProxyNode ? [...runtime.workerArgs, \"--proxy-node\", selectedProxyNode] : [...runtime.workerArgs]");
+  expect(flowSource).not.toContain("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
+  expect(workerSource).not.toContain("missing --proxy-node");
+  expect(workerSource).toContain("if (args.proxyNode) {");
 });

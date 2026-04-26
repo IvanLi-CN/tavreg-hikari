@@ -21,14 +21,14 @@ import {
 } from "./microsoft-account-surface.js";
 
 interface WorkerArgs {
-  proxyNode: string;
+  proxyNode: string | null;
 }
 
 interface WorkerResult {
   ok: boolean;
   finalUrl?: string | null;
   proxy?: {
-    nodeName: string;
+    nodeName: string | null;
     ip: string | null;
     country: string | null;
     region: string | null;
@@ -83,10 +83,7 @@ function parseArgs(argv: string[]): WorkerArgs {
       proxyNode = String(inlineMatch[1] || "").trim();
     }
   }
-  if (!proxyNode) {
-    throw new Error("missing --proxy-node");
-  }
-  return { proxyNode };
+  return { proxyNode: proxyNode || null };
 }
 
 async function writeJson(filePath: string, payload: unknown): Promise<void> {
@@ -366,30 +363,34 @@ async function main(): Promise<void> {
   let page: any = null;
   let mihomoController: Awaited<ReturnType<typeof startMihomo>> | null = null;
   let proxyGeo: GeoInfo | null = null;
+  let proxyServer: string | undefined;
 
   try {
     await mkdir(outputDir, { recursive: true });
     await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
-    mihomoController = await startMihomo({
-      subscriptionUrl: cfg.mihomoSubscriptionUrl,
-      groupName: cfg.mihomoGroupName,
-      routeGroupName: cfg.mihomoRouteGroupName,
-      checkUrl: cfg.proxyCheckUrl,
-      apiPort: cfg.mihomoApiPort,
-      mixedPort: cfg.mihomoMixedPort,
-      workDir: path.join(outputDir, "mihomo"),
-      downloadDir: downloadsDir,
-    });
-    await mihomoController.setGroupProxy(args.proxyNode);
-    proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({ ip: "" }));
-    const locale = deriveLocale(proxyGeo.country);
+    if (args.proxyNode) {
+      mihomoController = await startMihomo({
+        subscriptionUrl: cfg.mihomoSubscriptionUrl,
+        groupName: cfg.mihomoGroupName,
+        routeGroupName: cfg.mihomoRouteGroupName,
+        checkUrl: cfg.proxyCheckUrl,
+        apiPort: cfg.mihomoApiPort,
+        mixedPort: cfg.mihomoMixedPort,
+        workDir: path.join(outputDir, "mihomo"),
+        downloadDir: downloadsDir,
+      });
+      await mihomoController.setGroupProxy(args.proxyNode);
+      proxyServer = mihomoController.proxyServer;
+      proxyGeo = await fetchProxyGeo(proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({ ip: "" }));
+    }
+    const locale = deriveLocale(proxyGeo?.country);
     const acceptLanguage = buildAcceptLanguage(locale);
-    const launched = await launchChromePersistent(cfg, cfg.runMode, mihomoController.proxyServer, locale, {
+    const launched = await launchChromePersistent(cfg, cfg.runMode, proxyServer, locale, {
       locale,
       viewport: { width: 1512, height: 982 },
       screen: { width: 1512, height: 982 },
       deviceScaleFactor: 2,
-      ...(proxyGeo.timezone ? { timezoneId: proxyGeo.timezone } : {}),
+      ...(proxyGeo?.timezone ? { timezoneId: proxyGeo.timezone } : {}),
       extraHTTPHeaders: {
         "Accept-Language": acceptLanguage,
       },
@@ -397,18 +398,18 @@ async function main(): Promise<void> {
     browser = launched.browser;
     context = launched.context;
     page = context.pages()[0] || (await context.newPage());
-    page = await ensureMicrosoftAccountHome(page, cfg, mihomoController.proxyServer);
+    page = await ensureMicrosoftAccountHome(page, cfg, proxyServer);
     const finalUrl = String(page.url() || MICROSOFT_ACCOUNT_HOME_URL);
     await writeResult(outputDir, {
       ok: true,
       finalUrl,
       proxy: {
         nodeName: args.proxyNode,
-        ip: proxyGeo.ip || null,
-        country: proxyGeo.country || null,
-        region: proxyGeo.region || null,
-        city: proxyGeo.city || null,
-        timezone: proxyGeo.timezone || null,
+        ip: proxyGeo?.ip || null,
+        country: proxyGeo?.country || null,
+        region: proxyGeo?.region || null,
+        city: proxyGeo?.city || null,
+        timezone: proxyGeo?.timezone || null,
       },
     });
     if (isFingerprintBusinessFlow()) {

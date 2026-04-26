@@ -42,17 +42,17 @@ function nowIso(): string {
 function createPendingSnapshot(): BrowserAvailabilitySnapshot {
   return {
     runModeAvailability: {
-      headed: true,
+      headed: false,
       headless: true,
       headedReason: PENDING_REASON,
     },
     businessFlowAvailability: {
       headless: true,
-      headed: true,
-      fingerprint: true,
+      headed: false,
+      fingerprint: false,
       headedReason: PENDING_REASON,
       fingerprintReason: PENDING_REASON,
-      deAvailable: true,
+      deAvailable: false,
     },
     checkedAt: null,
     executablePath: null,
