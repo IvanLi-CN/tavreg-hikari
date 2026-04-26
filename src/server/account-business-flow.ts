@@ -91,6 +91,21 @@ function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | 
   }
 }
 
+async function waitForChildClose(
+  child: Pick<ChildProcessWithoutNullStreams, "exitCode" | "signalCode" | "once">,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode != null || child.signalCode != null) {
+    return true;
+  }
+  return await Promise.race([
+    new Promise<boolean>((resolve) => {
+      child.once("close", () => resolve(true));
+    }),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
   try {
     const raw = await readFile(filePath, "utf8");
@@ -1106,7 +1121,9 @@ export class AccountBusinessFlowManager {
         browserRetained: false,
         lastError: error.message || "failed to start business-flow worker",
       });
-      this.active.delete(input.key);
+      if (this.active.get(input.key) === active) {
+        this.active.delete(input.key);
+      }
     });
     input.child.once("close", async (code, signal) => {
       if (active.retainPollTimer) {
@@ -1116,7 +1133,9 @@ export class AccountBusinessFlowManager {
       try {
         await input.onClose(code, signal);
       } finally {
-        this.active.delete(input.key);
+        if (this.active.get(input.key) === active) {
+          this.active.delete(input.key);
+        }
       }
     });
   }
@@ -1127,14 +1146,11 @@ export class AccountBusinessFlowManager {
       active.retainPollTimer = null;
     }
     signalChildProcess(active.child, "SIGTERM");
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        active.child.once("close", () => resolve());
-      }),
-      delay(5_000).then(() => {
-        signalChildProcess(active.child, "SIGKILL");
-      }).then(() => {}),
-    ]).catch(() => {});
+    const closedAfterTerm = await waitForChildClose(active.child, 5_000).catch(() => false);
+    if (!closedAfterTerm) {
+      signalChildProcess(active.child, "SIGKILL");
+      await waitForChildClose(active.child, 5_000).catch(() => false);
+    }
     this.updateState(active.key, {
       browserRetained: false,
       lastError: reason,

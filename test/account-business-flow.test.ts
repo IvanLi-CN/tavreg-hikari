@@ -150,3 +150,11 @@ test("single-account flow lease accepts linked Microsoft accounts", async () => 
   expect(leaseSection).toContain("a.lease_job_id IS NULL");
   expect(leaseSection).toContain("s.status = 'ready'");
 });
+
+test("superseded fingerprint flow waits for the old child close before replacing tracking", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  expect(source).toContain("waitForChildClose");
+  expect(source).toContain('signalChildProcess(active.child, "SIGKILL")');
+  expect(source).toContain("if (this.active.get(input.key) === active)");
+});
