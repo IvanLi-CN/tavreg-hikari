@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.16.1",
+  "base_stable_version": "0.16.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-04-26T21:38:42Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.16.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "12a305001606c7152624148c00688f0031ae0472",
+  "pr_number": 63,
+  "pr_title": "fix(microsoft): handle Tavily OAuth proof confirmation",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.16.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.16.1",
+  "target_sha": "1044c0177ab5abb8a0905b3e5edcf498c4471591",
+  "type_label": "type:patch"
+}
