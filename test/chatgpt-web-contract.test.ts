@@ -15,7 +15,8 @@ test("chatgpt page still uses implemented job and credential endpoints", async (
   const appSource = await readFile(path.join(repoRoot, "web/src/App.tsx"), "utf8");
   expect(appSource).toContain("/api/jobs/current?site=");
   expect(appSource).toContain("/api/chatgpt/credentials?");
-  expect(appSource).toContain("/api/chatgpt/credentials/${credential.id}?includeSecrets=1");
+  expect(appSource).toContain("/api/chatgpt/credentials/${credentialId}?includeSecrets=1");
+  expect(appSource).toContain('/api/chatgpt/credentials/export');
 });
 
 test("parallel helper no longer depends on the removed chatgpt draft api", async () => {
@@ -28,6 +29,7 @@ test("parallel helper no longer depends on the removed chatgpt draft api", async
 test("server exposes the runner-only chatgpt attempt draft route", async () => {
   const serverSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   expect(serverSource).toContain('pathname === "/api/chatgpt/attempt-draft" && req.method === "POST"');
+  expect(serverSource).toContain('pathname === "/api/chatgpt/credentials/export" && req.method === "POST"');
   expect(serverSource).toContain('httpJson: serverHttpJson');
   expect(serverSource).toContain('rootDomain: DEFAULT_CFMAIL_ROOT_DOMAIN');
 });

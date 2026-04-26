@@ -19,6 +19,7 @@ import {
 } from "./proxy-check-coordinator.js";
 import {
   AppDatabase,
+  type IntegrationApiKeyRecord,
   normalizeAccountExtractorAccountType,
   normalizeJobMaxAttempts,
   type AccountExtractorProvider,
@@ -31,6 +32,13 @@ import {
   type MicrosoftAccountRecord,
   type MicrosoftMailMessageRecord,
 } from "../storage/app-db.js";
+import {
+  authenticateTrustedForwardAuth,
+  buildServerAuthConfig,
+  classifyRequestPath,
+  extractIntegrationApiKey,
+  resolveClientIp,
+} from "./auth-gate.js";
 import {
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
@@ -72,6 +80,13 @@ import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
 import { AccountExtractorRuntime } from "./account-extractor-runtime.js";
 import {
+  IntegrationApiKeyStateError,
+  buildIntegrationApiKeyPrefix,
+  generateIntegrationApiKeySecret,
+  hashIntegrationApiKey,
+} from "./integration-api-keys.js";
+import { handleIntegrationApiRequest } from "./integration-api.js";
+import {
   assertMicrosoftGraphSettings,
   buildMicrosoftAuthorizeUrl,
   createMicrosoftOauthState,
@@ -98,6 +113,7 @@ import {
   matchMailboxVerificationCodeForMessage,
   pickLatestMailboxVerificationCode,
 } from "./microsoft-mailbox-verification.js";
+import { parseMailboxVerificationCodes } from "./verification-codes.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -133,7 +149,7 @@ function getDefaultAccountBusinessFlowAvailability() {
     deAvailable: false,
   };
 }
-
+const MAX_KEYS_PAGE_SIZE = 5000;
 function toInt(value: string | undefined, fallback: number): number {
   if (!value || !value.trim()) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -557,6 +573,10 @@ function serializeMailboxMessageSummary(row: MicrosoftMailMessageRecord): Record
     webLink: row.webLink,
     updatedAt: row.updatedAt,
     verificationCode,
+    parsedVerificationCodes: parseMailboxVerificationCodes({
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+    }),
   };
 }
 
@@ -571,9 +591,30 @@ function serializeMailboxMessageDetail(row: MicrosoftMailMessageRecord): Record<
   });
   return {
     ...serializeMailboxMessageSummary(row),
+    parsedVerificationCodes: parseMailboxVerificationCodes({
+      subject: row.subject,
+      bodyPreview: row.bodyPreview,
+      bodyContent: row.bodyContent,
+    }),
     bodyContent: row.bodyContent,
     createdAt: row.createdAt,
     verificationCode,
+  };
+}
+
+function serializeIntegrationApiKey(row: IntegrationApiKeyRecord): Record<string, unknown> {
+  return {
+    id: row.id,
+    label: row.label,
+    notes: row.notes,
+    keyPrefix: row.keyPrefix,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    rotatedAt: row.rotatedAt,
+    revokedAt: row.revokedAt,
+    lastUsedAt: row.lastUsedAt,
+    lastUsedIp: row.lastUsedIp,
   };
 }
 
@@ -610,6 +651,16 @@ function buildMailboxRedirect(req: Request, accountId: number | null, outcome: "
   }
   target.searchParams.set("oauth", outcome);
   return Response.redirect(target.toString(), 302);
+}
+
+function buildMailboxOauthOutcomeUrl(redirectUri: string, accountId: number | null, outcome: "success" | "error"): string {
+  const redirectTarget = new URL(redirectUri);
+  const target = new URL("/mailboxes", redirectTarget.origin);
+  if (accountId) {
+    target.searchParams.set("accountId", String(accountId));
+  }
+  target.searchParams.set("oauth", outcome);
+  return target.toString();
 }
 
 function getAccountConnectBlockMessage(
@@ -1247,13 +1298,25 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       authUrl,
     });
     let refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
-    const oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
+    let oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
     input.broadcast({
       type: "mailbox.updated",
       payload: { mailboxIds: [refreshedMailbox.id], action: oauthOutcome === "success" ? "oauth_success" : "oauth_finished" },
       timestamp: nowIso(),
     });
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+    if (!workerResult.ok && (refreshedMailbox.refreshToken || refreshedMailbox.oauthConnectedAt)) {
+      const successUrl = buildMailboxOauthOutcomeUrl(graphSettings.redirectUri, refreshedMailbox.accountId, "success");
+      workerResult = {
+        ...workerResult,
+        ok: true,
+        finalUrl: isMicrosoftOauthCompletionUrl(workerResult.finalUrl || null, graphSettings.redirectUri)
+          ? workerResult.finalUrl
+          : successUrl,
+        oauthOutcome: "success",
+      };
+      oauthOutcome = "success";
+    }
     if (!workerResult.ok) {
       throw new Error(workerResult.error || "microsoft oauth automation failed");
     }
@@ -1362,6 +1425,7 @@ async function main(): Promise<void> {
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);
   const runtimeBinding = getRuntimeServerBinding(defaults);
+  const authConfig = buildServerAuthConfig(process.env);
   const clients = new Set<any>();
   const accountEventSubscribers = new Set<(event: ServerEvent) => void>();
   const proxyEventSubscribers = new Set<(event: ServerEvent) => void>();
@@ -1592,10 +1656,14 @@ async function main(): Promise<void> {
     async fetch(req, server) {
       const url = new URL(req.url);
       const pathname = url.pathname;
+      const authScope = classifyRequestPath(pathname);
+      const clientIp = resolveClientIp(req, authConfig, server.requestIP(req)?.address ?? null);
       const accountDetailMatch = pathname.match(/^\/api\/accounts\/(\d+)$/);
       const accountBusinessFlowStartMatch = pathname.match(/^\/api\/accounts\/(\d+)\/business-flow\/start$/);
       const accountSessionRebootstrapMatch = pathname.match(/^\/api\/accounts\/(\d+)\/session\/rebootstrap$/);
       const accountSessionBootstrapPreviewMatch = pathname === "/api/accounts/session-bootstrap/preview";
+      const apiAccessKeyRotateMatch = pathname.match(/^\/api\/settings\/api-access\/keys\/(\d+)\/rotate$/);
+      const apiAccessKeyRevokeMatch = pathname.match(/^\/api\/settings\/api-access\/keys\/(\d+)\/revoke$/);
       const mailboxOauthStartMatch = pathname.match(/^\/api\/microsoft-mail\/accounts\/(\d+)\/oauth\/start$/);
       const mailboxDetailMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)$/);
       const mailboxSyncMatch = pathname.match(/^\/api\/microsoft-mail\/mailboxes\/(\d+)\/sync$/);
@@ -1603,6 +1671,44 @@ async function main(): Promise<void> {
       const mailboxMessageDetailMatch = pathname.match(/^\/api\/microsoft-mail\/messages\/(\d+)$/);
 
       try {
+        if (authScope === "internal") {
+          const trustedForwardAuth = authenticateTrustedForwardAuth(req, authConfig);
+          if (!trustedForwardAuth.ok) {
+            if (trustedForwardAuth.reason === "misconfigured_secret") {
+              return badRequest("forward auth secret not configured", 503);
+            }
+            if (trustedForwardAuth.reason === "missing_identity") {
+              return badRequest("forward auth identity required", 401);
+            }
+            return badRequest("trusted forward auth required", 401);
+          }
+        }
+
+        if (authScope === "integration") {
+          const secret = extractIntegrationApiKey(req);
+          if (!secret) {
+            return badRequest("integration api key required", 401);
+          }
+          const integrationKey = db.authenticateIntegrationApiKey(secret, clientIp);
+          if (!integrationKey) {
+            return badRequest("invalid integration api key", 401);
+          }
+          if (integrationKey.status !== "active") {
+            return badRequest("integration api key revoked", 403);
+          }
+          const integrationResponse = await handleIntegrationApiRequest({
+            req,
+            pathname,
+            url,
+            db,
+            readSettings,
+          });
+          if (integrationResponse) {
+            return integrationResponse;
+          }
+          return badRequest(`integration route not found: ${pathname}`, 404);
+        }
+
         if (pathname === "/api/events/ws") {
           if (server.upgrade(req)) {
             return new Response(null);
@@ -2033,9 +2139,9 @@ async function main(): Promise<void> {
         return json({ ok: true, ...result });
       }
 
-        if (pathname === "/api/api-keys" && req.method === "GET") {
+      if (pathname === "/api/api-keys" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
-        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const data = db.listApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
@@ -2076,7 +2182,7 @@ async function main(): Promise<void> {
 
       if ((pathname === "/api/grok/keys" || pathname === "/api/grok/accounts") && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
-        const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const data = db.listGrokApiKeys({
           q: url.searchParams.get("q") || undefined,
           status: url.searchParams.get("status") || undefined,
@@ -2147,14 +2253,40 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
-        const limit = Math.max(1, Math.min(100, toInt(url.searchParams.get("limit") || undefined, 20)));
+        const page = toInt(url.searchParams.get("page") || undefined, 1);
+        const pageSize = Math.max(1, Math.min(MAX_KEYS_PAGE_SIZE, toInt(url.searchParams.get("pageSize") || undefined, 20)));
         const sortBy = (url.searchParams.get("sortBy") as "createdAt" | "expiresAt" | null) || "createdAt";
         const sortDir = (url.searchParams.get("sortDir") as "desc" | "asc" | null) || "desc";
         const q = url.searchParams.get("q") || undefined;
         const expiryStatus = (url.searchParams.get("expiryStatus") as "valid" | "expired" | "noExpiry" | null) || undefined;
+        const data = chatgptScheduler.getRecentCredentials({ page, pageSize, sortBy, sortDir, q, expiryStatus });
         return json({
           ok: true,
-          rows: chatgptScheduler.getRecentCredentials({ limit, sortBy, sortDir, q, expiryStatus }).map((row) => serializeChatGptCredential(row)),
+          rows: data.rows.map((row) => serializeChatGptCredential(row)),
+          total: data.total,
+          page: data.page,
+          pageSize: data.pageSize,
+          summary: data.summary,
+        });
+      }
+
+      if (pathname === "/api/chatgpt/credentials/export" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { ids?: unknown } | null;
+        const requestedIds = Array.isArray(body?.ids)
+          ? body.ids
+              .map((value) => (typeof value === "number" ? value : Number.parseInt(String(value), 10)))
+              .filter((value): value is number => Number.isInteger(value) && value > 0)
+          : [];
+        if (requestedIds.length === 0) {
+          return badRequest("at least one credential id is required");
+        }
+        const credentials = db.listChatGptCredentialsByIds(requestedIds);
+        const foundIds = new Set(credentials.map((credential) => credential.id));
+        const missingIds = requestedIds.filter((credentialId) => !foundIds.has(credentialId));
+        return json({
+          ok: true,
+          credentials: credentials.map((credential) => serializeChatGptCredential(credential, true)),
+          missingIds,
         });
       }
 
@@ -2340,6 +2472,88 @@ async function main(): Promise<void> {
           ok: true,
           settings: serializeMicrosoftGraphSettings(readSettings()),
         });
+      }
+
+      if (pathname === "/api/settings/api-access/keys" && req.method === "GET") {
+        return json({
+          ok: true,
+          rows: db.listIntegrationApiKeys().map((row) => serializeIntegrationApiKey(row)),
+        });
+      }
+
+      if (pathname === "/api/settings/api-access/keys" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as { label?: unknown; notes?: unknown } | null;
+        const label = typeof body?.label === "string" ? body.label.trim() : "";
+        const notes = typeof body?.notes === "string" ? body.notes : null;
+        if (!label) {
+          return badRequest("label is required");
+        }
+        const plainTextKey = generateIntegrationApiKeySecret();
+        const record = db.createIntegrationApiKey({
+          label,
+          notes,
+          keyHash: hashIntegrationApiKey(plainTextKey),
+          keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+        });
+        return json({
+          ok: true,
+          record: serializeIntegrationApiKey(record),
+          plainTextKey,
+        });
+      }
+
+      if (apiAccessKeyRotateMatch && req.method === "POST") {
+        const keyId = Number.parseInt(apiAccessKeyRotateMatch[1] || "", 10);
+        if (!Number.isInteger(keyId) || keyId < 1) {
+          return badRequest("invalid api access key id");
+        }
+        const body = (await req.json().catch(() => null)) as { label?: unknown; notes?: unknown } | null;
+        const nextNotes =
+          body && Object.prototype.hasOwnProperty.call(body, "notes")
+            ? typeof body.notes === "string"
+              ? body.notes
+              : body.notes === null
+                ? null
+                : undefined
+            : undefined;
+        const plainTextKey = generateIntegrationApiKeySecret();
+        try {
+          const record = db.rotateIntegrationApiKey(keyId, {
+            label: typeof body?.label === "string" ? body.label : undefined,
+            notes: nextNotes,
+            keyHash: hashIntegrationApiKey(plainTextKey),
+            keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+          });
+          return json({
+            ok: true,
+            record: serializeIntegrationApiKey(record),
+            plainTextKey,
+          });
+        } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
+          return badRequest(error instanceof Error ? error.message : String(error), 404);
+        }
+      }
+
+      if (apiAccessKeyRevokeMatch && req.method === "POST") {
+        const keyId = Number.parseInt(apiAccessKeyRevokeMatch[1] || "", 10);
+        if (!Number.isInteger(keyId) || keyId < 1) {
+          return badRequest("invalid api access key id");
+        }
+        try {
+          const record = db.revokeIntegrationApiKey(keyId);
+          return json({
+            ok: true,
+            record: serializeIntegrationApiKey(record),
+          });
+        } catch (error) {
+          if (error instanceof IntegrationApiKeyStateError) {
+            return badRequest(error.message, 409);
+          }
+          return badRequest(error instanceof Error ? error.message : String(error), 404);
+        }
       }
 
       if (pathname === "/api/microsoft-mail/settings" && req.method === "POST") {

@@ -172,6 +172,58 @@ export const ExportDialog: Story = {
   render: () => <StorySurface initialSelectedIds={[11, 12]} initialExportOpen />,
 };
 
+export const ActionsOnly: Story = {
+  args: baseArgs,
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+};
+
+export const CompactBelowMd: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysCompact700", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page-mobile" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page" })).toBeNull();
+    await expect(canvas.queryByText("出口 IP")).toBeNull();
+    await expect(canvas.getAllByText("SSO").length).toBeGreaterThan(0);
+  },
+};
+
+export const MediumTableLayout: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysMedium820", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
+    await expect(canvas.getByText("邮箱")).toBeInTheDocument();
+    await expect(canvas.getByText("SSO")).toBeInTheDocument();
+    await expect(canvas.queryByText("出口 IP")).toBeNull();
+  },
+};
+
+export const WideTableLayout: Story = {
+  args: baseArgs,
+  parameters: {
+    viewport: { value: "keysWide1120", isRotated: false },
+  },
+  render: () => <StorySurface initialSelectedIds={[11]} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("checkbox", { name: "select-current-page" })).toBeInTheDocument();
+    await expect(canvas.queryByRole("checkbox", { name: "select-current-page-mobile" })).toBeNull();
+    await expect(canvas.getByText("出口 IP")).toBeInTheDocument();
+    await expect(canvas.getByText("提取时间")).toBeInTheDocument();
+    await expect(canvas.getByText("最近验证")).toBeInTheDocument();
+  },
+};
+
 export const CopyActionPlay: Story = {
   args: baseArgs,
   render: () => <StorySurface />,

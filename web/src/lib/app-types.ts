@@ -1,4 +1,4 @@
-export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "proxies";
+export type PageKey = "tavily" | "grok" | "chatgpt" | "accounts" | "proxies" | "settings";
 export type JobSite = "tavily" | "grok" | "chatgpt";
 export type SortDir = "desc" | "asc";
 
@@ -153,6 +153,7 @@ export type MailboxMessageSummary = {
   webLink: string | null;
   updatedAt: string;
   verificationCode: MailboxVerificationCode | null;
+  parsedVerificationCodes?: ParsedVerificationCode[];
 };
 
 export type MailboxMessagesPayload = {
@@ -181,6 +182,38 @@ export type AccountBusinessFlowStartRequest = {
 export type AccountBusinessFlowStartPayload = {
   ok: true;
   account: AccountRecord;
+};
+
+export type ParsedVerificationCode = {
+  code: string;
+  kind: "numeric" | "alphanumeric" | "microsoftProof";
+  source: "subject" | "bodyPreview" | "bodyContent" | "cfmailSummary" | "cfmailDetail";
+  snippet: string;
+};
+
+export type IntegrationApiKeyRecord = {
+  id: number;
+  label: string;
+  notes: string | null;
+  keyPrefix: string;
+  status: "active" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+  lastUsedAt: string | null;
+  lastUsedIp: string | null;
+};
+
+export type IntegrationApiKeysPayload = {
+  ok: true;
+  rows: IntegrationApiKeyRecord[];
+};
+
+export type IntegrationApiKeyMutationPayload = {
+  ok: true;
+  record: IntegrationApiKeyRecord;
+  plainTextKey?: string;
 };
 
 export type MailboxMessageDetailPayload = {
@@ -463,16 +496,34 @@ export type ChatGptCredentialExpiryStatus = "" | "valid" | "expired" | "noExpiry
 export type ChatGptCredentialQuery = {
   q: string;
   expiryStatus: ChatGptCredentialExpiryStatus;
+  page: number;
+  pageSize: number;
+};
+
+export type ChatGptCredentialSummary = {
+  valid: number;
+  expired: number;
+  noExpiry: number;
 };
 
 export type ChatGptCredentialsPayload = {
   ok: true;
   rows: ChatGptCredentialRecord[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: ChatGptCredentialSummary;
 };
 
 export type ChatGptCredentialDetailPayload = {
   ok: true;
   credential: ChatGptCredentialRecord;
+};
+
+export type ChatGptCredentialExportPayload = {
+  ok: true;
+  credentials: ChatGptCredentialRecord[];
+  missingIds: number[];
 };
 
 export type ChatGptUpstreamSettingsSource = "db" | "env" | "unset";

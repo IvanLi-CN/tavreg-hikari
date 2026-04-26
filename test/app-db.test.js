@@ -23,6 +23,7 @@ import {
 import { pickAutoProxyNode } from "../src/server/proxy-node-allocation.ts";
 import { AppDatabase, computeLaunchCapacity, shouldEnterCompleting } from "../src/storage/app-db.ts";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "../src/server/static-assets.ts";
+import { buildIntegrationApiKeyPrefix, hashIntegrationApiKey } from "../src/server/integration-api-keys.ts";
 import { TaskLedger } from "../src/storage/task-ledger.ts";
 
 const tempDirs = [];
@@ -394,38 +395,78 @@ describe("AppDatabase account import", () => {
     appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T12:00:00.000Z", "2020-04-08T09:30:00.000Z", betaCredential.id);
     appDb.db.query("UPDATE chatgpt_credentials SET created_at = ?, expires_at = ? WHERE id = ?").run("2026-04-08T10:00:00.000Z", null, gammaCredential.id);
 
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "createdAt", sortDir: "desc" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
       "sort-gamma@mail.example.test",
       "sort-alpha@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "createdAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "createdAt", sortDir: "asc" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
       "sort-gamma@mail.example.test",
       "sort-beta@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "desc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "expiresAt", sortDir: "desc" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
       "sort-beta@mail.example.test",
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, sortBy: "expiresAt", sortDir: "asc" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, sortBy: "expiresAt", sortDir: "asc" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
       "sort-alpha@mail.example.test",
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, q: "gamma" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, q: "gamma" }).rows.map((row) => row.email)).toEqual([
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "noExpiry" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "noExpiry" }).rows.map((row) => row.email)).toEqual([
       "sort-gamma@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "expired" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "expired" }).rows.map((row) => row.email)).toEqual([
       "sort-beta@mail.example.test",
     ]);
-    expect(appDb.listChatGptCredentials({ limit: 10, expiryStatus: "valid" }).map((row) => row.email)).toEqual([
+    expect(appDb.listChatGptCredentials({ page: 1, pageSize: 10, expiryStatus: "valid" }).rows.map((row) => row.email)).toEqual([
       "sort-alpha@mail.example.test",
     ]);
+
+    appDb.close();
+  });
+
+  test("returns selected ChatGPT credentials for export in request order and chunks large selections", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({
+      site: "chatgpt",
+      runMode: "headed",
+      need: 520,
+      parallel: 1,
+      maxAttempts: 520,
+      payloadJson: {},
+    });
+    const credentialIds = [];
+    for (let index = 0; index < 520; index += 1) {
+      const attempt = appDb.createAttempt(job.id, {
+        accountEmail: `chatgpt-export-${index}@example.test`,
+        outputDir: path.join(process.cwd(), `tmp-chatgpt-export-${index}`),
+      });
+      const credential = appDb.recordChatGptCredential({
+        jobId: job.id,
+        attemptId: attempt.id,
+        email: `chatgpt-export-${index}@example.test`,
+        accountId: `acc-chatgpt-export-${index}`,
+        accessToken: `access-${index}`,
+        refreshToken: `refresh-${index}`,
+        idToken: `id-${index}`,
+        expiresAt: null,
+        credentialJson: "{}",
+      });
+      credentialIds.push(credential.id);
+    }
+
+    const selected = credentialIds.slice().reverse();
+    const exported = appDb.listChatGptCredentialsByIds(selected);
+
+    expect(exported).toHaveLength(520);
+    expect(exported[0]?.id).toBe(selected[0]);
+    expect(exported.at(-1)?.id).toBe(selected.at(-1));
 
     appDb.close();
   });
@@ -3477,6 +3518,186 @@ describe("scheduler runtime spec", () => {
   });
 });
 
+describe("integration api access", () => {
+  test("creates, authenticates, rotates and revokes integration api keys", async () => {
+    const { appDb } = await createTempDb();
+    const plainTextKey = "thki_demo_secret_1";
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-east",
+      notes: "primary relay",
+      keyHash: hashIntegrationApiKey(plainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+    });
+
+    expect(created).toMatchObject({
+      label: "relay-east",
+      status: "active",
+      keyPrefix: "thki_demo_secret",
+    });
+
+    const authed = appDb.authenticateIntegrationApiKey(plainTextKey, "203.0.113.7");
+    expect(authed).toMatchObject({
+      id: created.id,
+      lastUsedIp: "203.0.113.7",
+    });
+
+    const rotatedPlainTextKey = "thki_demo_secret_rotated";
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      label: "relay-east-v2",
+      notes: "rotated",
+      keyHash: hashIntegrationApiKey(rotatedPlainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(rotatedPlainTextKey),
+    });
+    expect(rotated).toMatchObject({
+      label: "relay-east-v2",
+      status: "active",
+    });
+    expect(appDb.authenticateIntegrationApiKey(plainTextKey)).toBeNull();
+    expect(appDb.authenticateIntegrationApiKey(rotatedPlainTextKey)?.id).toBe(created.id);
+
+    const revoked = appDb.revokeIntegrationApiKey(created.id);
+    expect(revoked.status).toBe("revoked");
+    expect(appDb.authenticateIntegrationApiKey(rotatedPlainTextKey)).toMatchObject({
+      id: created.id,
+      status: "revoked",
+    });
+
+    appDb.close();
+  });
+
+  test("stores tavily account service access snapshots", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "service@example.test", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    const apiKey = appDb.recordApiKey(accountId, "tvly-service-key", "198.51.100.8");
+
+    const snapshot = appDb.upsertAccountServiceAccess({
+      accountId,
+      service: "tavily",
+      apiKeyId: apiKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot: [{ name: "session", value: "cookie" }],
+        browserFingerprintSnapshot: { navigatorUserAgent: "demo" },
+      }),
+    });
+
+    expect(snapshot).toMatchObject({
+      accountId,
+      service: "tavily",
+      apiKeyId: apiKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+    });
+    expect(JSON.parse(snapshot.snapshotJson)).toMatchObject({
+      cookiesSnapshot: [{ name: "session", value: "cookie" }],
+    });
+
+    appDb.close();
+  });
+
+  test("rotating integration api keys can clear notes explicitly", async () => {
+    const { appDb } = await createTempDb();
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-east",
+      notes: "to be cleared",
+      keyHash: hashIntegrationApiKey("thki_demo_secret_to_clear"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_to_clear"),
+    });
+
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      keyHash: hashIntegrationApiKey("thki_demo_secret_cleared"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_cleared"),
+      notes: null,
+    });
+
+    expect(rotated.notes).toBeNull();
+
+    appDb.close();
+  });
+
+  test("rotating integration api keys resets last-used audit fields", async () => {
+    const { appDb } = await createTempDb();
+    const plainTextKey = "thki_demo_secret_reset_usage";
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-reset",
+      notes: "with usage",
+      keyHash: hashIntegrationApiKey(plainTextKey),
+      keyPrefix: buildIntegrationApiKeyPrefix(plainTextKey),
+    });
+
+    const authed = appDb.authenticateIntegrationApiKey(plainTextKey, "203.0.113.9");
+    expect(authed).toMatchObject({
+      id: created.id,
+      lastUsedIp: "203.0.113.9",
+    });
+    expect(authed?.lastUsedAt).toBeTruthy();
+
+    const rotated = appDb.rotateIntegrationApiKey(created.id, {
+      keyHash: hashIntegrationApiKey("thki_demo_secret_after_reset"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_after_reset"),
+    });
+
+    expect(rotated.lastUsedAt).toBeNull();
+    expect(rotated.lastUsedIp).toBeNull();
+
+    appDb.close();
+  });
+
+  test("revoked integration api keys cannot be rotated back to active", async () => {
+    const { appDb } = await createTempDb();
+    const created = appDb.createIntegrationApiKey({
+      label: "relay-revoked",
+      keyHash: hashIntegrationApiKey("thki_demo_secret_revoked"),
+      keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_revoked"),
+    });
+
+    appDb.revokeIntegrationApiKey(created.id);
+
+    expect(() =>
+      appDb.rotateIntegrationApiKey(created.id, {
+        keyHash: hashIntegrationApiKey("thki_demo_secret_revoked_new"),
+        keyPrefix: buildIntegrationApiKeyPrefix("thki_demo_secret_revoked_new"),
+      }),
+    ).toThrow("integration api key is not rotatable: revoked");
+
+    expect(appDb.getIntegrationApiKey(created.id)).toMatchObject({
+      status: "revoked",
+    });
+
+    appDb.close();
+  });
+
+  test("reassigning a duplicate api key clears stale service-access snapshots from the previous owner", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "first-owner@example.test", password: "pass-a" },
+      { email: "second-owner@example.test", password: "pass-b" },
+    ]);
+    const [firstAccountId, secondAccountId] = imported.affectedIds;
+    const firstKey = appDb.recordApiKey(firstAccountId, "tvly-shared-key", "198.51.100.8");
+
+    appDb.upsertAccountServiceAccess({
+      accountId: firstAccountId,
+      service: "tavily",
+      apiKeyId: firstKey.id,
+      extractedIp: "198.51.100.8",
+      lastSuccessAt: "2026-04-24T10:10:00.000Z",
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot: [{ name: "session", value: "cookie" }],
+      }),
+    });
+
+    const reassignedKey = appDb.recordApiKey(secondAccountId, "tvly-shared-key", "203.0.113.9");
+
+    expect(reassignedKey.id).toBe(firstKey.id);
+    expect(appDb.getAccountServiceAccess(firstAccountId, "tavily")).toBeNull();
+
+    appDb.close();
+  });
+});
+
 describe("AppDatabase grok api keys", () => {
   test("completes grok attempts into dedicated grok_api_keys rows", async () => {
     const { appDb } = await createTempDb();
@@ -3543,6 +3764,10 @@ describe("AppDatabase grok api keys", () => {
       checkoutUrl: "https://checkout.example.test/demo",
       birthDate: "1995-06-18T16:00:00.000Z",
     });
+
+    const paged = appDb.listGrokApiKeys({ page: 1, pageSize: 5000 });
+    expect(paged.rows).toHaveLength(1);
+    expect(paged.total).toBe(1);
 
     appDb.close();
   });

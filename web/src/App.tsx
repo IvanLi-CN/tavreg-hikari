@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AccountsView } from "@/components/accounts-view";
+import { ApiAccessSettingsView, type RevealedIntegrationApiSecret } from "@/components/api-access-settings-view";
 import { AppShell } from "@/components/app-shell";
 import {
   ChatGptUpstreamSettingsDialog,
@@ -15,10 +16,12 @@ import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { SiteKeysView } from "@/components/site-keys-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
-import { buildApiKeyExportFilename } from "@/lib/api-key-export";
+import { buildApiKeyExportFilename, countMissingExportIds, getMissingExportIds } from "@/lib/api-key-export";
+import { executeIntegrationApiKeyMutation } from "@/lib/api-access";
 import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
+import { DEFAULT_KEYS_PAGE_SIZE } from "@/lib/keys-page";
 import type {
   AccountBatchBootstrapMode,
   AccountBusinessFlowMode,
@@ -39,7 +42,11 @@ import type {
   AccountUpdatePayload,
   AccountQuery,
   AccountsPayload,
+  IntegrationApiKeyMutationPayload,
+  IntegrationApiKeyRecord,
+  IntegrationApiKeysPayload,
   ChatGptCredentialDetailPayload,
+  ChatGptCredentialExportPayload,
   ChatGptCredentialRecord,
   ChatGptCredentialQuery,
   ChatGptCredentialSort,
@@ -270,7 +277,14 @@ export function App() {
     maxAttempts: 1,
     upstreamGroupName: "",
   });
-  const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialRecord[]>([]);
+  const [chatGptCredentials, setChatGptCredentials] = useState<ChatGptCredentialsPayload>({
+    ok: true,
+    rows: [],
+    total: 0,
+    page: 1,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
+    summary: { valid: 0, expired: 0, noExpiry: 0 },
+  });
   const [chatGptUpstreamSettings, setChatGptUpstreamSettings] = useState<ChatGptUpstreamSettings>(createEmptyChatGptUpstreamSettings);
   const [chatGptUpstreamSettingsOpen, setChatGptUpstreamSettingsOpen] = useState(false);
   const [chatGptUpstreamSettingsDraft, setChatGptUpstreamSettingsDraft] = useState<ChatGptUpstreamSettingsDialogDraft>(() =>
@@ -282,13 +296,12 @@ export function App() {
   const [chatGptBatchSupplementGroupName, setChatGptBatchSupplementGroupName] = useState("");
   const [chatGptBatchSupplementBusy, setChatGptBatchSupplementBusy] = useState(false);
   const [chatGptBatchSupplementResult, setChatGptBatchSupplementResult] = useState<ChatGptCredentialSupplementPayload | null>(null);
-  const [revealedChatGptCredential, setRevealedChatGptCredential] = useState<ChatGptCredentialRecord | null>(null);
   const [grokApiKeys, setGrokApiKeys] = useState<GrokApiKeysPayload>({
     ok: true,
     rows: [],
     total: 0,
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
     summary: { active: 0, revoked: 0 },
   });
   const [accounts, setAccounts] = useState<AccountsPayload>({
@@ -303,7 +316,7 @@ export function App() {
     rows: [],
     total: 0,
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
     summary: { active: 0, revoked: 0 },
     groups: [],
   });
@@ -405,7 +418,7 @@ export function App() {
     sortBy: "extractedAt",
     sortDir: "desc",
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [grokApiKeyQuery, setGrokApiKeyQuery] = useState<GrokApiKeyQuery>({
     q: "",
@@ -413,11 +426,13 @@ export function App() {
     sortBy: "extractedAt",
     sortDir: "desc",
     page: 1,
-    pageSize: 20,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [chatGptCredentialQuery, setChatGptCredentialQuery] = useState<ChatGptCredentialQuery>({
     q: "",
     expiryStatus: "",
+    page: 1,
+    pageSize: DEFAULT_KEYS_PAGE_SIZE,
   });
   const [chatGptCredentialSort, setChatGptCredentialSort] = useState<ChatGptCredentialSort>({
     sortBy: "createdAt",
@@ -465,6 +480,9 @@ export function App() {
   const [grokJobBusy, setGrokJobBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
   const [chatGptCredentialBusy, setChatGptCredentialBusy] = useState(false);
+  const [integrationApiKeys, setIntegrationApiKeys] = useState<IntegrationApiKeyRecord[]>([]);
+  const [apiAccessMutatingId, setApiAccessMutatingId] = useState<number | "create" | null>(null);
+  const [revealedIntegrationSecret, setRevealedIntegrationSecret] = useState<RevealedIntegrationApiSecret | null>(null);
 
   const activePage = useMemo<PageKey>(() => getPageFromPathname(pathname, search), [pathname, search]);
   const isLegacyKeysPage = useMemo(() => isKeysCompatPath(pathname), [pathname]);
@@ -529,10 +547,17 @@ export function App() {
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.expiryStatus) params.set("expiryStatus", nextQuery.expiryStatus);
+    params.set("page", String(nextQuery.page));
+    params.set("pageSize", String(nextQuery.pageSize));
     params.set("sortBy", nextSort.sortBy);
     params.set("sortDir", nextSort.sortDir);
     const payload = await api<ChatGptCredentialsPayload>(`/api/chatgpt/credentials?${params.toString()}`);
-    setChatGptCredentials(payload.rows);
+    const lastPage = Math.max(1, Math.ceil(payload.total / nextQuery.pageSize));
+    if (nextQuery.page > lastPage) {
+      setChatGptCredentialQuery((current) => ({ ...current, page: lastPage }));
+      return;
+    }
+    setChatGptCredentials(payload);
   };
   const refreshChatGptUpstreamSettings = async () => {
     const payload = await api<ChatGptUpstreamSettingsPayload>("/api/chatgpt/upstream-settings");
@@ -587,6 +612,10 @@ export function App() {
       return;
     }
     setApiKeys(payload);
+  };
+  const refreshIntegrationApiKeys = async () => {
+    const payload = await api<IntegrationApiKeysPayload>("/api/settings/api-access/keys");
+    setIntegrationApiKeys(payload.rows);
   };
   const refreshGrokApiKeys = async (nextQuery = grokApiKeyQueryRef.current) => {
     const params = new URLSearchParams();
@@ -696,12 +725,16 @@ export function App() {
     await Promise.all([refreshAccounts(accountQueryRef.current), refreshMailboxes()]);
   };
 
+  const loadChatGptCredentialDetail = async (credentialId: number): Promise<ChatGptCredentialRecord> => {
+    const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
+    return payload.credential;
+  };
+
   const ensureChatGptCredentialDetail = async (credential: ChatGptCredentialRecord): Promise<ChatGptCredentialRecord> => {
     if (credential.accessToken && credential.refreshToken && credential.idToken) {
       return credential;
     }
-    const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credential.id}?includeSecrets=1`);
-    return payload.credential;
+    return loadChatGptCredentialDetail(credential.id);
   };
 
   const handleChatGptJobDraftChange = (patch: Partial<ChatGptJobDraft>) => {
@@ -772,8 +805,7 @@ export function App() {
     try {
       setChatGptCredentialBusy(true);
       setError(null);
-      const payload = await api<ChatGptCredentialDetailPayload>(`/api/chatgpt/credentials/${credentialId}?includeSecrets=1`);
-      setRevealedChatGptCredential(payload.credential);
+      await loadChatGptCredentialDetail(credentialId);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -822,7 +854,7 @@ export function App() {
   };
 
   const handleToggleChatGptCredentialPageSelection = (checked: boolean) => {
-    const currentPageCredentialIds = chatGptCredentials.map((row) => row.id);
+    const currentPageCredentialIds = chatGptCredentials.rows.map((row) => row.id);
     if (checked) {
       setSelectedChatGptCredentialIds((current) => mergeIds(current, currentPageCredentialIds));
       return;
@@ -835,19 +867,21 @@ export function App() {
     try {
       setChatGptExportBusy(true);
       setError(null);
-      const detailRows = (
-        await Promise.all(
-          selectedChatGptCredentialIds.map(async (credentialId) => {
-            const credential = chatGptCredentials.find((row) => row.id === credentialId);
-            if (!credential) return null;
-            return await ensureChatGptCredentialDetail(credential);
-          }),
-        )
-      ).filter((row): row is ChatGptCredentialRecord => Boolean(row));
+      const payload = await api<ChatGptCredentialExportPayload>("/api/chatgpt/credentials/export", {
+        method: "POST",
+        body: JSON.stringify({ ids: selectedChatGptCredentialIds }),
+      });
+      const detailRows = payload.credentials;
 
       if (detailRows.length === 0) {
+        setSelectedChatGptCredentialIds((current) => current.filter((id) => !payload.missingIds.includes(id)));
         setError("选中的 ChatGPT keys 已不存在");
         return;
+      }
+
+      if (payload.missingIds.length > 0) {
+        setSelectedChatGptCredentialIds((current) => current.filter((id) => !payload.missingIds.includes(id)));
+        setError(`有 ${payload.missingIds.length} 条 ChatGPT keys 已不存在或读取失败，已导出剩余 ${detailRows.length} 条`);
       }
 
       const content = JSON.stringify(
@@ -953,6 +987,88 @@ export function App() {
     }
   };
 
+  const handleCreateIntegrationApiKey = async (input: { label: string; notes: string | null }) => {
+    try {
+      setApiAccessMutatingId("create");
+      setError(null);
+      const result = await executeIntegrationApiKeyMutation({
+        mode: "create",
+        mutate: () =>
+          api<IntegrationApiKeyMutationPayload>("/api/settings/api-access/keys", {
+            method: "POST",
+            body: JSON.stringify(input),
+          }),
+        refresh: refreshIntegrationApiKeys,
+      });
+      if (result.mutationError) {
+        setError(result.mutationError.message);
+        return result.shouldCloseEditor;
+      }
+      if (result.revealedSecret) {
+        setRevealedIntegrationSecret(result.revealedSecret);
+      }
+      if (result.refreshError) {
+        setError(result.refreshError.message);
+      }
+      return result.shouldCloseEditor;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return false;
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
+  const handleRotateIntegrationApiKey = async (
+    record: IntegrationApiKeyRecord,
+    input: { label: string; notes: string | null },
+  ) => {
+    try {
+      setApiAccessMutatingId(record.id);
+      setError(null);
+      const result = await executeIntegrationApiKeyMutation({
+        mode: "rotate",
+        mutate: () =>
+          api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/rotate`, {
+            method: "POST",
+            body: JSON.stringify(input),
+          }),
+        refresh: refreshIntegrationApiKeys,
+      });
+      if (result.mutationError) {
+        setError(result.mutationError.message);
+        return result.shouldCloseEditor;
+      }
+      if (result.revealedSecret) {
+        setRevealedIntegrationSecret(result.revealedSecret);
+      }
+      if (result.refreshError) {
+        setError(result.refreshError.message);
+      }
+      return result.shouldCloseEditor;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return false;
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
+  const handleRevokeIntegrationApiKey = async (record: IntegrationApiKeyRecord) => {
+    try {
+      setApiAccessMutatingId(record.id);
+      setError(null);
+      await api<IntegrationApiKeyMutationPayload>(`/api/settings/api-access/keys/${record.id}/revoke`, {
+        method: "POST",
+      });
+      await refreshIntegrationApiKeys();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setApiAccessMutatingId(null);
+    }
+  };
+
   useEffect(() => {
     void Promise.all([
       refreshJob("tavily"),
@@ -962,6 +1078,7 @@ export function App() {
       refreshChatGptUpstreamSettings(),
       refreshAccounts(),
       refreshApiKeys(),
+      refreshIntegrationApiKeys(),
       refreshGrokApiKeys(),
       refreshProxies(),
       refreshExtractorSettings(),
@@ -1264,16 +1381,6 @@ export function App() {
   useEffect(() => {
     void refreshChatGptCredentials(chatGptCredentialQuery, chatGptCredentialSort).catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [chatGptCredentialQuery, chatGptCredentialSort]);
-
-  useEffect(() => {
-    const existingIds = new Set(grokApiKeys.rows.map((row) => row.id));
-    setSelectedGrokApiKeyIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [grokApiKeys]);
-
-  useEffect(() => {
-    const existingIds = new Set(chatGptCredentials.map((row) => row.id));
-    setSelectedChatGptCredentialIds((current) => current.filter((id) => existingIds.has(id)));
-  }, [chatGptCredentials]);
 
   useEffect(() => {
     void refreshExtractorHistory(extractorHistoryQuery).catch((err) => setError(err instanceof Error ? err.message : String(err)));
@@ -1683,9 +1790,15 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ids: selectedApiKeyIds }),
       });
-      if (payload.items.length === 0) {
-        setError("选中的 API key 已不存在");
-        return;
+      const missingCount = countMissingExportIds(selectedApiKeyIds, payload.items);
+      const missingIds = getMissingExportIds(selectedApiKeyIds, payload.items);
+      if (missingCount > 0) {
+        setSelectedApiKeyIds((current) => current.filter((id) => !missingIds.includes(id)));
+        if (payload.items.length === 0) {
+          setError("选中的 API key 已不存在");
+          return;
+        }
+        setError(`有 ${missingCount} 条 API key 已不存在，已导出剩余 ${payload.items.length} 条`);
       }
       setApiKeyExportContent(payload.content);
       setApiKeyExportOpen(true);
@@ -1741,9 +1854,15 @@ export function App() {
         method: "POST",
         body: JSON.stringify({ ids: selectedGrokApiKeyIds }),
       });
-      if (payload.items.length === 0) {
-        setError("选中的 Grok API key 已不存在");
-        return;
+      const missingCount = countMissingExportIds(selectedGrokApiKeyIds, payload.items);
+      const missingIds = getMissingExportIds(selectedGrokApiKeyIds, payload.items);
+      if (missingCount > 0) {
+        setSelectedGrokApiKeyIds((current) => current.filter((id) => !missingIds.includes(id)));
+        if (payload.items.length === 0) {
+          setError("选中的 Grok API key 已不存在");
+          return;
+        }
+        setError(`有 ${missingCount} 条 Grok API key 已不存在，已导出剩余 ${payload.items.length} 条`);
       }
       setGrokApiKeyExportContent(payload.content);
       setGrokApiKeyExportOpen(true);
@@ -2239,8 +2358,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="Tavily"
-            description="这里收纳 Tavily 提取结果；返回后继续处理 Tavily 主流程与自动补号。"
-            badgeText={`总计 ${apiKeys.total}`}
             onBack={() => handleCloseSiteKeys("tavily")}
           >
             <TavilyKeysPane {...tavilyKeysProps} />
@@ -2270,8 +2387,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="Grok"
-            description="这里集中查看 Grok 站点的 SSO 与导出结果；返回后继续 Grok 批量任务。"
-            badgeText={`总计 ${grokApiKeys.total}`}
             onBack={() => handleCloseSiteKeys("grok")}
           >
             <GrokKeysPane {...grokKeysProps} />
@@ -2300,8 +2415,6 @@ export function App() {
         isSiteKeysPage ? (
           <SiteKeysView
             siteLabel="ChatGPT"
-            description="这里集中查看 ChatGPT keys，并保留站内补号设置入口；返回后继续 ChatGPT 任务控制。"
-            badgeText={`总计 ${chatGptCredentials.length}`}
             onBack={() => handleCloseSiteKeys("chatgpt")}
           >
             <ChatGptKeysPane {...chatGptKeysProps} />
@@ -2461,6 +2574,22 @@ export function App() {
           onSaveProxySettings={handleSaveProxySettings}
           onCheckScope={handleProxyCheck}
           onCheckNode={handleCheckSingleNode}
+        />
+      ) : null}
+
+      {activePage === "settings" ? (
+        <ApiAccessSettingsView
+          rows={integrationApiKeys}
+          mutatingId={apiAccessMutatingId}
+          revealedSecret={revealedIntegrationSecret}
+          onCreate={handleCreateIntegrationApiKey}
+          onRotate={handleRotateIntegrationApiKey}
+          onRevoke={handleRevokeIntegrationApiKey}
+          onRevealedSecretOpenChange={(open) => {
+            if (!open) {
+              setRevealedIntegrationSecret(null);
+            }
+          }}
         />
       ) : null}
 

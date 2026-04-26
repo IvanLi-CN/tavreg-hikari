@@ -16,6 +16,7 @@ import {
   isMicrosoftOauthCallbackUrl,
   isMicrosoftOauthCompletionUrl,
 } from "./microsoft-mail.js";
+import { buildServerAuthConfig, buildTrustedForwardAuthHeaders } from "./auth-gate.js";
 
 interface WorkerArgs {
   authUrl: string;
@@ -200,13 +201,22 @@ function buildMicrosoftOauthOutcomeUrl(
   return url.toString();
 }
 
+function buildLocalServerAuthHeaders(): HeadersInit {
+  return buildTrustedForwardAuthHeaders(buildServerAuthConfig(process.env), {
+    user: "mailbox-oauth-worker",
+    email: "mailbox-oauth-worker@localhost",
+  });
+}
+
 async function fetchLocalMailboxCompletion(
   localServerOrigin: string,
   mailboxId: number,
   redirectUri: string,
 ): Promise<{ finalUrl: string | null; oauthOutcome: "success" | "error" | null }> {
   try {
-    const response = await fetch(new URL(`/api/microsoft-mail/mailboxes/${mailboxId}`, localServerOrigin));
+    const response = await fetch(new URL(`/api/microsoft-mail/mailboxes/${mailboxId}`, localServerOrigin), {
+      headers: buildLocalServerAuthHeaders(),
+    });
     if (!response.ok) {
       return { finalUrl: null, oauthOutcome: null };
     }

@@ -206,6 +206,15 @@ interface ResultPayload {
   verifyPassed: boolean;
   failureStage?: string;
   notes: string[];
+  serviceAccess?: {
+    tavily?: {
+      cookiesSnapshot: unknown[];
+      browserFingerprintSnapshot: BrowserFingerprintSnapshot | null;
+      extractedIp: string | null;
+      lastSuccessAt: string;
+      apiKeyPrefix: string | null;
+    };
+  };
 }
 
 interface RequestDiagRecord {
@@ -2753,7 +2762,13 @@ async function persistResolvedMicrosoftProofMailbox(cfg: AppConfig, address: str
 
 async function syncLinkedMicrosoftAccountOutcome(
   cfg: AppConfig,
-  outcome: { status: "succeeded"; apiKey: string } | { status: "failed"; errorCode?: string | null },
+  outcome:
+    | {
+        status: "succeeded";
+        apiKey: string;
+        serviceAccess?: ResultPayload["serviceAccess"];
+      }
+    | { status: "failed"; errorCode?: string | null },
 ): Promise<void> {
   const envJobId = Number.parseInt((process.env.TASK_LEDGER_JOB_ID || "").trim(), 10);
   const envAccountId = Number.parseInt((process.env.TASK_LEDGER_ACCOUNT_ID || "").trim(), 10);
@@ -2770,7 +2785,24 @@ async function syncLinkedMicrosoftAccountOutcome(
   const db = new AppDatabase(dbPath);
   try {
     if (outcome.status === "succeeded") {
-      db.recordApiKey(envAccountId, outcome.apiKey);
+      const keyRecord = db.recordApiKey(envAccountId, outcome.apiKey);
+      const tavilyAccess = outcome.serviceAccess?.tavily;
+      if (tavilyAccess) {
+        db.upsertAccountServiceAccess({
+          accountId: envAccountId,
+          service: "tavily",
+          status: "succeeded",
+          apiKeyId: keyRecord.id,
+          snapshotJson: JSON.stringify({
+            cookiesSnapshot: Array.isArray(tavilyAccess.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+            browserFingerprintSnapshot: tavilyAccess.browserFingerprintSnapshot || null,
+            extractedIp: tavilyAccess.extractedIp || null,
+            apiKeyPrefix: tavilyAccess.apiKeyPrefix || null,
+          }),
+          extractedIp: tavilyAccess.extractedIp || null,
+          lastSuccessAt: tavilyAccess.lastSuccessAt,
+        });
+      }
       db.markAccountDirectSuccess(envAccountId);
       return;
     }
@@ -12570,6 +12602,21 @@ async function runSingleMode(
     }
     notes.push("default api key fetched");
 
+    const tavilyCookies = await page
+      .context()
+      .cookies(["https://app.tavily.com", "https://www.tavily.com"])
+      .catch(() => []);
+    const latestFingerprintSnapshot =
+      browserFingerprintSnapshots[browserFingerprintSnapshots.length - 1] ||
+      (await collectBrowserFingerprintSnapshot(page).catch(() => null));
+    const tavilyServiceAccess = {
+      cookiesSnapshot: Array.isArray(tavilyCookies) ? tavilyCookies : [],
+      browserFingerprintSnapshot: latestFingerprintSnapshot,
+      extractedIp: browserObservedIp || null,
+      lastSuccessAt: new Date().toISOString(),
+      apiKeyPrefix: apiKey.slice(0, Math.min(apiKey.length, 12)),
+    };
+
     const successRisk = summarizeRiskSignals(requestLog, networkLog);
     ledgerRecord.status = "succeeded";
     ledgerRecord.completedAt = new Date().toISOString();
@@ -12618,6 +12665,9 @@ async function runSingleMode(
     await syncLinkedMicrosoftAccountOutcome(cfg, {
       status: "succeeded",
       apiKey,
+      serviceAccess: {
+        tavily: tavilyServiceAccess,
+      },
     }).catch((error) => {
       log(`linked account success sync skipped: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -12632,6 +12682,9 @@ async function runSingleMode(
       precheckPassed,
       verifyPassed: verifyPassed || hasConfiguredLoginAccount(cfg),
       notes,
+      serviceAccess: {
+        tavily: tavilyServiceAccess,
+      },
     };
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error);

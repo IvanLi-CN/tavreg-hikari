@@ -216,7 +216,8 @@ export const BatchExportPlay: Story = {
     await expect(exportButton).toBeDisabled();
     await userEvent.click(canvas.getByRole("checkbox", { name: "select-current-page" }));
     await expect(exportButton).toBeEnabled();
-    await expect(canvas.getByText("总已选 2 / 2")).toBeInTheDocument();
+    await expect(canvas.getByText(/当前页已选 · 2/)).toBeInTheDocument();
+    await expect(canvas.getByText(/总已选 · 2/)).toBeInTheDocument();
 
     await userEvent.click(exportButton);
     const dialog = within(document.body).getByRole("dialog", { name: "导出 API Keys" });

@@ -24,6 +24,7 @@ export function getPageFromPathname(pathname: string, search = ""): PageKey {
   if (normalized === "/chatgpt") return "chatgpt";
   if (normalized === "/tavily" || normalized === "/dashboard") return "tavily";
   if (normalized === "/accounts" || normalized === "/mailboxes" || normalized.startsWith("/mailboxes/")) return "accounts";
+  if (normalized === "/settings") return "settings";
   if (isKeysCompatPath(normalized)) {
     const site = params.get("site");
     return isSupportedKeysSite(site) ? site : "tavily";

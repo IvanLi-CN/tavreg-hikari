@@ -7,10 +7,11 @@
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
 | 8tmtv | 微软账号列表双字段分组与图标化操作 | 已完成 | `8tmtv-microsoft-account-list-two-field-layout/SPEC.md` | 2026-04-19 | 双字段布局、辅助邮箱命名、图标 tooltip、默认导入时间倒序与复制失败回退交互已完成收口 |
+| gvabx | Keys 页面信息架构与大数据列表性能收敛 | 已完成 | `gvabx-keys-page-ia-virtualization/SPEC.md` | 2026-04-23 | 删除错误 Keys 说明壳子、批量操作改为底部浮动条、统一 7 档分页并为三套列表接入整页虚拟化 |
 | kq7rv | 跨站点任务控制区对齐：ChatGPT 补齐更新限制，Tavily / ChatGPT 对齐 Grok | 已完成 | `kq7rv-cross-site-job-control-alignment/SPEC.md` | 2026-04-17 | PR #48；ChatGPT 补 pause/resume/update_limits，Tavily 控制区文案与按钮顺序对齐 Grok |
 | s76pf | 共享 mailbox provider 启动节流 | 已完成 | `s76pf-mailbox-provider-start-pacing/SPEC.md` | 2026-04-14 | PR #41；共享 guard 增加最小启动间隔，压平 ChatGPT / Grok 的 mailbox provisioning 启动波峰 |
 | vyg62 | Release 失败 Telegram 告警接入 | 已完成 | `vyg62-release-failure-telegram-alerts/SPEC.md` | 2026-04-19 | release failure notifier、目标 SHA 解析与 `workflow_dispatch` smoke 已收口为 canonical spec |
-| k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 已完成 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-19 | 显式 `CHROME_EXECUTABLE_PATH`、跨平台安装脚本、Docker 内置指纹浏览器、CI/Release/branch rules 与 release comment 全部闭环 |
+| k9tfr | 显式指纹浏览器契约 + GitHub 质量门禁收口 | 已完成 | `k9tfr-explicit-fingerprint-browser-quality-gates/SPEC.md` | 2026-04-25 | 显式 `CHROME_EXECUTABLE_PATH`、跨平台安装脚本、Docker 内置指纹浏览器、CI/Release/branch rules / release comment 闭环，并补齐 GHCR 公开 tag 的匿名可读 index 平台元数据契约 |
 | r6h9s | 主流程停止控制重构 | 已完成 | `r6h9s-job-stop-controls/SPEC.md` | 2026-04-19 | stop / force-stop 状态机、统一主按钮、Storybook 视觉证据与测试闭环已对齐 |
 | m1sso | 固定 Microsoft Account 登录接入 Tavily 主流程 | 已完成 | `m1sso-microsoft-login/SPEC.md` | 2026-03-18 | 已落地 |
 | 8855j | 增加批量注册（并行数 + 需求数） | 已完成 | `8855j-batch-parallel-need/SPEC.md` | 2026-03-01 | 已落地 |
@@ -35,4 +36,5 @@
 | bqa97 | 代理节点检查并发化与 SSE 进度流 | 已完成 | `bqa97-proxy-check-progress-stream/SPEC.md` | 2026-04-15 | `/api/proxies` 快照化、独立 proxy check coordinator、SSE 进度推送 |
 | zxuvb | Microsoft proof 补邮箱分支修复与多语言诊断加固 | 已完成 | `zxuvb-microsoft-proof-surface-locale-hardening/SPEC.md` | 2026-04-18 | 101 热修上线并完成 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归；zh-TW `/proofs/Add` auto-provision 已恢复 |
 | vhvds | ChatGPT 补号到 codex-vibe-monitor 分组 | 已完成 | `vhvds-chatgpt-upstream-account-supplement/SPEC.md` | 2026-04-18 | 自动补号 + Keys 批量补号 + 设置入口收敛到 Keys > ChatGPT |
-| 8qyzh | Web 管理台导航收敛与 Microsoft 信箱抽屉整合 | 已完成 | `8qyzh-nav-keys-mailbox-consolidation/SPEC.md` | 2026-04-19 | PR #54 merge-ready；顶栏五项、站内 Keys 子视图、Microsoft drawer、工具列记忆与视觉证据已收口 |
+| 8qyzh | Web 管理台导航收敛与 Microsoft 信箱抽屉整合 | 已完成 | `8qyzh-nav-keys-mailbox-consolidation/SPEC.md` | 2026-04-19 | PR #54 merge-ready；顶栏五项、站点 Keys 视图、Microsoft drawer、工具列记忆与视觉证据已收口 |
+| 3aqn8 | HTTP 外部接入与鉴权收口（v1） | active | `3aqn8-http-integration-auth-v1/SPEC.md` | 2026-04-24 | Forward Auth、integration v1、API Access UI 与服务接入快照进行中 |

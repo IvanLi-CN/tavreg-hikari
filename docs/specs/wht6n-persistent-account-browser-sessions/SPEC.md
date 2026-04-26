@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-31
-- Last: 2026-04-19
+- Last: 2026-04-26
 
 ## 背景 / 问题陈述
 
@@ -85,6 +85,7 @@
 - 代理池中找不到原 IP：按 `proxy_region` 匹配健康节点 LRU；仍找不到则退到全池健康节点 LRU。
 - proxy inventory 不再包含历史 pinned/lease 节点时，必须自动清理陈旧引用。
 - bootstrap 任一步失败时保留账号与 session 行，状态写入 `failed` 或 `blocked`，允许后续重试。
+- 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -116,9 +117,11 @@
 - Given 原 IP 不可用但同 `proxy_region` 仍有健康节点，When 选择代理，Then 必须在该 region 内按 `last_leased_at` 最久未使用节点优先。
 - Given Graph 设置缺失，When 自动 bootstrap 触发，Then session 进入 `blocked`（或等价错误码）而不是 `ready`。
 - Given 会话 bootstrap 成功，When 账号页刷新，Then 能看到会话状态、当前代理/IP 和 profile 路径摘要。
+- Given Graph OAuth token 已写入 DB，When 浏览器结束在 SSO 中继或本地 mailbox 状态确认需要 internal auth，Then bootstrap 仍必须收敛为 `browserSession.status=ready` 与 `mailbox.status=available`。
 - Given 账号页桌面态空间不足，When 点击“收起工具列”，Then 左侧提号器与导入区整列收起，右侧账号池占满主体宽度，并保留“展开工具列”入口。
 - Given 在账号页设置 `Session` 或 `收信状态` 筛选，When 触发查询，Then 过滤作用于筛选后的全量结果集，而不是当前页前端假过滤。
 - Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 仅未成功 Bootstrap 的账号会进入队列；When 触发“强制 Bootstrap”，Then 已成功账号也可重新进入队列。
+- Given mailbox OAuth 已写入 token 且相关验证测试需要读取 integration detail API，When 当前日期晚于旧固定样例过期时间，Then 测试必须使用相对未来的 access-token 过期时间，避免误走 refresh 分支掩盖实际 bootstrap 行为。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -224,6 +227,7 @@ None
 
 ## 变更记录（Change log）
 
+- 2026-04-26: 补充 Graph OAuth/收信 integration detail API 的 token 过期测试边界，避免日期推进导致验证误判。
 - 2026-04-07: 补充账号页桌面态工具列收起、`Session / 收信状态` 服务端筛选，以及批量 Bootstrap preview / 强制模式的收口说明与视觉证据。
 - 2026-03-31: 初版 spec，冻结账号持久会话、代理复用与 profile 落库改造范围。
 

@@ -74,17 +74,36 @@ export class MicrosoftGraphError extends Error {
   }
 }
 
-export function isMicrosoftOauthCompletionUrl(finalUrl: string | null | undefined, redirectUri: string): boolean {
+function parseMicrosoftOauthUrl(finalUrl: string | null | undefined, redirectUri: string): URL | null {
   const normalizedFinalUrl = String(finalUrl || "").trim();
   const normalizedRedirectUri = String(redirectUri || "").trim();
-  if (!normalizedFinalUrl || !normalizedRedirectUri) return false;
+  if (!normalizedFinalUrl || !normalizedRedirectUri) return null;
   try {
     const current = new URL(normalizedFinalUrl);
     const redirect = new URL(normalizedRedirectUri);
-    if (current.origin === redirect.origin && current.pathname === redirect.pathname) {
+    if (current.origin === redirect.origin) {
+      return current;
+    }
+    const relayDestination = String(current.searchParams.get("rd") || "").trim();
+    if (!relayDestination) {
+      return null;
+    }
+    const relayed = new URL(relayDestination);
+    return relayed.origin === redirect.origin ? relayed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isMicrosoftOauthCompletionUrl(finalUrl: string | null | undefined, redirectUri: string): boolean {
+  const current = parseMicrosoftOauthUrl(finalUrl, redirectUri);
+  if (!current) return false;
+  try {
+    const redirect = new URL(String(redirectUri || "").trim());
+    if (current.pathname === redirect.pathname) {
       return true;
     }
-    if (current.origin === redirect.origin && current.pathname === "/mailboxes") {
+    if (current.pathname === "/mailboxes") {
       return true;
     }
     return false;
@@ -110,20 +129,12 @@ export function getMicrosoftOauthBrowserOutcome(
   finalUrl: string | null | undefined,
   redirectUri: string,
 ): "success" | "error" | null {
-  const normalizedFinalUrl = String(finalUrl || "").trim();
-  const normalizedRedirectUri = String(redirectUri || "").trim();
-  if (!normalizedFinalUrl || !normalizedRedirectUri) return null;
-  try {
-    const current = new URL(normalizedFinalUrl);
-    const redirect = new URL(normalizedRedirectUri);
-    if (current.origin !== redirect.origin || current.pathname !== "/mailboxes") {
-      return null;
-    }
-    const oauth = String(current.searchParams.get("oauth") || "").trim().toLowerCase();
-    return oauth === "success" || oauth === "error" ? oauth : null;
-  } catch {
+  const current = parseMicrosoftOauthUrl(finalUrl, redirectUri);
+  if (!current || current.pathname !== "/mailboxes") {
     return null;
   }
+  const oauth = String(current.searchParams.get("oauth") || "").trim().toLowerCase();
+  return oauth === "success" || oauth === "error" ? oauth : null;
 }
 
 function normalizeAuthority(authority: string): string {
