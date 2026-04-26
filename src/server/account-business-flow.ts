@@ -58,6 +58,7 @@ interface ActiveBusinessFlow {
   attemptId: number | null;
   retainedAt: string | null;
   browserRetained: boolean;
+  closeHandled: Promise<void>;
 }
 
 interface RetainedBrowserSnapshot {
@@ -102,6 +103,13 @@ async function waitForChildClose(
     new Promise<boolean>((resolve) => {
       child.once("close", () => resolve(true));
     }),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
+async function waitForPromiseSettlement(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return await Promise.race([
+    promise.then(() => true, () => true),
     delay(timeoutMs).then(() => false),
   ]);
 }
@@ -425,7 +433,7 @@ export class AccountBusinessFlowManager {
         child,
         jobId: hiddenJob.id,
         attemptId,
-        onClose: async (code, signal) => {
+        onClose: async (code, signal, lifecycle) => {
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{ apiKey?: string | null }>(path.join(outputDir, "result.json"));
           const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
@@ -433,13 +441,15 @@ export class AccountBusinessFlowManager {
           if (code === 0 && signal == null && typeof result?.apiKey === "string" && result.apiKey.trim()) {
             this.db.completeAttemptSuccess(hiddenJob.id, attemptId, account.id, result.apiKey.trim(), null);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: Boolean(retained),
-              retainedAt: retained?.retainedAt || null,
-              lastError: null,
-            });
-            this.broadcastToast("success", `${account.microsoftEmail}：Tavily 单账号业务流完成`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: Boolean(retained),
+                retainedAt: retained?.retainedAt || null,
+                lastError: null,
+              });
+              this.broadcastToast("success", `${account.microsoftEmail}：Tavily 单账号业务流完成`);
+            }
             return;
           }
           if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
@@ -449,13 +459,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: true,
-              retainedAt: retained.retainedAt || nowIso(),
-              lastError: null,
-            });
-            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage(site)}`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: true,
+                retainedAt: retained.retainedAt || nowIso(),
+                lastError: null,
+              });
+              this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage(site)}`);
+            }
             return;
           }
           const message =
@@ -467,13 +479,15 @@ export class AccountBusinessFlowManager {
             errorMessage: message,
           }, null);
           this.db.completeJob(hiddenJob.id, false, message);
-          this.updateState(key, {
-            status: "failed",
-            browserRetained: Boolean(retained),
-            retainedAt: retained?.retainedAt || null,
-            lastError: message,
-          });
-          this.broadcastToast("error", `${account.microsoftEmail}：Tavily 单账号业务流失败：${message}`);
+          if (lifecycle.isCurrent()) {
+            this.updateState(key, {
+              status: "failed",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: message,
+            });
+            this.broadcastToast("error", `${account.microsoftEmail}：Tavily 单账号业务流失败：${message}`);
+          }
         },
       });
     } catch (error) {
@@ -558,7 +572,7 @@ export class AccountBusinessFlowManager {
         child,
         jobId: hiddenJob.id,
         attemptId,
-        onClose: async (code, signal) => {
+        onClose: async (code, signal, lifecycle) => {
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
           const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
@@ -570,13 +584,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: Boolean(retained),
-              retainedAt: retained?.retainedAt || null,
-              lastError: null,
-            });
-            this.broadcastToast("success", `${account.microsoftEmail}：微软账号页已打开`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: Boolean(retained),
+                retainedAt: retained?.retainedAt || null,
+                lastError: null,
+              });
+              this.broadcastToast("success", `${account.microsoftEmail}：微软账号页已打开`);
+            }
             return;
           }
           if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
@@ -586,13 +602,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: true,
-              retainedAt: retained.retainedAt || nowIso(),
-              lastError: null,
-            });
-            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("none")}`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: true,
+                retainedAt: retained.retainedAt || nowIso(),
+                lastError: null,
+              });
+              this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("none")}`);
+            }
             return;
           }
           const message =
@@ -605,13 +623,15 @@ export class AccountBusinessFlowManager {
           }, null);
           this.db.releaseAccountLease(account.id, hiddenJob.id);
           this.db.completeJob(hiddenJob.id, false, message);
-          this.updateState(key, {
-            status: "failed",
-            browserRetained: Boolean(retained),
-            retainedAt: retained?.retainedAt || null,
-            lastError: message,
-          });
-          this.broadcastToast("error", `${account.microsoftEmail}：微软账号页打开失败：${message}`);
+          if (lifecycle.isCurrent()) {
+            this.updateState(key, {
+              status: "failed",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: message,
+            });
+            this.broadcastToast("error", `${account.microsoftEmail}：微软账号页打开失败：${message}`);
+          }
         },
       });
     } catch (error) {
@@ -794,7 +814,7 @@ export class AccountBusinessFlowManager {
         child,
         jobId: hiddenJob.id,
         attemptId,
-        onClose: async (code, signal) => {
+        onClose: async (code, signal, lifecycle) => {
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
             email?: string;
@@ -834,13 +854,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: Boolean(retained),
-              retainedAt: retained?.retainedAt || null,
-              lastError: null,
-            });
-            this.broadcastToast("success", `${account.microsoftEmail}：ChatGPT 单账号业务流完成`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: Boolean(retained),
+                retainedAt: retained?.retainedAt || null,
+                lastError: null,
+              });
+              this.broadcastToast("success", `${account.microsoftEmail}：ChatGPT 单账号业务流完成`);
+            }
             return;
           }
           if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
@@ -850,13 +872,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: true,
-              retainedAt: retained.retainedAt || nowIso(),
-              lastError: null,
-            });
-            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("chatgpt")}`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: true,
+                retainedAt: retained.retainedAt || nowIso(),
+                lastError: null,
+              });
+              this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("chatgpt")}`);
+            }
             return;
           }
           const message =
@@ -869,13 +893,15 @@ export class AccountBusinessFlowManager {
           }, null);
           this.db.releaseAccountLease(account.id, hiddenJob.id);
           this.db.completeJob(hiddenJob.id, false, message);
-          this.updateState(key, {
-            status: "failed",
-            browserRetained: Boolean(retained),
-            retainedAt: retained?.retainedAt || null,
-            lastError: message,
-          });
-          this.broadcastToast("error", `${account.microsoftEmail}：ChatGPT 单账号业务流失败：${message}`);
+          if (lifecycle.isCurrent()) {
+            this.updateState(key, {
+              status: "failed",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: message,
+            });
+            this.broadcastToast("error", `${account.microsoftEmail}：ChatGPT 单账号业务流失败：${message}`);
+          }
         },
       });
     } catch (error) {
@@ -963,7 +989,7 @@ export class AccountBusinessFlowManager {
         child,
         jobId: hiddenJob.id,
         attemptId,
-        onClose: async (code, signal) => {
+        onClose: async (code, signal, lifecycle) => {
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
             email?: string;
@@ -997,13 +1023,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: Boolean(retained),
-              retainedAt: retained?.retainedAt || null,
-              lastError: null,
-            });
-            this.broadcastToast("success", `${account.microsoftEmail}：Grok 单账号业务流完成`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: Boolean(retained),
+                retainedAt: retained?.retainedAt || null,
+                lastError: null,
+              });
+              this.broadcastToast("success", `${account.microsoftEmail}：Grok 单账号业务流完成`);
+            }
             return;
           }
           if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
@@ -1013,13 +1041,15 @@ export class AccountBusinessFlowManager {
             });
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
-            this.updateState(key, {
-              status: "succeeded",
-              browserRetained: true,
-              retainedAt: retained.retainedAt || nowIso(),
-              lastError: null,
-            });
-            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("grok")}`);
+            if (lifecycle.isCurrent()) {
+              this.updateState(key, {
+                status: "succeeded",
+                browserRetained: true,
+                retainedAt: retained.retainedAt || nowIso(),
+                lastError: null,
+              });
+              this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("grok")}`);
+            }
             return;
           }
           const message =
@@ -1032,13 +1062,15 @@ export class AccountBusinessFlowManager {
           }, null);
           this.db.releaseAccountLease(account.id, hiddenJob.id);
           this.db.completeJob(hiddenJob.id, false, message);
-          this.updateState(key, {
-            status: "failed",
-            browserRetained: Boolean(retained),
-            retainedAt: retained?.retainedAt || null,
-            lastError: message,
-          });
-          this.broadcastToast("error", `${account.microsoftEmail}：Grok 单账号业务流失败：${message}`);
+          if (lifecycle.isCurrent()) {
+            this.updateState(key, {
+              status: "failed",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: message,
+            });
+            this.broadcastToast("error", `${account.microsoftEmail}：Grok 单账号业务流失败：${message}`);
+          }
         },
       });
     } catch (error) {
@@ -1063,10 +1095,18 @@ export class AccountBusinessFlowManager {
     child: ChildProcessWithoutNullStreams;
     jobId: number | null;
     attemptId: number | null;
-    onClose: (code: number | null, signal: NodeJS.Signals | null) => Promise<void>;
+    onClose: (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+      lifecycle: { isCurrent: () => boolean },
+    ) => Promise<void>;
   }): void {
     let stdout = "";
     let stderr = "";
+    let resolveCloseHandled: (() => void) | null = null;
+    const closeHandled = new Promise<void>((resolve) => {
+      resolveCloseHandled = resolve;
+    });
     const active: ActiveBusinessFlow = {
       key: input.key,
       accountId: input.accountId,
@@ -1080,6 +1120,7 @@ export class AccountBusinessFlowManager {
       attemptId: input.attemptId,
       retainedAt: null,
       browserRetained: false,
+      closeHandled,
     };
     this.active.set(input.key, active);
     this.updateState(input.key, {
@@ -1094,6 +1135,9 @@ export class AccountBusinessFlowManager {
       if (!retained) return;
       active.browserRetained = true;
       active.retainedAt = retained.retainedAt || nowIso();
+      if (this.active.get(input.key) !== active) {
+        return;
+      }
       this.updateState(input.key, {
         status: retained.success === false ? "failed" : "succeeded",
         browserRetained: true,
@@ -1120,6 +1164,9 @@ export class AccountBusinessFlowManager {
       void writeWorkerLog(input.outputDir, stdout, stderr);
     });
     input.child.once("error", async (error) => {
+      if (this.active.get(input.key) !== active) {
+        return;
+      }
       this.updateState(input.key, {
         status: "failed",
         browserRetained: false,
@@ -1135,11 +1182,14 @@ export class AccountBusinessFlowManager {
       }
       await writeWorkerLog(input.outputDir, stdout, stderr);
       try {
-        await input.onClose(code, signal);
+        await input.onClose(code, signal, {
+          isCurrent: () => this.active.get(input.key) === active,
+        });
       } finally {
         if (this.active.get(input.key) === active) {
           this.active.delete(input.key);
         }
+        resolveCloseHandled?.();
       }
     });
   }
@@ -1155,6 +1205,7 @@ export class AccountBusinessFlowManager {
       signalChildProcess(active.child, "SIGKILL");
       await waitForChildClose(active.child, 5_000).catch(() => false);
     }
+    await waitForPromiseSettlement(active.closeHandled, 5_000).catch(() => false);
     this.updateState(active.key, {
       browserRetained: false,
       lastError: reason,

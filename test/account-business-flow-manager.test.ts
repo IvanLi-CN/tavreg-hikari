@@ -157,6 +157,7 @@ test("fingerprint relaunch can replace the same active flow before the lease gat
     calls.push({ site, mode, key });
   };
   manager.stopActiveFlow = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
     account.leaseJobId = null;
   };
   manager.active.set("245:tavily", {
@@ -164,6 +165,7 @@ test("fingerprint relaunch can replace the same active flow before the lease gat
     accountId: 245,
     site: "tavily",
     mode: "fingerprint",
+    closeHandled: Promise.resolve(),
   });
 
   await expect(manager.start({ accountId: 245, site: "tavily", mode: "fingerprint" })).resolves.toBeUndefined();

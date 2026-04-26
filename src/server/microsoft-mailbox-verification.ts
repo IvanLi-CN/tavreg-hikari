@@ -137,7 +137,7 @@ function findMessageVerificationCode(
   const allowedProviders = providers?.length ? new Set(providers) : null;
   for (const message of sortMessagesByReceivedAt(messages)) {
     const receivedAtMs = toMillis(message.receivedAt);
-    if (notBeforeMs != null && receivedAtMs != null && receivedAtMs < notBeforeMs) {
+    if (notBeforeMs != null && (receivedAtMs == null || receivedAtMs < notBeforeMs)) {
       continue;
     }
     const match = matchMailboxVerificationCodeForMessage(message);

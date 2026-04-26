@@ -196,3 +196,9 @@ test("microsoft mailbox waiter does not widen notBefore backward into stale OTP 
   expect(source).toContain("function normalizeNotBeforeIso");
   expect(source).not.toContain("ms - 90_000");
 });
+
+test("microsoft mailbox waiter excludes timestamp-less messages once notBefore is enforced", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/microsoft-mailbox-verification.ts", import.meta.url), "utf8");
+  expect(source).toContain("(receivedAtMs == null || receivedAtMs < notBeforeMs)");
+});

@@ -155,6 +155,15 @@ test("superseded fingerprint flow waits for the old child close before replacing
   const { readFile } = await import("node:fs/promises");
   const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
   expect(source).toContain("waitForChildClose");
+  expect(source).toContain("waitForPromiseSettlement(active.closeHandled");
   expect(source).toContain('signalChildProcess(active.child, "SIGKILL")');
   expect(source).toContain("if (this.active.get(input.key) === active)");
+});
+
+test("superseded single-account workers ignore stale close updates after replacement", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  expect(source).toContain("isCurrent: () => this.active.get(input.key) === active");
+  expect(source).toContain("if (lifecycle.isCurrent())");
+  expect(source).toContain("if (this.active.get(input.key) !== active)");
 });
