@@ -66,6 +66,18 @@ function createAccount(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+test("blocks single-account business flows while the account is leased by a batch job", async () => {
+  const manager = createManagerFixture({
+    account: createAccount({
+      leaseJobId: 42,
+    }),
+  });
+
+  await expect(manager.start({ accountId: 245, site: "tavily", mode: "fingerprint" })).rejects.toThrow(
+    "当前账号正被批量作业 #42 占用，请等待该作业释放后再启动单账号业务流",
+  );
+});
+
 test("allows Tavily account business flow to start without a configured proof mailbox", async () => {
   const manager = createManagerFixture({
     account: createAccount(),

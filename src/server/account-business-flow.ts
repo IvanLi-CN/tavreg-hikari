@@ -212,6 +212,9 @@ export class AccountBusinessFlowManager {
     if (!account) {
       throw new Error(`account not found: ${input.accountId}`);
     }
+    if (account.leaseJobId != null) {
+      throw new Error(`当前账号正被批量作业 #${account.leaseJobId} 占用，请等待该作业释放后再启动单账号业务流`);
+    }
     if (!account.passwordPlaintext?.trim()) {
       throw new Error("账号缺少明文密码，暂时无法启动单账号业务流");
     }
