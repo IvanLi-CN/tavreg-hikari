@@ -144,3 +144,28 @@ test("still requires Microsoft mailbox authorization for ChatGPT and Grok code e
     );
   }
 });
+
+test("fingerprint relaunch can replace the same active flow before the lease gate runs", async () => {
+  const account = createAccount({
+    leaseJobId: 77,
+  }) as Record<string, unknown>;
+  const manager = createManagerFixture({
+    account,
+  });
+  const calls: Array<{ site: AccountBusinessFlowSite; mode: AccountBusinessFlowMode; key: string }> = [];
+  manager.startTavilyFlow = async (_account: unknown, site: AccountBusinessFlowSite, mode: AccountBusinessFlowMode, key: string) => {
+    calls.push({ site, mode, key });
+  };
+  manager.stopActiveFlow = async () => {
+    account.leaseJobId = null;
+  };
+  manager.active.set("245:tavily", {
+    key: "245:tavily",
+    accountId: 245,
+    site: "tavily",
+    mode: "fingerprint",
+  });
+
+  await expect(manager.start({ accountId: 245, site: "tavily", mode: "fingerprint" })).resolves.toBeUndefined();
+  expect(calls).toEqual([{ site: "tavily", mode: "fingerprint", key: "245:tavily" }]);
+});

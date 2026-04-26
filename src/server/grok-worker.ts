@@ -2682,10 +2682,13 @@ async function run(): Promise<void> {
         }
         await recoverSetCookieFlow(page, outputDir, "after_microsoft_code_verify").catch(() => {});
       }
-      if (!(await hasSsoCookie(page))) {
-        throw new Error("grok_microsoft_post_login_unhandled");
+      if (await hasSsoCookie(page)) {
+        await writeStageMarker(outputDir, "accounts:sso_ready_after_microsoft", {});
+      } else {
+        await writeStageMarker(outputDir, "accounts:profile_completion_after_microsoft", {
+          currentUrl: String(page.url?.() || ""),
+        });
       }
-      await writeStageMarker(outputDir, "accounts:sso_ready_after_microsoft", {});
     } else {
       failureStage = "accounts_send_email_code";
       const sent = await startEmailSignupInPage(page, email);
@@ -2737,7 +2740,7 @@ async function run(): Promise<void> {
 
     let completedViaNative = false;
     let turnstileProvider: string | null = null;
-    if (authProvider !== "microsoft") {
+    if (authProvider !== "microsoft" || !(await hasSsoCookie(page))) {
       failureStage = "accounts_submit_signup_native";
       await fillCompleteSignupFields(page, displayName, password);
       const nativeSignup = await submitCompleteSignupInPage(page, outputDir);
@@ -2767,6 +2770,10 @@ async function run(): Promise<void> {
       }
     } else if (await hasSsoCookie(page)) {
       completedViaNative = true;
+    }
+
+    if (authProvider === "microsoft" && !completedViaNative) {
+      throw new Error("grok_microsoft_post_sso_profile_unhandled");
     }
 
     if (!completedViaNative) {

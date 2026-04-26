@@ -126,9 +126,7 @@ async function resolveAccessToken(
 }
 
 function normalizeNotBeforeIso(value: string | null | undefined): number | null {
-  const ms = toMillis(value);
-  if (ms == null) return null;
-  return ms - 90_000;
+  return toMillis(value);
 }
 
 function findMessageVerificationCode(

@@ -228,18 +228,6 @@ export class AccountBusinessFlowManager {
     if (!account) {
       throw new Error(`account not found: ${input.accountId}`);
     }
-    if (account.leaseJobId != null) {
-      throw new Error(`当前账号正被批量作业 #${account.leaseJobId} 占用，请等待该作业释放后再启动单账号业务流`);
-    }
-    if (!account.passwordPlaintext?.trim()) {
-      throw new Error("账号缺少明文密码，暂时无法启动单账号业务流");
-    }
-    if (input.site !== "tavily" && input.site !== "none") {
-      const mailbox = this.db.getMailboxByAccountId(account.id);
-      if (!mailbox?.refreshToken?.trim()) {
-        throw new Error("当前账号还没有完成 Microsoft 邮箱授权，暂时无法自动提取验证码");
-      }
-    }
     const key = buildFlowKey(account.id, input.site);
     const existing = Array.from(this.active.values()).find((activeFlow) => activeFlow.accountId === account.id) || null;
     if (existing) {
@@ -247,6 +235,22 @@ export class AccountBusinessFlowManager {
         await this.stopActiveFlow(existing, "superseded_by_new_launch");
       } else {
         throw new Error("该账号已有业务流正在运行中，请等待当前站点完成后再启动新的业务流");
+      }
+    }
+    const refreshedAccount = this.db.getAccount(input.accountId);
+    if (!refreshedAccount) {
+      throw new Error(`account not found: ${input.accountId}`);
+    }
+    if (refreshedAccount.leaseJobId != null) {
+      throw new Error(`当前账号正被批量作业 #${refreshedAccount.leaseJobId} 占用，请等待该作业释放后再启动单账号业务流`);
+    }
+    if (!refreshedAccount.passwordPlaintext?.trim()) {
+      throw new Error("账号缺少明文密码，暂时无法启动单账号业务流");
+    }
+    if (input.site !== "tavily" && input.site !== "none") {
+      const mailbox = this.db.getMailboxByAccountId(refreshedAccount.id);
+      if (!mailbox?.refreshToken?.trim()) {
+        throw new Error("当前账号还没有完成 Microsoft 邮箱授权，暂时无法自动提取验证码");
       }
     }
     const startedAt = nowIso();
@@ -263,22 +267,22 @@ export class AccountBusinessFlowManager {
     this.broadcastToast("info", `${account.microsoftEmail}：${getBusinessFlowDisplayLabel(input.site)} 单账号业务流已启动`);
     try {
       if (input.site === "none") {
-        await this.startMicrosoftAccountFlow(account, input.mode, key);
+        await this.startMicrosoftAccountFlow(refreshedAccount, input.mode, key);
         return;
       }
       if (input.site === "tavily") {
-        await this.startTavilyFlow(account, input.site, input.mode, key);
+        await this.startTavilyFlow(refreshedAccount, input.site, input.mode, key);
         return;
       }
-      const mailbox = this.db.getMailboxByAccountId(account.id);
+      const mailbox = this.db.getMailboxByAccountId(refreshedAccount.id);
       if (!mailbox) {
         throw new Error("当前账号还没有可用的 Microsoft 邮箱记录");
       }
       if (input.site === "chatgpt") {
-        await this.startChatGptFlow(account, mailbox, input.mode, key);
+        await this.startChatGptFlow(refreshedAccount, mailbox, input.mode, key);
         return;
       }
-      await this.startGrokFlow(account, mailbox, input.mode, key);
+      await this.startGrokFlow(refreshedAccount, mailbox, input.mode, key);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error || "单账号业务流启动失败");
       this.updateState(key, {
