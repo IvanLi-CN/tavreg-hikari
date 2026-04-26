@@ -48,7 +48,7 @@
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
 - ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，并明确说明 attempt 资料由服务端自动生成。
 - ChatGPT 必须支持 `runMode=headed|headless` 显式配置；当当前运行环境不支持有头浏览器时，界面不得错误提供 `headed` 选项，后端也必须拒绝显式 `headed` 启动。
-- 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `fingerprint` 只在 DE 环境可用，并在登录成功后保留浏览器供人工接管。
+- 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `headed / fingerprint` 只在当前环境实际可启动相应浏览器时可用，`fingerprint` 在登录成功后保留浏览器供人工接管。
 - ChatGPT 每个 attempt 的邮箱必须由服务端通过 cf-mail provision/ensure 生成，且每个 attempt 都要拿到独立资料。
 - ChatGPT 成功结果必须包含 `access_token / refresh_token / id_token / account_id / email / exp(expires_at)`；缺少 `refresh_token` 视为失败。
 - 当 ChatGPT 批量任务派发 attempt 时，服务端必须为该 attempt 生成新的 cf-mail 邮箱、密码、昵称与生日，避免跨 attempt 共享资料，也不得为未实际派发的预算预占邮箱。

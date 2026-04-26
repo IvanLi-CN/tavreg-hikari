@@ -65,7 +65,8 @@ import {
   normalizeChatGptUpstreamGroupName,
   readChatGptJobUpstreamGroupName,
 } from "./chatgpt-upstream-supplement.js";
-import { assertRunModeAvailable, clampRunModeToAvailability, detectBrowserRunModeAvailability } from "./run-mode-availability.js";
+import { assertRunModeAvailable, clampRunModeToAvailability } from "./run-mode-availability.js";
+import { BrowserAvailabilityService } from "./browser-availability.js";
 import { GrokJobScheduler } from "./grok-scheduler.js";
 import { resolveStaticAssetPath, shouldServeSpaFallback } from "./static-assets.js";
 import { buildApiKeyExportContent, buildGrokSsoExportContent } from "./api-key-export.js";
@@ -90,7 +91,6 @@ import {
 } from "./microsoft-mail.js";
 import {
   AccountBusinessFlowManager,
-  detectAccountBusinessFlowAvailability,
   type AccountBusinessFlowMode,
   type AccountBusinessFlowSite,
 } from "./account-business-flow.js";
@@ -109,9 +109,29 @@ const WEB_DIST_DIR = path.join(REPO_ROOT, "web", "dist");
 const DEFAULT_CFMAIL_ROOT_DOMAIN = String(process.env.CHATGPT_CFMAIL_ROOT_DOMAIN || "").trim() || undefined;
 let appDbRef: AppDatabase | null = null;
 let accountBusinessFlowManager: AccountBusinessFlowManager | null = null;
+let browserAvailabilityService: BrowserAvailabilityService | null = null;
 
-function detectDefaultAccountBusinessFlowAvailability() {
-  return detectAccountBusinessFlowAvailability(process.env);
+async function ensureBrowserAvailabilityFresh(): Promise<void> {
+  await browserAvailabilityService?.ensureFresh();
+}
+
+function getBrowserRunModeAvailability() {
+  return browserAvailabilityService?.getRunModeAvailability() || {
+    headed: false,
+    headless: true as const,
+    headedReason: "正在检测当前环境的浏览器能力。",
+  };
+}
+
+function getDefaultAccountBusinessFlowAvailability() {
+  return browserAvailabilityService?.getAccountBusinessFlowAvailability() || {
+    headless: true as const,
+    headed: false,
+    fingerprint: false,
+    headedReason: "正在检测当前环境的浏览器能力。",
+    fingerprintReason: "正在检测当前环境的浏览器能力。",
+    deAvailable: false,
+  };
 }
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -377,7 +397,7 @@ function getRuntimeServerBinding(settings: AppSettings): { host: string; port: n
 
 function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> {
   const businessFlow = accountBusinessFlowManager?.serializeAccount(row) ?? {
-    businessFlowAvailability: detectDefaultAccountBusinessFlowAvailability(),
+    businessFlowAvailability: getDefaultAccountBusinessFlowAvailability(),
     businessFlowState: null,
   };
   return {
@@ -714,7 +734,7 @@ function parseJobSite(value: string | null | undefined): JobSite {
 }
 
 function parseAccountBusinessFlowSite(value: unknown): AccountBusinessFlowSite | null {
-  if (value === "chatgpt" || value === "grok" || value === "tavily") return value;
+  if (value === "none" || value === "chatgpt" || value === "grok" || value === "tavily") return value;
   return null;
 }
 
@@ -741,8 +761,9 @@ function serializeJobRecordForApi(job: NonNullable<ReturnType<AppDatabase["getCu
   };
 }
 
-function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
-  const runModeAvailability = detectBrowserRunModeAvailability();
+async function serializeJobSnapshot(site: JobSite, db: AppDatabase, scheduler: SiteScheduler) {
+  await ensureBrowserAvailabilityFresh();
+  const runModeAvailability = getBrowserRunModeAvailability();
   const job = db.getCurrentJob(site);
   if (!job) {
     return {
@@ -1527,7 +1548,17 @@ async function main(): Promise<void> {
       }
     },
   });
-  accountBusinessFlowManager = new AccountBusinessFlowManager(db, REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, serverHttpJson);
+  browserAvailabilityService = new BrowserAvailabilityService({ cwd: REPO_ROOT });
+  void browserAvailabilityService.ensureFresh().catch(() => {});
+  accountBusinessFlowManager = new AccountBusinessFlowManager(
+    db,
+    REPO_ROOT,
+    DEFAULT_DB_PATH,
+    readSettings,
+    broadcast,
+    serverHttpJson,
+    browserAvailabilityService,
+  );
   const getSchedulerBySite = (site: JobSite) => {
     if (site === "chatgpt") return chatgptScheduler;
     if (site === "grok") return grokScheduler;
@@ -1777,6 +1808,7 @@ async function main(): Promise<void> {
       }
 
         if (pathname === "/api/accounts" && req.method === "GET") {
+        await accountBusinessFlowManager?.ensureAvailability();
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({
@@ -2111,7 +2143,7 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/jobs/current" && req.method === "GET") {
         const site = parseJobSite(url.searchParams.get("site"));
-        return json(serializeJobSnapshot(site, db, getSchedulerBySite(site)));
+        return json(await serializeJobSnapshot(site, db, getSchedulerBySite(site)));
       }
 
       if (pathname === "/api/chatgpt/credentials" && req.method === "GET") {
@@ -2604,7 +2636,8 @@ async function main(): Promise<void> {
         const scheduler = getSchedulerBySite(site);
         try {
           if (action === "start") {
-            const runModeAvailability = detectBrowserRunModeAvailability();
+            await ensureBrowserAvailabilityFresh();
+            const runModeAvailability = getBrowserRunModeAvailability();
             if (site === "chatgpt") {
               const explicitRunMode = body?.runMode === "headless" || body?.runMode === "headed" ? body.runMode : null;
               if (explicitRunMode) {

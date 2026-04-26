@@ -71,6 +71,13 @@ test("scheduled workers defer successful account finalization to the scheduler e
   expect(source).toContain("if (isScheduledWorker && outcome.status === \"succeeded\") {");
 });
 
+test("account business flows release Mihomo port listeners after worker spawn", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/account-business-flow.ts"), "utf8");
+  expect(source).toContain('child.once("spawn", () => {');
+  expect(source).toContain("portLeases.apiPort.releaseListener()");
+  expect(source).toContain("portLeases.mixedPort.releaseListener()");
+});
+
 test("proof surface flow shares classifier-based provisioning and explicit unknown diagnostics", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const proofSurface = await collectMicrosoftProofSurfaceClassification(page);");

@@ -13,7 +13,7 @@ export type AccountExtractorAccountType = "outlook" | "hotmail" | "unlimited";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
 export type AccountBatchBootstrapMode = "pending_only" | "force";
-export type AccountBusinessFlowSite = "tavily" | "grok" | "chatgpt";
+export type AccountBusinessFlowSite = "none" | "tavily" | "grok" | "chatgpt";
 export type AccountBusinessFlowMode = "headless" | "headed" | "fingerprint";
 export type AccountBusinessFlowStatus = "starting" | "running" | "succeeded" | "failed";
 

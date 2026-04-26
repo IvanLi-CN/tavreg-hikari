@@ -90,7 +90,7 @@ const sampleJob: JobSnapshot = {
 const headlessOnlyAvailability: RunModeAvailability = {
   headed: false,
   headless: true,
-  headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
+  headedReason: "当前环境缺少可用的指纹浏览器，无法启动有头浏览器。",
 };
 
 function buildJob(status: NonNullable<typeof sampleJob.job>["status"]): JobSnapshot {

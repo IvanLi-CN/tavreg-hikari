@@ -13,6 +13,10 @@ import {
   assertUsableFingerprintChromiumExecutablePath,
   resolveExplicitChromeExecutablePath,
 } from "../fingerprint-browser.js";
+import {
+  BrowserAvailabilityService,
+  type AccountBusinessFlowAvailability,
+} from "./browser-availability.js";
 import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
@@ -25,18 +29,9 @@ import {
 } from "./scheduler.js";
 import type { CfMailHttpJson } from "../cfmail-api.js";
 
-export type AccountBusinessFlowSite = "tavily" | "grok" | "chatgpt";
+export type AccountBusinessFlowSite = "none" | "tavily" | "grok" | "chatgpt";
 export type AccountBusinessFlowMode = "headless" | "headed" | "fingerprint";
 export type AccountBusinessFlowStatus = "starting" | "running" | "succeeded" | "failed";
-
-export interface AccountBusinessFlowAvailability {
-  headless: true;
-  headed: boolean;
-  fingerprint: boolean;
-  headedReason: string | null;
-  fingerprintReason: string | null;
-  deAvailable: boolean;
-}
 
 export interface AccountBusinessFlowStateSnapshot {
   site: AccountBusinessFlowSite;
@@ -104,20 +99,6 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
-export function detectAccountBusinessFlowAvailability(
-  env: Record<string, string | undefined> = process.env,
-): AccountBusinessFlowAvailability {
-  const deAvailable = Boolean(String(env.DISPLAY || "").trim() || String(env.WAYLAND_DISPLAY || "").trim());
-  return {
-    headless: true,
-    headed: deAvailable,
-    fingerprint: deAvailable,
-    headedReason: deAvailable ? null : "当前环境未检测到 DISPLAY 或 WAYLAND_DISPLAY。",
-    fingerprintReason: deAvailable ? null : "当前环境未检测到 DISPLAY 或 WAYLAND_DISPLAY。",
-    deAvailable,
-  };
-}
-
 function randomPassword(length = 18): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=";
   let output = "";
@@ -147,7 +128,15 @@ function buildFlowKey(accountId: number, site: AccountBusinessFlowSite): string 
   return `${accountId}:${site}`;
 }
 
+function getBusinessFlowDisplayLabel(site: AccountBusinessFlowSite): string {
+  if (site === "none") return "微软账号页";
+  if (site === "chatgpt") return "ChatGPT";
+  if (site === "grok") return "Grok";
+  return "Tavily";
+}
+
 function getRetainStateMessage(site: AccountBusinessFlowSite): string {
+  if (site === "none") return "微软账号页已打开，浏览器保持可接管状态。";
   if (site === "chatgpt") return "ChatGPT 已完成登录，浏览器保持可接管状态。";
   if (site === "grok") return "Grok 已完成登录，浏览器保持可接管状态。";
   return "Tavily 已完成登录，浏览器保持可接管状态。";
@@ -184,10 +173,15 @@ export class AccountBusinessFlowManager {
     private readonly getSettings: () => AppSettings,
     private readonly broadcast: (event: ServerEvent) => void,
     private readonly httpJson: CfMailHttpJson,
+    private readonly browserAvailability: BrowserAvailabilityService,
   ) {}
 
   getAvailability(): AccountBusinessFlowAvailability {
-    return detectAccountBusinessFlowAvailability();
+    return this.browserAvailability.getAccountBusinessFlowAvailability();
+  }
+
+  async ensureAvailability(): Promise<void> {
+    await this.browserAvailability.ensureFresh();
   }
 
   getAccountState(accountId: number): AccountBusinessFlowStateSnapshot | null {
@@ -206,6 +200,7 @@ export class AccountBusinessFlowManager {
   }
 
   async start(input: { accountId: number; site: AccountBusinessFlowSite; mode: AccountBusinessFlowMode }): Promise<void> {
+    await this.ensureAvailability();
     const availability = this.getAvailability();
     if (input.mode === "headed" && !availability.headed) {
       throw new Error(availability.headedReason || "当前环境不支持 headed 模式");
@@ -220,10 +215,7 @@ export class AccountBusinessFlowManager {
     if (!account.passwordPlaintext?.trim()) {
       throw new Error("账号缺少明文密码，暂时无法启动单账号业务流");
     }
-    if (!account.proofMailboxProvider || !account.proofMailboxAddress?.trim()) {
-      throw new Error("当前账号还没有配置辅助邮箱，暂时无法自动完成 Microsoft 登录证明环节");
-    }
-    if (input.site !== "tavily") {
+    if (input.site !== "tavily" && input.site !== "none") {
       const mailbox = this.db.getMailboxByAccountId(account.id);
       if (!mailbox?.refreshToken?.trim()) {
         throw new Error("当前账号还没有完成 Microsoft 邮箱授权，暂时无法自动提取验证码");
@@ -249,8 +241,12 @@ export class AccountBusinessFlowManager {
       updatedAt: startedAt,
       retainedAt: null,
     });
-    this.broadcastToast("info", `${account.microsoftEmail}：${input.site} 单账号业务流已启动`);
+    this.broadcastToast("info", `${account.microsoftEmail}：${getBusinessFlowDisplayLabel(input.site)} 单账号业务流已启动`);
     try {
+      if (input.site === "none") {
+        await this.startMicrosoftAccountFlow(account, input.mode, key);
+        return;
+      }
       if (input.site === "tavily") {
         await this.startTavilyFlow(account, input.site, input.mode, key);
         return;
@@ -272,7 +268,7 @@ export class AccountBusinessFlowManager {
         retainedAt: null,
         lastError: message,
       });
-      this.broadcastToast("error", `${account.microsoftEmail}：${input.site} 单账号业务流启动失败：${message}`);
+      this.broadcastToast("error", `${account.microsoftEmail}：${getBusinessFlowDisplayLabel(input.site)} 单账号业务流启动失败：${message}`);
       throw error;
     }
   }
@@ -349,7 +345,7 @@ export class AccountBusinessFlowManager {
 
   private async startTavilyFlow(
     account: MicrosoftAccountRecord,
-    site: AccountBusinessFlowSite,
+    site: "tavily",
     mode: AccountBusinessFlowMode,
     key: string,
   ): Promise<void> {
@@ -396,6 +392,9 @@ export class AccountBusinessFlowManager {
       stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin.end();
+    child.once("spawn", () => {
+      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+    });
     this.attachFlowProcess({
       key,
       accountId: account.id,
@@ -455,6 +454,107 @@ export class AccountBusinessFlowManager {
           lastError: message,
         });
         this.broadcastToast("error", `${account.microsoftEmail}：Tavily 单账号业务流失败：${message}`);
+      },
+    });
+  }
+
+  private async startMicrosoftAccountFlow(
+    account: MicrosoftAccountRecord,
+    mode: AccountBusinessFlowMode,
+    key: string,
+  ): Promise<void> {
+    const outputDir = path.join(this.repoRoot, "output", "web-runs", "account-business-flow", "microsoft", `${account.id}-${Date.now()}`);
+    const retainPath = path.join(outputDir, "retained-browser.json");
+    const portLeases = await reserveMihomoPortLeases();
+    const runtime = process.versions.bun
+      ? { command: process.execPath || "bun", workerArgs: ["run", "src/server/microsoft-account-worker.ts"] }
+      : { command: resolveWorkerRuntime().command, workerArgs: ["--import", "tsx", "src/server/microsoft-account-worker.ts"] };
+    const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
+    if (!selectedProxyNode) {
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      throw new Error("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
+    }
+    this.db.touchProxyLease(selectedProxyNode);
+    await mkdir(outputDir, { recursive: true });
+    const args = [...runtime.workerArgs, "--proxy-node", selectedProxyNode];
+    const child = spawn(runtime.command, args, {
+      ...buildAttemptSpawnOptions(this.repoRoot, {
+        env: {
+          ...this.buildCommonFlowEnv({
+            account,
+            mode,
+            site: "none",
+            outputDir,
+            retainPath,
+          }),
+          MICROSOFT_ACCOUNT_JOB_OUTPUT_DIR: outputDir,
+          MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
+          MIHOMO_GROUP_NAME: this.getSettings().groupName,
+          MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+          MIHOMO_API_PORT: String(portLeases.apiPort.port),
+          MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
+          PROXY_CHECK_URL: this.getSettings().checkUrl,
+          PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
+          PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+          CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
+            ? path.resolve(account.browserSession.profilePath.trim())
+            : path.join(outputDir, "chrome-profile"),
+          ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
+          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+        },
+      }),
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    child.stdin.end();
+    child.once("spawn", () => {
+      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+    });
+    this.attachFlowProcess({
+      key,
+      accountId: account.id,
+      site: "none",
+      mode,
+      outputDir,
+      retainPath,
+      child,
+      jobId: null,
+      attemptId: null,
+      onClose: async (code, signal) => {
+        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+        const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
+        const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
+        const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
+        if (code === 0 && signal == null && result?.ok) {
+          this.updateState(key, {
+            status: "succeeded",
+            browserRetained: Boolean(retained),
+            retainedAt: retained?.retainedAt || null,
+            lastError: null,
+          });
+          this.broadcastToast("success", `${account.microsoftEmail}：微软账号页已打开`);
+          return;
+        }
+        if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
+          this.updateState(key, {
+            status: "succeeded",
+            browserRetained: true,
+            retainedAt: retained.retainedAt || nowIso(),
+            lastError: null,
+          });
+          this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("none")}`);
+          return;
+        }
+        const message =
+          error?.error ||
+          retained?.error ||
+          (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+        this.updateState(key, {
+          status: "failed",
+          browserRetained: Boolean(retained),
+          retainedAt: retained?.retainedAt || null,
+          lastError: message,
+        });
+        this.broadcastToast("error", `${account.microsoftEmail}：微软账号页打开失败：${message}`);
       },
     });
   }
@@ -550,6 +650,9 @@ export class AccountBusinessFlowManager {
       stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin.end();
+    child.once("spawn", () => {
+      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+    });
     this.attachFlowProcess({
       key,
       accountId: account.id,
@@ -707,6 +810,9 @@ export class AccountBusinessFlowManager {
       stdio: ["pipe", "pipe", "pipe"],
     });
     child.stdin.end();
+    child.once("spawn", () => {
+      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+    });
     this.attachFlowProcess({
       key,
       accountId: account.id,
@@ -845,7 +951,7 @@ export class AccountBusinessFlowManager {
       this.broadcastToast(
         retained.success === false ? "warning" : "info",
         retained.success === false
-          ? `${input.accountId}：浏览器已保留，请手动接管 ${input.site} 页面`
+          ? `${input.accountId}：浏览器已保留，请手动接管 ${getBusinessFlowDisplayLabel(input.site)}`
           : `${input.accountId}：${getRetainStateMessage(input.site)}`,
       );
     };

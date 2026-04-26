@@ -311,7 +311,7 @@ type AccountsStorySurfaceProps = {
   onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
-  onStartBusinessFlow?: (accountId: number, site: "tavily" | "grok" | "chatgpt", mode: "headless" | "headed" | "fingerprint") => Promise<void>;
+  onStartBusinessFlow?: (accountId: number, site: "none" | "tavily" | "grok" | "chatgpt", mode: "headless" | "headed" | "fingerprint") => Promise<void>;
   onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onRunExtractor?: () => Promise<void>;
   onStopExtractor?: () => Promise<void>;
@@ -1534,7 +1534,7 @@ export const BusinessFlowLauncherPopoverPlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "打开单账号业务流 launcher，验证 Tavily / Grok / ChatGPT 按钮与 headless / headed / fingerprint 三态切换同时可见。",
+        story: "打开单账号业务流 launcher，验证“无 / Tavily / Grok / ChatGPT”按钮与 headless / headed / fingerprint 三态切换同时可见。",
       },
     },
   },
@@ -1542,6 +1542,7 @@ export const BusinessFlowLauncherPopoverPlay: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: /打开 alpha@example\\.test 的业务流工具/ }));
     await expect(within(document.body).getByText("单账号业务流")).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "无" })).toBeInTheDocument();
     await expect(within(document.body).getByRole("button", { name: "Tavily" })).toBeInTheDocument();
     await expect(within(document.body).getByRole("button", { name: "Grok" })).toBeInTheDocument();
     await expect(within(document.body).getByRole("button", { name: "ChatGPT" })).toBeInTheDocument();
@@ -1549,6 +1550,29 @@ export const BusinessFlowLauncherPopoverPlay: Story = {
     await expect(within(document.body).getByRole("button", { name: "有头" })).toBeInTheDocument();
     await expect(within(document.body).getByRole("button", { name: "指纹" })).toBeInTheDocument();
     await expect(within(document.body).getByText(/浏览器已保留/)).toBeInTheDocument();
+  },
+};
+
+export const BusinessFlowLauncherNoneOptionPlay: Story = {
+  render: ({ onStartBusinessFlow }) => <AccountsStorySurface initialSelectedIds={[]} onStartBusinessFlow={onStartBusinessFlow} />,
+  args: {
+    ...baseArgs,
+    onStartBusinessFlow: fn(async () => undefined),
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "点击“无”时走新的微软账号页入口，而不是 Tavily / Grok / ChatGPT 站点流。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: /打开 alpha@example\\.test 的业务流工具/ }));
+    await userEvent.click(within(document.body).getByRole("button", { name: "无" }));
+    await waitFor(() => {
+      expect(BusinessFlowLauncherNoneOptionPlay.args?.onStartBusinessFlow).toHaveBeenCalledWith(1, "none", "headless");
+    });
   },
 };
 
@@ -1567,8 +1591,8 @@ export const BusinessFlowLauncherHeadlessOnlyPlay: Story = {
                   headless: true,
                   headed: false,
                   fingerprint: false,
-                  headedReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
-                  fingerprintReason: "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动指纹浏览器。",
+                  headedReason: "当前环境缺少可用的指纹浏览器，无法启动有头浏览器。",
+                  fingerprintReason: "当前环境缺少可用的指纹浏览器，无法启动指纹浏览器。",
                   deAvailable: false,
                 },
               }
@@ -1580,7 +1604,7 @@ export const BusinessFlowLauncherHeadlessOnlyPlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "在无 DE 环境下打开 launcher，验证 headed / fingerprint 自动禁用并提示原因。",
+        story: "在当前环境无法启动有头 / 指纹浏览器时打开 launcher，验证 headed / fingerprint 自动禁用并提示真实原因。",
       },
     },
   },
@@ -1590,6 +1614,43 @@ export const BusinessFlowLauncherHeadlessOnlyPlay: Story = {
     await expect(within(document.body).getByRole("button", { name: "无头" })).toBeEnabled();
     await expect(within(document.body).getByRole("button", { name: "有头" })).toBeDisabled();
     await expect(within(document.body).getByRole("button", { name: "指纹" })).toBeDisabled();
-    await expect(within(document.body).getByText(/WAYLAND_DISPLAY/)).toBeInTheDocument();
+    await expect(within(document.body).getByText(/指纹浏览器/)).toBeInTheDocument();
+  },
+};
+
+export const BusinessFlowLauncherMissingProofMailboxPlay: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      accounts={{
+        ...sampleAccounts,
+        rows: sampleAccounts.rows.map((row, index) =>
+          index === 0
+            ? {
+                ...row,
+                proofMailboxProvider: null,
+                proofMailboxAddress: null,
+              }
+            : row,
+        ),
+      }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "当账号缺少辅助邮箱时，launcher 仍允许启动业务流，只在浮层里说明这是可选能力：若 Microsoft 临时要求 proof 验证，流程可能失败或转入接管。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: /打开 alpha@example\\.test 的业务流工具/ }));
+    await expect(within(document.body).getByText(/这不会阻止业务流启动/)).toBeInTheDocument();
+    await expect(within(document.body).getByRole("button", { name: "无" })).toBeEnabled();
+    await expect(within(document.body).getByRole("button", { name: "Tavily" })).toBeEnabled();
+    await expect(within(document.body).getByRole("button", { name: "Grok" })).toBeEnabled();
+    await expect(within(document.body).getByRole("button", { name: "ChatGPT" })).toBeEnabled();
   },
 };

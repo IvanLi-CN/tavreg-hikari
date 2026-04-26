@@ -33,7 +33,7 @@
 - 新增 Microsoft 账号环境变量配置。
 - 新增 CF Mail 配置，用于 Microsoft proof 条件分支。
 - 在登录流程中接入 Tavily -> Microsoft -> Tavily Home 的自动化状态机。
-- 将同一套 Microsoft 登录状态机暴露给单账号 launcher，使 Tavily / ChatGPT / Grok 都能走 `Continue with Microsoft` 进入目标站点。
+- 将同一套 Microsoft 登录状态机暴露给单账号 launcher，使 `无 / Tavily / ChatGPT / Grok` 都能复用微软账号密码、proof 与保持登录能力；其中 `无` 会直接停在微软账号页。
 - 兼容首次授权与已记住账号的复用场景。
 - 兼容 Microsoft 可选的 proof / 备用邮箱绑定 / 安全码验证页面。
 - 更新 env 模板与规格索引。
