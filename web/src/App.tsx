@@ -24,6 +24,9 @@ import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-fo
 import { DEFAULT_KEYS_PAGE_SIZE } from "@/lib/keys-page";
 import type {
   AccountBatchBootstrapMode,
+  AccountBusinessFlowMode,
+  AccountBusinessFlowSite,
+  AccountBusinessFlowStartPayload,
   AccountBatchBootstrapPreviewPayload,
   AccountRecord,
   AccountExtractorHistoryPayload,
@@ -350,6 +353,7 @@ export function App() {
       createdAt: "",
       updatedAt: "",
       isAuthorized: false,
+      latestVerificationCode: null,
     },
     rows: [],
     total: 0,
@@ -1985,6 +1989,28 @@ export function App() {
     navigate(`/accounts?mailboxAccountId=${accountId}`);
   };
 
+  const handleStartAccountBusinessFlow = async (
+    accountId: number,
+    site: AccountBusinessFlowSite,
+    mode: AccountBusinessFlowMode,
+  ) => {
+    try {
+      setError(null);
+      const payload = await api<AccountBusinessFlowStartPayload>(`/api/accounts/${accountId}/business-flow/start`, {
+        method: "POST",
+        body: JSON.stringify({ site, mode }),
+      });
+      setAccounts((current) => mergeAccountIntoAccountsPayload(current, payload.account));
+      await Promise.allSettled([
+        refreshAccounts(accountQueryRef.current),
+        refreshMailboxes(),
+      ]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+  };
+
   const startMailboxConnectionForAccount = async (accountId: number, options?: { force?: boolean; proxyNode?: string | null }) => {
     const requestBody: AccountSessionRebootstrapRequest = { force: options?.force !== false };
     if (options?.proxyNode !== undefined) {
@@ -2511,6 +2537,7 @@ export function App() {
               onExtractorHistoryQueryChange={setExtractorHistoryQuery}
               onRefreshExtractorHistory={() => refreshExtractorHistory(extractorHistoryQueryRef.current)}
               onOpenMailbox={handleOpenMailbox}
+              onStartBusinessFlow={handleStartAccountBusinessFlow}
               onOpenMailboxSettings={() => handleOpenMailboxSettings("accounts")}
               onOpenStandaloneMailboxWorkspace={handleOpenStandaloneMailboxWorkspace}
             />

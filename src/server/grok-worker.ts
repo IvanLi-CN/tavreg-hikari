@@ -11,16 +11,19 @@ import { isFingerprintChromiumExecutable } from "../fingerprint-browser.js";
 import {
   applyBrowserIdentityToContext,
   buildBrowserIdentityProfile,
+  completeMicrosoftLogin,
   configureNativeChromePage,
   dispatchEnterViaCdp,
   dispatchMouseClickViaCdp,
   ensureManagedChallengeTokenBeforeSubmit,
+  isMicrosoftLoginFlowUrl,
   launchBrowserWithEngine,
   launchNativeChromeCdp,
   loadConfig,
 } from "../main.js";
 import { solveTurnstileToken } from "./grok-turnstile.js";
 import { waitForGrokEmailCode, type GrokMailbox } from "./grok-mail-service.js";
+import { waitForMicrosoftMailboxVerificationCode } from "./microsoft-mailbox-verification.js";
 
 const execFile = promisify(execFileCallback);
 const GROK_ACCOUNTS_URL = "https://accounts.x.ai";
@@ -38,6 +41,8 @@ const API_KEY_REGEXES = [
 interface WorkerArgs {
   proxyNode?: string;
 }
+
+type GrokAuthProvider = "email" | "microsoft";
 
 interface SignupBootstrap {
   siteKey: string;
@@ -86,6 +91,15 @@ function requireEnv(name: string): string {
     throw new Error(`missing_env:${name}`);
   }
   return value;
+}
+
+function optionalEnv(name: string): string | null {
+  const value = String(process.env[name] || "").trim();
+  return value || null;
+}
+
+function getGrokAuthProvider(): GrokAuthProvider {
+  return String(process.env.GROK_AUTH_PROVIDER || "").trim().toLowerCase() === "microsoft" ? "microsoft" : "email";
 }
 
 function parseMailboxFromEnv(): GrokMailbox {
@@ -464,6 +478,94 @@ async function clickFirstVisibleByText(page: any, patterns: RegExp[]): Promise<b
     }
   }
   return false;
+}
+
+async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
+  return await clickFirstVisibleByText(page, [
+    /continue with microsoft/i,
+    /sign in with microsoft/i,
+    /^microsoft$/i,
+  ]);
+}
+
+function watchMicrosoftProviderNavigation(page: any): { sawMicrosoftNavigation: () => boolean; dispose: () => void } {
+  let observed = false;
+  const mark = (rawUrl: string): void => {
+    if (!observed && isMicrosoftLoginFlowUrl(rawUrl)) {
+      observed = true;
+    }
+  };
+  const handlers = {
+    framenavigated: (frame: any) => {
+      try {
+        mark(String(frame?.url?.() || ""));
+      } catch {}
+    },
+    request: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+    response: (response: any) => {
+      try {
+        mark(String(response?.url?.() || ""));
+      } catch {}
+    },
+    requestfailed: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+  } as const;
+  page.on("framenavigated", handlers.framenavigated);
+  page.on("request", handlers.request);
+  page.on("response", handlers.response);
+  page.on("requestfailed", handlers.requestfailed);
+  return {
+    sawMicrosoftNavigation: () => observed || isMicrosoftLoginFlowUrl(String(page.url?.() || "")),
+    dispose: () => {
+      page.off?.("framenavigated", handlers.framenavigated);
+      page.off?.("request", handlers.request);
+      page.off?.("response", handlers.response);
+      page.off?.("requestfailed", handlers.requestfailed);
+    },
+  };
+}
+
+function getRetainPath(): string | null {
+  return optionalEnv("ACCOUNT_BUSINESS_FLOW_RETAIN_PATH");
+}
+
+function isFingerprintBusinessFlow(): boolean {
+  return String(process.env.ACCOUNT_BUSINESS_FLOW_MODE || "").trim().toLowerCase() === "fingerprint";
+}
+
+async function holdBrowserForBusinessFlowHandoff(
+  page: any,
+  browser: any,
+  stage: string,
+  extra?: Record<string, unknown>,
+): Promise<void> {
+  const retainPath = getRetainPath();
+  if (!retainPath) return;
+  await writeJson(retainPath, {
+    retainedAt: nowIso(),
+    stage,
+    currentUrl: page ? String(page.url?.() || "") : "",
+    ...extra,
+  }).catch(() => {});
+  log(`holding browser for fingerprint handoff stage=${stage} url=${String(page?.url?.() || "")}`);
+  while (true) {
+    const pageClosed = !page || (typeof page.isClosed === "function" ? page.isClosed() : false);
+    const browserClosed = !browser || (typeof browser.isConnected === "function" ? !browser.isConnected() : false);
+    if (pageClosed || browserClosed) return;
+    await sleepMs(1000);
+  }
+}
+
+async function isMicrosoftVerificationCodeSurface(page: any): Promise<boolean> {
+  const text = await pageText(page);
+  return /verification code|security code|enter code|one[- ]time code|temporary code/i.test(text);
 }
 
 async function fillVisibleField(page: any, patterns: RegExp[], value: string): Promise<boolean> {
@@ -2424,6 +2526,7 @@ async function run(): Promise<void> {
   await writeStageMarker(outputDir, "bootstrap:start");
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
+  const authProvider = getGrokAuthProvider();
   const runMode = cfg.runMode === "headless" ? "headless" : "headed";
   const runId = `grok-${Date.now()}`;
   const password = randomPassword();
@@ -2466,6 +2569,7 @@ async function run(): Promise<void> {
     email,
     mailboxId: mailbox.accountId,
     provider: mailbox.provider,
+    authProvider,
   });
 
   let browser: any = null;
@@ -2565,80 +2669,162 @@ async function run(): Promise<void> {
       stateTree: bootstrap.stateTree,
     });
 
-    failureStage = "accounts_send_email_code";
-    const sent = await startEmailSignupInPage(page, email);
-    const sentGrpc = sent.grpcStatus
-      ? { grpcStatus: sent.grpcStatus, grpcMessage: sent.grpcMessage }
-      : parseGrpcTrailerFromText(sent.textPreview);
-    await writeJson(path.join(outputDir, "email-code-send.json"), sent).catch(() => {});
-    if (!sent.ok || (sentGrpc.grpcStatus && sentGrpc.grpcStatus !== "0")) {
-      throw new Error(`grok_email_code_send_failed:${sent.status}:${sentGrpc.grpcStatus || "unknown"}`);
-    }
-    await writeStageMarker(outputDir, "accounts:email_code_sent", {
-      email,
-      status: sent.status,
-    });
+    let verificationCode: string | null = null;
+    if (authProvider === "microsoft") {
+      const microsoftVerificationNotBefore = nowIso();
+      failureStage = "accounts_open_microsoft_login";
+      const microsoftNavigationWatcher = watchMicrosoftProviderNavigation(page);
+      const clickedMicrosoft = await clickMicrosoftProviderEntry(page);
+      if (!clickedMicrosoft) {
+        microsoftNavigationWatcher.dispose();
+        throw new Error("grok_microsoft_entry_missing");
+      }
+      await writeStageMarker(outputDir, "accounts:microsoft_entry_opened", {});
+      const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();
+      microsoftNavigationWatcher.dispose();
+      page = await completeMicrosoftLogin(page, cfg, mihomo.proxyServer, {
+        completionUrlPatterns: [
+          /^https:\/\/accounts\.x\.ai/i,
+          /^https:\/\/grok\.com/i,
+          /^https:\/\/x\.ai/i,
+        ],
+        passkeyRecoveryUrl: GROK_SIGNUP_URL,
+        assumeVisitedMicrosoftAccountSurface: providerNavigationObserved,
+      });
+      await page.waitForLoadState("domcontentloaded", { timeout: 45_000 }).catch(() => {});
+      await writeStageMarker(outputDir, "accounts:microsoft_login_completed", {
+        currentUrl: String(page.url?.() || ""),
+      });
+      await captureRuntimeBrowserSnapshot(page, outputDir, "microsoft-login-browser.json");
+      await recoverSetCookieFlow(page, outputDir, "after_microsoft_login").catch(() => {});
+      if (!(await hasSsoCookie(page)) && (await isMicrosoftVerificationCodeSurface(page))) {
+        failureStage = "accounts_wait_microsoft_code";
+        const verification = await waitForMicrosoftMailboxVerificationCode({
+          graphSettings: {
+            clientId: requireEnv("MICROSOFT_GRAPH_CLIENT_ID"),
+            clientSecret: requireEnv("MICROSOFT_GRAPH_CLIENT_SECRET"),
+            redirectUri: requireEnv("MICROSOFT_GRAPH_REDIRECT_URI"),
+            authority: optionalEnv("MICROSOFT_GRAPH_AUTHORITY") || "common",
+          },
+          mailbox: {
+            refreshToken: optionalEnv("MICROSOFT_MAILBOX_REFRESH_TOKEN"),
+            accessToken: optionalEnv("MICROSOFT_MAILBOX_ACCESS_TOKEN"),
+            accessTokenExpiresAt: optionalEnv("MICROSOFT_MAILBOX_ACCESS_TOKEN_EXPIRES_AT"),
+            authority: optionalEnv("MICROSOFT_MAILBOX_AUTHORITY"),
+          },
+          timeoutMs: 75_000,
+          pollMs: 2500,
+          notBefore: microsoftVerificationNotBefore,
+          providers: ["grok", "generic"],
+        });
+        verificationCode = verification.code;
+        await writeStageMarker(outputDir, "accounts:microsoft_code_received", {
+          codeLength: verification.code.length,
+          provider: verification.provider,
+        });
+        failureStage = "accounts_verify_microsoft_code";
+        const verified = await submitEmailCodeInPage(page, verification.code);
+        const verifiedGrpc = verified.grpcStatus
+          ? { grpcStatus: verified.grpcStatus, grpcMessage: verified.grpcMessage }
+          : parseGrpcTrailerFromText(verified.trailerText);
+        await writeJson(path.join(outputDir, "microsoft-code-verify.json"), verified).catch(() => {});
+        if (!verified.ok || (verifiedGrpc.grpcStatus && verifiedGrpc.grpcStatus !== "0")) {
+          throw new Error(`grok_microsoft_code_verify_failed:${verifiedGrpc.grpcStatus || "unknown"}:${verifiedGrpc.grpcMessage || "no_message"}`);
+        }
+        await recoverSetCookieFlow(page, outputDir, "after_microsoft_code_verify").catch(() => {});
+      }
+      if (await hasSsoCookie(page)) {
+        await writeStageMarker(outputDir, "accounts:sso_ready_after_microsoft", {});
+      } else {
+        await writeStageMarker(outputDir, "accounts:profile_completion_after_microsoft", {
+          currentUrl: String(page.url?.() || ""),
+        });
+      }
+    } else {
+      failureStage = "accounts_send_email_code";
+      const sent = await startEmailSignupInPage(page, email);
+      const sentGrpc = sent.grpcStatus
+        ? { grpcStatus: sent.grpcStatus, grpcMessage: sent.grpcMessage }
+        : parseGrpcTrailerFromText(sent.textPreview);
+      await writeJson(path.join(outputDir, "email-code-send.json"), sent).catch(() => {});
+      if (!sent.ok || (sentGrpc.grpcStatus && sentGrpc.grpcStatus !== "0")) {
+        throw new Error(`grok_email_code_send_failed:${sent.status}:${sentGrpc.grpcStatus || "unknown"}`);
+      }
+      await writeStageMarker(outputDir, "accounts:email_code_sent", {
+        email,
+        status: sent.status,
+      });
 
-    failureStage = "accounts_wait_email_code";
-    await writeStageMarker(outputDir, "accounts:waiting_email_code", {
-      provider: mailbox.provider,
-    });
-    const verification = await waitForGrokEmailCode({
-      mailbox,
-      cfg,
-      proxyUrl: mihomo.proxyServer,
-    });
-    await writeStageMarker(outputDir, "accounts:email_code_received", {
-      provider: mailbox.provider,
-      codeLength: verification.code.length,
-    });
+      failureStage = "accounts_wait_email_code";
+      await writeStageMarker(outputDir, "accounts:waiting_email_code", {
+        provider: mailbox.provider,
+      });
+      const verification = await waitForGrokEmailCode({
+        mailbox,
+        cfg,
+        proxyUrl: mihomo.proxyServer,
+      });
+      verificationCode = verification.code;
+      await writeStageMarker(outputDir, "accounts:email_code_received", {
+        provider: mailbox.provider,
+        codeLength: verification.code.length,
+      });
 
-    failureStage = "accounts_verify_email_code";
-    const verified = await submitEmailCodeInPage(page, verification.code);
-    const verifiedGrpc = verified.grpcStatus
-      ? { grpcStatus: verified.grpcStatus, grpcMessage: verified.grpcMessage }
-      : parseGrpcTrailerFromText(verified.trailerText);
-    await writeJson(path.join(outputDir, "email-code-verify.json"), verified).catch(() => {});
-    if (!verified.ok || (verifiedGrpc.grpcStatus && verifiedGrpc.grpcStatus !== "0")) {
-      throw new Error(`grok_email_code_verify_failed:${verifiedGrpc.grpcStatus || "unknown"}:${verifiedGrpc.grpcMessage || "no_message"}`);
-    }
-    await writeStageMarker(outputDir, "accounts:email_verified", {
-      codeLength: verification.code.length,
-    });
-    await writeStageMarker(outputDir, "accounts:complete_signup_ready", {
-      email,
-    });
-    await captureRuntimeBrowserSnapshot(page, outputDir, "complete-signup-browser.json");
-    await recoverSetCookieFlow(page, outputDir, "after_email_verify").catch(() => {});
-
-    failureStage = "accounts_submit_signup_native";
-    await fillCompleteSignupFields(page, displayName, password);
-    const nativeSignup = await submitCompleteSignupInPage(page, outputDir);
-    await writeJson(path.join(outputDir, "signup-native.json"), nativeSignup).catch(() => {});
-    if (/set-cookie\?q=|auth\.grok\.com|auth\.x\.ai|grok\.com/i.test(nativeSignup.currentUrl || "")) {
-      await recoverSetCookieFlow(page, outputDir, "after_native_signup").catch(() => {});
+      failureStage = "accounts_verify_email_code";
+      const verified = await submitEmailCodeInPage(page, verification.code);
+      const verifiedGrpc = verified.grpcStatus
+        ? { grpcStatus: verified.grpcStatus, grpcMessage: verified.grpcMessage }
+        : parseGrpcTrailerFromText(verified.trailerText);
+      await writeJson(path.join(outputDir, "email-code-verify.json"), verified).catch(() => {});
+      if (!verified.ok || (verifiedGrpc.grpcStatus && verifiedGrpc.grpcStatus !== "0")) {
+        throw new Error(`grok_email_code_verify_failed:${verifiedGrpc.grpcStatus || "unknown"}:${verifiedGrpc.grpcMessage || "no_message"}`);
+      }
+      await writeStageMarker(outputDir, "accounts:email_verified", {
+        codeLength: verification.code.length,
+      });
+      await writeStageMarker(outputDir, "accounts:complete_signup_ready", {
+        email,
+      });
+      await captureRuntimeBrowserSnapshot(page, outputDir, "complete-signup-browser.json");
+      await recoverSetCookieFlow(page, outputDir, "after_email_verify").catch(() => {});
     }
 
     let completedViaNative = false;
     let turnstileProvider: string | null = null;
-    if (nativeSignup.verifyUrl) {
-      await writeStageMarker(outputDir, "accounts:signup_submitted", {
-        mode: "native_page",
-        status: nativeSignup.status,
-        hasVerifyUrl: true,
-      });
-      failureStage = "accounts_complete_sso";
-      await completeSsoVerification(page, nativeSignup.verifyUrl, outputDir);
-      completedViaNative = true;
+    if (authProvider !== "microsoft" || !(await hasSsoCookie(page))) {
+      failureStage = "accounts_submit_signup_native";
+      await fillCompleteSignupFields(page, displayName, password);
+      const nativeSignup = await submitCompleteSignupInPage(page, outputDir);
+      await writeJson(path.join(outputDir, "signup-native.json"), nativeSignup).catch(() => {});
+      if (/set-cookie\?q=|auth\.grok\.com|auth\.x\.ai|grok\.com/i.test(nativeSignup.currentUrl || "")) {
+        await recoverSetCookieFlow(page, outputDir, "after_native_signup").catch(() => {});
+      }
+
+      if (nativeSignup.verifyUrl) {
+        await writeStageMarker(outputDir, "accounts:signup_submitted", {
+          mode: "native_page",
+          status: nativeSignup.status,
+          hasVerifyUrl: true,
+        });
+        failureStage = "accounts_complete_sso";
+        await completeSsoVerification(page, nativeSignup.verifyUrl, outputDir);
+        completedViaNative = true;
+      } else if (await hasSsoCookie(page)) {
+        await writeStageMarker(outputDir, "accounts:signup_submitted", {
+          mode: "native_page",
+          status: nativeSignup.status,
+          hasVerifyUrl: false,
+          ssoReady: true,
+          currentUrl: nativeSignup.currentUrl,
+        });
+        completedViaNative = true;
+      }
     } else if (await hasSsoCookie(page)) {
-      await writeStageMarker(outputDir, "accounts:signup_submitted", {
-        mode: "native_page",
-        status: nativeSignup.status,
-        hasVerifyUrl: false,
-        ssoReady: true,
-        currentUrl: nativeSignup.currentUrl,
-      });
       completedViaNative = true;
+    }
+
+    if (authProvider === "microsoft" && !completedViaNative) {
+      throw new Error("grok_microsoft_post_sso_profile_unhandled");
     }
 
     if (!completedViaNative) {
@@ -2674,7 +2860,7 @@ async function run(): Promise<void> {
       const signupResponse = await submitSignup(page, {
         email,
         password,
-        emailValidationCode: verification.code,
+        emailValidationCode: verificationCode || "",
         turnstileToken: turnstile.token,
         bootstrap,
         displayName,
@@ -2864,6 +3050,12 @@ async function run(): Promise<void> {
         `checkout=ready`,
       ],
     } satisfies GrokWorkerResult);
+    if (isFingerprintBusinessFlow()) {
+      await holdBrowserForBusinessFlowHandoff(page, browser, "grok_ready", {
+        email,
+        checkoutUrl: checkoutResult.checkoutUrl,
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await writeFailureArtifacts(outputDir, page, failureStage);
@@ -2871,6 +3063,13 @@ async function run(): Promise<void> {
       error: message,
       failureStage,
     });
+    if (isFingerprintBusinessFlow()) {
+      await holdBrowserForBusinessFlowHandoff(page, browser, "grok_failed", {
+        success: false,
+        error: message,
+        failureStage,
+      });
+    }
     await keepBrowserOpenOnFailure(page, browser, failureStage);
     throw error;
   } finally {

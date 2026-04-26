@@ -13,6 +13,35 @@ export type AccountExtractorAccountType = "outlook" | "hotmail" | "unlimited";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
 export type AccountBatchBootstrapMode = "pending_only" | "force";
+export type AccountBusinessFlowSite = "none" | "tavily" | "grok" | "chatgpt";
+export type AccountBusinessFlowMode = "headless" | "headed" | "fingerprint";
+export type AccountBusinessFlowStatus = "starting" | "running" | "succeeded" | "failed";
+
+export type MailboxVerificationCode = {
+  code: string;
+  provider: "microsoft" | "chatgpt" | "grok" | "generic";
+  evidence: string;
+};
+
+export type AccountBusinessFlowAvailability = {
+  headless: true;
+  headed: boolean;
+  fingerprint: boolean;
+  headedReason: string | null;
+  fingerprintReason: string | null;
+  deAvailable: boolean;
+};
+
+export type AccountBusinessFlowState = {
+  site: AccountBusinessFlowSite;
+  mode: AccountBusinessFlowMode;
+  status: AccountBusinessFlowStatus;
+  browserRetained: boolean;
+  lastError: string | null;
+  startedAt: string;
+  updatedAt: string;
+  retainedAt: string | null;
+};
 
 export type AccountBrowserSession = {
   id: number;
@@ -60,6 +89,8 @@ export type AccountRecord = {
   mailboxLastErrorCode: string | null;
   mailboxUnreadCount: number;
   browserSession: AccountBrowserSession | null;
+  businessFlowAvailability: AccountBusinessFlowAvailability;
+  businessFlowState: AccountBusinessFlowState | null;
 };
 
 export type MicrosoftGraphSettings = {
@@ -97,6 +128,7 @@ export type MailboxRecord = {
   createdAt: string;
   updatedAt: string;
   isAuthorized: boolean;
+  latestVerificationCode: MailboxVerificationCode | null;
 };
 
 export type MailboxesPayload = {
@@ -120,6 +152,7 @@ export type MailboxMessageSummary = {
   bodyPreview: string;
   webLink: string | null;
   updatedAt: string;
+  verificationCode: MailboxVerificationCode | null;
   parsedVerificationCodes?: ParsedVerificationCode[];
 };
 
@@ -139,6 +172,16 @@ export type MailboxMessageDetail = MailboxMessageSummary & {
   bodyContentType: "html" | "text";
   bodyContent: string;
   webLink: string | null;
+};
+
+export type AccountBusinessFlowStartRequest = {
+  site: AccountBusinessFlowSite;
+  mode: AccountBusinessFlowMode;
+};
+
+export type AccountBusinessFlowStartPayload = {
+  ok: true;
+  account: AccountRecord;
 };
 
 export type ParsedVerificationCode = {

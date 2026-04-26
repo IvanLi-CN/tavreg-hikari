@@ -80,3 +80,20 @@ export const OpenSettingsPlay: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Graph 设置" }));
   },
 };
+
+export const VerificationCodeQuickCopyPlay: Story = {
+  args: {} as Story["args"],
+  render: () => <MailboxesStorySurface />,
+  parameters: {
+    docs: {
+      description: {
+        story: "验证邮箱卡片与 Inbox 消息项在存在验证码时都会显示钥匙复制按钮。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: /复制 beta@example\\.test 最新验证码/ })).toBeInTheDocument();
+    await expect(canvas.getByRole("button", { name: /复制 Your verification code 验证码/ })).toBeInTheDocument();
+  },
+};

@@ -1,28 +1,6 @@
-export type BrowserRunModeAvailability = {
-  headed: boolean;
-  headless: true;
-  headedReason: string | null;
-};
+import type { BrowserRunModeAvailability } from "./browser-availability.js";
 
-export function detectBrowserRunModeAvailability(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-): BrowserRunModeAvailability {
-  if (platform === "linux") {
-    const hasDisplay = Boolean(String(env.DISPLAY || "").trim() || String(env.WAYLAND_DISPLAY || "").trim());
-    return {
-      headed: hasDisplay,
-      headless: true,
-      headedReason: hasDisplay ? null : "当前环境缺少 DISPLAY / WAYLAND_DISPLAY，无法启动有头浏览器。",
-    };
-  }
-
-  return {
-    headed: true,
-    headless: true,
-    headedReason: null,
-  };
-}
+export type { BrowserRunModeAvailability };
 
 export function clampRunModeToAvailability(
   requested: "headed" | "headless",

@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-04-19
+- Last: 2026-04-23
 
 ## 背景
 
@@ -21,6 +21,7 @@
 ## 非目标
 
 - 不复用 Tavily 的微软账号池与自动补号 UI。
+- 不把微软账号页单账号 launcher 的 Microsoft 登录支持回写到 Grok 批量 job 主链。
 - 不把 `api_keys` 改造成跨站点总表。
 - 不在管理台内接入人工验证码接管。
 
@@ -32,11 +33,13 @@
 - `GET /api/jobs/current?site=grok` 与 `POST /api/jobs/current/control` 必须支持 `site=grok`。
 - Grok 成功链路必须以“拿到并可导出 SSO bundle”为准，批量导出默认只输出 `sso`。
 - Grok UI 主数据持久化 `grok_api_keys` 中的账号与 SSO 信息，额外 cookies 仍只保留在 attempt 工件。
+- 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `fingerprint` 走持久 profile 并在登录成功或可接管 challenge 时保留浏览器。
 - Keys > Grok tab 默认展示邮箱、密码、SSO、出口 IP、状态、提取时间、最近验证时间。
 
 ### SHOULD
 
 - Grok worker 对齐 ChatGPT 邮箱生成方案：由服务端先 provision `cfmail + mailboxId`，worker 只消费受控邮箱与 mihomo 代理租约。
+- 当请求来自微软账号页单账号 launcher 且 auth provider 为 Microsoft 时，worker 先点击 `Continue with Microsoft`，再复用统一 Microsoft 登录状态机；如 SSO 后仍需验证码，则继续轮询共享 mailbox verification-code waiter。
 - Grok worker 在 `accounts.x.ai` 注册成功后提取 SSO 与相关会话信息，并生成可复用的 SSO bundle 工件。
 - Storybook 至少覆盖 Grok idle / running / failed、导航新增 Grok、Keys > Grok。
 
@@ -52,6 +55,7 @@
 - `site=grok` 的 start / pause / resume / stop / force_stop / update_limits 只影响 Grok current job。
 - Grok key 列表默认直接显示邮箱、密码与 SSO 原文，批量导出可以稳定输出“每行一个 SSO token”。
 - `bun run typecheck` 与相关 Bun tests 通过。
+- 从微软账号页以 `fingerprint` 启动 Grok 单账号业务流时，到达已登录或可接管 challenge 页面后浏览器保持打开，并把保留状态回传到账号页。
 
 ## Visual Evidence
 

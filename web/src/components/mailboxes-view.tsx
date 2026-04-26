@@ -1,12 +1,14 @@
 import DOMPurify from "dompurify";
-import { MailOpen, RefreshCw, Settings2 } from "lucide-react";
-import type { ReactNode } from "react";
+import { KeyRound, MailOpen, RefreshCw, Settings2 } from "lucide-react";
+import { useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type SyntheticEvent } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { StatusBadge } from "@/components/status-badge";
+import { CopyIconButton, type CopyButtonStatus } from "@/components/ui/copy-icon-button";
 import type { MailboxMessageDetail, MailboxMessageSummary, MailboxRecord } from "@/lib/app-types";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -35,17 +37,31 @@ function MetaRow(props: { label: string; value: string }) {
   );
 }
 
+function handleSelectableRowKeyDown(event: ReactKeyboardEvent<HTMLElement>, onSelect: () => void) {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  onSelect();
+}
+
+function stopSelectableRowEvent(event: SyntheticEvent<HTMLElement>) {
+  event.stopPropagation();
+}
+
 function MailboxListItem(props: {
   mailbox: MailboxRecord;
   selected: boolean;
   onSelect: () => void;
+  verificationCopyStatus: CopyButtonStatus;
+  onCopyVerificationCode: (anchorElement: HTMLElement) => void;
 }) {
   const label = props.mailbox.graphDisplayName || props.mailbox.microsoftEmail;
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={props.onSelect}
+      onKeyDown={(event) => handleSelectableRowKeyDown(event, props.onSelect)}
       className={cn(
         "w-full cursor-pointer rounded-xl border px-3 py-3 text-left transition-colors duration-200",
         props.selected
@@ -58,8 +74,24 @@ function MailboxListItem(props: {
           <div className="truncate text-sm font-medium text-white">{label}</div>
           <div className="mt-0.5 truncate text-xs text-slate-500">{props.mailbox.microsoftEmail}</div>
         </div>
-        <div className="rounded-full border border-white/8 bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-slate-300">
-          {props.mailbox.unreadCount}
+        <div className="flex items-center gap-1">
+          {props.mailbox.latestVerificationCode ? (
+            <div onClick={stopSelectableRowEvent} onKeyDown={stopSelectableRowEvent}>
+              <CopyIconButton
+                label={`${props.mailbox.microsoftEmail} 最新验证码`}
+                copyStatus={props.verificationCopyStatus}
+                onCopy={props.onCopyVerificationCode}
+                size="dense"
+                idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+                feedbackSubject="验证码"
+                feedbackValue={props.mailbox.latestVerificationCode.code}
+                successMessage="验证码已复制"
+              />
+            </div>
+          ) : null}
+          <div className="rounded-full border border-white/8 bg-white/[0.03] px-2 py-0.5 text-[11px] font-medium text-slate-300">
+            {props.mailbox.unreadCount}
+          </div>
         </div>
       </div>
 
@@ -79,7 +111,7 @@ function MailboxListItem(props: {
           {props.mailbox.lastErrorMessage}
         </div>
       ) : null}
-    </button>
+    </div>
   );
 }
 
@@ -87,11 +119,15 @@ function MessageListItem(props: {
   message: MailboxMessageSummary;
   selected: boolean;
   onSelect: () => void;
+  verificationCopyStatus: CopyButtonStatus;
+  onCopyVerificationCode: (anchorElement: HTMLElement) => void;
 }) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={props.onSelect}
+      onKeyDown={(event) => handleSelectableRowKeyDown(event, props.onSelect)}
       className={cn(
         "w-full cursor-pointer rounded-xl border px-3 py-3 text-left transition-colors duration-200",
         props.selected
@@ -107,12 +143,26 @@ function MessageListItem(props: {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {props.message.verificationCode ? (
+            <div onClick={stopSelectableRowEvent} onKeyDown={stopSelectableRowEvent}>
+              <CopyIconButton
+                label={`${props.message.subject || "邮件"} 验证码`}
+                copyStatus={props.verificationCopyStatus}
+                onCopy={props.onCopyVerificationCode}
+                size="dense"
+                idleIcon={<KeyRound className="size-4" aria-hidden="true" />}
+                feedbackSubject="验证码"
+                feedbackValue={props.message.verificationCode.code}
+                successMessage="验证码已复制"
+              />
+            </div>
+          ) : null}
           {!props.message.isRead ? <Badge variant="info">未读</Badge> : null}
           <span className="text-[11px] text-slate-500">{formatDate(props.message.receivedAt)}</span>
         </div>
       </div>
       <div className="mt-2 line-clamp-2 text-sm leading-5 text-slate-300">{props.message.bodyPreview || "无预览"}</div>
-    </button>
+    </div>
   );
 }
 
@@ -134,6 +184,7 @@ export function MailboxesView(props: {
   onLoadMoreMessages: () => Promise<void>;
   onSelectMessage: (messageId: number) => Promise<void>;
 }) {
+  const [copyStatusByKey, setCopyStatusByKey] = useState<Record<string, CopyButtonStatus>>({});
   const sanitizedBody =
     props.messageDetail?.bodyContentType === "html"
       ? DOMPurify.sanitize(props.messageDetail.bodyContent, { USE_PROFILES: { html: true } })
@@ -142,6 +193,18 @@ export function MailboxesView(props: {
   const selectedMailboxSyncing = props.selectedMailbox ? props.syncingMailboxId === props.selectedMailbox.id : false;
   const invalidatedCount = props.mailboxes.filter((mailbox) => mailbox.status === "invalidated").length;
   const lockedCount = props.mailboxes.filter((mailbox) => mailbox.status === "locked").length;
+  const getCopyStatus = (key: string) => copyStatusByKey[key] || "idle";
+  const handleCopyCode = async (key: string, value: string) => {
+    try {
+      await copyTextToClipboard(value);
+      setCopyStatusByKey((current) => ({ ...current, [key]: "copied" }));
+    } catch {
+      setCopyStatusByKey((current) => ({ ...current, [key]: "failed" }));
+    }
+    window.setTimeout(() => {
+      setCopyStatusByKey((current) => (current[key] ? { ...current, [key]: "idle" } : current));
+    }, 1800);
+  };
 
   return (
     <div className="space-y-4">
@@ -229,6 +292,13 @@ export function MailboxesView(props: {
                     mailbox={mailbox}
                     selected={props.selectedMailbox?.id === mailbox.id}
                     onSelect={() => props.onSelectMailbox(mailbox.id)}
+                    verificationCopyStatus={getCopyStatus(`mailbox:${mailbox.id}`)}
+                    onCopyVerificationCode={(anchorElement) => {
+                      anchorElement.blur();
+                      if (mailbox.latestVerificationCode) {
+                        void handleCopyCode(`mailbox:${mailbox.id}`, mailbox.latestVerificationCode.code);
+                      }
+                    }}
                   />
                 ))}
                 {props.mailboxes.length === 0 ? (
@@ -257,6 +327,13 @@ export function MailboxesView(props: {
                     message={message}
                     selected={props.selectedMessageId === message.id}
                     onSelect={() => void props.onSelectMessage(message.id)}
+                    verificationCopyStatus={getCopyStatus(`message:${message.id}`)}
+                    onCopyVerificationCode={(anchorElement) => {
+                      anchorElement.blur();
+                      if (message.verificationCode) {
+                        void handleCopyCode(`message:${message.id}`, message.verificationCode.code);
+                      }
+                    }}
                   />
                 ))}
                 {props.messagesBusy ? (
