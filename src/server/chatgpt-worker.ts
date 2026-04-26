@@ -89,6 +89,17 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function buildChatGptMicrosoftCompletionUrlPatterns(callbackUrl = CALLBACK_URL): RegExp[] {
+  return [
+    /^https:\/\/auth\.openai\.com\//i,
+    new RegExp(`^${escapeRegex(callbackUrl)}`, "i"),
+  ];
+}
+
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1691,10 +1702,7 @@ async function run(): Promise<void> {
       }
       await page.waitForTimeout(1200);
       page = await completeMicrosoftLogin(page, cfg, mihomo.proxyServer, {
-        completionUrlPatterns: [
-          /^https:\/\/auth\.openai\.com\//i,
-          new RegExp(`^${CALLBACK_URL.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}`, "i"),
-        ],
+        completionUrlPatterns: buildChatGptMicrosoftCompletionUrlPatterns(),
         passkeyRecoveryUrl: authorizeUrl,
       });
       await writeStageMarker(outputDir, "oauth:microsoft_completed", {
