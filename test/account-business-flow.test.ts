@@ -167,3 +167,21 @@ test("superseded single-account workers ignore stale close updates after replace
   expect(source).toContain("if (lifecycle.isCurrent())");
   expect(source).toContain("if (this.active.get(input.key) !== active)");
 });
+
+test("retained fingerprint flows stay running until the worker exits", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  expect(source).toContain('status: "running"');
+  expect(source).toContain("browserRetained: true");
+});
+
+test("accounts listing does not trigger headed-browser availability probes", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/main.ts", import.meta.url), "utf8");
+  const accountsGetStart = source.indexOf('if (pathname === "/api/accounts" && req.method === "GET")');
+  const accountsGetEnd = source.indexOf('if (pathname === "/api/accounts/group" && req.method === "POST")');
+  const accountsGetBlock = source.slice(accountsGetStart, accountsGetEnd);
+  expect(accountsGetStart).toBeGreaterThan(-1);
+  expect(accountsGetEnd).toBeGreaterThan(accountsGetStart);
+  expect(accountsGetBlock).not.toContain("ensureAvailability()");
+});

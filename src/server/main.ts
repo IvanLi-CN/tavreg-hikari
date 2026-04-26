@@ -1913,8 +1913,7 @@ async function main(): Promise<void> {
         });
       }
 
-        if (pathname === "/api/accounts" && req.method === "GET") {
-        await accountBusinessFlowManager?.ensureAvailability();
+      if (pathname === "/api/accounts" && req.method === "GET") {
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({

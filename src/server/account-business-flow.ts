@@ -1139,7 +1139,7 @@ export class AccountBusinessFlowManager {
         return;
       }
       this.updateState(input.key, {
-        status: retained.success === false ? "failed" : "succeeded",
+        status: "running",
         browserRetained: true,
         retainedAt: active.retainedAt,
         lastError: retained.success === false ? retained.error || "浏览器已保留，请手动接管当前页面。" : null,
