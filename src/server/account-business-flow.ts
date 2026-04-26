@@ -6,6 +6,7 @@ import {
   AppDatabase,
   type AppSettings,
   type JobRecord,
+  type JobSite,
   type MicrosoftAccountRecord,
   type MicrosoftMailboxRecord,
 } from "../storage/app-db.js";
@@ -352,113 +353,120 @@ export class AccountBusinessFlowManager {
     mode: AccountBusinessFlowMode,
     key: string,
   ): Promise<void> {
-    const hiddenJob = this.db.createJob({
-      site,
-      runMode: normalizeBusinessFlowRunMode(mode),
-      need: 1,
-      parallel: 1,
-      maxAttempts: 1,
-      payloadJson: buildHiddenJobPayload(account.id, site, mode),
-    });
     const outputDir = path.join(this.repoRoot, "output", "web-runs", "account-business-flow", site, `${account.id}-${Date.now()}`);
     const retainPath = path.join(outputDir, "retained-browser.json");
-    const attempt = this.db.createAttempt(hiddenJob.id, {
-      accountId: account.id,
-      accountEmail: account.microsoftEmail,
-      outputDir,
-    });
-    const chromeExecutablePath = assertUsableFingerprintChromiumExecutablePath(
-      resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
-    );
-    const settings = this.getSettings();
-    const portLeases = await reserveMihomoPortLeases();
-    const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-    if (selectedProxyNode) {
-      this.db.touchProxyLease(selectedProxyNode);
-    }
-    const runtimeSpec = buildAttemptRuntimeSpec({
-      job: hiddenJob,
+    const { hiddenJob, attemptId } = this.createLeasedHiddenJob({
       account,
-      outputDir,
-      sharedLedgerPath: this.taskLedgerDbPath,
-      settings,
-      reservedPorts: {
-        apiPort: portLeases.apiPort.port,
-        mixedPort: portLeases.mixedPort.port,
-      },
-      chromeExecutablePath,
-      selectedProxyNode,
-      baseEnv: this.buildCommonFlowEnv({ account, mode, site, outputDir, retainPath }),
-    });
-    const child = spawn(runtimeSpec.command, runtimeSpec.args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, runtimeSpec),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    child.stdin.end();
-    child.once("spawn", () => {
-      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
-    });
-    this.attachFlowProcess({
-      key,
-      accountId: account.id,
       site,
+      businessSite: site,
       mode,
       outputDir,
-      retainPath,
-      child,
-      jobId: hiddenJob.id,
-      attemptId: attempt.id,
-      onClose: async (code, signal) => {
-        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-        const result = await readJsonFile<{ apiKey?: string | null }>(path.join(outputDir, "result.json"));
-        const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
-        const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
-        if (code === 0 && signal == null && typeof result?.apiKey === "string" && result.apiKey.trim()) {
-          this.db.completeAttemptSuccess(hiddenJob.id, attempt.id, account.id, result.apiKey.trim(), null);
-          this.db.completeJob(hiddenJob.id, true);
+    });
+    let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    try {
+      const chromeExecutablePath = assertUsableFingerprintChromiumExecutablePath(
+        resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
+      );
+      const settings = this.getSettings();
+      portLeases = await reserveMihomoPortLeases();
+      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
+      if (selectedProxyNode) {
+        this.db.touchProxyLease(selectedProxyNode);
+      }
+      const runtimeSpec = buildAttemptRuntimeSpec({
+        job: hiddenJob,
+        account,
+        outputDir,
+        sharedLedgerPath: this.taskLedgerDbPath,
+        settings,
+        reservedPorts: {
+          apiPort: portLeases.apiPort.port,
+          mixedPort: portLeases.mixedPort.port,
+        },
+        chromeExecutablePath,
+        selectedProxyNode,
+        baseEnv: this.buildCommonFlowEnv({ account, mode, site, outputDir, retainPath }),
+      });
+      const child = spawn(runtimeSpec.command, runtimeSpec.args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, runtimeSpec),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+      child.once("spawn", () => {
+        if (!portLeases) return;
+        void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+      });
+      this.attachFlowProcess({
+        key,
+        accountId: account.id,
+        site,
+        mode,
+        outputDir,
+        retainPath,
+        child,
+        jobId: hiddenJob.id,
+        attemptId,
+        onClose: async (code, signal) => {
+          await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+          const result = await readJsonFile<{ apiKey?: string | null }>(path.join(outputDir, "result.json"));
+          const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
+          const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
+          if (code === 0 && signal == null && typeof result?.apiKey === "string" && result.apiKey.trim()) {
+            this.db.completeAttemptSuccess(hiddenJob.id, attemptId, account.id, result.apiKey.trim(), null);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: null,
+            });
+            this.broadcastToast("success", `${account.microsoftEmail}：Tavily 单账号业务流完成`);
+            return;
+          }
+          if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
+            this.finalizeDirectAttempt(attemptId, {
+              status: "succeeded",
+              stage: "retained",
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: true,
+              retainedAt: retained.retainedAt || nowIso(),
+              lastError: null,
+            });
+            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage(site)}`);
+            return;
+          }
+          const message =
+            error?.error ||
+            retained?.error ||
+            (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          this.db.completeAttemptFailure(hiddenJob.id, attemptId, account.id, {
+            errorCode: code == null ? "process_exit" : `exit_${code}`,
+            errorMessage: message,
+          }, null);
+          this.db.completeJob(hiddenJob.id, false, message);
           this.updateState(key, {
-            status: "succeeded",
+            status: "failed",
             browserRetained: Boolean(retained),
             retainedAt: retained?.retainedAt || null,
-            lastError: null,
+            lastError: message,
           });
-          this.broadcastToast("success", `${account.microsoftEmail}：Tavily 单账号业务流完成`);
-          return;
-        }
-        if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
-          this.db.updateAttempt(attempt.id, {
-            status: "succeeded",
-            stage: "retained",
-            completedAt: nowIso(),
-          });
-          this.db.completeJob(hiddenJob.id, true);
-          this.updateState(key, {
-            status: "succeeded",
-            browserRetained: true,
-            retainedAt: retained.retainedAt || nowIso(),
-            lastError: null,
-          });
-          this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage(site)}`);
-          return;
-        }
-        const message =
-          error?.error ||
-          retained?.error ||
-          (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
-        this.db.completeAttemptFailure(hiddenJob.id, attempt.id, account.id, {
-          errorCode: code == null ? "process_exit" : `exit_${code}`,
-          errorMessage: message,
-        }, null);
-        this.db.completeJob(hiddenJob.id, false, message);
-        this.updateState(key, {
-          status: "failed",
-          browserRetained: Boolean(retained),
-          retainedAt: retained?.retainedAt || null,
-          lastError: message,
-        });
-        this.broadcastToast("error", `${account.microsoftEmail}：Tavily 单账号业务流失败：${message}`);
-      },
-    });
+          this.broadcastToast("error", `${account.microsoftEmail}：Tavily 单账号业务流失败：${message}`);
+        },
+      });
+    } catch (error) {
+      await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+      this.rollbackHiddenLaunchSetup({
+        hiddenJobId: hiddenJob.id,
+        attemptId,
+        accountId: account.id,
+        error,
+      });
+      throw error;
+    }
   }
 
   private async startMicrosoftAccountFlow(
@@ -468,98 +476,135 @@ export class AccountBusinessFlowManager {
   ): Promise<void> {
     const outputDir = path.join(this.repoRoot, "output", "web-runs", "account-business-flow", "microsoft", `${account.id}-${Date.now()}`);
     const retainPath = path.join(outputDir, "retained-browser.json");
-    const portLeases = await reserveMihomoPortLeases();
-    const runtime = process.versions.bun
-      ? { command: process.execPath || "bun", workerArgs: ["run", "src/server/microsoft-account-worker.ts"] }
-      : { command: resolveWorkerRuntime().command, workerArgs: ["--import", "tsx", "src/server/microsoft-account-worker.ts"] };
-    const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
-    if (!selectedProxyNode) {
-      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-      throw new Error("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
-    }
-    this.db.touchProxyLease(selectedProxyNode);
-    await mkdir(outputDir, { recursive: true });
-    const args = [...runtime.workerArgs, "--proxy-node", selectedProxyNode];
-    const child = spawn(runtime.command, args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, {
-        env: {
-          ...this.buildCommonFlowEnv({
-            account,
-            mode,
-            site: "none",
-            outputDir,
-            retainPath,
-          }),
-          MICROSOFT_ACCOUNT_JOB_OUTPUT_DIR: outputDir,
-          MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-          MIHOMO_GROUP_NAME: this.getSettings().groupName,
-          MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
-          MIHOMO_API_PORT: String(portLeases.apiPort.port),
-          MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-          PROXY_CHECK_URL: this.getSettings().checkUrl,
-          PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-          PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
-          CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
-            ? path.resolve(account.browserSession.profilePath.trim())
-            : path.join(outputDir, "chrome-profile"),
-          ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
-          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-        },
-      }),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    child.stdin.end();
-    child.once("spawn", () => {
-      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
-    });
-    this.attachFlowProcess({
-      key,
-      accountId: account.id,
-      site: "none",
+    const { hiddenJob, attemptId } = this.createLeasedHiddenJob({
+      account,
+      site: "microsoft",
+      businessSite: "none",
       mode,
       outputDir,
-      retainPath,
-      child,
-      jobId: null,
-      attemptId: null,
-      onClose: async (code, signal) => {
-        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-        const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
-        const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
-        const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
-        if (code === 0 && signal == null && result?.ok) {
+    });
+    let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    try {
+      portLeases = await reserveMihomoPortLeases();
+      const runtime = process.versions.bun
+        ? { command: process.execPath || "bun", workerArgs: ["run", "src/server/microsoft-account-worker.ts"] }
+        : { command: resolveWorkerRuntime().command, workerArgs: ["--import", "tsx", "src/server/microsoft-account-worker.ts"] };
+      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
+      if (!selectedProxyNode) {
+        throw new Error("当前账号还没有可复用的代理节点，暂时无法打开微软账号页");
+      }
+      this.db.touchProxyLease(selectedProxyNode);
+      await mkdir(outputDir, { recursive: true });
+      const args = [...runtime.workerArgs, "--proxy-node", selectedProxyNode];
+      const child = spawn(runtime.command, args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, {
+          env: {
+            ...this.buildCommonFlowEnv({
+              account,
+              mode,
+              site: "none",
+              outputDir,
+              retainPath,
+            }),
+            MICROSOFT_ACCOUNT_JOB_OUTPUT_DIR: outputDir,
+            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
+            MIHOMO_GROUP_NAME: this.getSettings().groupName,
+            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_API_PORT: String(portLeases.apiPort.port),
+            MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
+            PROXY_CHECK_URL: this.getSettings().checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
+              ? path.resolve(account.browserSession.profilePath.trim())
+              : path.join(outputDir, "chrome-profile"),
+            ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
+            INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+          },
+        }),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+      child.once("spawn", () => {
+        if (!portLeases) return;
+        void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+      });
+      this.attachFlowProcess({
+        key,
+        accountId: account.id,
+        site: "none",
+        mode,
+        outputDir,
+        retainPath,
+        child,
+        jobId: hiddenJob.id,
+        attemptId,
+        onClose: async (code, signal) => {
+          await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+          const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
+          const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
+          const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
+          if (code === 0 && signal == null && result?.ok) {
+            this.finalizeDirectAttempt(attemptId, {
+              status: "succeeded",
+              stage: "completed",
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: null,
+            });
+            this.broadcastToast("success", `${account.microsoftEmail}：微软账号页已打开`);
+            return;
+          }
+          if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
+            this.finalizeDirectAttempt(attemptId, {
+              status: "succeeded",
+              stage: "retained",
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: true,
+              retainedAt: retained.retainedAt || nowIso(),
+              lastError: null,
+            });
+            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("none")}`);
+            return;
+          }
+          const message =
+            error?.error ||
+            retained?.error ||
+            (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          this.db.completeAttemptFailure(hiddenJob.id, attemptId, null, {
+            errorCode: code == null ? "process_exit" : `exit_${code}`,
+            errorMessage: message,
+          }, null);
+          this.db.releaseAccountLease(account.id, hiddenJob.id);
+          this.db.completeJob(hiddenJob.id, false, message);
           this.updateState(key, {
-            status: "succeeded",
+            status: "failed",
             browserRetained: Boolean(retained),
             retainedAt: retained?.retainedAt || null,
-            lastError: null,
+            lastError: message,
           });
-          this.broadcastToast("success", `${account.microsoftEmail}：微软账号页已打开`);
-          return;
-        }
-        if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
-          this.updateState(key, {
-            status: "succeeded",
-            browserRetained: true,
-            retainedAt: retained.retainedAt || nowIso(),
-            lastError: null,
-          });
-          this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("none")}`);
-          return;
-        }
-        const message =
-          error?.error ||
-          retained?.error ||
-          (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
-        this.updateState(key, {
-          status: "failed",
-          browserRetained: Boolean(retained),
-          retainedAt: retained?.retainedAt || null,
-          lastError: message,
-        });
-        this.broadcastToast("error", `${account.microsoftEmail}：微软账号页打开失败：${message}`);
-      },
-    });
+          this.broadcastToast("error", `${account.microsoftEmail}：微软账号页打开失败：${message}`);
+        },
+      });
+    } catch (error) {
+      await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+      this.rollbackHiddenLaunchSetup({
+        hiddenJobId: hiddenJob.id,
+        attemptId,
+        accountId: account.id,
+        error,
+      });
+      throw error;
+    }
   }
 
   private async createChatGptDraft(): Promise<{ nickname: string; birthDate: string }> {
@@ -586,168 +631,244 @@ export class AccountBusinessFlowManager {
     }
   }
 
+  private createLeasedHiddenJob(input: {
+    account: MicrosoftAccountRecord;
+    site: JobSite;
+    businessSite: AccountBusinessFlowSite;
+    mode: AccountBusinessFlowMode;
+    outputDir: string;
+  }): { hiddenJob: JobRecord; attemptId: number } {
+    const hiddenJob = this.db.createJob({
+      site: input.site,
+      runMode: normalizeBusinessFlowRunMode(input.mode),
+      need: 1,
+      parallel: 1,
+      maxAttempts: 1,
+      payloadJson: buildHiddenJobPayload(input.account.id, input.businessSite, input.mode),
+    });
+    const leased = this.db.leaseAccountForJob(hiddenJob.id, input.account.id);
+    if (!leased) {
+      this.db.completeJob(hiddenJob.id, false, "account became unavailable before single-account flow launch");
+      throw new Error("当前账号在启动前被其他任务占用，请稍后重试");
+    }
+    const attempt = this.db.createAttempt(hiddenJob.id, {
+      accountId: input.account.id,
+      accountEmail: input.account.microsoftEmail,
+      outputDir: input.outputDir,
+    });
+    return { hiddenJob, attemptId: attempt.id };
+  }
+
+  private rollbackHiddenLaunchSetup(input: {
+    hiddenJobId: number;
+    attemptId: number | null;
+    accountId: number;
+    error: unknown;
+  }): void {
+    const message = input.error instanceof Error ? input.error.message : String(input.error || "single-account flow setup failed");
+    if (input.attemptId != null) {
+      this.db.rollbackAttemptBeforeLaunch(input.hiddenJobId, input.attemptId, input.accountId);
+    } else {
+      this.db.releaseAccountLease(input.accountId, input.hiddenJobId);
+    }
+    this.db.completeJob(input.hiddenJobId, false, message);
+  }
+
+  private finalizeDirectAttempt(
+    attemptId: number,
+    patch: Partial<
+      Pick<
+        ReturnType<AppDatabase["getAttempt"]> extends infer T
+          ? T extends null
+            ? never
+            : NonNullable<T>
+          : never,
+        "status" | "stage" | "completedAt" | "durationMs" | "errorCode" | "errorMessage" | "accountEmail" | "runId" | "proxyNode" | "proxyIp"
+      >
+    >,
+  ): void {
+    const currentAttempt = this.db.getAttempt(attemptId);
+    if (!currentAttempt) return;
+    const now = nowIso();
+    const durationMs = Math.max(0, Date.parse(now) - Date.parse(currentAttempt.startedAt));
+    this.db.updateAttempt(attemptId, {
+      completedAt: now,
+      durationMs,
+      ...patch,
+    });
+  }
+
   private async startChatGptFlow(
     account: MicrosoftAccountRecord,
     mailbox: MicrosoftMailboxRecord,
     mode: AccountBusinessFlowMode,
     key: string,
   ): Promise<void> {
-    const hiddenJob = this.db.createJob({
-      site: "chatgpt",
-      runMode: normalizeBusinessFlowRunMode(mode),
-      need: 1,
-      parallel: 1,
-      maxAttempts: 1,
-      payloadJson: buildHiddenJobPayload(account.id, "chatgpt", mode),
-    });
     const outputDir = path.join(this.repoRoot, "output", "web-runs", "account-business-flow", "chatgpt", `${account.id}-${Date.now()}`);
     const retainPath = path.join(outputDir, "retained-browser.json");
-    const attempt = this.db.createAttempt(hiddenJob.id, {
-      accountId: null,
-      accountEmail: account.microsoftEmail,
-      outputDir,
-    });
-    const draft = await this.createChatGptDraft();
-    const portLeases = await reserveMihomoPortLeases();
-    const runtime = resolveWorkerRuntime();
-    const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-    const args = runtime.command === "bun" ? ["run", "src/server/chatgpt-worker.ts"] : ["--import", "tsx", "src/server/chatgpt-worker.ts"];
-    if (selectedProxyNode?.trim()) {
-      args.push("--proxy-node", selectedProxyNode.trim());
-      this.db.touchProxyLease(selectedProxyNode.trim());
-    }
-    await mkdir(outputDir, { recursive: true });
-    const child = spawn(runtime.command, args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, {
-        env: {
-          ...this.buildCommonFlowEnv({
-            account,
-            mailbox,
-            mode,
-            site: "chatgpt",
-            outputDir,
-            retainPath,
-          }),
-          CHATGPT_AUTH_PROVIDER: "microsoft",
-          CHATGPT_JOB_EMAIL: account.microsoftEmail,
-          CHATGPT_JOB_PASSWORD: account.passwordPlaintext || "",
-          CHATGPT_JOB_NICKNAME: draft.nickname,
-          CHATGPT_JOB_BIRTH_DATE: draft.birthDate,
-          CHATGPT_JOB_MAILBOX_ID: String(mailbox.id),
-          CHATGPT_JOB_OUTPUT_DIR: outputDir,
-          MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-          MIHOMO_GROUP_NAME: this.getSettings().groupName,
-          MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
-          MIHOMO_API_PORT: String(portLeases.apiPort.port),
-          MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-          PROXY_CHECK_URL: this.getSettings().checkUrl,
-          PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-          PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
-          CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
-            ? path.resolve(account.browserSession.profilePath.trim())
-            : path.join(outputDir, "chrome-profile"),
-          ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
-          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-        },
-      }),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    child.stdin.end();
-    child.once("spawn", () => {
-      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
-    });
-    this.attachFlowProcess({
-      key,
-      accountId: account.id,
+    const { hiddenJob, attemptId } = this.createLeasedHiddenJob({
+      account,
       site: "chatgpt",
+      businessSite: "chatgpt",
       mode,
       outputDir,
-      retainPath,
-      child,
-      jobId: hiddenJob.id,
-      attemptId: attempt.id,
-      onClose: async (code, signal) => {
-        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-        const result = await readJsonFile<{
-          email?: string;
-          credentials?: {
-            account_id?: string;
-            access_token?: string;
-            refresh_token?: string;
-            id_token?: string;
-            expires_at?: string | null;
-            token_type?: string | null;
-          };
-        }>(path.join(outputDir, "result.json"));
-        const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
-        const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
-        const accessToken = String(result?.credentials?.access_token || "").trim();
-        const refreshToken = String(result?.credentials?.refresh_token || "").trim();
-        const idToken = String(result?.credentials?.id_token || "").trim();
-        const accountId = String(result?.credentials?.account_id || "").trim();
-        if (code === 0 && signal == null && accessToken && refreshToken && idToken) {
-          this.db.completeChatGptAttemptSuccess(hiddenJob.id, attempt.id, {
-            email: String(result?.email || account.microsoftEmail).trim().toLowerCase(),
-            accountId,
-            accessToken,
-            refreshToken,
-            idToken,
-            expiresAt: result?.credentials?.expires_at || null,
-            credentialJson: buildCodexVibeMonitorCredentialJson({
+    });
+    let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    try {
+      const draft = await this.createChatGptDraft();
+      portLeases = await reserveMihomoPortLeases();
+      const runtime = resolveWorkerRuntime();
+      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
+      const args = runtime.command === "bun" ? ["run", "src/server/chatgpt-worker.ts"] : ["--import", "tsx", "src/server/chatgpt-worker.ts"];
+      if (selectedProxyNode?.trim()) {
+        args.push("--proxy-node", selectedProxyNode.trim());
+        this.db.touchProxyLease(selectedProxyNode.trim());
+      }
+      await mkdir(outputDir, { recursive: true });
+      const child = spawn(runtime.command, args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, {
+          env: {
+            ...this.buildCommonFlowEnv({
+              account,
+              mailbox,
+              mode,
+              site: "chatgpt",
+              outputDir,
+              retainPath,
+            }),
+            CHATGPT_AUTH_PROVIDER: "microsoft",
+            CHATGPT_JOB_EMAIL: account.microsoftEmail,
+            CHATGPT_JOB_PASSWORD: account.passwordPlaintext || "",
+            CHATGPT_JOB_NICKNAME: draft.nickname,
+            CHATGPT_JOB_BIRTH_DATE: draft.birthDate,
+            CHATGPT_JOB_MAILBOX_ID: String(mailbox.id),
+            CHATGPT_JOB_OUTPUT_DIR: outputDir,
+            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
+            MIHOMO_GROUP_NAME: this.getSettings().groupName,
+            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_API_PORT: String(portLeases.apiPort.port),
+            MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
+            PROXY_CHECK_URL: this.getSettings().checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
+              ? path.resolve(account.browserSession.profilePath.trim())
+              : path.join(outputDir, "chrome-profile"),
+            ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
+            INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+          },
+        }),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+      child.once("spawn", () => {
+        if (!portLeases) return;
+        void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+      });
+      this.attachFlowProcess({
+        key,
+        accountId: account.id,
+        site: "chatgpt",
+        mode,
+        outputDir,
+        retainPath,
+        child,
+        jobId: hiddenJob.id,
+        attemptId,
+        onClose: async (code, signal) => {
+          await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+          const result = await readJsonFile<{
+            email?: string;
+            credentials?: {
+              account_id?: string;
+              access_token?: string;
+              refresh_token?: string;
+              id_token?: string;
+              expires_at?: string | null;
+              token_type?: string | null;
+            };
+          }>(path.join(outputDir, "result.json"));
+          const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
+          const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
+          const accessToken = String(result?.credentials?.access_token || "").trim();
+          const refreshToken = String(result?.credentials?.refresh_token || "").trim();
+          const idToken = String(result?.credentials?.id_token || "").trim();
+          const accountId = String(result?.credentials?.account_id || "").trim();
+          if (code === 0 && signal == null && accessToken && refreshToken && idToken) {
+            this.db.completeChatGptAttemptSuccess(hiddenJob.id, attemptId, {
               email: String(result?.email || account.microsoftEmail).trim().toLowerCase(),
               accountId,
               accessToken,
               refreshToken,
               idToken,
               expiresAt: result?.credentials?.expires_at || null,
-              createdAt: nowIso(),
-              tokenType: result?.credentials?.token_type || null,
-            }),
-          });
-          this.db.completeJob(hiddenJob.id, true);
+              credentialJson: buildCodexVibeMonitorCredentialJson({
+                email: String(result?.email || account.microsoftEmail).trim().toLowerCase(),
+                accountId,
+                accessToken,
+                refreshToken,
+                idToken,
+                expiresAt: result?.credentials?.expires_at || null,
+                createdAt: nowIso(),
+                tokenType: result?.credentials?.token_type || null,
+              }),
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: null,
+            });
+            this.broadcastToast("success", `${account.microsoftEmail}：ChatGPT 单账号业务流完成`);
+            return;
+          }
+          if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
+            this.finalizeDirectAttempt(attemptId, {
+              status: "succeeded",
+              stage: "retained",
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: true,
+              retainedAt: retained.retainedAt || nowIso(),
+              lastError: null,
+            });
+            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("chatgpt")}`);
+            return;
+          }
+          const message =
+            error?.error ||
+            retained?.error ||
+            (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          this.db.completeAttemptFailure(hiddenJob.id, attemptId, null, {
+            errorCode: code == null ? "process_exit" : `exit_${code}`,
+            errorMessage: message,
+          }, null);
+          this.db.releaseAccountLease(account.id, hiddenJob.id);
+          this.db.completeJob(hiddenJob.id, false, message);
           this.updateState(key, {
-            status: "succeeded",
+            status: "failed",
             browserRetained: Boolean(retained),
             retainedAt: retained?.retainedAt || null,
-            lastError: null,
+            lastError: message,
           });
-          this.broadcastToast("success", `${account.microsoftEmail}：ChatGPT 单账号业务流完成`);
-          return;
-        }
-        if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
-          this.db.updateAttempt(attempt.id, {
-            status: "succeeded",
-            stage: "retained",
-            completedAt: nowIso(),
-          });
-          this.db.completeJob(hiddenJob.id, true);
-          this.updateState(key, {
-            status: "succeeded",
-            browserRetained: true,
-            retainedAt: retained.retainedAt || nowIso(),
-            lastError: null,
-          });
-          this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("chatgpt")}`);
-          return;
-        }
-        const message =
-          error?.error ||
-          retained?.error ||
-          (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
-        this.db.completeAttemptFailure(hiddenJob.id, attempt.id, null, {
-          errorCode: code == null ? "process_exit" : `exit_${code}`,
-          errorMessage: message,
-        }, null);
-        this.db.completeJob(hiddenJob.id, false, message);
-        this.updateState(key, {
-          status: "failed",
-          browserRetained: Boolean(retained),
-          retainedAt: retained?.retainedAt || null,
-          lastError: message,
-        });
-        this.broadcastToast("error", `${account.microsoftEmail}：ChatGPT 单账号业务流失败：${message}`);
-      },
-    });
+          this.broadcastToast("error", `${account.microsoftEmail}：ChatGPT 单账号业务流失败：${message}`);
+        },
+      });
+    } catch (error) {
+      await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+      this.rollbackHiddenLaunchSetup({
+        hiddenJobId: hiddenJob.id,
+        attemptId,
+        accountId: account.id,
+        error,
+      });
+      throw error;
+    }
   }
 
   private async startGrokFlow(
@@ -756,152 +877,161 @@ export class AccountBusinessFlowManager {
     mode: AccountBusinessFlowMode,
     key: string,
   ): Promise<void> {
-    const hiddenJob = this.db.createJob({
-      site: "grok",
-      runMode: normalizeBusinessFlowRunMode(mode),
-      need: 1,
-      parallel: 1,
-      maxAttempts: 1,
-      payloadJson: buildHiddenJobPayload(account.id, "grok", mode),
-    });
     const outputDir = path.join(this.repoRoot, "output", "web-runs", "account-business-flow", "grok", `${account.id}-${Date.now()}`);
     const retainPath = path.join(outputDir, "retained-browser.json");
-    const attempt = this.db.createAttempt(hiddenJob.id, {
-      accountId: null,
-      accountEmail: account.microsoftEmail,
-      outputDir,
-    });
-    const portLeases = await reserveMihomoPortLeases();
-    const runtime = resolveWorkerRuntime();
-    const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-    const args = runtime.command === "bun" ? ["run", "src/server/grok-worker.ts"] : ["--import", "tsx", "src/server/grok-worker.ts"];
-    if (selectedProxyNode?.trim()) {
-      args.push("--proxy-node", selectedProxyNode.trim());
-      this.db.touchProxyLease(selectedProxyNode.trim());
-    }
-    await mkdir(outputDir, { recursive: true });
-    const child = spawn(runtime.command, args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, {
-        env: {
-          ...this.buildCommonFlowEnv({
-            account,
-            mailbox,
-            mode,
-            site: "grok",
-            outputDir,
-            retainPath,
-          }),
-          GROK_AUTH_PROVIDER: "microsoft",
-          GROK_JOB_OUTPUT_DIR: outputDir,
-          GROK_JOB_EMAIL: account.microsoftEmail,
-          GROK_JOB_MAILBOX_ID: String(mailbox.id),
-          MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-          MIHOMO_GROUP_NAME: this.getSettings().groupName,
-          MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
-          MIHOMO_API_PORT: String(portLeases.apiPort.port),
-          MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-          PROXY_CHECK_URL: this.getSettings().checkUrl,
-          PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-          PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
-          CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
-            ? path.resolve(account.browserSession.profilePath.trim())
-            : path.join(outputDir, "chrome-profile"),
-          ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
-          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-        },
-      }),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    child.stdin.end();
-    child.once("spawn", () => {
-      void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
-    });
-    this.attachFlowProcess({
-      key,
-      accountId: account.id,
+    const { hiddenJob, attemptId } = this.createLeasedHiddenJob({
+      account,
       site: "grok",
+      businessSite: "grok",
       mode,
       outputDir,
-      retainPath,
-      child,
-      jobId: hiddenJob.id,
-      attemptId: attempt.id,
-      onClose: async (code, signal) => {
-        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-        const result = await readJsonFile<{
-          email?: string;
-          password?: string;
-          sso?: string;
-          ssoRw?: string | null;
-          cfClearance?: string | null;
-          checkoutUrl?: string | null;
-          birthDate?: string | null;
-          proxy?: { nodeName?: string | null; ip?: string | null };
-          runId?: string | null;
-        }>(path.join(outputDir, "result.json"));
-        const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
-        const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
-        const email = String(result?.email || "").trim().toLowerCase();
-        const password = String(result?.password || "").trim();
-        const sso = String(result?.sso || "").trim();
-        if (code === 0 && signal == null && email && password && sso) {
-          this.db.completeGrokAttemptSuccess(hiddenJob.id, attempt.id, {
-            email,
-            password,
-            sso,
-            ssoRw: result?.ssoRw || null,
-            cfClearance: result?.cfClearance || null,
-            checkoutUrl: result?.checkoutUrl || null,
-            birthDate: result?.birthDate || null,
-            extractedIp: result?.proxy?.ip || null,
-            runId: result?.runId || null,
-            proxyNode: result?.proxy?.nodeName || null,
-            proxyIp: result?.proxy?.ip || null,
-          });
-          this.db.completeJob(hiddenJob.id, true);
+    });
+    let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    try {
+      portLeases = await reserveMihomoPortLeases();
+      const runtime = resolveWorkerRuntime();
+      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
+      const args = runtime.command === "bun" ? ["run", "src/server/grok-worker.ts"] : ["--import", "tsx", "src/server/grok-worker.ts"];
+      if (selectedProxyNode?.trim()) {
+        args.push("--proxy-node", selectedProxyNode.trim());
+        this.db.touchProxyLease(selectedProxyNode.trim());
+      }
+      await mkdir(outputDir, { recursive: true });
+      const child = spawn(runtime.command, args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, {
+          env: {
+            ...this.buildCommonFlowEnv({
+              account,
+              mailbox,
+              mode,
+              site: "grok",
+              outputDir,
+              retainPath,
+            }),
+            GROK_AUTH_PROVIDER: "microsoft",
+            GROK_JOB_OUTPUT_DIR: outputDir,
+            GROK_JOB_EMAIL: account.microsoftEmail,
+            GROK_JOB_MAILBOX_ID: String(mailbox.id),
+            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
+            MIHOMO_GROUP_NAME: this.getSettings().groupName,
+            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_API_PORT: String(portLeases.apiPort.port),
+            MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
+            PROXY_CHECK_URL: this.getSettings().checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
+              ? path.resolve(account.browserSession.profilePath.trim())
+              : path.join(outputDir, "chrome-profile"),
+            ...(account.browserSession?.profilePath?.trim() ? { CHROME_PROFILE_STRATEGY: "exact" } : {}),
+            INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+          },
+        }),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      child.stdin.end();
+      child.once("spawn", () => {
+        if (!portLeases) return;
+        void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
+      });
+      this.attachFlowProcess({
+        key,
+        accountId: account.id,
+        site: "grok",
+        mode,
+        outputDir,
+        retainPath,
+        child,
+        jobId: hiddenJob.id,
+        attemptId,
+        onClose: async (code, signal) => {
+          await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+          const result = await readJsonFile<{
+            email?: string;
+            password?: string;
+            sso?: string;
+            ssoRw?: string | null;
+            cfClearance?: string | null;
+            checkoutUrl?: string | null;
+            birthDate?: string | null;
+            proxy?: { nodeName?: string | null; ip?: string | null };
+            runId?: string | null;
+          }>(path.join(outputDir, "result.json"));
+          const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
+          const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
+          const email = String(result?.email || "").trim().toLowerCase();
+          const password = String(result?.password || "").trim();
+          const sso = String(result?.sso || "").trim();
+          if (code === 0 && signal == null && email && password && sso) {
+            this.db.completeGrokAttemptSuccess(hiddenJob.id, attemptId, {
+              email,
+              password,
+              sso,
+              ssoRw: result?.ssoRw || null,
+              cfClearance: result?.cfClearance || null,
+              checkoutUrl: result?.checkoutUrl || null,
+              birthDate: result?.birthDate || null,
+              extractedIp: result?.proxy?.ip || null,
+              runId: result?.runId || null,
+              proxyNode: result?.proxy?.nodeName || null,
+              proxyIp: result?.proxy?.ip || null,
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: Boolean(retained),
+              retainedAt: retained?.retainedAt || null,
+              lastError: null,
+            });
+            this.broadcastToast("success", `${account.microsoftEmail}：Grok 单账号业务流完成`);
+            return;
+          }
+          if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
+            this.finalizeDirectAttempt(attemptId, {
+              status: "succeeded",
+              stage: "retained",
+            });
+            this.db.releaseAccountLease(account.id, hiddenJob.id);
+            this.db.completeJob(hiddenJob.id, true);
+            this.updateState(key, {
+              status: "succeeded",
+              browserRetained: true,
+              retainedAt: retained.retainedAt || nowIso(),
+              lastError: null,
+            });
+            this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("grok")}`);
+            return;
+          }
+          const message =
+            error?.error ||
+            retained?.error ||
+            (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          this.db.completeAttemptFailure(hiddenJob.id, attemptId, null, {
+            errorCode: code == null ? "process_exit" : `exit_${code}`,
+            errorMessage: message,
+          }, null);
+          this.db.releaseAccountLease(account.id, hiddenJob.id);
+          this.db.completeJob(hiddenJob.id, false, message);
           this.updateState(key, {
-            status: "succeeded",
+            status: "failed",
             browserRetained: Boolean(retained),
             retainedAt: retained?.retainedAt || null,
-            lastError: null,
+            lastError: message,
           });
-          this.broadcastToast("success", `${account.microsoftEmail}：Grok 单账号业务流完成`);
-          return;
-        }
-        if (retained && isSuccessfulRetainedBrowserSnapshot(retained)) {
-          this.db.updateAttempt(attempt.id, {
-            status: "succeeded",
-            stage: "retained",
-            completedAt: nowIso(),
-          });
-          this.db.completeJob(hiddenJob.id, true);
-          this.updateState(key, {
-            status: "succeeded",
-            browserRetained: true,
-            retainedAt: retained.retainedAt || nowIso(),
-            lastError: null,
-          });
-          this.broadcastToast("info", `${account.microsoftEmail}：${getRetainStateMessage("grok")}`);
-          return;
-        }
-        const message =
-          error?.error ||
-          retained?.error ||
-          (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
-        this.db.completeAttemptFailure(hiddenJob.id, attempt.id, null, {
-          errorCode: code == null ? "process_exit" : `exit_${code}`,
-          errorMessage: message,
-        }, null);
-        this.db.completeJob(hiddenJob.id, false, message);
-        this.updateState(key, {
-          status: "failed",
-          browserRetained: Boolean(retained),
-          retainedAt: retained?.retainedAt || null,
-          lastError: message,
-        });
-        this.broadcastToast("error", `${account.microsoftEmail}：Grok 单账号业务流失败：${message}`);
-      },
-    });
+          this.broadcastToast("error", `${account.microsoftEmail}：Grok 单账号业务流失败：${message}`);
+        },
+      });
+    } catch (error) {
+      await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
+      this.rollbackHiddenLaunchSetup({
+        hiddenJobId: hiddenJob.id,
+        attemptId,
+        accountId: account.id,
+        error,
+      });
+      throw error;
+    }
   }
 
   private attachFlowProcess(input: {

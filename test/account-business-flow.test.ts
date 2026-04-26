@@ -132,3 +132,12 @@ test("microsoft account business flow prefers Bun-hosted worker runtime when the
   expect(source).toContain("src/server/microsoft-account-worker.ts");
   expect(source).toContain('process.execPath || "bun"');
 });
+
+test("single-account business flows lease the account and clean up hidden setup failures", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  expect(source).toContain("leaseAccountForJob");
+  expect(source).toContain("releaseAccountLease");
+  expect(source).toContain("rollbackAttemptBeforeLaunch");
+  expect(source).toContain('site: "microsoft"');
+});

@@ -64,7 +64,7 @@ export type AccountStatus =
   | "skipped_has_key"
   | "disabled";
 export type JobStatus = "idle" | "running" | "paused" | "stopping" | "force_stopping" | "completing" | "completed" | "failed" | "stopped";
-export type JobSite = "tavily" | "grok" | "chatgpt";
+export type JobSite = "tavily" | "grok" | "chatgpt" | "microsoft";
 export type AttemptStatus = "running" | "succeeded" | "failed" | "stopped";
 export type ApiKeyStatus = "active" | "revoked" | "unknown";
 export type ProofMailboxProvider = "cfmail";
@@ -2462,6 +2462,66 @@ export class AppDatabase {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  leaseAccountForJob(jobId: number, accountId: number): MicrosoftAccountRecord | null {
+    const now = nowIso();
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const row = this.db
+        .query(`
+          SELECT a.id
+          FROM microsoft_accounts a
+          JOIN account_browser_sessions s ON s.account_id = a.id
+          WHERE a.id = ?
+            AND a.disabled_at IS NULL
+            AND a.has_api_key = 0
+            AND COALESCE(a.skip_reason, '') = ''
+            AND a.lease_job_id IS NULL
+            AND s.status = 'ready'
+          LIMIT 1
+        `)
+        .get(accountId) as { id?: number } | null;
+      if (!row?.id) {
+        this.db.exec("COMMIT;");
+        return null;
+      }
+      this.db
+        .query(`
+          UPDATE microsoft_accounts
+          SET lease_job_id = ?, lease_started_at = ?, last_result_status = 'leased', updated_at = ?
+          WHERE id = ?
+        `)
+        .run(jobId, now, now, accountId);
+      this.db.exec("COMMIT;");
+      return this.getAccount(accountId);
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  releaseAccountLease(accountId: number, leaseJobId?: number | null): MicrosoftAccountRecord | null {
+    const current = this.getAccount(accountId);
+    if (!current) return null;
+    if (leaseJobId != null && current.leaseJobId !== leaseJobId) {
+      return current;
+    }
+    if (current.leaseJobId == null) {
+      return current;
+    }
+    const now = nowIso();
+    this.db
+      .query(`
+        UPDATE microsoft_accounts
+        SET last_result_status = ?,
+            updated_at = ?,
+            lease_job_id = NULL,
+            lease_started_at = NULL
+        WHERE id = ?
+      `)
+      .run(resolveReleasedLeaseAccountStatus(current), now, accountId);
+    return this.getAccount(accountId);
   }
 
   countEligibleAccounts(jobId: number): number {
