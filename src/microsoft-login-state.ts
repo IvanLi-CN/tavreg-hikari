@@ -42,6 +42,21 @@ export interface MicrosoftKeepSignedInPromptInput {
   bodyText?: string;
 }
 
+export interface MicrosoftRecoveryChallengeInput {
+  configuredAddress?: string | null;
+  title?: string;
+  bodyText?: string;
+  controlText?: string;
+}
+
+export interface MicrosoftRecoveryChallengeState {
+  hintedMaskedEmail: string;
+  matchesConfiguredMailbox: boolean | null;
+  hasMismatchError: boolean;
+  hasPasswordFallback: boolean;
+  surfaceKind: MicrosoftRecoverySurfaceKind;
+}
+
 export interface MicrosoftProofSurfaceInput {
   url: string;
   title?: string;
@@ -70,6 +85,20 @@ function normalizeText(value: string | undefined | null): string {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function parseMaskedEmail(value: string | undefined | null): {
+  visibleLocal: string;
+  hasMask: boolean;
+  domain: string;
+} | null {
+  const match = normalizeText(value).match(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/i);
+  if (!match) return null;
+  return {
+    visibleLocal: (match[1] || "").toLowerCase(),
+    hasMask: !!match[2],
+    domain: (match[3] || "").toLowerCase(),
+  };
 }
 
 function buildUrlSignature(url: string): string {
@@ -218,6 +247,56 @@ export function classifyMicrosoftFlowInterrupt(input: {
     };
   }
   return null;
+}
+
+export function classifyMicrosoftRecoveryChallenge(
+  input: MicrosoftRecoveryChallengeInput,
+): MicrosoftRecoveryChallengeState {
+  const configured = parseMaskedEmail(input.configuredAddress);
+  const combinedText = normalizeText([input.title, input.bodyText, input.controlText].filter(Boolean).join(" "));
+  const matches = Array.from(combinedText.matchAll(/([a-z0-9._%+-]*)(\*+)?@([a-z0-9.-]+\.[a-z]{2,})/gi));
+  let hinted: { visibleLocal: string; hasMask: boolean; domain: string } | null = null;
+  for (const match of matches) {
+    const candidate = {
+      visibleLocal: (match[1] || "").toLowerCase(),
+      hasMask: !!match[2],
+      domain: (match[3] || "").toLowerCase(),
+    };
+    if (!hinted || candidate.hasMask) {
+      hinted = candidate;
+    }
+    if (candidate.hasMask) {
+      break;
+    }
+  }
+  const hasMismatchError =
+    /doesn[’']?t match the alternate email|correct email starts with|alternate email associated with your account|不匹配|正确的电子邮件|备用电子邮件/i.test(
+      combinedText,
+    );
+  const matchesConfiguredMailbox =
+    hinted && configured
+      ? hinted.domain === configured.domain && configured.visibleLocal.startsWith(hinted.visibleLocal)
+      : null;
+  const hasPasswordFallback =
+    /use\s+your\s+password|sign\s+in\s+with\s+password|使用密码|パスワードを使用する|パスワードでサインイン/i.test(
+      combinedText,
+    );
+  const surfaceKind = /help us protect your account|verify online|i don[’']?t have these any more|我不再拥有这些信息|オンラインで確認|これらはもうありません/i.test(
+    combinedText,
+  )
+    ? "identity_confirm"
+    : /verify your email|we[’']?ll send a code to|already received a code|验证你的电子邮件|メールをご確認ください|コードを送信します|既にコードを受け取りましたか/i.test(
+        combinedText,
+      )
+      ? "verify_email"
+      : "unknown";
+  return {
+    hintedMaskedEmail: hinted ? `${hinted.visibleLocal}${hinted.hasMask ? "***" : ""}@${hinted.domain}` : "",
+    matchesConfiguredMailbox: hasMismatchError ? false : matchesConfiguredMailbox,
+    hasMismatchError,
+    hasPasswordFallback,
+    surfaceKind,
+  };
 }
 
 export function buildMicrosoftPasswordSurfaceKey(input: {

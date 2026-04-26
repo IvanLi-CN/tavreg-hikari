@@ -4,6 +4,7 @@ import {
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftProofSurface,
+  classifyMicrosoftRecoveryChallenge,
   classifyMicrosoftPasswordError,
   getMicrosoftRecoveryTerminalErrorCode,
   isMicrosoftAuthorizeShellUnready,
@@ -268,6 +269,61 @@ describe("Microsoft login state", () => {
       onAddRoute: true,
       allowProvision: false,
     });
+  });
+
+  test("classifies login.live OAuth confirmation surfaces as confirm-email", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=3f026981-b1b0-4305-b12f-e60015126b8c",
+        title: "Verify your email",
+        bodyText:
+          "Verify your email. We'll send a code to no*****@mail.ivanli.asia. Already received a code? Use your password.",
+        hasConfirmationEmailInput: true,
+      }),
+    ).toMatchObject({
+      kind: "confirm_email",
+      onProofRoute: false,
+      allowProvision: false,
+    });
+  });
+
+  test("matches Microsoft recovery challenge against configured proof mailbox", () => {
+    expect(
+      classifyMicrosoftRecoveryChallenge({
+        configuredAddress: "noral18@mail.ivanli.asia",
+        title: "Verify your email",
+        bodyText: "We'll send a code to no*****@mail.ivanli.asia. To verify this is your email, enter it here.",
+        controlText: "Use your password",
+      }),
+    ).toMatchObject({
+      hintedMaskedEmail: "no***@mail.ivanli.asia",
+      matchesConfiguredMailbox: true,
+      hasPasswordFallback: true,
+      surfaceKind: "verify_email",
+    });
+  });
+
+  test("classifies configured proof mailbox mismatches as unknown recovery email", () => {
+    const challenge = classifyMicrosoftRecoveryChallenge({
+      configuredAddress: "noral18@mail.ivanli.asia",
+      title: "Verify your email",
+      bodyText: "We'll send a code to ab*****@mail.ivanli.asia. To verify this is your email, enter it here.",
+      controlText: "Use your password",
+    });
+
+    expect(challenge).toMatchObject({
+      hintedMaskedEmail: "ab***@mail.ivanli.asia",
+      matchesConfiguredMailbox: false,
+      hasPasswordFallback: true,
+      surfaceKind: "verify_email",
+    });
+    expect(
+      shouldClassifyMicrosoftUnknownRecoveryEmail({
+        surfaceKind: challenge.surfaceKind,
+        configuredMailboxMatchesChallenge: challenge.matchesConfiguredMailbox,
+        hasPasswordFallback: false,
+      }),
+    ).toBe(true);
   });
 
   test("keeps legacy confirmation copy markers routed to confirm-email", () => {

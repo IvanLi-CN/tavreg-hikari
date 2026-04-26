@@ -399,14 +399,17 @@ test("microsoft account picker only acts on real picker surfaces and ignores rec
 
 test("microsoft login waits out the post-email password window before touching the account picker again", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
-  const start = source.indexOf("if (await handleMicrosoftUsePasswordShortcut");
-  const end = source.indexOf("if (await handleMicrosoftProofAddPrompt");
+  const start = source.indexOf("if (await handleMicrosoftPasswordPrompt");
+  const end = source.indexOf("if (proofSurface.kind === \"unclassified\" && proofSurface.onProofRoute)");
   const segment = source.slice(start, end);
   expect(segment.indexOf("if (await handleMicrosoftPasswordPrompt(page, password, passwordState))")).toBeLessThan(
     segment.indexOf("if (\n        proofState.postEmailPasswordPriorityUntil"),
   );
   expect(segment.indexOf("if (\n        proofState.postEmailPasswordPriorityUntil")).toBeLessThan(
     segment.indexOf("if (await handleMicrosoftAccountPicker(page, email)) continue;"),
+  );
+  expect(segment.indexOf("if (await handleMicrosoftProofConfirmationEmailPrompt")).toBeLessThan(
+    segment.indexOf("if (await handleMicrosoftUsePasswordShortcut"),
   );
 });
 

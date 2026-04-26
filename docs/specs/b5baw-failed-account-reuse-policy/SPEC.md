@@ -4,13 +4,14 @@
 
 - Status: 已完成
 - Created: 2026-03-28
-- Last: 2026-03-29
+- Last: 2026-04-26
 
 ## 背景 / 问题陈述
 
 - 现有调度逻辑把“failed 账号是否还能在后续任务复用”混在多个状态字段与隐式副作用里，导致失败的微软账号一旦落成某些状态，即使只是瞬时失败，也可能长期留在候选池外。
 - 自动化流程会把密码错误、账号锁定、未知辅助邮箱等“硬账号错误”写进 `disabled_*`，这让人工停用与自动化阻断语义混杂，UI 也无法明确区分“人工停用”“瞬时失败可复用”“硬阻断需修复”。
 - 当前账号修复入口分散在密码导入、Proof 邮箱保存与“恢复可用”按钮，但它们没有统一清除阻断的行为约束，导致账号修好后仍可能继续被调度层忽略。
+- Microsoft OAuth confirm-email proof surface 可能直接暴露 masked recovery mailbox；当该 mailbox 与账号配置不匹配时，这属于账号数据不可自动恢复的问题，应复用 `microsoft_unknown_recovery_email` 硬阻断，而不是作为普通登录阶段超时继续重试。
 
 ## 目标 / 非目标
 
@@ -72,6 +73,7 @@
 
 - 自动化运行失败时：
   - 若错误码属于硬账号阻断，则写入 `skip_reason`，并把 `last_result_status` 收敛为 `disabled`。
+  - 若 Microsoft proof confirmation handler 抛出 `microsoft_unknown_recovery_email:<masked>`，则按 `microsoft_unknown_recovery_email` 写入 `skip_reason`，并保留 masked mailbox 作为排障上下文。
   - 若错误码属于瞬时失败，例如 `network_connection_closed`、代理故障、浏览器异常、`microsoft_auth_try_again_later`、`microsoft_password_rate_limited`，则保留 `skip_reason = null`。
 - 人工停用状态优先级高于自动化失败写入；自动化失败不得清空或改写既有 `disabled_*`。
 
@@ -99,6 +101,7 @@
 - Given 某账号在 job A 因 `network_connection_closed`、代理、浏览器或临时风控失败，When 创建 job B，Then 该账号会重新计入 `eligibleCount` 并可再次被派发。
 - Given 某账号已经在当前 job 里因瞬时错误失败过，When 当前 job 继续调度，Then 该账号会重新计入 `eligibleCount` 并允许再次派发。
 - Given 某账号失败码为 `microsoft_password_incorrect`、`microsoft_account_locked` 或 `microsoft_unknown_recovery_email`，When 创建新 job，Then 该账号不会进入候选池，且账号页会显示明确阻断原因。
+- Given Microsoft OAuth confirm-email proof surface 提供的 masked recovery mailbox 与账号配置不匹配，When 自动化失败落盘，Then 账号写入 `skip_reason=microsoft_unknown_recovery_email` 并从后续 Tavily job 候选池中排除。
 - Given 操作者更新了密码、保存了正确的 Proof 邮箱，或点击“恢复可用”，When 刷新账号列表并创建新 job，Then 对应阻断会被清除，账号重新可调度。
 - Given 账号被人工停用，When 自动化再写失败结果，Then 人工停用状态不会被覆盖，且仍优先阻止调度。
 - Given UI 文案与状态展示发生变化，When 执行 `bun test`、`bun run typecheck`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
@@ -157,3 +160,4 @@
 - 2026-03-29: 重新截取账号状态矩阵与阻断入口证据，并补充 Dashboard 运行中 Attempts 在长邮箱 / IPv6 场景下无横向滚动的界面图。
 - 2026-03-29: 完成 PR 收敛前最终验证与 Spec 状态收口，准备合并并执行后续收尾。
 - 2026-03-29: 修正瞬时失败账号的同 job 复用规则，改为同 job 与新 job 都允许继续重试，仅对成功、租用中、人工停用与硬账号阻断维持不可调度。
+- 2026-04-26: 明确 Tavily OAuth confirm-email proof mailbox mismatch 复用 `microsoft_unknown_recovery_email` 硬阻断，避免账号在后续 job 中反复租用。
