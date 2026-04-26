@@ -9,7 +9,7 @@ import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMa
 import { assertUsableFingerprintChromiumExecutablePath } from "../fingerprint-browser.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
-import { completeMicrosoftLogin, launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
+import { completeMicrosoftLogin, isMicrosoftLoginFlowUrl, launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
 import {
   waitForMicrosoftMailboxVerificationCode,
 } from "./microsoft-mailbox-verification.js";
@@ -553,6 +553,50 @@ async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
     /sign in with microsoft/i,
     /^microsoft$/i,
   ]);
+}
+
+function watchMicrosoftProviderNavigation(page: any): { sawMicrosoftNavigation: () => boolean; dispose: () => void } {
+  let observed = false;
+  const mark = (rawUrl: string): void => {
+    if (!observed && isMicrosoftLoginFlowUrl(rawUrl)) {
+      observed = true;
+    }
+  };
+  const handlers = {
+    framenavigated: (frame: any) => {
+      try {
+        mark(String(frame?.url?.() || ""));
+      } catch {}
+    },
+    request: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+    response: (response: any) => {
+      try {
+        mark(String(response?.url?.() || ""));
+      } catch {}
+    },
+    requestfailed: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+  } as const;
+  page.on("framenavigated", handlers.framenavigated);
+  page.on("request", handlers.request);
+  page.on("response", handlers.response);
+  page.on("requestfailed", handlers.requestfailed);
+  return {
+    sawMicrosoftNavigation: () => observed || isMicrosoftLoginFlowUrl(String(page.url?.() || "")),
+    dispose: () => {
+      page.off?.("framenavigated", handlers.framenavigated);
+      page.off?.("request", handlers.request);
+      page.off?.("response", handlers.response);
+      page.off?.("requestfailed", handlers.requestfailed);
+    },
+  };
 }
 
 function getRetainPath(): string | null {
@@ -1696,14 +1740,19 @@ async function run(): Promise<void> {
     });
     if (authProvider === "microsoft") {
       failureStage = "oauth_microsoft_provider";
+      const microsoftNavigationWatcher = watchMicrosoftProviderNavigation(page);
       const clickedMicrosoftProvider = await clickMicrosoftProviderEntry(page);
       if (!clickedMicrosoftProvider) {
+        microsoftNavigationWatcher.dispose();
         throw new Error("chatgpt_microsoft_provider_missing");
       }
       await page.waitForTimeout(1200);
+      const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();
+      microsoftNavigationWatcher.dispose();
       page = await completeMicrosoftLogin(page, cfg, mihomo.proxyServer, {
         completionUrlPatterns: buildChatGptMicrosoftCompletionUrlPatterns(),
         passkeyRecoveryUrl: authorizeUrl,
+        assumeVisitedMicrosoftAccountSurface: providerNavigationObserved,
       });
       await writeStageMarker(outputDir, "oauth:microsoft_completed", {
         currentUrl: String(page.url() || ""),

@@ -258,3 +258,11 @@ test("chatgpt microsoft completion patterns match the localhost callback", () =>
   expect(patterns).toHaveLength(2);
   expect(patterns[1]?.test("http://localhost:1455/auth/callback?code=demo&state=abc")).toBe(true);
 });
+
+test("chatgpt microsoft provider flow preserves fast callback navigation evidence", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/server/chatgpt-worker.ts", import.meta.url), "utf8");
+  expect(source).toContain("function watchMicrosoftProviderNavigation(page: any)");
+  expect(source).toContain("const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();");
+  expect(source).toContain("assumeVisitedMicrosoftAccountSurface: providerNavigationObserved");
+});

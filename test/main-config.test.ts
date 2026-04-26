@@ -455,7 +455,8 @@ test("home stabilization gives Tavily auth APIs extra time after Microsoft retur
 test("microsoft login returns Tavily social-signup continuations instead of re-submitting the provider", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {");
-  expect(source).toContain("let visitedMicrosoftAccountSurface = isMicrosoftLoginFlowUrl(String(page.url?.() || \"\"));");
+  expect(source).toContain("assumeVisitedMicrosoftAccountSurface?: boolean;");
+  expect(source).toContain("Boolean(options?.assumeVisitedMicrosoftAccountSurface) || isMicrosoftLoginFlowUrl(String(page.url?.() || \"\"))");
   expect(source).toContain("page.on(\"request\", microsoftFlowObservers.request);");
   expect(source).toContain("page.on(\"response\", microsoftFlowObservers.response);");
   expect(source).toContain("const hasCompleted = (url: string): boolean =>");

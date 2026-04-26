@@ -16,6 +16,7 @@ import {
   dispatchEnterViaCdp,
   dispatchMouseClickViaCdp,
   ensureManagedChallengeTokenBeforeSubmit,
+  isMicrosoftLoginFlowUrl,
   launchBrowserWithEngine,
   launchNativeChromeCdp,
   loadConfig,
@@ -485,6 +486,50 @@ async function clickMicrosoftProviderEntry(page: any): Promise<boolean> {
     /sign in with microsoft/i,
     /^microsoft$/i,
   ]);
+}
+
+function watchMicrosoftProviderNavigation(page: any): { sawMicrosoftNavigation: () => boolean; dispose: () => void } {
+  let observed = false;
+  const mark = (rawUrl: string): void => {
+    if (!observed && isMicrosoftLoginFlowUrl(rawUrl)) {
+      observed = true;
+    }
+  };
+  const handlers = {
+    framenavigated: (frame: any) => {
+      try {
+        mark(String(frame?.url?.() || ""));
+      } catch {}
+    },
+    request: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+    response: (response: any) => {
+      try {
+        mark(String(response?.url?.() || ""));
+      } catch {}
+    },
+    requestfailed: (request: any) => {
+      try {
+        mark(String(request?.url?.() || ""));
+      } catch {}
+    },
+  } as const;
+  page.on("framenavigated", handlers.framenavigated);
+  page.on("request", handlers.request);
+  page.on("response", handlers.response);
+  page.on("requestfailed", handlers.requestfailed);
+  return {
+    sawMicrosoftNavigation: () => observed || isMicrosoftLoginFlowUrl(String(page.url?.() || "")),
+    dispose: () => {
+      page.off?.("framenavigated", handlers.framenavigated);
+      page.off?.("request", handlers.request);
+      page.off?.("response", handlers.response);
+      page.off?.("requestfailed", handlers.requestfailed);
+    },
+  };
 }
 
 function getRetainPath(): string | null {
@@ -2628,11 +2673,15 @@ async function run(): Promise<void> {
     if (authProvider === "microsoft") {
       const microsoftVerificationNotBefore = nowIso();
       failureStage = "accounts_open_microsoft_login";
+      const microsoftNavigationWatcher = watchMicrosoftProviderNavigation(page);
       const clickedMicrosoft = await clickMicrosoftProviderEntry(page);
       if (!clickedMicrosoft) {
+        microsoftNavigationWatcher.dispose();
         throw new Error("grok_microsoft_entry_missing");
       }
       await writeStageMarker(outputDir, "accounts:microsoft_entry_opened", {});
+      const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();
+      microsoftNavigationWatcher.dispose();
       page = await completeMicrosoftLogin(page, cfg, mihomo.proxyServer, {
         completionUrlPatterns: [
           /^https:\/\/accounts\.x\.ai/i,
@@ -2640,6 +2689,7 @@ async function run(): Promise<void> {
           /^https:\/\/x\.ai/i,
         ],
         passkeyRecoveryUrl: GROK_SIGNUP_URL,
+        assumeVisitedMicrosoftAccountSurface: providerNavigationObserved,
       });
       await page.waitForLoadState("domcontentloaded", { timeout: 45_000 }).catch(() => {});
       await writeStageMarker(outputDir, "accounts:microsoft_login_completed", {

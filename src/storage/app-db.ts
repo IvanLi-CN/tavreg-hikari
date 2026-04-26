@@ -2595,8 +2595,9 @@ export class AppDatabase {
     autoExtractAccountType?: AccountExtractorAccountType;
   }): JobRecord {
     const site = input.site || "tavily";
+    const hidden = input.payloadJson?.hidden === true;
     const active = this.getCurrentJob(site);
-    if (active && ["running", "paused", "stopping", "force_stopping", "completing"].includes(active.status)) {
+    if (!hidden && active && ["running", "paused", "stopping", "force_stopping", "completing"].includes(active.status)) {
       throw new Error(`active job exists for site=${site}: ${active.id}`);
     }
     const now = nowIso();

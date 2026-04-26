@@ -6729,9 +6729,10 @@ async function handleMicrosoftProofCodePrompt(
 export interface MicrosoftLoginCompletionOptions {
   completionUrlPatterns?: RegExp[];
   passkeyRecoveryUrl?: string;
+  assumeVisitedMicrosoftAccountSurface?: boolean;
 }
 
-function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {
+export function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {
   return /login\.live\.com|account\.live\.com|login\.microsoft\.com|login\.microsoftonline\.com|(?:^|\/\/)[a-z0-9.-]+\.b2clogin\.com(?:\/|$)/i.test(
     rawUrl,
   );
@@ -6796,7 +6797,8 @@ export async function completeMicrosoftLogin(
   page.on("dialog", dialogHandler);
   const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
   const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
-  let visitedMicrosoftAccountSurface = isMicrosoftLoginFlowUrl(String(page.url?.() || ""));
+  let visitedMicrosoftAccountSurface =
+    Boolean(options?.assumeVisitedMicrosoftAccountSurface) || isMicrosoftLoginFlowUrl(String(page.url?.() || ""));
   const markVisitedMicrosoftAccountSurface = (rawUrl: string): void => {
     if (!visitedMicrosoftAccountSurface && isMicrosoftLoginFlowUrl(rawUrl)) {
       visitedMicrosoftAccountSurface = true;

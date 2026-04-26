@@ -259,5 +259,8 @@ describe("grok mail service", () => {
     expect(source).toContain('accounts:profile_completion_after_microsoft');
     expect(source).toContain("const microsoftVerificationNotBefore = nowIso();");
     expect(source).toContain("notBefore: microsoftVerificationNotBefore");
+    expect(source).toContain("function watchMicrosoftProviderNavigation(page: any)");
+    expect(source).toContain("const providerNavigationObserved = microsoftNavigationWatcher.sawMicrosoftNavigation();");
+    expect(source).toContain("assumeVisitedMicrosoftAccountSurface: providerNavigationObserved");
   });
 });

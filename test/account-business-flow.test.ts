@@ -154,11 +154,14 @@ test("microsoft account business flow prefers Bun-hosted worker runtime when the
 
 test("single-account business flows lease the account and clean up hidden setup failures", async () => {
   const { readFile } = await import("node:fs/promises");
-  const source = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
-  expect(source).toContain("leaseAccountForJob");
-  expect(source).toContain("releaseAccountLease");
-  expect(source).toContain("rollbackAttemptBeforeLaunch");
-  expect(source).toContain('site: "microsoft"');
+  const flowSource = await readFile(new URL("../src/server/account-business-flow.ts", import.meta.url), "utf8");
+  const dbSource = await readFile(new URL("../src/storage/app-db.ts", import.meta.url), "utf8");
+  expect(flowSource).toContain("leaseAccountForJob");
+  expect(flowSource).toContain("releaseAccountLease");
+  expect(flowSource).toContain("rollbackAttemptBeforeLaunch");
+  expect(flowSource).toContain('site: "microsoft"');
+  expect(dbSource).toContain("const hidden = input.payloadJson?.hidden === true;");
+  expect(dbSource).toContain('if (!hidden && active && ["running", "paused", "stopping", "force_stopping", "completing"].includes(active.status))');
 });
 
 test("single-account flow lease accepts linked Microsoft accounts", async () => {
