@@ -197,6 +197,7 @@ export interface AppSettings extends Record<string, unknown> {
   microsoftGraphClientSecret: string;
   microsoftGraphRedirectUri: string;
   microsoftGraphAuthority: string;
+  upstreamTavregSyncEnabled: boolean;
   upstreamTavregBaseUrl: string;
   upstreamTavregApiKey: string;
   upstreamTavregWriteback: "off" | "success_only";

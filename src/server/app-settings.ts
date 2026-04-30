@@ -61,6 +61,9 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
     const normalizedAuthority = input.microsoftGraphAuthority.trim().replace(/^\/+|\/+$/g, "");
     next.microsoftGraphAuthority = normalizedAuthority || "common";
   }
+  if (typeof input.upstreamTavregSyncEnabled === "boolean") {
+    next.upstreamTavregSyncEnabled = input.upstreamTavregSyncEnabled;
+  }
   if (typeof input.upstreamTavregBaseUrl === "string") next.upstreamTavregBaseUrl = input.upstreamTavregBaseUrl.trim();
   if (typeof input.upstreamTavregApiKey === "string") next.upstreamTavregApiKey = input.upstreamTavregApiKey.trim();
   if (input.upstreamTavregWriteback === "success_only" || input.upstreamTavregWriteback === "off") {

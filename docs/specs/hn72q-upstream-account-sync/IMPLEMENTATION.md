@@ -9,6 +9,7 @@
 ## Coverage / rollout summary
 
 - 新增本地 upstream sync API、`/settings` 持久化配置入口与 `/accounts` 手动同步入口。
+- `/settings` 使用显式同步开关控制本地是否访问线上实例；API key 输入为空时保留已保存 key，不提供清除 key 功能。
 - 扩展 integration v1 账号读契约与 Tavily success writeback。
 - 新增 SQLite 上游映射字段、同步 repository 方法与 service access snapshot 导入。
 - Storybook 覆盖 `/settings` 同步配置状态与 `/accounts` 同步 idle/loading/success/error 状态。

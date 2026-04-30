@@ -263,9 +263,9 @@ const DEFAULT_UPSTREAM_TAVREG_BASE_URL = "https://tavreg-hikari.ivanli.cc";
 
 function createUpstreamSyncSettingsDraft(settings: UpstreamSyncSettings | null): UpstreamSyncSettingsUpdate {
   return {
+    enabled: settings?.enabled ?? false,
     baseUrl: settings?.baseUrl || DEFAULT_UPSTREAM_TAVREG_BASE_URL,
     apiKey: "",
-    clearApiKey: false,
     writeback: settings?.writeback || "off",
   };
 }
@@ -603,7 +603,7 @@ export function App() {
     const payload = await api<UpstreamSyncSettingsPayload>("/api/upstream-sync/settings");
     setUpstreamSyncSettings(payload.settings);
     setUpstreamSyncSettingsDraft((current) =>
-      current.apiKey || current.clearApiKey ? current : createUpstreamSyncSettingsDraft(payload.settings),
+      current.apiKey ? current : createUpstreamSyncSettingsDraft(payload.settings),
     );
   };
   const refreshAccounts = async (nextQuery = accountQuery) => {
@@ -1006,9 +1006,9 @@ export function App() {
       const payload = await api<UpstreamSyncSettingsPayload>("/api/upstream-sync/settings", {
         method: "POST",
         body: JSON.stringify({
+          enabled: upstreamSyncSettingsDraft.enabled,
           baseUrl: upstreamSyncSettingsDraft.baseUrl.trim(),
           apiKey: upstreamSyncSettingsDraft.apiKey.trim(),
-          clearApiKey: upstreamSyncSettingsDraft.clearApiKey,
           writeback: upstreamSyncSettingsDraft.writeback,
         }),
       });
@@ -2576,6 +2576,7 @@ export function App() {
               batchBootstrapPreview={batchBootstrapPreview}
               batchBootstrapPreviewBusy={batchBootstrapPreviewBusy}
               activeBatchBootstrapMode={activeBatchBootstrapMode}
+              upstreamSyncAvailable={Boolean(upstreamSyncSettings?.enabled && upstreamSyncSettings.hasApiKey)}
               upstreamSyncState={upstreamAccountSync}
               extractorSettings={extractorSettings}
               extractorSettingsBusy={extractorSettingsBusy}

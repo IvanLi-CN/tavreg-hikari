@@ -41,6 +41,7 @@ const sampleRows = [
 ];
 
 const sampleUpstreamSyncSettings: UpstreamSyncSettings = {
+  enabled: true,
   baseUrl: "https://tavreg-hikari.ivanli.cc",
   apiKeyMasked: "thki_live_••••••9q2p",
   hasApiKey: true,
@@ -50,9 +51,9 @@ const sampleUpstreamSyncSettings: UpstreamSyncSettings = {
 
 function createUpstreamSyncDraft(settings: UpstreamSyncSettings | null): UpstreamSyncSettingsUpdate {
   return {
+    enabled: settings?.enabled ?? false,
     baseUrl: settings?.baseUrl || "https://tavreg-hikari.ivanli.cc",
     apiKey: "",
-    clearApiKey: false,
     writeback: settings?.writeback || "off",
   };
 }
@@ -77,11 +78,12 @@ function InteractivePreview() {
       onSaveUpstreamSyncSettings={async () => {
         setUpstreamSyncBusy(true);
         const next: UpstreamSyncSettings = {
+          enabled: upstreamSyncDraft.enabled,
           baseUrl: upstreamSyncDraft.baseUrl.trim(),
           apiKeyMasked: upstreamSyncDraft.apiKey.trim() ? "thki_live_••••••new" : upstreamSyncSettings.apiKeyMasked,
-          hasApiKey: upstreamSyncDraft.clearApiKey ? false : upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim()),
+          hasApiKey: upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim()),
           writeback: upstreamSyncDraft.writeback,
-          configured: upstreamSyncDraft.clearApiKey ? false : upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim()),
+          configured: upstreamSyncDraft.enabled && (upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim())),
         };
         setUpstreamSyncSettings(next);
         setUpstreamSyncDraft(createUpstreamSyncDraft(next));
@@ -301,12 +303,18 @@ export const UpstreamSyncSettingsPlay: Story = {
     await expect(card.getByText("线上数据同步")).toBeInTheDocument();
     await userEvent.clear(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"));
     await userEvent.type(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"), "https://tavreg-hikari.ivanli.cc/");
-    const writebackToggle = card.getAllByRole("checkbox")[0]!;
+    const syncToggle = card.getAllByRole("checkbox")[0]!;
+    if (syncToggle.getAttribute("data-state")?.includes("checked")) {
+      await userEvent.click(syncToggle);
+      await expect(card.getByText("同步已关闭")).toBeInTheDocument();
+      await userEvent.click(syncToggle);
+    }
+    const writebackToggle = card.getAllByRole("checkbox")[1]!;
     if (!writebackToggle.getAttribute("data-state")?.includes("checked")) {
       await userEvent.click(writebackToggle);
     }
     await userEvent.click(card.getByRole("button", { name: "保存同步设置" }));
-    await expect(card.getByText("success-only writeback")).toBeInTheDocument();
-    await expect(card.getByText("已配置")).toBeInTheDocument();
+    await expect(card.getByText("同步已开启")).toBeInTheDocument();
+    await expect(card.getByText("key 已保存")).toBeInTheDocument();
   },
 };

@@ -31,6 +31,7 @@ function createSettings(): AppSettings {
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
     upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+    upstreamTavregSyncEnabled: false,
     upstreamTavregApiKey: "",
     upstreamTavregWriteback: "off",
   };

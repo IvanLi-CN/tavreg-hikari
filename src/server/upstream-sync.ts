@@ -9,6 +9,7 @@ export const DEFAULT_UPSTREAM_TAVREG_BASE_URL = "https://tavreg-hikari.ivanli.cc
 export type UpstreamTavregWritebackMode = "off" | "success_only";
 
 export interface UpstreamSyncConfig {
+  enabled: boolean;
   baseUrl: string;
   apiKey: string;
   writeback: UpstreamTavregWritebackMode;
@@ -16,7 +17,7 @@ export interface UpstreamSyncConfig {
 
 export type UpstreamSyncSettingsInput = Pick<
   AppSettings,
-  "upstreamTavregBaseUrl" | "upstreamTavregApiKey" | "upstreamTavregWriteback"
+  "upstreamTavregSyncEnabled" | "upstreamTavregBaseUrl" | "upstreamTavregApiKey" | "upstreamTavregWriteback"
 >;
 
 export interface UpstreamAccountSyncSummary {
@@ -63,6 +64,7 @@ export function normalizeUpstreamWritebackMode(value: unknown): UpstreamTavregWr
 
 export function buildUpstreamSyncConfig(settings: Partial<UpstreamSyncSettingsInput>): UpstreamSyncConfig {
   return {
+    enabled: settings.upstreamTavregSyncEnabled === true,
     baseUrl: normalizeUpstreamBaseUrl(settings.upstreamTavregBaseUrl),
     apiKey: String(settings.upstreamTavregApiKey || "").trim(),
     writeback: normalizeUpstreamWritebackMode(settings.upstreamTavregWriteback),
@@ -177,6 +179,9 @@ export async function syncAccountsFromUpstream(
   if (!config) {
     throw new Error("upstream sync settings are required");
   }
+  if (!config.enabled) {
+    throw new Error("upstream sync is disabled");
+  }
   if (!config.apiKey) {
     throw new Error("upstream sync API key is not configured");
   }
@@ -236,6 +241,9 @@ export async function writeBackUpstreamTavilySuccess(
   const config = options.config;
   if (!config) {
     return { ok: true, skipped: true, reason: "settings_missing" };
+  }
+  if (!config.enabled) {
+    return { ok: true, skipped: true, reason: "sync_disabled" };
   }
   if (config.writeback !== "success_only") {
     return { ok: true, skipped: true, reason: "writeback_disabled" };

@@ -129,6 +129,7 @@ const baseArgs = {
   batchBootstrapPreview: null,
   batchBootstrapPreviewBusy: false,
   activeBatchBootstrapMode: null,
+  upstreamSyncAvailable: true,
   upstreamSyncState: { status: "idle", payload: null, error: null } as UpstreamSyncStoryState,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
@@ -308,6 +309,7 @@ type AccountsStorySurfaceProps = {
   graphSettingsConfigured?: boolean;
   connectingAccountIds?: number[];
   initialDesktopToolsCollapsed?: boolean;
+  upstreamSyncAvailable?: boolean;
   upstreamSyncState?: UpstreamSyncStoryState;
   onConnectAccount?: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
@@ -500,6 +502,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         batchBootstrapPreview={batchBootstrapPreview}
         batchBootstrapPreviewBusy={false}
         activeBatchBootstrapMode={null}
+        upstreamSyncAvailable={props.upstreamSyncAvailable ?? true}
         upstreamSyncState={props.upstreamSyncState ?? { status: "idle", payload: null, error: null }}
         initialDesktopToolsCollapsed={props.initialDesktopToolsCollapsed}
         extractorSettings={extractorSettings}

@@ -50,7 +50,7 @@
 
 ## 本地同步线上账号池
 
-- 先在本地 `/settings` 的“线上数据同步”卡片保存线上地址、production integration API key 与回写模式。
+- 先在本地 `/settings` 的“线上数据同步”卡片开启同步，并保存线上地址、production integration API key 与回写模式。
 - 本地 `/accounts` 的“从线上同步”按钮会调用 `POST /api/upstream-sync/accounts`，并按本地设置请求线上 `/api/integration/v1/microsoft-accounts`。
 - 回写模式设为 `success_only` 后，本地 Tavily 单账号或批量 attempt 成功时只回写成功结果；失败、禁用、分组编辑、密码编辑不会回写线上。
 - 同步不会复制线上 SQLite 或 Chrome profile。本地会保留自己的 `account_browser_sessions.profile_path` 与 session 状态，新同步账号仍需要在本机 bootstrap 或复用本机已有 profile。

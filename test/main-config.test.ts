@@ -245,6 +245,7 @@ test("upstream account sync is configured through persisted settings routes", as
   const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   expect(source).toContain('if (pathname === "/api/upstream-sync/settings" && req.method === "GET")');
   expect(source).toContain('if (pathname === "/api/upstream-sync/settings" && req.method === "POST")');
+  expect(source).toContain("upstreamTavregSyncEnabled");
   expect(source).toContain("upstreamTavregApiKey");
   expect(source).not.toContain("process.env.UPSTREAM_TAVREG");
 });

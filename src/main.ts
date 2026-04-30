@@ -2814,6 +2814,7 @@ async function syncLinkedMicrosoftAccountOutcome(
             writeBackUpstreamTavilySuccess,
           } = await import("./server/upstream-sync.js");
           const upstreamSettings = db.getSettings({
+            upstreamTavregSyncEnabled: false,
             upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
             upstreamTavregApiKey: "",
             upstreamTavregWriteback: "off" as const,

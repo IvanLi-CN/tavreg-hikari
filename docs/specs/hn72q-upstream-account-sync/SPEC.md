@@ -33,6 +33,9 @@
 ## 配置契约
 
 - 本地 `/settings` 提供“线上数据同步”设置卡片，所有 upstream sync 配置都保存到 `app_settings`，不通过环境变量配置。
+- `upstreamTavregSyncEnabled`
+  - 默认：`false`
+  - 关闭时，本地手动同步与 Tavily 成功回写都不访问线上实例。
 - `upstreamTavregBaseUrl`
   - 默认：`https://tavreg-hikari.ivanli.cc`
   - 用于本地同步与成功回写的线上实例 base URL。
@@ -57,7 +60,7 @@
   - 行为：返回 base URL、masked API key、是否已配置与当前回写模式。
 - `POST /api/upstream-sync/settings`
   - 范围：`internal`
-  - 行为：保存 base URL、API key、清除 API key 标记与回写模式。
+  - 行为：保存启用开关、base URL、API key 与回写模式；空 API key 表示保留已保存 key，不提供清除 key 功能。
 
 ### Integration v1 read API
 
@@ -85,10 +88,11 @@
 
 ## 验收标准
 
-- Given 本地配置了有效 upstream API key，When 在 `/accounts` 点击“从线上同步”，Then 本地账号池出现线上账号、分组、proof mailbox、Tavily key 与服务摘要。
+- Given 本地启用了 upstream sync 且配置了有效 API key，When 在 `/accounts` 点击“从线上同步”，Then 本地账号池出现线上账号、分组、proof mailbox、Tavily key 与服务摘要。
 - Given 线上账号有 ready session，When 同步到本地，Then 本地 session 不会被标为 ready，仍需本地 bootstrap/profile。
-- Given 本地 Tavily 单账号或批量 attempt 成功，When settings 中 `upstreamTavregWriteback=success_only`，Then 成功结果回写线上并按账号 id + email 校验。
+- Given 本地 Tavily 单账号或批量 attempt 成功，When settings 中 `upstreamTavregSyncEnabled=true` 且 `upstreamTavregWriteback=success_only`，Then 成功结果回写线上并按账号 id + email 校验。
 - Given 上游认证失败或配置缺失，When 点击同步，Then UI 显示失败原因且本地账号池不被破坏。
+- Given `upstreamTavregSyncEnabled=false`，When 点击同步或本地 Tavily 成功，Then 本地不会向线上实例发起同步或回写请求。
 - Given 写回失败，When 本地 attempt 已成功，Then 本地 key 与 service snapshot 保留，attempt 不回滚。
 
 ## 非功能性验收 / 质量门槛
@@ -102,7 +106,7 @@
 - source_type: storybook_canvas
   story_id_or_title: `Views/ApiAccessSettingsView/UpstreamSyncSettingsPlay`
   scenario: `/settings` upstream sync configuration
-  evidence_note: settings page contains persisted production URL, API key state, clear-key control, and success-only writeback toggle.
+  evidence_note: settings page contains persisted enable switch, production URL, API key state, and success-only writeback toggle.
 
 ![线上数据同步设置](./assets/accounts-upstream-sync-settings.png)
 

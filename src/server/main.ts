@@ -344,12 +344,14 @@ function serializeMicrosoftGraphSettings(settings: AppSettings) {
 
 function serializeUpstreamSyncSettings(settings: AppSettings) {
   const config = buildUpstreamSyncConfig(settings);
+  const hasApiKey = Boolean(config.apiKey);
   return {
+    enabled: config.enabled,
     baseUrl: config.baseUrl,
     apiKeyMasked: config.apiKey ? maskSecret(config.apiKey) : "",
-    hasApiKey: Boolean(config.apiKey),
+    hasApiKey,
     writeback: config.writeback,
-    configured: Boolean(config.apiKey),
+    configured: config.enabled && hasApiKey,
   };
 }
 
@@ -381,6 +383,7 @@ function buildSettingsCodeDefaults(): AppSettings {
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    upstreamTavregSyncEnabled: false,
     upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
     upstreamTavregApiKey: "",
     upstreamTavregWriteback: "off",
@@ -420,6 +423,7 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     microsoftGraphClientSecret: (process.env.MICROSOFT_GRAPH_CLIENT_SECRET || "").trim(),
     microsoftGraphRedirectUri: (process.env.MICROSOFT_GRAPH_REDIRECT_URI || "").trim(),
     microsoftGraphAuthority: (process.env.MICROSOFT_GRAPH_AUTHORITY || baseDefaults.microsoftGraphAuthority).trim() || "common",
+    upstreamTavregSyncEnabled: baseDefaults.upstreamTavregSyncEnabled,
     upstreamTavregBaseUrl: baseDefaults.upstreamTavregBaseUrl,
     upstreamTavregApiKey: baseDefaults.upstreamTavregApiKey,
     upstreamTavregWriteback: baseDefaults.upstreamTavregWriteback,
@@ -1975,16 +1979,13 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/upstream-sync/settings" && req.method === "POST") {
         const body = (await req.json().catch(() => null)) as {
+          enabled?: unknown;
           baseUrl?: unknown;
           apiKey?: unknown;
-          clearApiKey?: unknown;
           writeback?: unknown;
         } | null;
         const current = readSettings();
         let nextApiKey = current.upstreamTavregApiKey;
-        if (body?.clearApiKey === true) {
-          nextApiKey = "";
-        }
         if (typeof body?.apiKey === "string" && body.apiKey.trim()) {
           nextApiKey = body.apiKey.trim();
         }
@@ -1999,6 +2000,8 @@ async function main(): Promise<void> {
         }
 
         const next = buildNextSettings(current, {
+          upstreamTavregSyncEnabled:
+            typeof body?.enabled === "boolean" ? body.enabled : current.upstreamTavregSyncEnabled,
           upstreamTavregBaseUrl: nextBaseUrl,
           upstreamTavregApiKey: nextApiKey,
           upstreamTavregWriteback: normalizeUpstreamWritebackMode(body?.writeback ?? current.upstreamTavregWriteback),

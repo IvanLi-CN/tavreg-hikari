@@ -359,6 +359,7 @@ describe("integration api", () => {
       microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
       microsoftGraphAuthority: "common",
       upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+      upstreamTavregSyncEnabled: false,
       upstreamTavregApiKey: "",
       upstreamTavregWriteback: "off",
     };
@@ -461,6 +462,7 @@ describe("integration api", () => {
       microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
       microsoftGraphAuthority: "common",
       upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+      upstreamTavregSyncEnabled: false,
       upstreamTavregApiKey: "",
       upstreamTavregWriteback: "off",
     };

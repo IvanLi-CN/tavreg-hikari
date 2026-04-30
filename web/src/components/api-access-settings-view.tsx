@@ -123,16 +123,14 @@ export function ApiAccessSettingsView(props: {
               <CloudDownload className="size-5 text-cyan-200" aria-hidden="true" />
               线上数据同步
             </CardTitle>
-            <CardDescription>
-              配置本地实例访问线上 integration API；账号页会按这里保存的设置拉取账号池与成功回写。
-            </CardDescription>
+            <CardDescription>本地账号页使用这组 integration API 设置拉取线上账号池；关闭后不会访问线上。</CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Badge variant={props.upstreamSyncSettings?.configured ? "success" : "warning"}>
-              {props.upstreamSyncSettings?.configured ? "已配置" : "待配置"}
+            <Badge variant={props.upstreamSyncDraft.enabled ? "success" : "neutral"}>
+              {props.upstreamSyncDraft.enabled ? "同步已开启" : "同步已关闭"}
             </Badge>
-            <Badge variant={props.upstreamSyncDraft.writeback === "success_only" ? "success" : "neutral"}>
-              {props.upstreamSyncDraft.writeback === "success_only" ? "success-only writeback" : "writeback off"}
+            <Badge variant={props.upstreamSyncSettings?.hasApiKey ? "success" : "warning"}>
+              {props.upstreamSyncSettings?.hasApiKey ? "key 已保存" : "缺少 key"}
             </Badge>
           </div>
         </CardHeader>
@@ -153,12 +151,7 @@ export function ApiAccessSettingsView(props: {
                 type="password"
                 value={props.upstreamSyncDraft.apiKey}
                 disabled={props.upstreamSyncBusy}
-                onChange={(event) =>
-                  props.onUpstreamSyncDraftChange({
-                    apiKey: event.target.value,
-                    clearApiKey: event.target.value.trim() ? false : props.upstreamSyncDraft.clearApiKey,
-                  })
-                }
+                onChange={(event) => props.onUpstreamSyncDraftChange({ apiKey: event.target.value })}
                 placeholder={
                   props.upstreamSyncSettings?.hasApiKey
                     ? `当前生效：${props.upstreamSyncSettings.apiKeyMasked}`
@@ -169,6 +162,20 @@ export function ApiAccessSettingsView(props: {
           </div>
 
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
+              <Checkbox
+                checked={props.upstreamSyncDraft.enabled}
+                disabled={props.upstreamSyncBusy}
+                onCheckedChange={(checked) => props.onUpstreamSyncDraftChange({ enabled: checked === true })}
+              />
+              <span className="space-y-1 text-sm">
+                <span className="block font-medium text-slate-100">启用线上同步</span>
+                <span className="block text-xs leading-5 text-slate-400">
+                  控制账号页手动同步和 Tavily 成功回写是否调用线上实例。
+                </span>
+              </span>
+            </label>
+
             <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
               <Checkbox
                 checked={props.upstreamSyncDraft.writeback === "success_only"}
@@ -182,28 +189,12 @@ export function ApiAccessSettingsView(props: {
                 <span className="block text-xs leading-5 text-slate-400">失败、禁用、分组或密码编辑都不会回写线上。</span>
               </span>
             </label>
-
-            <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
-              <Checkbox
-                checked={props.upstreamSyncDraft.clearApiKey}
-                disabled={props.upstreamSyncBusy || !props.upstreamSyncSettings?.hasApiKey || Boolean(props.upstreamSyncDraft.apiKey.trim())}
-                onCheckedChange={(checked) => props.onUpstreamSyncDraftChange({ clearApiKey: checked === true })}
-              />
-              <span className="space-y-1 text-sm">
-                <span className="block font-medium text-slate-100">清除已保存 API Key</span>
-                <span className="block text-xs leading-5 text-slate-400">
-                  {props.upstreamSyncSettings?.hasApiKey ? props.upstreamSyncSettings.apiKeyMasked : "当前没有已保存 key"}
-                </span>
-              </span>
-            </label>
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-[24px] border border-white/8 bg-[linear-gradient(180deg,rgba(11,18,31,0.95),rgba(8,15,27,0.92))] px-4 py-3 text-sm text-slate-300">
             <div className="min-w-0">
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Current upstream</div>
-              <div className="mt-1 break-all font-mono text-cyan-100">
-                {props.upstreamSyncSettings?.baseUrl || props.upstreamSyncDraft.baseUrl || "未设置"}
-              </div>
+              <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Saved upstream</div>
+              <div className="mt-1 break-all font-mono text-cyan-100">{props.upstreamSyncSettings?.baseUrl || "未设置"}</div>
             </div>
             <Button
               type="button"

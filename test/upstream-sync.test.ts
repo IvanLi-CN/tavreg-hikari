@@ -97,6 +97,7 @@ test("syncAccountsFromUpstream imports account details without marking remote se
 
   const summary = await syncAccountsFromUpstream(appDb, {
     config: {
+      enabled: true,
       baseUrl: "https://upstream.example.test",
       apiKey: "secret-key",
       writeback: "off",
@@ -176,6 +177,7 @@ test("syncAccountsFromUpstream validates every detail before writing local accou
   await expect(
     syncAccountsFromUpstream(appDb, {
       config: {
+        enabled: true,
         baseUrl: "https://upstream.example.test",
         apiKey: "secret-key",
         writeback: "off",
@@ -184,6 +186,48 @@ test("syncAccountsFromUpstream validates every detail before writing local accou
   ).rejects.toThrow("missing passwordPlaintext");
 
   expect(appDb.getAccountsByEmails(["valid-prefix@example.test"])).toHaveLength(0);
+  appDb.close();
+});
+
+test("upstream sync switch blocks imports and writeback calls", async () => {
+  const { appDb } = await createTempDb();
+  let fetchCount = 0;
+  globalThis.fetch = (async () => {
+    fetchCount += 1;
+    return Response.json({ ok: true });
+  }) as unknown as typeof fetch;
+
+  await expect(
+    syncAccountsFromUpstream(appDb, {
+      config: {
+        enabled: false,
+        baseUrl: "https://upstream.example.test",
+        apiKey: "secret-key",
+        writeback: "success_only",
+      },
+    }),
+  ).rejects.toThrow("upstream sync is disabled");
+
+  const { account } = appDb.upsertUpstreamAccount({
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamAccountId: 501,
+    microsoftEmail: "disabled-switch@example.test",
+    passwordPlaintext: "pw123456",
+  });
+  await expect(
+    writeBackUpstreamTavilySuccess({
+      account,
+      apiKey: "tvly-local-success",
+    }, {
+      config: {
+        enabled: false,
+        baseUrl: "https://upstream.example.test",
+        apiKey: "secret-key",
+        writeback: "success_only",
+      },
+    }),
+  ).resolves.toEqual({ ok: true, skipped: true, reason: "sync_disabled" });
+  expect(fetchCount).toBe(0);
   appDb.close();
 });
 
@@ -241,6 +285,7 @@ test("writeBackUpstreamTavilySuccess posts only linked success records", async (
       cookiesSnapshot: [{ name: "session", value: "cookie" }],
     }, {
       config: {
+        enabled: true,
         baseUrl: "https://ignored.example.test",
         apiKey: "secret-key",
         writeback: "success_only",

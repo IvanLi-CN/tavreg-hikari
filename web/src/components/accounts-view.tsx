@@ -605,6 +605,7 @@ export function AccountsView({
   batchBootstrapPreview,
   batchBootstrapPreviewBusy,
   activeBatchBootstrapMode,
+  upstreamSyncAvailable,
   upstreamSyncState,
   initialDesktopToolsCollapsed,
   extractorSettings,
@@ -669,6 +670,7 @@ export function AccountsView({
   batchBootstrapPreview: AccountBatchBootstrapPreviewPayload | null;
   batchBootstrapPreviewBusy: boolean;
   activeBatchBootstrapMode: AccountBatchBootstrapMode | null;
+  upstreamSyncAvailable: boolean;
   upstreamSyncState: UpstreamSyncState;
   initialDesktopToolsCollapsed?: boolean;
   extractorSettings: AccountExtractorSettings | null;
@@ -1809,7 +1811,8 @@ export function AccountsView({
                   variant="outline"
                   className="xl:self-start"
                   onClick={() => void onSyncUpstreamAccounts()}
-                  disabled={upstreamSyncState.status === "running"}
+                  disabled={upstreamSyncState.status === "running" || !upstreamSyncAvailable}
+                  title={upstreamSyncAvailable ? undefined : "先到设置页启用线上同步并保存 API key"}
                 >
                   <CloudDownload
                     className={cn("mr-1 size-4", upstreamSyncState.status === "running" ? "animate-spin" : "")}

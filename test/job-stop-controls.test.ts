@@ -40,6 +40,7 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
     upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+    upstreamTavregSyncEnabled: false,
     upstreamTavregApiKey: "",
     upstreamTavregWriteback: "off",
     ...overrides,
@@ -604,6 +605,7 @@ test("upstream tavily writeback failure does not roll back a successful attempt"
     dbPath,
     () =>
       createSchedulerSettings({
+        upstreamTavregSyncEnabled: true,
         upstreamTavregApiKey: "upstream-secret",
         upstreamTavregWriteback: "success_only",
       }),

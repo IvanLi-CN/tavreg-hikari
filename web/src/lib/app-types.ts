@@ -110,6 +110,7 @@ export type UpstreamAccountSyncPayload = {
 export type UpstreamTavregWritebackMode = "off" | "success_only";
 
 export type UpstreamSyncSettings = {
+  enabled: boolean;
   baseUrl: string;
   apiKeyMasked: string;
   hasApiKey: boolean;
@@ -123,9 +124,9 @@ export type UpstreamSyncSettingsPayload = {
 };
 
 export type UpstreamSyncSettingsUpdate = {
+  enabled: boolean;
   baseUrl: string;
   apiKey: string;
-  clearApiKey: boolean;
   writeback: UpstreamTavregWritebackMode;
 };
 
