@@ -241,6 +241,14 @@ test("web admin settings use env only for bootstrap and DB for runtime reads", a
   expect(source).not.toContain("db.getSettings(getDefaultSettings())");
 });
 
+test("upstream account sync is configured through persisted settings routes", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  expect(source).toContain('if (pathname === "/api/upstream-sync/settings" && req.method === "GET")');
+  expect(source).toContain('if (pathname === "/api/upstream-sync/settings" && req.method === "POST")');
+  expect(source).toContain("upstreamTavregApiKey");
+  expect(source).not.toContain("process.env.UPSTREAM_TAVREG");
+});
+
 test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusing admin ports", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   expect(source).toContain('const portLeases = await reserveMihomoPortLeases();');

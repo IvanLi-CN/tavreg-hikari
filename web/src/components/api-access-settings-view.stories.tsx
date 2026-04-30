@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within } from "storybook/test";
 import { ApiAccessSettingsView, type RevealedIntegrationApiSecret } from "@/components/api-access-settings-view";
-import type { IntegrationApiKeyRecord } from "@/lib/app-types";
+import type { IntegrationApiKeyRecord, UpstreamSyncSettings, UpstreamSyncSettingsUpdate } from "@/lib/app-types";
 
 function createRecord(partial: Partial<IntegrationApiKeyRecord> & Pick<IntegrationApiKeyRecord, "id" | "label" | "keyPrefix">): IntegrationApiKeyRecord {
   return {
@@ -40,16 +40,53 @@ const sampleRows = [
   }),
 ];
 
+const sampleUpstreamSyncSettings: UpstreamSyncSettings = {
+  baseUrl: "https://tavreg-hikari.ivanli.cc",
+  apiKeyMasked: "thki_live_••••••9q2p",
+  hasApiKey: true,
+  writeback: "success_only",
+  configured: true,
+};
+
+function createUpstreamSyncDraft(settings: UpstreamSyncSettings | null): UpstreamSyncSettingsUpdate {
+  return {
+    baseUrl: settings?.baseUrl || "https://tavreg-hikari.ivanli.cc",
+    apiKey: "",
+    clearApiKey: false,
+    writeback: settings?.writeback || "off",
+  };
+}
+
 function InteractivePreview() {
   const [rows, setRows] = useState<IntegrationApiKeyRecord[]>(sampleRows);
+  const [upstreamSyncSettings, setUpstreamSyncSettings] = useState<UpstreamSyncSettings>(sampleUpstreamSyncSettings);
+  const [upstreamSyncDraft, setUpstreamSyncDraft] = useState<UpstreamSyncSettingsUpdate>(() => createUpstreamSyncDraft(sampleUpstreamSyncSettings));
+  const [upstreamSyncBusy, setUpstreamSyncBusy] = useState(false);
   const [mutatingId, setMutatingId] = useState<number | "create" | null>(null);
   const [revealedSecret, setRevealedSecret] = useState<RevealedIntegrationApiSecret | null>(null);
 
   return (
     <ApiAccessSettingsView
+      upstreamSyncSettings={upstreamSyncSettings}
+      upstreamSyncDraft={upstreamSyncDraft}
+      upstreamSyncBusy={upstreamSyncBusy}
       rows={rows}
       mutatingId={mutatingId}
       revealedSecret={revealedSecret}
+      onUpstreamSyncDraftChange={(patch) => setUpstreamSyncDraft((current) => ({ ...current, ...patch }))}
+      onSaveUpstreamSyncSettings={async () => {
+        setUpstreamSyncBusy(true);
+        const next: UpstreamSyncSettings = {
+          baseUrl: upstreamSyncDraft.baseUrl.trim(),
+          apiKeyMasked: upstreamSyncDraft.apiKey.trim() ? "thki_live_••••••new" : upstreamSyncSettings.apiKeyMasked,
+          hasApiKey: upstreamSyncDraft.clearApiKey ? false : upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim()),
+          writeback: upstreamSyncDraft.writeback,
+          configured: upstreamSyncDraft.clearApiKey ? false : upstreamSyncSettings.hasApiKey || Boolean(upstreamSyncDraft.apiKey.trim()),
+        };
+        setUpstreamSyncSettings(next);
+        setUpstreamSyncDraft(createUpstreamSyncDraft(next));
+        setUpstreamSyncBusy(false);
+      }}
       onCreate={async ({ label, notes }) => {
         setMutatingId("create");
         const record = createRecord({
@@ -128,8 +165,12 @@ type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
   args: {
+    upstreamSyncSettings: sampleUpstreamSyncSettings,
+    upstreamSyncDraft: createUpstreamSyncDraft(sampleUpstreamSyncSettings),
     rows: sampleRows,
     revealedSecret: null,
+    onUpstreamSyncDraftChange: () => {},
+    onSaveUpstreamSyncSettings: async () => {},
     onCreate: async () => {},
     onRotate: async () => {},
     onRevoke: async () => {},
@@ -138,8 +179,12 @@ export const Default: Story = {
   render: () => (
     <div className="p-6">
       <ApiAccessSettingsView
+        upstreamSyncSettings={sampleUpstreamSyncSettings}
+        upstreamSyncDraft={createUpstreamSyncDraft(sampleUpstreamSyncSettings)}
         rows={sampleRows}
         revealedSecret={null}
+        onUpstreamSyncDraftChange={() => {}}
+        onSaveUpstreamSyncSettings={async () => {}}
         onCreate={async () => {}}
         onRotate={async () => {}}
         onRevoke={async () => {}}
@@ -151,12 +196,16 @@ export const Default: Story = {
 
 export const RevealDialogVisible: Story = {
   args: {
+    upstreamSyncSettings: sampleUpstreamSyncSettings,
+    upstreamSyncDraft: createUpstreamSyncDraft(sampleUpstreamSyncSettings),
     rows: sampleRows,
     revealedSecret: {
       mode: "create",
       record: sampleRows[0]!,
       plainTextKey: "thki_demo_secret_plaintext_once",
     },
+    onUpstreamSyncDraftChange: () => {},
+    onSaveUpstreamSyncSettings: async () => {},
     onCreate: async () => {},
     onRotate: async () => {},
     onRevoke: async () => {},
@@ -165,12 +214,16 @@ export const RevealDialogVisible: Story = {
   render: () => (
     <div className="p-6">
       <ApiAccessSettingsView
+        upstreamSyncSettings={sampleUpstreamSyncSettings}
+        upstreamSyncDraft={createUpstreamSyncDraft(sampleUpstreamSyncSettings)}
         rows={sampleRows}
         revealedSecret={{
           mode: "create",
           record: sampleRows[0]!,
           plainTextKey: "thki_demo_secret_plaintext_once",
         }}
+        onUpstreamSyncDraftChange={() => {}}
+        onSaveUpstreamSyncSettings={async () => {}}
         onCreate={async () => {}}
         onRotate={async () => {}}
         onRevoke={async () => {}}
@@ -182,8 +235,12 @@ export const RevealDialogVisible: Story = {
 
 export const InteractiveLifecyclePlay: Story = {
   args: {
+    upstreamSyncSettings: sampleUpstreamSyncSettings,
+    upstreamSyncDraft: createUpstreamSyncDraft(sampleUpstreamSyncSettings),
     rows: sampleRows,
     revealedSecret: null,
+    onUpstreamSyncDraftChange: () => {},
+    onSaveUpstreamSyncSettings: async () => {},
     onCreate: async () => {},
     onRotate: async () => {},
     onRevoke: async () => {},
@@ -216,5 +273,40 @@ export const InteractiveLifecyclePlay: Story = {
 
     await userEvent.click(canvas.getAllByRole("button", { name: "禁用" })[0]!);
     await expect(canvas.getAllByText("revoked")[0]).toBeInTheDocument();
+  },
+};
+
+export const UpstreamSyncSettingsPlay: Story = {
+  args: {
+    upstreamSyncSettings: sampleUpstreamSyncSettings,
+    upstreamSyncDraft: createUpstreamSyncDraft(sampleUpstreamSyncSettings),
+    rows: sampleRows,
+    revealedSecret: null,
+    onUpstreamSyncDraftChange: () => {},
+    onSaveUpstreamSyncSettings: async () => {},
+    onCreate: async () => {},
+    onRotate: async () => {},
+    onRevoke: async () => {},
+    onRevealedSecretOpenChange: () => {},
+  },
+  render: () => (
+    <div className="p-6">
+      <InteractivePreview />
+    </div>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const card = within(canvas.getByTestId("upstream-sync-settings-card"));
+
+    await expect(card.getByText("线上数据同步")).toBeInTheDocument();
+    await userEvent.clear(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"));
+    await userEvent.type(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"), "https://tavreg-hikari.ivanli.cc/");
+    const writebackToggle = card.getAllByRole("checkbox")[0]!;
+    if (!writebackToggle.getAttribute("data-state")?.includes("checked")) {
+      await userEvent.click(writebackToggle);
+    }
+    await userEvent.click(card.getByRole("button", { name: "保存同步设置" }));
+    await expect(card.getByText("success-only writeback")).toBeInTheDocument();
+    await expect(card.getByText("已配置")).toBeInTheDocument();
   },
 };

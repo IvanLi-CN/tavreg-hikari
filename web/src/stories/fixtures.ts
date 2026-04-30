@@ -119,9 +119,12 @@ const defaultBusinessFlowAvailability = {
 
 const defaultBusinessFlowState = null;
 
-const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState">>): AccountRecord => ({
+const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt">>): AccountRecord => ({
   businessFlowAvailability: defaultBusinessFlowAvailability,
   businessFlowState: defaultBusinessFlowState,
+  upstreamOrigin: null,
+  upstreamAccountId: null,
+  upstreamSyncedAt: null,
   ...row,
 });
 

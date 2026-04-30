@@ -17,6 +17,7 @@ import type {
   AccountsPayload,
   ExtractorSseState,
   ProxyPayload,
+  UpstreamAccountSyncPayload,
 } from "@/lib/app-types";
 import {
   sampleAccounts,
@@ -128,6 +129,7 @@ const baseArgs = {
   batchBootstrapPreview: null,
   batchBootstrapPreviewBusy: false,
   activeBatchBootstrapMode: null,
+  upstreamSyncState: { status: "idle", payload: null, error: null } as UpstreamSyncStoryState,
   extractorSettings: sampleExtractorSettings,
   extractorSettingsBusy: false,
   extractorRuntime: sampleExtractorRuntimeIdle,
@@ -153,6 +155,7 @@ const baseArgs = {
   onOpenPreview: fn(),
   onPreviewOpenChange: fn(),
   onConfirmImport: fn(),
+  onSyncUpstreamAccounts: fn(async () => undefined),
   onQueryChange: fn(),
   onToggleSelection: fn(),
   onTogglePageSelection: fn(),
@@ -305,8 +308,10 @@ type AccountsStorySurfaceProps = {
   graphSettingsConfigured?: boolean;
   connectingAccountIds?: number[];
   initialDesktopToolsCollapsed?: boolean;
+  upstreamSyncState?: UpstreamSyncStoryState;
   onConnectAccount?: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
+  onSyncUpstreamAccounts?: () => Promise<void>;
   onCheckProxyNode?: (nodeName: string) => Promise<void>;
   onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
@@ -315,6 +320,23 @@ type AccountsStorySurfaceProps = {
   onSaveExtractorSettings?: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
   onRunExtractor?: () => Promise<void>;
   onStopExtractor?: () => Promise<void>;
+};
+
+type UpstreamSyncStoryState =
+  | { status: "idle"; payload: null; error: null }
+  | { status: "running"; payload: UpstreamAccountSyncPayload | null; error: null }
+  | { status: "succeeded"; payload: UpstreamAccountSyncPayload; error: null }
+  | { status: "failed"; payload: UpstreamAccountSyncPayload | null; error: string };
+
+const sampleUpstreamSyncPayload: UpstreamAccountSyncPayload = {
+  ok: true,
+  upstreamOrigin: "https://tavreg-hikari.ivanli.cc",
+  startedAt: "2026-04-30T08:00:00.000Z",
+  completedAt: "2026-04-30T08:00:04.000Z",
+  total: 128,
+  created: 7,
+  updated: 121,
+  linkedApiKeys: 43,
 };
 
 function AccountsStorySurface(props: AccountsStorySurfaceProps) {
@@ -478,6 +500,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         batchBootstrapPreview={batchBootstrapPreview}
         batchBootstrapPreviewBusy={false}
         activeBatchBootstrapMode={null}
+        upstreamSyncState={props.upstreamSyncState ?? { status: "idle", payload: null, error: null }}
         initialDesktopToolsCollapsed={props.initialDesktopToolsCollapsed}
         extractorSettings={extractorSettings}
         extractorSettingsBusy={false}
@@ -499,6 +522,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onOpenPreview={() => setPreviewOpen(true)}
         onPreviewOpenChange={setPreviewOpen}
         onConfirmImport={() => undefined}
+        onSyncUpstreamAccounts={props.onSyncUpstreamAccounts ?? (async () => undefined)}
         onQueryChange={setQuery}
         onToggleSelection={(id, checked) => setSelectedIds((current) => (checked ? Array.from(new Set([...current, id])) : current.filter((item) => item !== id)))}
         onTogglePageSelection={(checked) => setSelectedIds(checked ? visibleAccounts.rows.map((row) => row.id) : [])}
@@ -1501,6 +1525,97 @@ export const MailWorkspaceEntryPlay: Story = {
     const canvas = within(canvasElement);
     await expect(canvas.getByRole("button", { name: "微软邮箱" })).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: "Graph 设置" })).toBeInTheDocument();
+  },
+};
+
+const upstreamSyncSpy = fn(async () => undefined);
+
+export const UpstreamSyncIdlePlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface initialSelectedIds={[]} onSyncUpstreamAccounts={upstreamSyncSpy} />,
+  parameters: {
+    docs: {
+      description: {
+        story: "账号页头部提供手动从线上实例同步账号池的入口，并保持显式点击触发。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(canvas.getByRole("button", { name: "从线上同步" }));
+    await expect(upstreamSyncSpy).toHaveBeenCalledTimes(1);
+  },
+};
+
+export const UpstreamSyncRunning: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      upstreamSyncState={{ status: "running", payload: sampleUpstreamSyncPayload, error: null }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "线上账号池同步运行态，按钮禁用并展示当前拉取状态，防止重复触发。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "同步中…" })).toBeDisabled();
+    await expect(canvas.getByText("正在从线上实例拉取账号池。")).toBeInTheDocument();
+  },
+};
+
+export const UpstreamSyncSucceeded: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      upstreamSyncState={{ status: "succeeded", payload: sampleUpstreamSyncPayload, error: null }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "线上同步成功态展示来源、创建/更新数量、导入 KEY 数量和完成时间。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("线上同步完成")).toBeInTheDocument();
+    await expect(canvas.getByText(/新增 7/)).toBeInTheDocument();
+    await expect(canvas.getByText(/KEY 43/)).toBeInTheDocument();
+  },
+};
+
+export const UpstreamSyncFailed: Story = {
+  args: baseArgs,
+  render: () => (
+    <AccountsStorySurface
+      initialSelectedIds={[]}
+      upstreamSyncState={{
+        status: "failed",
+        payload: sampleUpstreamSyncPayload,
+        error: "upstream_http_failed:401:{\"error\":\"invalid integration api key\"}",
+      }}
+    />
+  ),
+  parameters: {
+    docs: {
+      description: {
+        story: "线上同步失败态保留上次成功时间，并直接显示上游错误，便于修正 `.env.local` 中的 integration key。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("线上同步失败")).toBeInTheDocument();
+    await expect(canvas.getByText(/invalid integration api key/)).toBeInTheDocument();
+    await expect(canvas.getByText(/上次成功/)).toBeInTheDocument();
   },
 };
 

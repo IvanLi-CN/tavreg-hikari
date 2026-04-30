@@ -26,6 +26,7 @@ import {
   resolveExplicitChromeExecutablePath,
 } from "../fingerprint-browser.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
+import { buildUpstreamSyncConfig, writeBackUpstreamTavilySuccess } from "./upstream-sync.js";
 
 export interface ServerEvent {
   type:
@@ -1332,6 +1333,29 @@ export class JobScheduler {
           extractedIp: tavilyAccess.extractedIp || null,
           lastSuccessAt: tavilyAccess.lastSuccessAt || attempt.completedAt || nowIso(),
         });
+      }
+      const account = this.db.getAccount(accountId);
+      if (account) {
+        try {
+          await writeBackUpstreamTavilySuccess({
+            account,
+            apiKey,
+            extractedIp: tavilyAccess?.extractedIp || attempt.proxyIp,
+            lastSuccessAt: tavilyAccess?.lastSuccessAt || attempt.completedAt || nowIso(),
+            cookiesSnapshot: Array.isArray(tavilyAccess?.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+            browserFingerprintSnapshot: tavilyAccess?.browserFingerprintSnapshot || null,
+            apiKeyPrefix: tavilyAccess?.apiKeyPrefix || apiKeyRecord.apiKeyPrefix,
+          }, {
+            config: buildUpstreamSyncConfig(this.getSettings()),
+          });
+        } catch (writebackError) {
+          this.emit("toast", {
+            level: "warning",
+            message: `attempt #${attempt.id} succeeded locally, but upstream Tavily writeback failed: ${
+              writebackError instanceof Error ? writebackError.message : String(writebackError)
+            }`,
+          });
+        }
       }
       this.emit("attempt.updated", { attempt });
       this.emit("account.updated", { account: this.db.getAccount(accountId) });

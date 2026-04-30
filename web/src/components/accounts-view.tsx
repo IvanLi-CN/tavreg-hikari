@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, CloudDownload, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +44,7 @@ import type {
   MailboxStatus,
   ProxyCheckState,
   ProxyNode,
+  UpstreamAccountSyncPayload,
 } from "@/lib/app-types";
 import { DEFAULT_ACCOUNT_QUERY_SORT, isDefaultAccountQuerySort } from "@/lib/account-query";
 import { formatDate } from "@/lib/format";
@@ -95,6 +96,12 @@ const ACCOUNT_BUSINESS_FLOW_SITE_OPTIONS = [
   label: string;
   stateLabel: string;
 }>;
+
+type UpstreamSyncState =
+  | { status: "idle"; payload: null; error: null }
+  | { status: "running"; payload: UpstreamAccountSyncPayload | null; error: null }
+  | { status: "succeeded"; payload: UpstreamAccountSyncPayload; error: null }
+  | { status: "failed"; payload: UpstreamAccountSyncPayload | null; error: string };
 
 function extractorProviderLabel(provider: AccountExtractorProvider): string {
   return EXTRACTOR_PROVIDER_OPTIONS.find((item) => item.provider === provider)?.label || provider;
@@ -598,6 +605,7 @@ export function AccountsView({
   batchBootstrapPreview,
   batchBootstrapPreviewBusy,
   activeBatchBootstrapMode,
+  upstreamSyncState,
   initialDesktopToolsCollapsed,
   extractorSettings,
   extractorSettingsBusy,
@@ -619,6 +627,7 @@ export function AccountsView({
   onOpenPreview,
   onPreviewOpenChange,
   onConfirmImport,
+  onSyncUpstreamAccounts,
   onQueryChange,
   onToggleSelection,
   onTogglePageSelection,
@@ -660,6 +669,7 @@ export function AccountsView({
   batchBootstrapPreview: AccountBatchBootstrapPreviewPayload | null;
   batchBootstrapPreviewBusy: boolean;
   activeBatchBootstrapMode: AccountBatchBootstrapMode | null;
+  upstreamSyncState: UpstreamSyncState;
   initialDesktopToolsCollapsed?: boolean;
   extractorSettings: AccountExtractorSettings | null;
   extractorSettingsBusy: boolean;
@@ -681,6 +691,7 @@ export function AccountsView({
   onOpenPreview: () => void;
   onPreviewOpenChange: (open: boolean) => void;
   onConfirmImport: () => void;
+  onSyncUpstreamAccounts: () => Promise<void>;
   onQueryChange: (value: AccountQuery) => void;
   onToggleSelection: (accountId: number, checked: boolean) => void;
   onTogglePageSelection: (checked: boolean) => void;
@@ -1796,6 +1807,19 @@ export function AccountsView({
                 <Button
                   type="button"
                   variant="outline"
+                  className="xl:self-start"
+                  onClick={() => void onSyncUpstreamAccounts()}
+                  disabled={upstreamSyncState.status === "running"}
+                >
+                  <CloudDownload
+                    className={cn("mr-1 size-4", upstreamSyncState.status === "running" ? "animate-spin" : "")}
+                    aria-hidden="true"
+                  />
+                  {upstreamSyncState.status === "running" ? "同步中…" : "从线上同步"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
                   className="hidden xl:inline-flex xl:self-start"
                   onClick={() => setDesktopToolsCollapsed((current) => !current)}
                 >
@@ -1816,6 +1840,40 @@ export function AccountsView({
               <Badge variant="danger">failed · {failedCount}</Badge>
               <Badge variant="warning">disabled · {disabledCount}</Badge>
             </div>
+
+            {upstreamSyncState.status !== "idle" ? (
+              <div
+                className={cn(
+                  "rounded-[20px] border px-4 py-3 text-sm",
+                  upstreamSyncState.status === "failed"
+                    ? "border-red-300/20 bg-red-400/8 text-red-100"
+                    : "border-cyan-300/20 bg-cyan-400/8 text-cyan-100",
+                )}
+              >
+                {upstreamSyncState.status === "running" ? (
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="size-4 animate-spin" aria-hidden="true" />
+                    <span>正在从线上实例拉取账号池。</span>
+                  </div>
+                ) : upstreamSyncState.status === "failed" ? (
+                  <div className="space-y-1">
+                    <div className="font-medium">线上同步失败</div>
+                    <div className="break-words text-red-100/80">{upstreamSyncState.error}</div>
+                    {upstreamSyncState.payload ? (
+                      <div className="text-red-100/70">上次成功：{formatDate(upstreamSyncState.payload.completedAt)}</div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="font-medium">线上同步完成</div>
+                    <div className="text-cyan-100/80">
+                      {upstreamSyncState.payload.upstreamOrigin} · 新增 {upstreamSyncState.payload.created} · 更新 {upstreamSyncState.payload.updated} ·
+                      KEY {upstreamSyncState.payload.linkedApiKeys} · {formatDate(upstreamSyncState.payload.completedAt)}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : null}
 
             <div className="flex flex-col gap-3 rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
               <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-400">

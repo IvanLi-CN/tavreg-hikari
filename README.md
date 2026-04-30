@@ -13,6 +13,7 @@
 
 - 主流程页：启动任务、暂停、恢复、动态调整 `parallel / need / maxAttempts`，并支持在缺号时按站点开关自动提取微软账号；当前支持 `账号鸭 / 闪邮箱 / 闪客云 / Hotmail666` 四个渠道，按单源 `500ms/次` 轮转、最多 `4` 个并发请求。
 - 微软账号页：支持 `email,password`、`email:password`、`email|password` 或 `email password` 的批量导入，按邮箱去重，查看是否已有 API key、最近状态、导入时间、跳过原因与收信状态，并提供四个提取器 KEY 设置与本地提取历史查询。
+- 微软账号页可在本地实例手动“从线上同步”，通过 production integration API 拉取线上账号、proof mailbox、分组、Tavily key 与服务快照，用本地 SQLite 重建可运行账号数据。
 - 微软账号页现在会在导入/自动提取后立即为账号创建持久浏览器会话 bootstrap：自动选取代理池 IP、记住登录态、保存 `output/browser-profiles/accounts/<accountId>/chrome`，并在账号列表展示 session 状态、代理/IP 与 profile 路径摘要。
 - 后续 Tavily attempt 会优先复用账号上次成功的代理 IP；若原 IP 不在池中，则按同 region、再按全池健康节点的 LRU 选择代理，并继续复用同一持久 profile。
 - 微软邮箱页：通过 Microsoft Graph OAuth 接入 Inbox，只读显示导入账号对应的收信状态、邮件列表与正文；主工作台固定为三栏收件箱视图，Graph 凭据改到独立设置页维护。
@@ -46,6 +47,13 @@
   - `Authorization: Bearer <plainTextKey>`
   - `X-API-Key: <plainTextKey>`
 - v1 目前只开放 Microsoft 账号、Tavily 服务接入快照、Microsoft Mail Inbox 与 `cfmail` proof mailbox 验证码能力。
+
+## 本地同步线上账号池
+
+- 先在本地 `/settings` 的“线上数据同步”卡片保存线上地址、production integration API key 与回写模式。
+- 本地 `/accounts` 的“从线上同步”按钮会调用 `POST /api/upstream-sync/accounts`，并按本地设置请求线上 `/api/integration/v1/microsoft-accounts`。
+- 回写模式设为 `success_only` 后，本地 Tavily 单账号或批量 attempt 成功时只回写成功结果；失败、禁用、分组编辑、密码编辑不会回写线上。
+- 同步不会复制线上 SQLite 或 Chrome profile。本地会保留自己的 `account_browser_sessions.profile_path` 与 session 状态，新同步账号仍需要在本机 bootstrap 或复用本机已有 profile。
 
 ## 运行前准备
 

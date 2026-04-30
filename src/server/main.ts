@@ -114,6 +114,13 @@ import {
   pickLatestMailboxVerificationCode,
 } from "./microsoft-mailbox-verification.js";
 import { parseMailboxVerificationCodes } from "./verification-codes.js";
+import {
+  DEFAULT_UPSTREAM_TAVREG_BASE_URL,
+  buildUpstreamSyncConfig,
+  normalizeUpstreamBaseUrl,
+  normalizeUpstreamWritebackMode,
+  syncAccountsFromUpstream,
+} from "./upstream-sync.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
 
@@ -335,6 +342,17 @@ function serializeMicrosoftGraphSettings(settings: AppSettings) {
   };
 }
 
+function serializeUpstreamSyncSettings(settings: AppSettings) {
+  const config = buildUpstreamSyncConfig(settings);
+  return {
+    baseUrl: config.baseUrl,
+    apiKeyMasked: config.apiKey ? maskSecret(config.apiKey) : "",
+    hasApiKey: Boolean(config.apiKey),
+    writeback: config.writeback,
+    configured: Boolean(config.apiKey),
+  };
+}
+
 function buildSettingsCodeDefaults(): AppSettings {
   return {
     subscriptionUrl: "",
@@ -363,6 +381,9 @@ function buildSettingsCodeDefaults(): AppSettings {
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
+    upstreamTavregApiKey: "",
+    upstreamTavregWriteback: "off",
   };
 }
 
@@ -399,6 +420,9 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     microsoftGraphClientSecret: (process.env.MICROSOFT_GRAPH_CLIENT_SECRET || "").trim(),
     microsoftGraphRedirectUri: (process.env.MICROSOFT_GRAPH_REDIRECT_URI || "").trim(),
     microsoftGraphAuthority: (process.env.MICROSOFT_GRAPH_AUTHORITY || baseDefaults.microsoftGraphAuthority).trim() || "common",
+    upstreamTavregBaseUrl: baseDefaults.upstreamTavregBaseUrl,
+    upstreamTavregApiKey: baseDefaults.upstreamTavregApiKey,
+    upstreamTavregWriteback: baseDefaults.upstreamTavregWriteback,
   };
 }
 
@@ -439,6 +463,9 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     groupName: row.groupName,
     disabledAt: row.disabledAt,
     disabledReason: row.disabledReason,
+    upstreamOrigin: row.upstreamOrigin,
+    upstreamAccountId: row.upstreamAccountId,
+    upstreamSyncedAt: row.upstreamSyncedAt,
     mailboxStatus: row.mailboxStatus,
     mailboxLastSyncedAt: row.mailboxLastSyncedAt,
     mailboxLastErrorCode: row.mailboxLastErrorCode,
@@ -1937,6 +1964,67 @@ async function main(): Promise<void> {
           groups: db.listAccountGroups(),
           rows: data.rows.map((row) => serializeAccount(row)),
         });
+      }
+
+      if (pathname === "/api/upstream-sync/settings" && req.method === "GET") {
+        return json({
+          ok: true,
+          settings: serializeUpstreamSyncSettings(readSettings()),
+        });
+      }
+
+      if (pathname === "/api/upstream-sync/settings" && req.method === "POST") {
+        const body = (await req.json().catch(() => null)) as {
+          baseUrl?: unknown;
+          apiKey?: unknown;
+          clearApiKey?: unknown;
+          writeback?: unknown;
+        } | null;
+        const current = readSettings();
+        let nextApiKey = current.upstreamTavregApiKey;
+        if (body?.clearApiKey === true) {
+          nextApiKey = "";
+        }
+        if (typeof body?.apiKey === "string" && body.apiKey.trim()) {
+          nextApiKey = body.apiKey.trim();
+        }
+
+        let nextBaseUrl: string;
+        try {
+          nextBaseUrl = normalizeUpstreamBaseUrl(
+            typeof body?.baseUrl === "string" ? body.baseUrl : current.upstreamTavregBaseUrl,
+          );
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error));
+        }
+
+        const next = buildNextSettings(current, {
+          upstreamTavregBaseUrl: nextBaseUrl,
+          upstreamTavregApiKey: nextApiKey,
+          upstreamTavregWriteback: normalizeUpstreamWritebackMode(body?.writeback ?? current.upstreamTavregWriteback),
+        });
+        db.setSettings(next);
+        return json({
+          ok: true,
+          settings: serializeUpstreamSyncSettings(next),
+        });
+      }
+
+      if (pathname === "/api/upstream-sync/accounts" && req.method === "POST") {
+        let payload: Awaited<ReturnType<typeof syncAccountsFromUpstream>>;
+        try {
+          payload = await syncAccountsFromUpstream(db, {
+            config: buildUpstreamSyncConfig(readSettings()),
+          });
+        } catch (error) {
+          return badRequest(error instanceof Error ? error.message : String(error), 400);
+        }
+        broadcast({
+          type: "account.updated",
+          payload: { action: "upstream_sync", summary: payload },
+          timestamp: nowIso(),
+        });
+        return json(payload);
       }
 
       if (accountSessionBootstrapPreviewMatch && req.method === "POST") {

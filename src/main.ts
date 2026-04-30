@@ -2805,6 +2805,38 @@ async function syncLinkedMicrosoftAccountOutcome(
         });
       }
       db.markAccountDirectSuccess(envAccountId);
+      const refreshedAccount = db.getAccount(envAccountId);
+      if (refreshedAccount) {
+        try {
+          const {
+            DEFAULT_UPSTREAM_TAVREG_BASE_URL,
+            buildUpstreamSyncConfig,
+            writeBackUpstreamTavilySuccess,
+          } = await import("./server/upstream-sync.js");
+          const upstreamSettings = db.getSettings({
+            upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
+            upstreamTavregApiKey: "",
+            upstreamTavregWriteback: "off" as const,
+          });
+          await writeBackUpstreamTavilySuccess({
+            account: refreshedAccount,
+            apiKey: outcome.apiKey,
+            extractedIp: tavilyAccess?.extractedIp || null,
+            lastSuccessAt: tavilyAccess?.lastSuccessAt || new Date().toISOString(),
+            cookiesSnapshot: Array.isArray(tavilyAccess?.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+            browserFingerprintSnapshot: tavilyAccess?.browserFingerprintSnapshot || null,
+            apiKeyPrefix: tavilyAccess?.apiKeyPrefix || keyRecord.apiKeyPrefix,
+          }, {
+            config: buildUpstreamSyncConfig(upstreamSettings),
+          });
+        } catch (writebackError) {
+          console.warn(
+            `[upstream-sync] Tavily success kept locally but upstream writeback failed: ${
+              writebackError instanceof Error ? writebackError.message : String(writebackError)
+            }`,
+          );
+        }
+      }
       return;
     }
     db.markAccountDirectFailure(envAccountId, outcome.errorCode ?? null, {

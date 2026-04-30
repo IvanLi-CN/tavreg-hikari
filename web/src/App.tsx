@@ -84,6 +84,10 @@ import type {
   ProxyPayload,
   ProxySettingsUpdate,
   RunModeAvailability,
+  UpstreamAccountSyncPayload,
+  UpstreamSyncSettings,
+  UpstreamSyncSettingsPayload,
+  UpstreamSyncSettingsUpdate,
 } from "@/lib/app-types";
 import { jobToDraft, normalizeJobDraft } from "@/lib/job-draft";
 import {
@@ -255,6 +259,23 @@ function createChatGptUpstreamSettingsDialogDraft(
   };
 }
 
+const DEFAULT_UPSTREAM_TAVREG_BASE_URL = "https://tavreg-hikari.ivanli.cc";
+
+function createUpstreamSyncSettingsDraft(settings: UpstreamSyncSettings | null): UpstreamSyncSettingsUpdate {
+  return {
+    baseUrl: settings?.baseUrl || DEFAULT_UPSTREAM_TAVREG_BASE_URL,
+    apiKey: "",
+    clearApiKey: false,
+    writeback: settings?.writeback || "off",
+  };
+}
+
+type UpstreamSyncUiState =
+  | { status: "idle"; payload: null; error: null }
+  | { status: "running"; payload: UpstreamAccountSyncPayload | null; error: null }
+  | { status: "succeeded"; payload: UpstreamAccountSyncPayload; error: null }
+  | { status: "failed"; payload: UpstreamAccountSyncPayload | null; error: string };
+
 function getPagePath(page: PageKey): string {
   if (page === "tavily") return "/";
   return `/${page}`;
@@ -312,6 +333,16 @@ export function App() {
     summary: { ready: 0, linked: 0, failed: 0, disabled: 0 },
     groups: [],
   });
+  const [upstreamAccountSync, setUpstreamAccountSync] = useState<UpstreamSyncUiState>({
+    status: "idle",
+    payload: null,
+    error: null,
+  });
+  const [upstreamSyncSettings, setUpstreamSyncSettings] = useState<UpstreamSyncSettings | null>(null);
+  const [upstreamSyncSettingsDraft, setUpstreamSyncSettingsDraft] = useState<UpstreamSyncSettingsUpdate>(() =>
+    createUpstreamSyncSettingsDraft(null),
+  );
+  const [upstreamSyncSettingsBusy, setUpstreamSyncSettingsBusy] = useState(false);
   const [apiKeys, setApiKeys] = useState<ApiKeysPayload>({
     rows: [],
     total: 0,
@@ -566,6 +597,13 @@ export function App() {
       current.apiKey || current.clearApiKey || current.clearBaseUrl || current.baseUrl
         ? current
         : createChatGptUpstreamSettingsDialogDraft(payload.settings),
+    );
+  };
+  const refreshUpstreamSyncSettings = async () => {
+    const payload = await api<UpstreamSyncSettingsPayload>("/api/upstream-sync/settings");
+    setUpstreamSyncSettings(payload.settings);
+    setUpstreamSyncSettingsDraft((current) =>
+      current.apiKey || current.clearApiKey ? current : createUpstreamSyncSettingsDraft(payload.settings),
     );
   };
   const refreshAccounts = async (nextQuery = accountQuery) => {
@@ -961,6 +999,28 @@ export function App() {
     }
   };
 
+  const handleSaveUpstreamSyncSettings = async () => {
+    try {
+      setUpstreamSyncSettingsBusy(true);
+      setError(null);
+      const payload = await api<UpstreamSyncSettingsPayload>("/api/upstream-sync/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          baseUrl: upstreamSyncSettingsDraft.baseUrl.trim(),
+          apiKey: upstreamSyncSettingsDraft.apiKey.trim(),
+          clearApiKey: upstreamSyncSettingsDraft.clearApiKey,
+          writeback: upstreamSyncSettingsDraft.writeback,
+        }),
+      });
+      setUpstreamSyncSettings(payload.settings);
+      setUpstreamSyncSettingsDraft(createUpstreamSyncSettingsDraft(payload.settings));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setUpstreamSyncSettingsBusy(false);
+    }
+  };
+
   const handleOpenChatGptBatchSupplement = () => {
     setChatGptBatchSupplementResult(null);
     setChatGptBatchSupplementOpen(true);
@@ -1076,6 +1136,7 @@ export function App() {
       refreshJob("chatgpt"),
       refreshChatGptCredentials(),
       refreshChatGptUpstreamSettings(),
+      refreshUpstreamSyncSettings(),
       refreshAccounts(),
       refreshApiKeys(),
       refreshIntegrationApiKeys(),
@@ -1540,6 +1601,32 @@ export function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setImportBusy(false);
+    }
+  };
+
+  const handleSyncUpstreamAccounts = async () => {
+    setUpstreamAccountSync((current) => ({
+      status: "running",
+      payload: current.payload,
+      error: null,
+    }));
+    try {
+      const payload = await api<UpstreamAccountSyncPayload>("/api/upstream-sync/accounts", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      setUpstreamAccountSync({ status: "succeeded", payload, error: null });
+      await Promise.all([
+        refreshAccounts(accountQueryRef.current),
+        refreshApiKeys(apiKeyQueryRef.current),
+        refreshMailboxes().catch(() => undefined),
+      ]);
+    } catch (err) {
+      setUpstreamAccountSync((current) => ({
+        status: "failed",
+        payload: current.payload,
+        error: err instanceof Error ? err.message : String(err),
+      }));
     }
   };
 
@@ -2489,6 +2576,7 @@ export function App() {
               batchBootstrapPreview={batchBootstrapPreview}
               batchBootstrapPreviewBusy={batchBootstrapPreviewBusy}
               activeBatchBootstrapMode={activeBatchBootstrapMode}
+              upstreamSyncState={upstreamAccountSync}
               extractorSettings={extractorSettings}
               extractorSettingsBusy={extractorSettingsBusy}
               extractorRuntime={extractorRuntime}
@@ -2512,6 +2600,7 @@ export function App() {
                 if (!open) setImportPreview(null);
               }}
               onConfirmImport={handleConfirmImport}
+              onSyncUpstreamAccounts={handleSyncUpstreamAccounts}
               onQueryChange={handleAccountQueryChange}
               onToggleSelection={handleToggleSelection}
               onTogglePageSelection={handleTogglePageSelection}
@@ -2579,9 +2668,14 @@ export function App() {
 
       {activePage === "settings" ? (
         <ApiAccessSettingsView
+          upstreamSyncSettings={upstreamSyncSettings}
+          upstreamSyncDraft={upstreamSyncSettingsDraft}
+          upstreamSyncBusy={upstreamSyncSettingsBusy}
           rows={integrationApiKeys}
           mutatingId={apiAccessMutatingId}
           revealedSecret={revealedIntegrationSecret}
+          onUpstreamSyncDraftChange={(patch) => setUpstreamSyncSettingsDraft((current) => ({ ...current, ...patch }))}
+          onSaveUpstreamSyncSettings={handleSaveUpstreamSyncSettings}
           onCreate={handleCreateIntegrationApiKey}
           onRotate={handleRotateIntegrationApiKey}
           onRevoke={handleRevokeIntegrationApiKey}

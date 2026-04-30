@@ -41,6 +41,9 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+    upstreamTavregApiKey: "",
+    upstreamTavregWriteback: "off",
     ...overrides,
   };
 }

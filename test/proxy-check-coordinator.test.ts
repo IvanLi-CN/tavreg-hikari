@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { createProxyCheckCoordinator, type ProxyCheckState } from "../src/server/proxy-check-coordinator.ts";
+import type { AppSettings } from "../src/storage/app-db.ts";
 
-function createSettings() {
+function createSettings(): AppSettings {
   return {
     subscriptionUrl: "https://example.com/sub.yaml",
     groupName: "CODEX_AUTO",
@@ -29,6 +30,9 @@ function createSettings() {
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+    upstreamTavregApiKey: "",
+    upstreamTavregWriteback: "off",
   };
 }
 
