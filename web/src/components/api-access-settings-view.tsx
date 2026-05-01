@@ -193,11 +193,7 @@ export function ApiAccessSettingsView(props: {
             </label>
           </div>
 
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-[24px] border border-white/8 bg-[linear-gradient(180deg,rgba(11,18,31,0.95),rgba(8,15,27,0.92))] px-4 py-3 text-sm text-slate-300">
-            <div className="min-w-0">
-              <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Saved upstream</div>
-              <div className="mt-1 break-all font-mono text-cyan-100">{props.upstreamSyncSettings?.baseUrl || "未设置"}</div>
-            </div>
+          <div className="flex justify-end">
             <Button
               type="button"
               disabled={props.upstreamSyncBusy || !props.upstreamSyncDraft.baseUrl.trim()}
