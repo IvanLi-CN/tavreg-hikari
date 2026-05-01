@@ -204,6 +204,41 @@ describe("integration api", () => {
     appDb.close();
   });
 
+  test("preserves active production leases during tavily success writeback", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId } = await seedAccount(appDb);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseAccountForJob(job.id, accountId)!;
+    expect(leased.leaseJobId).toBe(job.id);
+
+    const req = new Request(`https://console.example.test/api/integration/v1/microsoft-accounts/${accountId}/tavily-success`, {
+      method: "POST",
+      body: JSON.stringify({
+        microsoftEmail: "relay@example.test",
+        apiKey: "tvly-writeback-while-leased",
+        extractedIp: "203.0.113.89",
+      }),
+    });
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(200);
+    const account = appDb.getAccount(accountId)!;
+    expect(account).toMatchObject({
+      hasApiKey: true,
+      lastResultStatus: "leased",
+      leaseJobId: job.id,
+    });
+    expect(account.leaseStartedAt).toBe(leased.leaseStartedAt);
+    expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-writeback-while-leased");
+
+    appDb.close();
+  });
+
   test("treats failed mailboxes as unavailable in microsoft account summaries", async () => {
     const { appDb } = await createTempDb();
     const { accountId } = await seedAccount(appDb);

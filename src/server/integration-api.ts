@@ -583,7 +583,7 @@ export async function handleIntegrationApiRequest(input: {
       body?.browserFingerprintSnapshot && typeof body.browserFingerprintSnapshot === "object"
         ? body.browserFingerprintSnapshot
         : null;
-    const key = input.db.recordApiKey(account.id, apiKey, extractedIp);
+    const key = input.db.recordApiKey(account.id, apiKey, extractedIp, { preserveLease: true });
     const access = input.db.upsertAccountServiceAccess({
       accountId: account.id,
       service: "tavily",

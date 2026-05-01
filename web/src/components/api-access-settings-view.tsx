@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import type { IntegrationApiKeyRecord, UpstreamSyncSettings, UpstreamSyncSettingsUpdate } from "@/lib/app-types";
 
@@ -162,10 +163,11 @@ export function ApiAccessSettingsView(props: {
           </div>
 
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-            <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
-              <Checkbox
+            <div className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
+              <Switch
                 checked={props.upstreamSyncDraft.enabled}
                 disabled={props.upstreamSyncBusy}
+                aria-label="启用线上同步"
                 onCheckedChange={(checked) => props.onUpstreamSyncDraftChange({ enabled: checked === true })}
               />
               <span className="space-y-1 text-sm">
@@ -174,7 +176,7 @@ export function ApiAccessSettingsView(props: {
                   控制账号页手动同步和 Tavily 成功回写是否调用线上实例。
                 </span>
               </span>
-            </label>
+            </div>
 
             <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
               <Checkbox

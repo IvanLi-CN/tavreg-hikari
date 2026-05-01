@@ -2055,10 +2055,16 @@ export class AppDatabase {
     const existingHasApiKey = asBoolean(existing?.has_api_key);
     const preserveLocalApiKey = existingHasApiKey && !tavilyApiKey;
     const normalizedSkipReason = normalizeAccountSkipReasonValue(input.skipReason);
-    const defaultStatus = input.disabledAt ? "disabled" : normalizedSkipReason ? "failed" : "ready";
-    const normalizedStatus = preserveLocalApiKey
-      ? "skipped_has_key"
-      : normalizeAccountStatusValue(input.lastResultStatus, defaultStatus);
+    const disabledAt = input.disabledAt?.trim() || null;
+    const disabledReason = input.disabledReason?.trim() || null;
+    const defaultStatus = disabledAt ? "disabled" : normalizedSkipReason ? "failed" : "ready";
+    let normalizedStatus = normalizeAccountStatusValue(input.lastResultStatus, defaultStatus);
+    if (preserveLocalApiKey) {
+      normalizedStatus = "skipped_has_key";
+    }
+    if (disabledAt) {
+      normalizedStatus = "disabled";
+    }
     const nextSkipReason = preserveLocalApiKey ? "has_api_key" : normalizedSkipReason;
     const importedAt = input.importedAt?.trim() || (existing?.imported_at == null ? now : String(existing.imported_at));
     const updatedAt = input.updatedAt?.trim() || now;
@@ -2073,8 +2079,6 @@ export class AppDatabase {
     const lastUsedAt = input.lastUsedAt?.trim() || null;
     const lastResultAt = input.lastResultAt?.trim() || null;
     const lastErrorCode = input.lastErrorCode?.trim() || null;
-    const disabledAt = input.disabledAt?.trim() || null;
-    const disabledReason = input.disabledReason?.trim() || null;
     const nextHasApiKey = preserveLocalApiKey ? 1 : 0;
     const nextApiKeyId = preserveLocalApiKey && existing?.api_key_id != null ? Number(existing.api_key_id) : null;
 
@@ -2131,15 +2135,13 @@ export class AppDatabase {
                 account_source = ?,
                 source_raw_payload = ?,
                 last_used_at = ?,
-                last_result_status = ?,
+                last_result_status = CASE WHEN lease_job_id IS NOT NULL THEN last_result_status ELSE ? END,
                 last_result_at = ?,
                 last_error_code = ?,
                 skip_reason = ?,
                 group_name = ?,
                 disabled_at = ?,
                 disabled_reason = ?,
-                lease_job_id = NULL,
-                lease_started_at = NULL,
                 upstream_origin = ?,
                 upstream_account_id = ?,
                 upstream_synced_at = ?
@@ -2221,7 +2223,7 @@ export class AppDatabase {
     }
     let apiKeyId = account.apiKeyId;
     if (tavilyApiKey) {
-      const key = this.recordApiKey(account.id, tavilyApiKey, input.tavily?.extractedIp || null);
+      const key = this.recordApiKey(account.id, tavilyApiKey, input.tavily?.extractedIp || null, { preserveLease: true });
       apiKeyId = key.id;
       linkedApiKey = true;
     }
@@ -4404,10 +4406,16 @@ export class AppDatabase {
     return row || null;
   }
 
-  recordApiKey(accountId: number, apiKey: string, extractedIp?: string | null): ApiKeyRecord {
+  recordApiKey(
+    accountId: number,
+    apiKey: string,
+    extractedIp?: string | null,
+    options: { preserveLease?: boolean } = {},
+  ): ApiKeyRecord {
     const now = nowIso();
     const prefix = apiKey.slice(0, Math.min(apiKey.length, 12));
     const normalizedExtractedIp = extractedIp == null ? null : String(extractedIp).trim() || null;
+    const preserveLease = options.preserveLease === true ? 1 : 0;
     const previous = this.db.query("SELECT account_id FROM api_keys WHERE api_key = ? LIMIT 1").get(apiKey) as { account_id?: number | null } | null;
     this.db.exec("BEGIN IMMEDIATE;");
     let row: Record<string, unknown>;
@@ -4448,13 +4456,17 @@ export class AppDatabase {
             SET has_api_key = 0,
                 api_key_id = NULL,
                 skip_reason = NULL,
-                last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'ready' END,
+                last_result_status = CASE
+                  WHEN ? = 1 AND lease_job_id IS NOT NULL THEN last_result_status
+                  WHEN disabled_at IS NOT NULL THEN 'disabled'
+                  ELSE 'ready'
+                END,
                 updated_at = ?,
-                lease_job_id = NULL,
-                lease_started_at = NULL
+                lease_job_id = CASE WHEN ? = 1 THEN lease_job_id ELSE NULL END,
+                lease_started_at = CASE WHEN ? = 1 THEN lease_started_at ELSE NULL END
             WHERE id = ?
           `)
-          .run(now, previousAccountId);
+          .run(preserveLease, now, preserveLease, preserveLease, previousAccountId);
       }
       this.db
         .query(`
@@ -4462,14 +4474,18 @@ export class AppDatabase {
           SET has_api_key = 1,
               api_key_id = ?,
               skip_reason = 'has_api_key',
-              last_result_status = 'skipped_has_key',
+              last_result_status = CASE
+                WHEN ? = 1 AND lease_job_id IS NOT NULL THEN last_result_status
+                WHEN disabled_at IS NOT NULL THEN 'disabled'
+                ELSE 'skipped_has_key'
+              END,
               last_result_at = ?,
               updated_at = ?,
-              lease_job_id = NULL,
-              lease_started_at = NULL
+              lease_job_id = CASE WHEN ? = 1 THEN lease_job_id ELSE NULL END,
+              lease_started_at = CASE WHEN ? = 1 THEN lease_started_at ELSE NULL END
           WHERE id = ?
         `)
-        .run(keyId, now, now, accountId);
+        .run(keyId, preserveLease, now, now, preserveLease, preserveLease, accountId);
       this.db.exec("COMMIT;");
     } catch (error) {
       this.db.exec("ROLLBACK;");

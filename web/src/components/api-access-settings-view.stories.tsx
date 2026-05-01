@@ -303,13 +303,13 @@ export const UpstreamSyncSettingsPlay: Story = {
     await expect(card.getByText("线上数据同步")).toBeInTheDocument();
     await userEvent.clear(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"));
     await userEvent.type(card.getByPlaceholderText("https://tavreg-hikari.ivanli.cc"), "https://tavreg-hikari.ivanli.cc/");
-    const syncToggle = card.getAllByRole("checkbox")[0]!;
-    if (syncToggle.getAttribute("data-state")?.includes("checked")) {
+    const syncToggle = card.getByRole("switch", { name: "启用线上同步" });
+    if (syncToggle.getAttribute("aria-checked") === "true") {
       await userEvent.click(syncToggle);
       await expect(card.getByText("同步已关闭")).toBeInTheDocument();
       await userEvent.click(syncToggle);
     }
-    const writebackToggle = card.getAllByRole("checkbox")[1]!;
+    const writebackToggle = card.getByRole("checkbox", { name: /仅回写 Tavily 成功结果/ });
     if (!writebackToggle.getAttribute("data-state")?.includes("checked")) {
       await userEvent.click(writebackToggle);
     }

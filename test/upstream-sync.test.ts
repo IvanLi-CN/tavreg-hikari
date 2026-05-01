@@ -259,6 +259,76 @@ test("upstream sync preserves an existing local key when production has no key",
   appDb.close();
 });
 
+test("upstream sync keeps disabled account status while importing a Tavily key", async () => {
+  const { appDb } = await createTempDb();
+  const result = appDb.upsertUpstreamAccount({
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamAccountId: 92,
+    microsoftEmail: "disabled-key@example.test",
+    passwordPlaintext: "disabled-pass",
+    lastResultStatus: "disabled",
+    skipReason: "has_api_key",
+    disabledAt: "2026-04-29T09:00:00.000Z",
+    disabledReason: "manual hold",
+    tavily: {
+      apiKey: "tvly-disabled-upstream",
+      extractedIp: "198.51.100.11",
+      lastSuccessAt: "2026-04-29T08:50:00.000Z",
+    },
+  });
+
+  expect(result.linkedApiKey).toBe(true);
+  const account = appDb.getAccountsByEmails(["disabled-key@example.test"])[0]!;
+  expect(account).toMatchObject({
+    hasApiKey: true,
+    lastResultStatus: "disabled",
+    skipReason: "has_api_key",
+    disabledAt: "2026-04-29T09:00:00.000Z",
+    disabledReason: "manual hold",
+  });
+  expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-disabled-upstream");
+
+  const disabledAccounts = appDb.listAccounts({ status: "disabled" });
+  expect(disabledAccounts.total).toBe(1);
+  expect(disabledAccounts.summary.disabled).toBe(1);
+
+  appDb.close();
+});
+
+test("upstream sync preserves active local leases for existing accounts", async () => {
+  const { appDb } = await createTempDb();
+  const imported = appDb.importAccounts([{ email: "leased-sync@example.test", password: "old-pass" }]);
+  const accountId = imported.affectedIds[0]!;
+  const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+  const leased = appDb.leaseAccountForJob(job.id, accountId)!;
+  expect(leased.leaseJobId).toBe(job.id);
+
+  const result = appDb.upsertUpstreamAccount({
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamAccountId: 93,
+    microsoftEmail: "leased-sync@example.test",
+    passwordPlaintext: "new-pass",
+    lastResultStatus: "ready",
+    tavily: {
+      apiKey: "tvly-leased-upstream",
+      extractedIp: "198.51.100.12",
+    },
+  });
+
+  expect(result.updated).toBe(true);
+  const account = appDb.getAccount(accountId)!;
+  expect(account).toMatchObject({
+    passwordPlaintext: "new-pass",
+    hasApiKey: true,
+    lastResultStatus: "leased",
+    leaseJobId: job.id,
+  });
+  expect(account.leaseStartedAt).toBe(leased.leaseStartedAt);
+  expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-leased-upstream");
+
+  appDb.close();
+});
+
 test("writeBackUpstreamTavilySuccess posts only linked success records", async () => {
   const { appDb } = await createTempDb();
   const result = appDb.upsertUpstreamAccount({
