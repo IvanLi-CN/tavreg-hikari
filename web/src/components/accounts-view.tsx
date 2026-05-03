@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, CloudDownload, Inbox, KeyRound, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, CloudDownload, Inbox, KeyRound, LoaderCircle, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -77,6 +77,13 @@ const MAILBOX_STATUS_OPTIONS = [
 ] as const satisfies Array<{ value: MailboxStatus; label: string }>;
 const DESKTOP_TOOLS_STORAGE_KEY = "tavreg-hikari.accounts.desktopToolsCollapsed";
 const ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY = "tavreg-hikari.accounts.businessFlowMode";
+const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
+
+function formatAccountImportedAt(row: AccountRecord): string {
+  if (row.upstreamOrigin && row.importedAt === UNKNOWN_UPSTREAM_IMPORTED_AT) return "—";
+  return formatDate(row.importedAt);
+}
+
 const ACCOUNT_BUSINESS_FLOW_MODE_OPTIONS = [
   { value: "headless", label: "无头", description: "自动完成业务流，浏览器不保留。" },
   { value: "headed", label: "有头", description: "自动完成业务流，并在可用的有头浏览器里可见。" },
@@ -227,7 +234,7 @@ function describeBusinessFlowState(account: Pick<AccountRecord, "businessFlowSta
   const siteLabel = getBusinessFlowSiteStateLabel(account.businessFlowState.site);
   const retainedText = account.businessFlowState.browserRetained ? " · 浏览器保留中" : "";
   if (account.businessFlowState.status === "failed" && account.businessFlowState.lastError) {
-    return `${siteLabel}/${account.businessFlowState.mode} · ${account.businessFlowState.lastError}`;
+    return `${siteLabel}/${account.businessFlowState.mode} · 失败`;
   }
   return `${siteLabel}/${account.businessFlowState.mode}${retainedText}`;
 }
@@ -1496,7 +1503,7 @@ export function AccountsView({
     <TwoLineFieldCell
       primaryLabel="导入时间"
       secondaryLabel="最近使用"
-      primaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.importedAt)}</span>}
+      primaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatAccountImportedAt(row)}</span>}
       secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.lastUsedAt)}</span>}
       className="min-w-0"
       align={align}
@@ -1577,7 +1584,7 @@ export function AccountsView({
 
   const renderDesktopTimeCell = (row: AccountRecord) => (
     <DesktopTwoLineValueCell
-      primaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.importedAt)}</span>}
+      primaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatAccountImportedAt(row)}</span>}
       secondaryValue={<span className="min-w-0 truncate whitespace-nowrap text-slate-300">{formatDate(row.lastUsedAt)}</span>}
     />
   );
@@ -1814,10 +1821,11 @@ export function AccountsView({
                   disabled={upstreamSyncState.status === "running" || !upstreamSyncAvailable}
                   title={upstreamSyncAvailable ? undefined : "先到设置页启用线上同步并保存 API key"}
                 >
-                  <CloudDownload
-                    className={cn("mr-1 size-4", upstreamSyncState.status === "running" ? "animate-spin" : "")}
-                    aria-hidden="true"
-                  />
+                  {upstreamSyncState.status === "running" ? (
+                    <LoaderCircle className="mr-1 size-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <CloudDownload className="mr-1 size-4" aria-hidden="true" />
+                  )}
                   {upstreamSyncState.status === "running" ? "同步中…" : "从线上同步"}
                 </Button>
                 <Button

@@ -105,6 +105,12 @@ describe("integration api", () => {
     expect(payload.rows[0]).toMatchObject({
       id: accountId,
       microsoftEmail: "relay@example.test",
+      groupName: "relay",
+      importedAt: expect.any(String),
+      updatedAt: expect.any(String),
+      importSource: "manual",
+      accountSource: "manual",
+      lastResultStatus: "skipped_has_key",
       serviceSummary: {
         tavily: {
           available: true,
@@ -133,6 +139,12 @@ describe("integration api", () => {
       id: accountId,
       microsoftEmail: "relay@example.test",
       passwordPlaintext: "relay-pass",
+      groupName: "relay",
+      importedAt: expect.any(String),
+      updatedAt: expect.any(String),
+      importSource: "manual",
+      accountSource: "manual",
+      lastResultStatus: "skipped_has_key",
       successfulServices: ["tavily", "microsoftMail"],
       tavily: {
         apiKey: "tvly-demo-secret",

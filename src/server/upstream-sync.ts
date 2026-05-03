@@ -43,6 +43,8 @@ export interface UpstreamTavilySuccessPayload {
 
 type JsonRecord = Record<string, unknown>;
 
+const DEFAULT_UPSTREAM_DETAIL_CONCURRENCY = 12;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -114,13 +116,36 @@ function asRecord(value: unknown): JsonRecord {
   return value && typeof value === "object" && !Array.isArray(value) ? value as JsonRecord : {};
 }
 
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  task: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const limit = Math.max(1, Math.min(concurrency, items.length || 1));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: limit }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await task(items[index]!, index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 function toSyncInput(account: JsonRecord, upstreamOrigin: string, syncedAt: string): UpstreamMicrosoftAccountSyncInput {
   const accountId = asNumber(account.id);
   const microsoftEmail = asString(account.microsoftEmail);
   const passwordPlaintext = asString(account.passwordPlaintext);
+  const importedAt = asString(account.importedAt);
+  const updatedAt = asString(account.updatedAt);
   if (!accountId) throw new Error("upstream account detail is missing id");
   if (!microsoftEmail) throw new Error(`upstream account ${accountId} is missing microsoftEmail`);
   if (!passwordPlaintext) throw new Error(`upstream account ${microsoftEmail} is missing passwordPlaintext`);
+  if (!importedAt) throw new Error(`upstream account ${microsoftEmail} is missing importedAt`);
+  if (!updatedAt) throw new Error(`upstream account ${microsoftEmail} is missing updatedAt`);
 
   const proofMailbox = asRecord(account.proofMailbox);
   const tavily = asRecord(account.tavily);
@@ -135,8 +160,8 @@ function toSyncInput(account: JsonRecord, upstreamOrigin: string, syncedAt: stri
     proofMailboxAddress: asString(proofMailbox.address),
     proofMailboxId: asString(proofMailbox.mailboxId),
     groupName: asString(account.groupName),
-    importedAt: asString(account.importedAt),
-    updatedAt: asString(account.updatedAt),
+    importedAt,
+    updatedAt,
     importSource: asString(account.importSource),
     accountSource: asString(account.accountSource),
     sourceRawPayload: asString(account.sourceRawPayload),
@@ -197,13 +222,14 @@ export async function syncAccountsFromUpstream(
     const payload = await fetchJson<{ rows?: unknown[]; total?: unknown }>(listUrl.toString(), config);
     const rows = Array.isArray(payload.rows) ? payload.rows.map(asRecord) : [];
     total = Number(payload.total || rows.length);
-    for (const row of rows) {
+    const pageDetails = await mapWithConcurrency(rows, DEFAULT_UPSTREAM_DETAIL_CONCURRENCY, async (row) => {
       const accountId = asNumber(row.id);
       if (!accountId) throw new Error("upstream account list row is missing id");
       const detailUrl = new URL(`/api/integration/v1/microsoft-accounts/${accountId}`, `${config.baseUrl}/`);
       const detailPayload = await fetchJson<{ account?: unknown }>(detailUrl.toString(), config);
-      details.push(asRecord(detailPayload.account));
-    }
+      return asRecord(detailPayload.account);
+    });
+    details.push(...pageDetails);
     if (rows.length === 0 || page * pageSize >= total) break;
     page += 1;
   }

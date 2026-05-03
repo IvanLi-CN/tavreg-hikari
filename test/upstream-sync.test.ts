@@ -158,6 +158,8 @@ test("syncAccountsFromUpstream validates every detail before writing local accou
           id: 101,
           microsoftEmail: "valid-prefix@example.test",
           passwordPlaintext: "valid-pass",
+          importedAt: "2026-04-29T08:00:00.000Z",
+          updatedAt: "2026-04-29T08:30:00.000Z",
         },
       });
     }
@@ -186,6 +188,58 @@ test("syncAccountsFromUpstream validates every detail before writing local accou
   ).rejects.toThrow("missing passwordPlaintext");
 
   expect(appDb.getAccountsByEmails(["valid-prefix@example.test"])).toHaveLength(0);
+  appDb.close();
+});
+
+test("syncAccountsFromUpstream fetches account details concurrently", async () => {
+  const { appDb } = await createTempDb();
+  let activeDetails = 0;
+  let maxActiveDetails = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/integration/v1/microsoft-accounts?")) {
+      return Response.json({
+        ok: true,
+        rows: Array.from({ length: 16 }, (_, index) => ({
+          id: index + 1,
+          microsoftEmail: `concurrent-${index + 1}@example.test`,
+        })),
+        total: 16,
+      });
+    }
+    const match = url.match(/\/api\/integration\/v1\/microsoft-accounts\/(\d+)$/);
+    if (match) {
+      activeDetails += 1;
+      maxActiveDetails = Math.max(maxActiveDetails, activeDetails);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeDetails -= 1;
+      const id = Number(match[1]);
+      return Response.json({
+        ok: true,
+        account: {
+          id,
+          microsoftEmail: `concurrent-${id}@example.test`,
+          passwordPlaintext: "valid-pass",
+          importedAt: "2026-04-29T08:00:00.000Z",
+          updatedAt: "2026-04-29T08:30:00.000Z",
+        },
+      });
+    }
+    return Response.json({ error: "not found" }, { status: 404 });
+  }) as typeof fetch;
+
+  const summary = await syncAccountsFromUpstream(appDb, {
+    config: {
+      enabled: true,
+      baseUrl: "https://upstream.example.test",
+      apiKey: "secret-key",
+      writeback: "off",
+    },
+  });
+
+  expect(summary.total).toBe(16);
+  expect(maxActiveDetails).toBeGreaterThan(1);
+  expect(maxActiveDetails).toBeLessThanOrEqual(12);
   appDb.close();
 });
 
@@ -242,6 +296,7 @@ test("upstream sync preserves an existing local key when production has no key",
     upstreamAccountId: 91,
     microsoftEmail: "local-key@example.test",
     passwordPlaintext: "new-pass",
+    importedAt: "2026-04-29T08:00:00.000Z",
     groupName: "production",
     lastResultStatus: "ready",
     skipReason: null,
@@ -253,8 +308,48 @@ test("upstream sync preserves an existing local key when production has no key",
   expect(account.passwordPlaintext).toBe("new-pass");
   expect(account.hasApiKey).toBe(true);
   expect(account.apiKeyId).toBe(localKey.id);
+  expect(account.importedAt).toBe("2026-04-29T08:00:00.000Z");
   expect(account.skipReason).toBe("has_api_key");
   expect(appDb.getApiKey(localKey.id)?.apiKey).toBe("tvly-local-only");
+
+  appDb.close();
+});
+
+test("syncAccountsFromUpstream rejects details with missing import timestamps", async () => {
+  const { appDb } = await createTempDb();
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/integration/v1/microsoft-accounts?")) {
+      return Response.json({
+        ok: true,
+        rows: [{ id: 191, microsoftEmail: "missing-imported-at@example.test" }],
+        total: 1,
+      });
+    }
+    if (url.endsWith("/api/integration/v1/microsoft-accounts/191")) {
+      return Response.json({
+        ok: true,
+        account: {
+          id: 191,
+          microsoftEmail: "missing-imported-at@example.test",
+          passwordPlaintext: "new-pass",
+        },
+      });
+    }
+    return Response.json({ error: "not found" }, { status: 404 });
+  }) as typeof fetch;
+
+  await expect(
+    syncAccountsFromUpstream(appDb, {
+      config: {
+        enabled: true,
+        baseUrl: "https://upstream.example.test",
+        apiKey: "secret-key",
+        writeback: "off",
+      },
+    }),
+  ).rejects.toThrow("missing importedAt");
+  expect(appDb.getAccountsByEmails(["missing-imported-at@example.test"])).toHaveLength(0);
 
   appDb.close();
 });

@@ -10,6 +10,7 @@ import {
 } from "../server/integration-api-keys.js";
 
 const require = createRequire(import.meta.url);
+const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
 
 type SqliteBindValue = string | number | boolean | null | undefined;
 type SqliteNamedParams = Record<string, SqliteBindValue>;
@@ -2066,7 +2067,7 @@ export class AppDatabase {
       normalizedStatus = "disabled";
     }
     const nextSkipReason = preserveLocalApiKey ? "has_api_key" : normalizedSkipReason;
-    const importedAt = input.importedAt?.trim() || (existing?.imported_at == null ? now : String(existing.imported_at));
+    const importedAt = input.importedAt?.trim() || UNKNOWN_UPSTREAM_IMPORTED_AT;
     const updatedAt = input.updatedAt?.trim() || now;
     const syncedAt = input.upstreamSyncedAt?.trim() || now;
     const proofAddress = input.proofMailboxAddress?.trim().toLowerCase() || null;

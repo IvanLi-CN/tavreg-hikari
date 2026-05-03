@@ -358,7 +358,7 @@ export function buildAttemptRuntimeSpec(input: {
   selectedProxyNode?: string | null;
   baseEnv?: NodeJS.ProcessEnv;
 }): { command: string; args: string[]; env: NodeJS.ProcessEnv } {
-  const runtime = resolveWorkerRuntime();
+  const runtime = resolveWorkerRuntime(input.baseEnv);
   const args = [...runtime.bootstrapArgs, "--mode", input.job.runMode, "--parallel", "1", "--need", "1"];
   if (input.selectedProxyNode?.trim()) {
     args.push("--proxy-node", input.selectedProxyNode.trim());

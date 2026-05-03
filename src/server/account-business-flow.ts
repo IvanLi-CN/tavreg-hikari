@@ -174,6 +174,16 @@ function getRetainStateMessage(site: AccountBusinessFlowSite): string {
   return "Tavily 已完成登录，浏览器保持可接管状态。";
 }
 
+function summarizeBusinessFlowError(message: string): string {
+  const normalized = String(message || "").replace(/\x1B\[[0-9;]*m/g, "").trim();
+  if (!normalized) return "业务流失败，请查看 worker.log。";
+  if (/better-sqlite3|NODE_MODULE_VERSION|compiled against a different Node\.js version/i.test(normalized)) {
+    return "运行环境的 SQLite native 模块与 worker Node 版本不匹配，请重启服务或重新安装依赖后重试。";
+  }
+  const firstLine = normalized.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || normalized;
+  return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
+}
+
 function isSuccessfulRetainedBrowserSnapshot(retained: RetainedBrowserSnapshot | null): boolean {
   return Boolean(retained) && retained?.success !== false;
 }
@@ -530,15 +540,16 @@ export class AccountBusinessFlowManager {
             }
             return;
           }
-          const message =
+          const rawMessage =
             error?.error ||
             retained?.error ||
             (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          const message = summarizeBusinessFlowError(rawMessage);
           this.db.completeAttemptFailure(hiddenJob.id, attemptId, account.id, {
             errorCode: code == null ? "process_exit" : `exit_${code}`,
-            errorMessage: message,
+            errorMessage: rawMessage,
           }, null);
-          this.db.completeJob(hiddenJob.id, false, message);
+          this.db.completeJob(hiddenJob.id, false, rawMessage);
           if (lifecycle.isCurrent()) {
             this.updateState(key, {
               status: "failed",
