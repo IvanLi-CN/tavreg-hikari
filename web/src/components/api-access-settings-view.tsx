@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { KeyRound, RefreshCcw, ShieldOff } from "lucide-react";
+import { CloudDownload, KeyRound, RefreshCcw, Save, ShieldOff } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CopyIconButton, type CopyButtonStatus } from "@/components/ui/copy-icon-button";
 import {
   Dialog,
@@ -13,8 +14,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import type { IntegrationApiKeyRecord } from "@/lib/app-types";
+import type { IntegrationApiKeyRecord, UpstreamSyncSettings, UpstreamSyncSettingsUpdate } from "@/lib/app-types";
 
 type EditorMode =
   | { kind: "create" }
@@ -47,10 +49,15 @@ function statusBadgeVariant(status: IntegrationApiKeyRecord["status"]): "success
 }
 
 export function ApiAccessSettingsView(props: {
+  upstreamSyncSettings: UpstreamSyncSettings | null;
+  upstreamSyncDraft: UpstreamSyncSettingsUpdate;
+  upstreamSyncBusy?: boolean;
   rows: IntegrationApiKeyRecord[];
   loading?: boolean;
   mutatingId?: number | "create" | null;
   revealedSecret: RevealedIntegrationApiSecret | null;
+  onUpstreamSyncDraftChange: (patch: Partial<UpstreamSyncSettingsUpdate>) => void;
+  onSaveUpstreamSyncSettings: () => void | Promise<void>;
   onCreate: (input: { label: string; notes: string | null }) => boolean | void | Promise<boolean | void>;
   onRotate: (
     record: IntegrationApiKeyRecord,
@@ -110,6 +117,95 @@ export function ApiAccessSettingsView(props: {
 
   return (
     <>
+      <Card data-testid="upstream-sync-settings-card" aria-label="线上数据同步设置">
+        <CardHeader className="gap-4 md:flex-row md:items-start md:justify-between">
+          <div className="space-y-2">
+            <CardTitle className="flex items-center gap-2">
+              <CloudDownload className="size-5 text-cyan-200" aria-hidden="true" />
+              线上数据同步
+            </CardTitle>
+            <CardDescription>本地账号页使用这组 integration API 设置拉取线上账号池；关闭后不会访问线上。</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={props.upstreamSyncDraft.enabled ? "success" : "neutral"}>
+              {props.upstreamSyncDraft.enabled ? "同步已开启" : "同步已关闭"}
+            </Badge>
+            <Badge variant={props.upstreamSyncSettings?.hasApiKey ? "success" : "warning"}>
+              {props.upstreamSyncSettings?.hasApiKey ? "key 已保存" : "缺少 key"}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <label className="flex flex-col gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Production base URL</span>
+              <Input
+                value={props.upstreamSyncDraft.baseUrl}
+                disabled={props.upstreamSyncBusy}
+                onChange={(event) => props.onUpstreamSyncDraftChange({ baseUrl: event.target.value })}
+                placeholder="https://tavreg-hikari.ivanli.cc"
+              />
+            </label>
+            <label className="flex flex-col gap-2">
+              <span className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">Integration API Key</span>
+              <Input
+                type="password"
+                value={props.upstreamSyncDraft.apiKey}
+                disabled={props.upstreamSyncBusy}
+                onChange={(event) => props.onUpstreamSyncDraftChange({ apiKey: event.target.value })}
+                placeholder={
+                  props.upstreamSyncSettings?.hasApiKey
+                    ? `当前生效：${props.upstreamSyncSettings.apiKeyMasked}`
+                    : "粘贴线上 API Access key"
+                }
+              />
+            </label>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
+              <Switch
+                checked={props.upstreamSyncDraft.enabled}
+                disabled={props.upstreamSyncBusy}
+                aria-label="启用线上同步"
+                onCheckedChange={(checked) => props.onUpstreamSyncDraftChange({ enabled: checked === true })}
+              />
+              <span className="space-y-1 text-sm">
+                <span className="block font-medium text-slate-100">启用线上同步</span>
+                <span className="block text-xs leading-5 text-slate-400">
+                  控制账号页手动同步和 Tavily 成功回写是否调用线上实例。
+                </span>
+              </span>
+            </div>
+
+            <label className="flex items-start gap-3 rounded-[24px] border border-white/8 bg-[#08111d]/88 p-4">
+              <Checkbox
+                checked={props.upstreamSyncDraft.writeback === "success_only"}
+                disabled={props.upstreamSyncBusy}
+                onCheckedChange={(checked) =>
+                  props.onUpstreamSyncDraftChange({ writeback: checked === true ? "success_only" : "off" })
+                }
+              />
+              <span className="space-y-1 text-sm">
+                <span className="block font-medium text-slate-100">仅回写 Tavily 成功结果</span>
+                <span className="block text-xs leading-5 text-slate-400">失败、禁用、分组或密码编辑都不会回写线上。</span>
+              </span>
+            </label>
+          </div>
+
+          <div className="flex justify-end">
+            <Button
+              type="button"
+              disabled={props.upstreamSyncBusy || !props.upstreamSyncDraft.baseUrl.trim()}
+              onClick={() => void props.onSaveUpstreamSyncSettings()}
+            >
+              <Save className="size-4" aria-hidden="true" />
+              {props.upstreamSyncBusy ? "保存中…" : "保存同步设置"}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader className="gap-4 md:flex-row md:items-start md:justify-between">
           <div className="space-y-2">

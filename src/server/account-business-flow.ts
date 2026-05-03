@@ -29,6 +29,7 @@ import {
   type ServerEvent,
 } from "./scheduler.js";
 import type { CfMailHttpJson } from "../cfmail-api.js";
+import { buildUpstreamSyncConfig, writeBackUpstreamTavilySuccess } from "./upstream-sync.js";
 
 export type AccountBusinessFlowSite = "none" | "tavily" | "grok" | "chatgpt";
 export type AccountBusinessFlowMode = "headless" | "headed" | "fingerprint";
@@ -171,6 +172,16 @@ function getRetainStateMessage(site: AccountBusinessFlowSite): string {
   if (site === "chatgpt") return "ChatGPT 已完成登录，浏览器保持可接管状态。";
   if (site === "grok") return "Grok 已完成登录，浏览器保持可接管状态。";
   return "Tavily 已完成登录，浏览器保持可接管状态。";
+}
+
+function summarizeBusinessFlowError(message: string): string {
+  const normalized = String(message || "").replace(/\x1B\[[0-9;]*m/g, "").trim();
+  if (!normalized) return "业务流失败，请查看 worker.log。";
+  if (/better-sqlite3|NODE_MODULE_VERSION|compiled against a different Node\.js version/i.test(normalized)) {
+    return "运行环境的 SQLite native 模块与 worker Node 版本不匹配，请重启服务或重新安装依赖后重试。";
+  }
+  const firstLine = normalized.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || normalized;
+  return firstLine.length > 180 ? `${firstLine.slice(0, 177)}...` : firstLine;
 }
 
 function isSuccessfulRetainedBrowserSnapshot(retained: RetainedBrowserSnapshot | null): boolean {
@@ -442,11 +453,63 @@ export class AccountBusinessFlowManager {
         attemptId,
         onClose: async (code, signal, lifecycle) => {
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
-          const result = await readJsonFile<{ apiKey?: string | null }>(path.join(outputDir, "result.json"));
+          const result = await readJsonFile<{
+            apiKey?: string | null;
+            serviceAccess?: {
+              tavily?: {
+                cookiesSnapshot?: unknown[];
+                browserFingerprintSnapshot?: unknown;
+                extractedIp?: string | null;
+                lastSuccessAt?: string | null;
+                apiKeyPrefix?: string | null;
+              };
+            };
+          }>(path.join(outputDir, "result.json"));
           const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
           const retained = await readJsonFile<RetainedBrowserSnapshot>(retainPath);
           if (code === 0 && signal == null && typeof result?.apiKey === "string" && result.apiKey.trim()) {
-            this.db.completeAttemptSuccess(hiddenJob.id, attemptId, account.id, result.apiKey.trim(), null);
+            const apiKey = result.apiKey.trim();
+            const { attempt, apiKeyRecord } = this.db.completeAttemptSuccess(hiddenJob.id, attemptId, account.id, apiKey, null);
+            const tavilyAccess = result.serviceAccess?.tavily;
+            if (tavilyAccess) {
+              this.db.upsertAccountServiceAccess({
+                accountId: account.id,
+                service: "tavily",
+                status: "succeeded",
+                apiKeyId: apiKeyRecord.id,
+                snapshotJson: JSON.stringify({
+                  cookiesSnapshot: Array.isArray(tavilyAccess.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+                  browserFingerprintSnapshot: tavilyAccess.browserFingerprintSnapshot || null,
+                  extractedIp: tavilyAccess.extractedIp || null,
+                  apiKeyPrefix: tavilyAccess.apiKeyPrefix || apiKeyRecord.apiKeyPrefix,
+                }),
+                extractedIp: tavilyAccess.extractedIp || null,
+                lastSuccessAt: tavilyAccess.lastSuccessAt || attempt.completedAt || nowIso(),
+              });
+            }
+            const refreshedAccount = this.db.getAccount(account.id);
+            if (refreshedAccount) {
+              try {
+                await writeBackUpstreamTavilySuccess({
+                  account: refreshedAccount,
+                  apiKey,
+                  extractedIp: tavilyAccess?.extractedIp || null,
+                  lastSuccessAt: tavilyAccess?.lastSuccessAt || attempt.completedAt || nowIso(),
+                  cookiesSnapshot: Array.isArray(tavilyAccess?.cookiesSnapshot) ? tavilyAccess.cookiesSnapshot : [],
+                  browserFingerprintSnapshot: tavilyAccess?.browserFingerprintSnapshot || null,
+                  apiKeyPrefix: tavilyAccess?.apiKeyPrefix || apiKeyRecord.apiKeyPrefix,
+                }, {
+                  config: buildUpstreamSyncConfig(this.getSettings()),
+                });
+              } catch (writebackError) {
+                this.broadcastToast(
+                  "warning",
+                  `${account.microsoftEmail}：Tavily 已在本地完成，但线上成功结果回写失败：${
+                    writebackError instanceof Error ? writebackError.message : String(writebackError)
+                  }`,
+                );
+              }
+            }
             this.db.completeJob(hiddenJob.id, true);
             if (lifecycle.isCurrent()) {
               this.updateState(key, {
@@ -477,15 +540,16 @@ export class AccountBusinessFlowManager {
             }
             return;
           }
-          const message =
+          const rawMessage =
             error?.error ||
             retained?.error ||
             (signal ? `terminated by ${signal}` : code == null ? "process exited without code" : `process exited with code ${code}`);
+          const message = summarizeBusinessFlowError(rawMessage);
           this.db.completeAttemptFailure(hiddenJob.id, attemptId, account.id, {
             errorCode: code == null ? "process_exit" : `exit_${code}`,
-            errorMessage: message,
+            errorMessage: rawMessage,
           }, null);
-          this.db.completeJob(hiddenJob.id, false, message);
+          this.db.completeJob(hiddenJob.id, false, rawMessage);
           if (lifecycle.isCurrent()) {
             this.updateState(key, {
               status: "failed",

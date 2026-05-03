@@ -39,6 +39,10 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+    upstreamTavregSyncEnabled: false,
+    upstreamTavregApiKey: "",
+    upstreamTavregWriteback: "off",
     ...overrides,
   };
 }
@@ -586,6 +590,92 @@ test("force stop wins over a last-moment successful worker exit", async () => {
     stage: "stopped",
   });
   expect(appDb.getAccount(accountId)?.hasApiKey).toBe(false);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("upstream tavily writeback failure does not roll back a successful attempt", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const events: any[] = [];
+  const scheduler = new JobScheduler(
+    appDb,
+    "tavily",
+    process.cwd(),
+    dbPath,
+    () =>
+      createSchedulerSettings({
+        upstreamTavregSyncEnabled: true,
+        upstreamTavregApiKey: "upstream-secret",
+        upstreamTavregWriteback: "success_only",
+      }),
+    (event) => events.push(event),
+  );
+  const fetchCalls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetchCalls.push(String(input));
+    return Response.json({ error: "upstream unavailable" }, { status: 502 });
+  }) as typeof fetch;
+
+  const { account } = appDb.upsertUpstreamAccount({
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamAccountId: 412,
+    microsoftEmail: "writeback-fail@example.test",
+    passwordPlaintext: "pw123456",
+  });
+  const job = appDb.createJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+  const outputDir = path.join(path.dirname(dbPath), "writeback-failure-success");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      apiKey: "tvly-local-success-001",
+      serviceAccess: {
+        tavily: {
+          extractedIp: "198.51.100.27",
+          lastSuccessAt: "2026-04-30T08:30:00.000Z",
+          cookiesSnapshot: [{ name: "tvly_session", value: "local-cookie" }],
+          browserFingerprintSnapshot: { navigatorUserAgent: "local-agent" },
+        },
+      },
+    }),
+  );
+  const attempt = appDb.createAttempt(job.id, {
+    accountId: account.id,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+
+  await scheduler["handleAttemptExit"](
+    job.id,
+    attempt.id,
+    account.id,
+    outputDir,
+    0,
+    null,
+    {
+      child: { pid: 0, kill: () => true },
+      attempt,
+      account,
+      outputDir,
+      reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+      tail: [],
+      stopRequested: null,
+    } as any,
+  );
+
+  expect(fetchCalls).toEqual(["https://upstream.example.test/api/integration/v1/microsoft-accounts/412/tavily-success"]);
+  expect(appDb.getAttempt(attempt.id)).toMatchObject({ status: "succeeded" });
+  const refreshedAccount = appDb.getAccount(account.id)!;
+  expect(refreshedAccount.hasApiKey).toBe(true);
+  expect(appDb.getApiKey(refreshedAccount.apiKeyId!)?.apiKey).toBe("tvly-local-success-001");
+  expect(events.some((event) => event.type === "toast" && event.payload?.level === "warning" && /writeback failed/.test(event.payload.message))).toBe(true);
+  expect(events.some((event) => event.type === "toast" && event.payload?.level === "success")).toBe(true);
 
   await scheduler.shutdown();
   appDb.close();

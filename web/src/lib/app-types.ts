@@ -84,6 +84,9 @@ export type AccountRecord = {
   groupName: string | null;
   disabledAt: string | null;
   disabledReason: string | null;
+  upstreamOrigin: string | null;
+  upstreamAccountId: number | null;
+  upstreamSyncedAt: string | null;
   mailboxStatus: MailboxStatus | null;
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
@@ -91,6 +94,40 @@ export type AccountRecord = {
   browserSession: AccountBrowserSession | null;
   businessFlowAvailability: AccountBusinessFlowAvailability;
   businessFlowState: AccountBusinessFlowState | null;
+};
+
+export type UpstreamAccountSyncPayload = {
+  ok: true;
+  upstreamOrigin: string;
+  startedAt: string;
+  completedAt: string;
+  total: number;
+  created: number;
+  updated: number;
+  linkedApiKeys: number;
+};
+
+export type UpstreamTavregWritebackMode = "off" | "success_only";
+
+export type UpstreamSyncSettings = {
+  enabled: boolean;
+  baseUrl: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  writeback: UpstreamTavregWritebackMode;
+  configured: boolean;
+};
+
+export type UpstreamSyncSettingsPayload = {
+  ok: true;
+  settings: UpstreamSyncSettings;
+};
+
+export type UpstreamSyncSettingsUpdate = {
+  enabled: boolean;
+  baseUrl: string;
+  apiKey: string;
+  writeback: UpstreamTavregWritebackMode;
 };
 
 export type MicrosoftGraphSettings = {

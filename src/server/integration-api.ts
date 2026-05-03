@@ -33,6 +33,19 @@ type JsonRecord = Record<string, unknown>;
 export interface IntegrationMicrosoftAccountRecord {
   id: number;
   microsoftEmail: string;
+  groupName: string | null;
+  importedAt: string;
+  updatedAt: string;
+  importSource: string;
+  accountSource: string;
+  sourceRawPayload: string | null;
+  lastUsedAt: string | null;
+  lastResultStatus: string;
+  lastResultAt: string | null;
+  lastErrorCode: string | null;
+  skipReason: string | null;
+  disabledAt: string | null;
+  disabledReason: string | null;
   passwordPlaintext?: string;
   proofMailbox: {
     provider: "cfmail";
@@ -310,6 +323,19 @@ function serializeIntegrationMicrosoftAccount(input: {
   const result: IntegrationMicrosoftAccountRecord = {
     id: input.account.id,
     microsoftEmail: input.account.microsoftEmail,
+    groupName: input.account.groupName,
+    importedAt: input.account.importedAt,
+    updatedAt: input.account.updatedAt,
+    importSource: input.account.importSource,
+    accountSource: input.account.accountSource,
+    sourceRawPayload: input.account.sourceRawPayload,
+    lastUsedAt: input.account.lastUsedAt,
+    lastResultStatus: input.account.lastResultStatus,
+    lastResultAt: input.account.lastResultAt,
+    lastErrorCode: input.account.lastErrorCode,
+    skipReason: input.account.skipReason,
+    disabledAt: input.account.disabledAt,
+    disabledReason: input.account.disabledReason,
     proofMailbox:
       input.account.proofMailboxProvider && input.account.proofMailboxAddress
         ? {
@@ -474,6 +500,7 @@ export async function handleIntegrationApiRequest(input: {
   readSettings?: () => AppSettings;
 }): Promise<Response | null> {
   const accountDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)$/);
+  const accountTavilySuccessMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)\/tavily-success$/);
   const proofMailboxCodesMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)\/proof-mailbox\/codes$/);
   const mailboxMessagesMatch = input.pathname.match(/^\/api\/integration\/v1\/mailboxes\/(\d+)\/messages$/);
   const messageDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/messages\/(\d+)$/);
@@ -517,6 +544,67 @@ export async function handleIntegrationApiRequest(input: {
         mailbox: input.db.getMailboxByAccountId(account.id),
         tavilyAccess: input.db.getAccountServiceAccess(account.id, "tavily"),
         currentApiKey: account.apiKeyId != null ? input.db.getApiKey(account.apiKeyId) : null,
+        detailed: true,
+      }),
+    });
+  }
+
+  if (accountTavilySuccessMatch && input.req.method === "POST") {
+    const accountId = Number.parseInt(accountTavilySuccessMatch[1] || "", 10);
+    if (!Number.isInteger(accountId) || accountId < 1) {
+      return badRequest("invalid account id");
+    }
+    const account = input.db.getAccount(accountId);
+    if (!account) {
+      return badRequest(`account not found: ${accountId}`, 404);
+    }
+    const body = (await input.req.json().catch(() => null)) as {
+      microsoftEmail?: unknown;
+      apiKey?: unknown;
+      extractedIp?: unknown;
+      lastSuccessAt?: unknown;
+      apiKeyPrefix?: unknown;
+      cookiesSnapshot?: unknown;
+      browserFingerprintSnapshot?: unknown;
+    } | null;
+    const microsoftEmail = String(body?.microsoftEmail || "").trim().toLowerCase();
+    const apiKey = String(body?.apiKey || "").trim();
+    if (!microsoftEmail || microsoftEmail !== account.microsoftEmail.trim().toLowerCase()) {
+      return badRequest("microsoft email does not match account id", 409);
+    }
+    if (!apiKey) {
+      return badRequest("apiKey is required", 422);
+    }
+    const extractedIp = body?.extractedIp == null ? null : String(body.extractedIp).trim() || null;
+    const lastSuccessAt = body?.lastSuccessAt == null ? null : String(body.lastSuccessAt).trim() || null;
+    const apiKeyPrefix = body?.apiKeyPrefix == null ? null : String(body.apiKeyPrefix).trim() || null;
+    const cookiesSnapshot = Array.isArray(body?.cookiesSnapshot) ? body.cookiesSnapshot : [];
+    const browserFingerprintSnapshot =
+      body?.browserFingerprintSnapshot && typeof body.browserFingerprintSnapshot === "object"
+        ? body.browserFingerprintSnapshot
+        : null;
+    const key = input.db.recordApiKey(account.id, apiKey, extractedIp, { preserveLease: true });
+    const access = input.db.upsertAccountServiceAccess({
+      accountId: account.id,
+      service: "tavily",
+      status: "succeeded",
+      apiKeyId: key.id,
+      extractedIp,
+      lastSuccessAt: lastSuccessAt || key.extractedAt,
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot,
+        browserFingerprintSnapshot,
+        extractedIp,
+        apiKeyPrefix: apiKeyPrefix || key.apiKeyPrefix,
+      }),
+    });
+    return json({
+      ok: true,
+      account: serializeIntegrationMicrosoftAccount({
+        account: input.db.getAccount(account.id) || account,
+        mailbox: input.db.getMailboxByAccountId(account.id),
+        tavilyAccess: access,
+        currentApiKey: key,
         detailed: true,
       }),
     });

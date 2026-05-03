@@ -105,6 +105,12 @@ describe("integration api", () => {
     expect(payload.rows[0]).toMatchObject({
       id: accountId,
       microsoftEmail: "relay@example.test",
+      groupName: "relay",
+      importedAt: expect.any(String),
+      updatedAt: expect.any(String),
+      importSource: "manual",
+      accountSource: "manual",
+      lastResultStatus: "skipped_has_key",
       serviceSummary: {
         tavily: {
           available: true,
@@ -133,6 +139,12 @@ describe("integration api", () => {
       id: accountId,
       microsoftEmail: "relay@example.test",
       passwordPlaintext: "relay-pass",
+      groupName: "relay",
+      importedAt: expect.any(String),
+      updatedAt: expect.any(String),
+      importSource: "manual",
+      accountSource: "manual",
+      lastResultStatus: "skipped_has_key",
       successfulServices: ["tavily", "microsoftMail"],
       tavily: {
         apiKey: "tvly-demo-secret",
@@ -145,6 +157,97 @@ describe("integration api", () => {
     });
     expect(payload.account.tavily.cookiesSnapshot).toHaveLength(1);
     expect(payload.account.session).not.toHaveProperty("profilePath");
+    appDb.close();
+  });
+
+  test("records tavily success writeback with account id and email guard", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId } = await seedAccount(appDb);
+
+    const mismatchReq = new Request(`https://console.example.test/api/integration/v1/microsoft-accounts/${accountId}/tavily-success`, {
+      method: "POST",
+      body: JSON.stringify({
+        microsoftEmail: "other@example.test",
+        apiKey: "tvly-writeback-mismatch",
+      }),
+    });
+    const mismatchResp = await handleIntegrationApiRequest({
+      req: mismatchReq,
+      pathname: new URL(mismatchReq.url).pathname,
+      url: new URL(mismatchReq.url),
+      db: appDb,
+    });
+    expect(mismatchResp?.status).toBe(409);
+
+    const req = new Request(`https://console.example.test/api/integration/v1/microsoft-accounts/${accountId}/tavily-success`, {
+      method: "POST",
+      body: JSON.stringify({
+        microsoftEmail: "relay@example.test",
+        apiKey: "tvly-writeback-secret",
+        extractedIp: "203.0.113.88",
+        lastSuccessAt: "2026-04-24T12:00:00.000Z",
+        cookiesSnapshot: [{ name: "tvly_session", value: "writeback-cookie" }],
+        browserFingerprintSnapshot: { navigatorUserAgent: "writeback-agent" },
+      }),
+    });
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(200);
+    const payload = await resp!.json();
+    expect(payload.account).toMatchObject({
+      id: accountId,
+      microsoftEmail: "relay@example.test",
+      tavily: {
+        apiKey: "tvly-writeback-secret",
+        extractedIp: "203.0.113.88",
+      },
+    });
+    const account = appDb.getAccount(accountId)!;
+    expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-writeback-secret");
+    expect(JSON.parse(appDb.getAccountServiceAccess(accountId, "tavily")!.snapshotJson)).toMatchObject({
+      cookiesSnapshot: [{ name: "tvly_session", value: "writeback-cookie" }],
+      browserFingerprintSnapshot: { navigatorUserAgent: "writeback-agent" },
+    });
+    appDb.close();
+  });
+
+  test("preserves active production leases during tavily success writeback", async () => {
+    const { appDb } = await createTempDb();
+    const { accountId } = await seedAccount(appDb);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const leased = appDb.leaseAccountForJob(job.id, accountId)!;
+    expect(leased.leaseJobId).toBe(job.id);
+
+    const req = new Request(`https://console.example.test/api/integration/v1/microsoft-accounts/${accountId}/tavily-success`, {
+      method: "POST",
+      body: JSON.stringify({
+        microsoftEmail: "relay@example.test",
+        apiKey: "tvly-writeback-while-leased",
+        extractedIp: "203.0.113.89",
+      }),
+    });
+    const resp = await handleIntegrationApiRequest({
+      req,
+      pathname: new URL(req.url).pathname,
+      url: new URL(req.url),
+      db: appDb,
+    });
+
+    expect(resp?.status).toBe(200);
+    const account = appDb.getAccount(accountId)!;
+    expect(account).toMatchObject({
+      hasApiKey: true,
+      lastResultStatus: "leased",
+      leaseJobId: job.id,
+    });
+    expect(account.leaseStartedAt).toBe(leased.leaseStartedAt);
+    expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-writeback-while-leased");
+
     appDb.close();
   });
 
@@ -302,6 +405,10 @@ describe("integration api", () => {
       microsoftGraphClientSecret: "client-secret",
       microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
       microsoftGraphAuthority: "common",
+      upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+      upstreamTavregSyncEnabled: false,
+      upstreamTavregApiKey: "",
+      upstreamTavregWriteback: "off",
     };
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -401,6 +508,10 @@ describe("integration api", () => {
       microsoftGraphClientSecret: "client-secret",
       microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
       microsoftGraphAuthority: "common",
+      upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
+      upstreamTavregSyncEnabled: false,
+      upstreamTavregApiKey: "",
+      upstreamTavregWriteback: "off",
     };
     let fetchCount = 0;
     globalThis.fetch = (async () => {

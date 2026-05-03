@@ -10,6 +10,7 @@ import {
 } from "../server/integration-api-keys.js";
 
 const require = createRequire(import.meta.url);
+const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
 
 type SqliteBindValue = string | number | boolean | null | undefined;
 type SqliteNamedParams = Record<string, SqliteBindValue>;
@@ -111,6 +112,65 @@ export function normalizeAccountExtractorAccountType(
   return isAccountExtractorAccountType(value) ? value : fallback;
 }
 
+function normalizeAccountStatusValue(value: unknown, fallback: AccountStatus = "ready"): AccountStatus {
+  const normalized = String(value || "").trim();
+  if (
+    normalized === "ready" ||
+    normalized === "leased" ||
+    normalized === "running" ||
+    normalized === "succeeded" ||
+    normalized === "failed" ||
+    normalized === "skipped_has_key" ||
+    normalized === "disabled"
+  ) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function normalizeAccountSkipReasonValue(value: unknown): AccountSkipReason | null {
+  const normalized = String(value || "").trim();
+  if (
+    normalized === "has_api_key" ||
+    normalized === "microsoft_password_incorrect" ||
+    normalized === "microsoft_account_locked" ||
+    normalized === "microsoft_unknown_recovery_email"
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function normalizeAccountImportSourceValue(value: unknown): AccountImportSource {
+  return value === "extractor" ? "extractor" : "manual";
+}
+
+function normalizeAccountSourceValue(value: unknown): AccountSource {
+  if (
+    value === "zhanghaoya" ||
+    value === "shanyouxiang" ||
+    value === "shankeyun" ||
+    value === "hotmail666"
+  ) {
+    return value;
+  }
+  return "manual";
+}
+
+function normalizeMailboxStatusValue(value: unknown, fallback: MailboxStatus = "preparing"): MailboxStatus {
+  const normalized = String(value || "").trim();
+  if (
+    normalized === "preparing" ||
+    normalized === "available" ||
+    normalized === "failed" ||
+    normalized === "invalidated" ||
+    normalized === "locked"
+  ) {
+    return normalized;
+  }
+  return fallback;
+}
+
 export interface AppSettings extends Record<string, unknown> {
   subscriptionUrl: string;
   groupName: string;
@@ -138,6 +198,10 @@ export interface AppSettings extends Record<string, unknown> {
   microsoftGraphClientSecret: string;
   microsoftGraphRedirectUri: string;
   microsoftGraphAuthority: string;
+  upstreamTavregSyncEnabled: boolean;
+  upstreamTavregBaseUrl: string;
+  upstreamTavregApiKey: string;
+  upstreamTavregWriteback: "off" | "success_only";
 }
 
 export interface MicrosoftAccountRecord {
@@ -164,11 +228,62 @@ export interface MicrosoftAccountRecord {
   disabledReason: string | null;
   leaseJobId: number | null;
   leaseStartedAt: string | null;
+  upstreamOrigin: string | null;
+  upstreamAccountId: number | null;
+  upstreamSyncedAt: string | null;
   mailboxStatus: MailboxStatus;
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
   mailboxUnreadCount: number;
   browserSession: AccountBrowserSessionRecord | null;
+}
+
+export interface UpstreamTavilyAccessSyncInput {
+  apiKey?: string | null;
+  apiKeyPrefix?: string | null;
+  extractedIp?: string | null;
+  lastSuccessAt?: string | null;
+  cookiesSnapshot?: unknown[];
+  browserFingerprintSnapshot?: unknown | null;
+}
+
+export interface UpstreamMicrosoftAccountSyncInput {
+  upstreamOrigin: string;
+  upstreamAccountId: number;
+  upstreamSyncedAt?: string | null;
+  microsoftEmail: string;
+  passwordPlaintext: string;
+  proofMailboxProvider?: ProofMailboxProvider | null;
+  proofMailboxAddress?: string | null;
+  proofMailboxId?: string | null;
+  groupName?: string | null;
+  importedAt?: string | null;
+  updatedAt?: string | null;
+  importSource?: string | null;
+  accountSource?: string | null;
+  sourceRawPayload?: string | null;
+  lastUsedAt?: string | null;
+  lastResultStatus?: string | null;
+  lastResultAt?: string | null;
+  lastErrorCode?: string | null;
+  skipReason?: string | null;
+  disabledAt?: string | null;
+  disabledReason?: string | null;
+  mailbox?: {
+    status?: string | null;
+    unreadCount?: number | null;
+    lastSyncedAt?: string | null;
+    lastErrorCode?: string | null;
+    lastErrorMessage?: string | null;
+  } | null;
+  tavily?: UpstreamTavilyAccessSyncInput | null;
+}
+
+export interface UpstreamMicrosoftAccountSyncResult {
+  account: MicrosoftAccountRecord;
+  created: boolean;
+  updated: boolean;
+  linkedApiKey: boolean;
 }
 
 export interface ImportAccountsResult {
@@ -707,6 +822,9 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     disabledReason: row.disabled_reason == null ? null : String(row.disabled_reason),
     leaseJobId: row.lease_job_id == null ? null : Number(row.lease_job_id),
     leaseStartedAt: row.lease_started_at == null ? null : String(row.lease_started_at),
+    upstreamOrigin: row.upstream_origin == null ? null : String(row.upstream_origin),
+    upstreamAccountId: row.upstream_account_id == null ? null : Number(row.upstream_account_id),
+    upstreamSyncedAt: row.upstream_synced_at == null ? null : String(row.upstream_synced_at),
     mailboxStatus: String(row.mailbox_status || "preparing") as MailboxStatus,
     mailboxLastSyncedAt: row.mailbox_last_synced_at == null ? null : String(row.mailbox_last_synced_at),
     mailboxLastErrorCode: row.mailbox_last_error_code == null ? null : String(row.mailbox_last_error_code),
@@ -1114,7 +1232,10 @@ export class AppDatabase {
         disabled_at TEXT,
         disabled_reason TEXT,
         lease_job_id INTEGER,
-        lease_started_at TEXT
+        lease_started_at TEXT,
+        upstream_origin TEXT,
+        upstream_account_id INTEGER,
+        upstream_synced_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS api_keys (
@@ -1400,6 +1521,15 @@ export class AppDatabase {
     if (!accountColumns.has("source_raw_payload")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN source_raw_payload TEXT;");
     }
+    if (!accountColumns.has("upstream_origin")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN upstream_origin TEXT;");
+    }
+    if (!accountColumns.has("upstream_account_id")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN upstream_account_id INTEGER;");
+    }
+    if (!accountColumns.has("upstream_synced_at")) {
+      this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN upstream_synced_at TEXT;");
+    }
     const jobTableInfo = this.db.query("PRAGMA table_info(jobs);").all() as Array<Record<string, unknown>>;
     const jobColumns = new Set(jobTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!jobColumns.has("site")) {
@@ -1544,6 +1674,7 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_group_name ON microsoft_accounts(group_name, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_proof_mailbox ON microsoft_accounts(proof_mailbox_address, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_source ON microsoft_accounts(account_source, updated_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_upstream ON microsoft_accounts(upstream_origin, upstream_account_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_attempt ON grok_api_keys(attempt_id);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_job_extracted ON grok_api_keys(job_id, extracted_at DESC);");
@@ -1897,6 +2028,229 @@ export class AppDatabase {
     }
 
     return { created, updated, total: deduped.size, affectedIds };
+  }
+
+  upsertUpstreamAccount(input: UpstreamMicrosoftAccountSyncInput): UpstreamMicrosoftAccountSyncResult {
+    const now = nowIso();
+    const upstreamOrigin = input.upstreamOrigin.trim().replace(/\/+$/, "");
+    const upstreamAccountId = Number(input.upstreamAccountId);
+    const email = input.microsoftEmail.trim().toLowerCase();
+    const password = input.passwordPlaintext || "";
+    if (!upstreamOrigin) {
+      throw new Error("upstream origin is required");
+    }
+    if (!Number.isSafeInteger(upstreamAccountId) || upstreamAccountId < 1) {
+      throw new Error("upstream account id is invalid");
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new Error("upstream microsoft email is invalid");
+    }
+    if (!password.trim()) {
+      throw new Error(`upstream account ${email} is missing password`);
+    }
+
+    const tavilyApiKey = input.tavily?.apiKey?.trim() || null;
+    const selectStmt = this.db.query("SELECT * FROM microsoft_accounts WHERE microsoft_email = ?");
+    const existing = selectStmt.get(email) as Record<string, unknown> | null;
+    const created = !existing;
+    const existingHasApiKey = asBoolean(existing?.has_api_key);
+    const preserveLocalApiKey = existingHasApiKey && !tavilyApiKey;
+    const normalizedSkipReason = normalizeAccountSkipReasonValue(input.skipReason);
+    const disabledAt = input.disabledAt?.trim() || null;
+    const disabledReason = input.disabledReason?.trim() || null;
+    const defaultStatus = disabledAt ? "disabled" : normalizedSkipReason ? "failed" : "ready";
+    let normalizedStatus = normalizeAccountStatusValue(input.lastResultStatus, defaultStatus);
+    if (preserveLocalApiKey) {
+      normalizedStatus = "skipped_has_key";
+    }
+    if (disabledAt) {
+      normalizedStatus = "disabled";
+    }
+    const nextSkipReason = preserveLocalApiKey ? "has_api_key" : normalizedSkipReason;
+    const importedAt = input.importedAt?.trim() || UNKNOWN_UPSTREAM_IMPORTED_AT;
+    const updatedAt = input.updatedAt?.trim() || now;
+    const syncedAt = input.upstreamSyncedAt?.trim() || now;
+    const proofAddress = input.proofMailboxAddress?.trim().toLowerCase() || null;
+    const proofProvider = proofAddress ? input.proofMailboxProvider || "cfmail" : null;
+    const proofMailboxId = proofAddress ? input.proofMailboxId?.trim() || null : null;
+    const groupName = input.groupName?.trim() || null;
+    const sourceRawPayload = input.sourceRawPayload == null ? null : String(input.sourceRawPayload);
+    const importSource = normalizeAccountImportSourceValue(input.importSource);
+    const accountSource = normalizeAccountSourceValue(input.accountSource);
+    const lastUsedAt = input.lastUsedAt?.trim() || null;
+    const lastResultAt = input.lastResultAt?.trim() || null;
+    const lastErrorCode = input.lastErrorCode?.trim() || null;
+    const nextHasApiKey = preserveLocalApiKey ? 1 : 0;
+    const nextApiKeyId = preserveLocalApiKey && existing?.api_key_id != null ? Number(existing.api_key_id) : null;
+
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      if (created) {
+        this.db
+          .query(`
+            INSERT INTO microsoft_accounts (
+              microsoft_email, password_plaintext, proof_mailbox_provider, proof_mailbox_address, proof_mailbox_id,
+              has_api_key, api_key_id, imported_at, updated_at, import_source, account_source, source_raw_payload,
+              last_used_at, last_result_status, last_result_at, last_error_code, skip_reason, group_name,
+              disabled_at, disabled_reason, lease_job_id, lease_started_at, upstream_origin, upstream_account_id, upstream_synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
+          `)
+          .run(
+            email,
+            password,
+            proofProvider,
+            proofAddress,
+            proofMailboxId,
+            nextHasApiKey,
+            nextApiKeyId,
+            importedAt,
+            updatedAt,
+            importSource,
+            accountSource,
+            sourceRawPayload,
+            lastUsedAt,
+            normalizedStatus,
+            lastResultAt,
+            lastErrorCode,
+            nextSkipReason,
+            groupName,
+            disabledAt,
+            disabledReason,
+            upstreamOrigin,
+            upstreamAccountId,
+            syncedAt,
+          );
+      } else {
+        this.db
+          .query(`
+            UPDATE microsoft_accounts
+            SET password_plaintext = ?,
+                proof_mailbox_provider = ?,
+                proof_mailbox_address = ?,
+                proof_mailbox_id = ?,
+                has_api_key = ?,
+                api_key_id = ?,
+                imported_at = ?,
+                updated_at = ?,
+                import_source = ?,
+                account_source = ?,
+                source_raw_payload = ?,
+                last_used_at = ?,
+                last_result_status = CASE WHEN lease_job_id IS NOT NULL THEN last_result_status ELSE ? END,
+                last_result_at = ?,
+                last_error_code = ?,
+                skip_reason = ?,
+                group_name = ?,
+                disabled_at = ?,
+                disabled_reason = ?,
+                upstream_origin = ?,
+                upstream_account_id = ?,
+                upstream_synced_at = ?
+            WHERE microsoft_email = ?
+          `)
+          .run(
+            password,
+            proofProvider,
+            proofAddress,
+            proofMailboxId,
+            nextHasApiKey,
+            nextApiKeyId,
+            importedAt,
+            updatedAt,
+            importSource,
+            accountSource,
+            sourceRawPayload,
+            lastUsedAt,
+            normalizedStatus,
+            lastResultAt,
+            lastErrorCode,
+            nextSkipReason,
+            groupName,
+            disabledAt,
+            disabledReason,
+            upstreamOrigin,
+            upstreamAccountId,
+            syncedAt,
+            email,
+          );
+      }
+      const accountRow = selectStmt.get(email) as Record<string, unknown> | null;
+      if (!accountRow?.id) {
+        throw new Error(`upstream account sync failed for ${email}`);
+      }
+      const accountId = Number(accountRow.id);
+      this.db
+        .query(`
+          INSERT INTO microsoft_mailboxes (account_id, status, sync_enabled, authority, unread_count, last_synced_at, last_error_code, last_error_message, updated_at)
+          VALUES (?, ?, 1, 'common', ?, ?, ?, ?, ?)
+          ON CONFLICT(account_id) DO UPDATE SET
+            status = excluded.status,
+            sync_enabled = 1,
+            unread_count = excluded.unread_count,
+            last_synced_at = excluded.last_synced_at,
+            last_error_code = excluded.last_error_code,
+            last_error_message = excluded.last_error_message,
+            updated_at = excluded.updated_at
+        `)
+        .run(
+          accountId,
+          normalizeMailboxStatusValue(input.mailbox?.status),
+          Math.max(0, Number(input.mailbox?.unreadCount || 0)),
+          input.mailbox?.lastSyncedAt?.trim() || null,
+          input.mailbox?.lastErrorCode?.trim() || null,
+          input.mailbox?.lastErrorMessage?.trim() || null,
+          now,
+        );
+      this.db
+        .query(`
+          INSERT INTO account_browser_sessions (account_id, status, profile_path, browser_engine, updated_at)
+          VALUES (?, 'pending', ?, 'chrome', ?)
+          ON CONFLICT(account_id) DO UPDATE SET
+            profile_path = COALESCE(NULLIF(account_browser_sessions.profile_path, ''), excluded.profile_path),
+            browser_engine = COALESCE(account_browser_sessions.browser_engine, excluded.browser_engine),
+            updated_at = excluded.updated_at
+        `)
+        .run(accountId, this.accountBrowserProfilePath(accountId), now);
+      this.db.exec("COMMIT;");
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
+
+    let linkedApiKey = false;
+    const account = this.getAccountsByEmails([email])[0];
+    if (!account) {
+      throw new Error(`upstream account sync failed for ${email}`);
+    }
+    let apiKeyId = account.apiKeyId;
+    if (tavilyApiKey) {
+      const key = this.recordApiKey(account.id, tavilyApiKey, input.tavily?.extractedIp || null, { preserveLease: true });
+      apiKeyId = key.id;
+      linkedApiKey = true;
+    }
+    if (input.tavily && (linkedApiKey || input.tavily.lastSuccessAt || input.tavily.extractedIp)) {
+      this.upsertAccountServiceAccess({
+        accountId: account.id,
+        service: "tavily",
+        status: "succeeded",
+        apiKeyId,
+        extractedIp: input.tavily.extractedIp || null,
+        lastSuccessAt: input.tavily.lastSuccessAt || account.lastResultAt || now,
+        snapshotJson: JSON.stringify({
+          cookiesSnapshot: Array.isArray(input.tavily.cookiesSnapshot) ? input.tavily.cookiesSnapshot : [],
+          browserFingerprintSnapshot: input.tavily.browserFingerprintSnapshot || null,
+          extractedIp: input.tavily.extractedIp || null,
+          apiKeyPrefix: input.tavily.apiKeyPrefix || (tavilyApiKey ? tavilyApiKey.slice(0, Math.min(tavilyApiKey.length, 12)) : null),
+        }),
+      });
+    }
+
+    return {
+      account: this.getAccount(account.id)!,
+      created,
+      updated: !created,
+      linkedApiKey,
+    };
   }
 
   listAccounts(filters: {
@@ -4053,10 +4407,16 @@ export class AppDatabase {
     return row || null;
   }
 
-  recordApiKey(accountId: number, apiKey: string, extractedIp?: string | null): ApiKeyRecord {
+  recordApiKey(
+    accountId: number,
+    apiKey: string,
+    extractedIp?: string | null,
+    options: { preserveLease?: boolean } = {},
+  ): ApiKeyRecord {
     const now = nowIso();
     const prefix = apiKey.slice(0, Math.min(apiKey.length, 12));
     const normalizedExtractedIp = extractedIp == null ? null : String(extractedIp).trim() || null;
+    const preserveLease = options.preserveLease === true ? 1 : 0;
     const previous = this.db.query("SELECT account_id FROM api_keys WHERE api_key = ? LIMIT 1").get(apiKey) as { account_id?: number | null } | null;
     this.db.exec("BEGIN IMMEDIATE;");
     let row: Record<string, unknown>;
@@ -4097,13 +4457,17 @@ export class AppDatabase {
             SET has_api_key = 0,
                 api_key_id = NULL,
                 skip_reason = NULL,
-                last_result_status = CASE WHEN disabled_at IS NOT NULL THEN 'disabled' ELSE 'ready' END,
+                last_result_status = CASE
+                  WHEN ? = 1 AND lease_job_id IS NOT NULL THEN last_result_status
+                  WHEN disabled_at IS NOT NULL THEN 'disabled'
+                  ELSE 'ready'
+                END,
                 updated_at = ?,
-                lease_job_id = NULL,
-                lease_started_at = NULL
+                lease_job_id = CASE WHEN ? = 1 THEN lease_job_id ELSE NULL END,
+                lease_started_at = CASE WHEN ? = 1 THEN lease_started_at ELSE NULL END
             WHERE id = ?
           `)
-          .run(now, previousAccountId);
+          .run(preserveLease, now, preserveLease, preserveLease, previousAccountId);
       }
       this.db
         .query(`
@@ -4111,14 +4475,18 @@ export class AppDatabase {
           SET has_api_key = 1,
               api_key_id = ?,
               skip_reason = 'has_api_key',
-              last_result_status = 'skipped_has_key',
+              last_result_status = CASE
+                WHEN ? = 1 AND lease_job_id IS NOT NULL THEN last_result_status
+                WHEN disabled_at IS NOT NULL THEN 'disabled'
+                ELSE 'skipped_has_key'
+              END,
               last_result_at = ?,
               updated_at = ?,
-              lease_job_id = NULL,
-              lease_started_at = NULL
+              lease_job_id = CASE WHEN ? = 1 THEN lease_job_id ELSE NULL END,
+              lease_started_at = CASE WHEN ? = 1 THEN lease_started_at ELSE NULL END
           WHERE id = ?
         `)
-        .run(keyId, now, now, accountId);
+        .run(keyId, preserveLease, now, now, preserveLease, preserveLease, accountId);
       this.db.exec("COMMIT;");
     } catch (error) {
       this.db.exec("ROLLBACK;");
