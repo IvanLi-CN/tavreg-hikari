@@ -79,6 +79,9 @@
 - 当前仓库 Docker 产物仍保持 amd64-only；公开 tag 至少要暴露 `linux/amd64` 平台描述符，但本次不引入真实多架构镜像。
 - `Release` 必须在发布后以匿名读取方式校验 GHCR 公开 tag：未登录也能 raw inspect 到 index/list 顶层 media type 与 `linux/amd64` 描述符；若返回 `403`、私有包或缺失平台元数据，则 fail closed。
 - `candidate-*` 只作为 release pipeline 的中间产物存在，不属于对外稳定发布契约，也不要求匿名读取。
+- `PR Preview` workflow 可从未合并 PR head 构建临时 GHCR 镜像；手动入口使用 `workflow_dispatch.pr_number`，自动入口使用 `preview:build` label。
+- PR preview tag 契约固定为 `pr-<pr_number>-<short_sha>`，并在同一次 smoke 成功后追加/更新 `pr-<pr_number>-latest`；构建参数必须使用 `APP_EFFECTIVE_VERSION=pr-<pr_number>-<short_sha>`。
+- PR preview 必须从 trusted workflow revision 复用 `.github/scripts/smoke-test-image.sh`，PR head 只作为 Docker build context；只有 smoke 成功后才允许推送 GHCR tag 或更新 latest，成功后在 PR 上 upsert 单条 marker 评论，包含不可变 tag、latest tag、digest 与 head commit。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -91,6 +94,8 @@
 - Given `main` 上有通过 CI Main 的提交，When Release 运行，Then 会生成 Git tag、GitHub Release、GHCR 镜像，并在对应 PR 上维护单条 release version comment。
 - Given 稳定 release 发布完成，When 未登录 GHCR 对公开 tag 执行 raw inspect，Then 返回结果的顶层 media type 必须是 image index / manifest list，且 `manifests[].platform` 至少包含 `linux/amd64`。
 - Given Docker 镜像构建完成，When 运行容器内 browser smoke，Then `/opt/fingerprint-browser/chrome` 可执行且 `playwright-core` 能成功打开最小页面。
+- Given 未合并 PR 手动运行 `PR Preview` workflow，When Docker smoke 通过，Then GHCR 出现 `pr-<pr_number>-<short_sha>` 与 `pr-<pr_number>-latest`，且 PR 评论包含 tag 和 digest。
+- Given PR 被加上 `preview:build` label，When workflow 被触发，Then 使用当前 PR head commit 构建同一套 preview tag，不影响 `CI PR` 或 `Release`。
 
 ## Visual Evidence
 
@@ -119,3 +124,4 @@
 ## 历史
 
 - 2026-04-25: 将公开 GHCR tag 收敛为匿名可读的 image index / manifest list，新增 `linux/amd64` 平台元数据匿名校验门禁；`candidate-*` 继续保留为内部中间产物。
+- 2026-05-04: 新增 PR preview 镜像发布契约，允许未合并 PR head 在 smoke 通过后发布 `pr-*` GHCR 临时镜像并回写 PR 评论。
