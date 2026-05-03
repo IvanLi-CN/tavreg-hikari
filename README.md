@@ -83,6 +83,7 @@
 - 对外发布到 GHCR 的稳定 tag（例如 `v*` 与 `latest`）现在必须解析为**公开可读**的 single-platform image index / manifest list，而不是单 manifest 镜像对象。
 - 上述公开 tag 必须至少暴露一个 `linux/amd64` 平台描述符，供外部检测链直接读取架构；镜像本体仍保持 amd64-only，不因此承诺 arm64。
 - `candidate-*` 仍只作为 release pipeline 内部中间产物使用，不属于对外稳定契约的一部分。
+- 未合并 PR 可通过 `PR Preview` workflow 发布临时 GHCR 镜像：`pr-<pr_number>-<short_sha>` 与 `pr-<pr_number>-latest`；该流程只从 PR head 构建，必须通过 Docker smoke 后才推送并在 PR 上评论 tag 与 digest。
 
 ## Linked Worktree Bootstrap
 
