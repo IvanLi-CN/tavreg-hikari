@@ -18,7 +18,7 @@
 - 后续 Tavily attempt 会优先复用账号上次成功的代理 IP；若原 IP 不在池中，则按同 region、再按全池健康节点的 LRU 选择代理，并继续复用同一持久 profile。
 - 微软邮箱页：通过 Microsoft Graph OAuth 接入 Inbox，只读显示导入账号对应的收信状态、邮件列表与正文；主工作台固定为三栏收件箱视图，Graph 凭据改到独立设置页维护。
 - Microsoft mailbox Bootstrap 以 Graph callback 写入的 token 状态为最终事实源：如果浏览器最终停在 SSO 中继页，但 DB 已写入 `refresh_token` / `oauth_connected_at`，服务端会按成功收敛，避免把已授权账号误标失败。
-- API Keys 页：查询已提取的完整 KEY、状态、账号归属与时间信息，并支持行内复制。
+- API Keys 页：查询已提取的完整 KEY、状态、账号归属与提取时间，并支持行内复制。
 - 设置页（API Access）：管理 `/api/integration/v1/*` 的外部接入 API key，支持多 key 创建、一次性明文展示、轮换、禁用与 last-used 审计。
 - 代理节点页：修改 Mihomo 订阅设置、同步节点、检查当前节点/全部节点/单节点，并查看出口 IP、地理信息和 24 小时成功提取数量。
 
