@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.17.0",
+  "base_stable_version": "0.16.3",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-05T14:46:35Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.17.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "ef96f3b7622349e00e0d380144d3aa2f5ab3c802",
+  "pr_number": 67,
+  "pr_title": "feat(sync): sync all successful keys across instances",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.17.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.17.0",
+  "target_sha": "b2178f625f3bb70701c32494822d1e82bae0c774",
+  "type_label": "type:minor"
+}
