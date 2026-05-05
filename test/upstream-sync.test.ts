@@ -137,6 +137,102 @@ test("syncAccountsFromUpstream imports account details without marking remote se
   appDb.close();
 });
 
+test("syncAccountsFromUpstream imports ChatGPT and Grok keys through unified integration keys", async () => {
+  const { appDb } = await createTempDb();
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/integration/v1/microsoft-accounts?")) {
+      return Response.json({ ok: true, rows: [], total: 0 });
+    }
+    if (url.includes("/api/integration/v1/keys?site=tavily")) {
+      return Response.json({ ok: true, site: "tavily", rows: [], total: 0 });
+    }
+    if (url.includes("/api/integration/v1/keys?site=chatgpt")) {
+      return Response.json({ ok: true, site: "chatgpt", rows: [{ id: 701 }], total: 1 });
+    }
+    if (url.endsWith("/api/integration/v1/keys/chatgpt/701")) {
+      return Response.json({
+        ok: true,
+        key: {
+          site: "chatgpt",
+          id: 701,
+          email: "cgpt@example.test",
+          accountId: "chatgpt-account-701",
+          accessToken: "access-701",
+          refreshToken: "refresh-701",
+          idToken: "id-701",
+          expiresAt: "2026-05-01T00:00:00.000Z",
+          credentialJson: JSON.stringify({ account_id: "chatgpt-account-701" }),
+          createdAt: "2026-04-30T12:00:00.000Z",
+        },
+      });
+    }
+    if (url.includes("/api/integration/v1/keys?site=grok")) {
+      return Response.json({ ok: true, site: "grok", rows: [{ id: 801 }], total: 1 });
+    }
+    if (url.endsWith("/api/integration/v1/keys/grok/801")) {
+      return Response.json({
+        ok: true,
+        key: {
+          site: "grok",
+          id: 801,
+          email: "grok@example.test",
+          password: "grok-pass",
+          sso: "grok-sso-801",
+          ssoRw: "grok-rw-801",
+          cfClearance: "cf-801",
+          checkoutUrl: "https://grok.example.test/checkout",
+          birthDate: "1999-01-02",
+          extractedIp: "198.51.100.81",
+          extractedAt: "2026-04-30T12:10:00.000Z",
+          lastVerifiedAt: "2026-04-30T12:11:00.000Z",
+          createdAt: "2026-04-30T12:10:00.000Z",
+        },
+      });
+    }
+    return Response.json({ error: "not found", url }, { status: 404 });
+  }) as typeof fetch;
+
+  const summary = await syncAccountsFromUpstream(appDb, {
+    config: {
+      enabled: true,
+      baseUrl: "https://upstream.example.test",
+      apiKey: "secret-key",
+      writeback: "off",
+    },
+  });
+
+  expect(summary.syncedKeys).toEqual({ tavily: 0, chatgpt: 1, grok: 1 });
+  expect(appDb.listChatGptCredentials({ pageSize: 10 }).rows[0]).toMatchObject({
+    email: "cgpt@example.test",
+    accountId: "chatgpt-account-701",
+    accessToken: "access-701",
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamKeyId: 701,
+  });
+  expect(appDb.listGrokApiKeys({ pageSize: 10 }).rows[0]).toMatchObject({
+    email: "grok@example.test",
+    password: "grok-pass",
+    sso: "grok-sso-801",
+    upstreamOrigin: "https://upstream.example.test",
+    upstreamKeyId: 801,
+  });
+
+  const second = await syncAccountsFromUpstream(appDb, {
+    config: {
+      enabled: true,
+      baseUrl: "https://upstream.example.test",
+      apiKey: "secret-key",
+      writeback: "off",
+    },
+  });
+  expect(second.syncedKeys).toEqual({ tavily: 0, chatgpt: 1, grok: 1 });
+  expect(appDb.listChatGptCredentials({ pageSize: 10 }).total).toBe(1);
+  expect(appDb.listGrokApiKeys({ pageSize: 10 }).total).toBe(1);
+
+  appDb.close();
+});
+
 test("syncAccountsFromUpstream validates every detail before writing local accounts", async () => {
   const { appDb } = await createTempDb();
   globalThis.fetch = (async (input: RequestInfo | URL) => {

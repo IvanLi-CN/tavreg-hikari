@@ -357,6 +357,7 @@ function serializeUpstreamSyncSettings(settings: AppSettings) {
 
 function buildSettingsCodeDefaults(): AppSettings {
   return {
+    localInstanceId: "",
     subscriptionUrl: "",
     groupName: "CODEX_AUTO",
     routeGroupName: "CODEX_ROUTE",
@@ -393,6 +394,7 @@ function buildSettingsCodeDefaults(): AppSettings {
 function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
   return {
     ...baseDefaults,
+    localInstanceId: baseDefaults.localInstanceId,
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
     groupName: (process.env.MIHOMO_GROUP_NAME || baseDefaults.groupName).trim() || baseDefaults.groupName,
     routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || baseDefaults.routeGroupName).trim() || baseDefaults.routeGroupName,
@@ -1452,6 +1454,7 @@ async function main(): Promise<void> {
   const db = await AppDatabase.open(DEFAULT_DB_PATH, LEGACY_PROXY_USAGE_PATH);
   appDbRef = db;
   const settingsDefaults = buildSettingsCodeDefaults();
+  settingsDefaults.localInstanceId = db.getOrCreateLocalInstanceId();
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);

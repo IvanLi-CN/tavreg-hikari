@@ -6,3 +6,9 @@
 - 锁定回写边界为 Tavily success-only，避免本地失败、调试状态或人工编辑污染线上账号池。
 - upstream 连接信息改为本地 `/settings` 持久化设置；不得使用环境变量配置。
 - 上线前按设置页反馈去掉“清除 API Key”入口，并新增同步启用开关；关闭时同步与成功回写都不会访问线上。
+
+## 2026-05-05
+
+- 将 Tavily-only 成功同步扩展为 Tavily / ChatGPT / Grok 三站点成功 keys 同步。
+- 新增统一 integration keys 读写契约，保留旧 Tavily writeback endpoint 作为兼容入口。
+- ChatGPT/Grok 导入采用 hidden synthetic completed job/attempt 承载既有外键，不导入线上 job history。
