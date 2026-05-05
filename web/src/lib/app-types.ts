@@ -354,6 +354,7 @@ export type ApiKeyRecord = {
   apiKey: string;
   status: string;
   extractedAt: string;
+  extractedIp: string | null;
   lastVerifiedAt: string | null;
 };
 
