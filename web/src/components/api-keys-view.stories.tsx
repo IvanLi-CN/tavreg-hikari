@@ -33,7 +33,8 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T09:00:00.000Z",
-      lastVerifiedAt: "2026-03-18T09:10:00.000Z",
+      extractedIp: "1.2.3.4",
+      lastVerifiedAt: null,
     },
     {
       id: 102,
@@ -43,7 +44,8 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T12:00:00.000Z",
-      lastVerifiedAt: "2026-03-18T07:00:00.000Z",
+      extractedIp: null,
+      lastVerifiedAt: null,
     },
     {
       id: 103,
@@ -53,6 +55,7 @@ const sortingDemoApiKeys: ApiKeysPayload = {
       apiKey: "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",
       status: "revoked",
       extractedAt: "2026-03-18T08:00:00.000Z",
+      extractedIp: "9.8.7.6",
       lastVerifiedAt: null,
     },
   ],
@@ -82,10 +85,7 @@ function applyQuery(source: ApiKeysPayload, query: ApiKeyQuery): ApiKeysPayload 
     return [row.microsoftEmail, row.apiKey, row.groupName || ""].some((value) => value.toLowerCase().includes(pattern));
   });
   const sortedRows = [...filteredRows].sort((left, right) => {
-    const primary =
-      query.sortBy === "lastVerifiedAt"
-        ? compareNullableTime(left.lastVerifiedAt, right.lastVerifiedAt, query.sortDir)
-        : compareNullableTime(left.extractedAt, right.extractedAt, query.sortDir);
+    const primary = compareNullableTime(left.extractedAt, right.extractedAt, query.sortDir);
     if (primary !== 0) return primary;
     return query.sortDir === "asc" ? left.id - right.id : right.id - left.id;
   });
@@ -262,15 +262,10 @@ export const SortingTimeColumnsPlay: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const extractedAtButton = canvas.getByRole("button", { name: /提取时间排序/ });
-    const lastVerifiedButton = canvas.getByRole("button", { name: /最近验证排序/ });
     const rowCells = () => canvas.getAllByRole("cell").filter((cell) => cell.textContent?.includes("sort."));
 
     await expect(rowCells()[0]).toHaveTextContent("sort.beta@example.test");
     await userEvent.click(extractedAtButton);
     await expect(rowCells()[0]).toHaveTextContent("sort.gamma@example.test");
-    await userEvent.click(lastVerifiedButton);
-    await expect(rowCells()[0]).toHaveTextContent("sort.alpha@example.test");
-    await userEvent.click(lastVerifiedButton);
-    await expect(rowCells()[0]).toHaveTextContent("sort.beta@example.test");
   },
 };

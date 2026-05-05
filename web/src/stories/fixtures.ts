@@ -599,6 +599,7 @@ export const sampleApiKeys: ApiKeysPayload = {
       apiKey: "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",
       status: "active",
       extractedAt: "2026-03-18T07:14:00.000Z",
+      extractedIp: "198.51.100.10",
       lastVerifiedAt: "2026-03-18T07:16:00.000Z",
     },
     {
@@ -609,6 +610,7 @@ export const sampleApiKeys: ApiKeysPayload = {
       apiKey: "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",
       status: "revoked",
       extractedAt: "2026-03-17T15:40:00.000Z",
+      extractedIp: "198.51.100.11",
       lastVerifiedAt: "2026-03-18T00:10:00.000Z",
     },
   ],

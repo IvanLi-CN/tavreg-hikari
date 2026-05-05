@@ -24,7 +24,7 @@ import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const desktopGridClass =
-  "grid min-w-[980px] grid-cols-[3.5rem_minmax(15rem,1.2fr)_10rem_minmax(18rem,1.8fr)_9rem_11rem_11rem]";
+  "grid min-w-[820px] grid-cols-[3.5rem_minmax(15rem,1.2fr)_10rem_minmax(18rem,1.8fr)_9rem_11rem]";
 
 function FilterField(props: { label: string; children: ReactNode }) {
   return (
@@ -316,10 +316,6 @@ export function ApiKeysView({
                                 <dt className="text-slate-500">提取时间</dt>
                                 <dd>{formatDate(row.extractedAt)}</dd>
                               </div>
-                              <div className="flex items-center justify-between gap-3">
-                                <dt className="text-slate-500">最近验证</dt>
-                                <dd>{formatDate(row.lastVerifiedAt)}</dd>
-                              </div>
                             </dl>
                           </div>
                         </div>
@@ -344,13 +340,10 @@ export function ApiKeysView({
                     <div className="px-4 py-3">
                       <SortableApiKeyHeaderButton label="提取时间" column="extractedAt" query={query} onQueryChange={onQueryChange} />
                     </div>
-                    <div className="px-4 py-3">
-                      <SortableApiKeyHeaderButton label="最近验证" column="lastVerifiedAt" query={query} onQueryChange={onQueryChange} />
-                    </div>
                   </div>
                   <WindowVirtualList
                     items={apiKeys.rows}
-                    className="min-w-[980px]"
+                    className="min-w-[820px]"
                     compactQuery="(max-width: 0px)"
                     getKey={(row) => row.id}
                     estimateSize={() => 63}
@@ -379,7 +372,6 @@ export function ApiKeysView({
                         </div>
                         <div className="px-4 py-3"><StatusBadge status={row.status} /></div>
                         <div className="px-4 py-3">{formatDate(row.extractedAt)}</div>
-                        <div className="px-4 py-3">{formatDate(row.lastVerifiedAt)}</div>
                       </div>
                     )}
                   />

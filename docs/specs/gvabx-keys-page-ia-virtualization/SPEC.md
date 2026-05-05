@@ -104,6 +104,7 @@
 - 三套 keys 列表统一在 `md` 以下才切换为卡片布局；`md` 及以上继续优先保留表格布局。
 - 在 `lg` 以下的 Grok keys 列表中不再显示 `出口 IP` 字段；这同时覆盖小屏卡片布局与 `md ~ lg` 的紧凑表格布局，以优先保留邮箱、密码、SSO 与时间信息。
 - Grok 桌面表格在 `md ~ lg` 使用更紧凑的列模板，在 `lg+` 恢复更宽的列模板，并优先把剩余宽度分配给 `SSO` 列，避免右侧空间利用不均衡。
+- Tavily keys 列表只展示对操作有直接意义的时间字段：`提取时间`。不得展示 `last_verified_at` 派生的“最近验证 / 最近刷新 / 最近同步”列，除非后续实现了真实在线 key health check 并重新定义该字段语义。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -126,6 +127,10 @@
 - Given 用户在 ChatGPT keys 中跨页勾选多条记录
   When 点击导出
   Then 导出结果包含全部已勾选记录，而不是仅当前页。
+
+- Given 用户查看 Tavily keys 列表
+  When 页面展示时间字段
+  Then 只显示 `提取时间`，不显示“最近验证 / 最近刷新 / 最近同步”等没有真实 key 可用性语义的时间列。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -165,6 +170,12 @@
   state: `tavily floating selection dock`
   evidence_note: 验证 Tavily keys 勾选后使用底部固定浮动条承载批量操作，不再占据列表顶部空间。
   ![Tavily Keys 底部浮动批量条](./assets/tavily-selection-dock.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `Views/ApiKeysView/Default`
+  state: `tavily single meaningful time column`
+  evidence_note: 验证 Tavily keys 列表只保留 `提取时间`，不再展示没有真实 key 可用性语义的“最近验证 / 最近刷新 / 最近同步”时间列。
+  ![Tavily Keys 单一有效时间列](./assets/tavily-keys-time-column-pruned.png)
 
 - source_type: `storybook_canvas`
   story_id_or_title: `Views/GrokApiKeysView/ActionsOnly`
