@@ -97,6 +97,47 @@
   - detail keeps `passwordPlaintext`
   - session summary omits host-local browser `profilePath`
 
+### `GET /api/integration/v1/keys`
+
+- Scope: `integration`
+- Query:
+  - `site: "tavily" | "chatgpt" | "grok"`
+  - `page?: number`
+  - `pageSize?: number`
+- Response:
+  - `ok: true`
+  - `site`
+  - `rows`
+  - `page`
+  - `pageSize`
+  - `total`
+- Notes:
+  - list rows omit site secrets
+  - Tavily rows include Microsoft account linkage summary
+
+### `GET /api/integration/v1/keys/:site/:id`
+
+- Scope: `integration`
+- `site`: `tavily | chatgpt | grok`
+- Response:
+  - `ok: true`
+  - `key`
+- Notes:
+  - detail returns secrets required for authorized cross-instance sync
+  - ChatGPT detail includes OAuth tokens and `credentialJson`
+  - Grok detail includes SSO bundle fields
+
+### `POST /api/integration/v1/keys/:site/success`
+
+- Scope: `integration`
+- `site`: `tavily | chatgpt | grok`
+- Response:
+  - `ok: true`
+  - `key`
+- Notes:
+  - success-only writeback endpoint
+  - ChatGPT and Grok require `sourceOrigin` and `sourceKeyId` for idempotent upstream mapping
+
 ### `GET /api/integration/v1/microsoft-accounts/:id/proof-mailbox/codes`
 
 - Scope: `integration`

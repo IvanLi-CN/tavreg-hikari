@@ -12,9 +12,11 @@ import {
 } from "../src/server/mailbox-provider-guard";
 
 const tempDirs: string[] = [];
+const originalFetch = globalThis.fetch;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
+    localInstanceId: "test-instance",
     subscriptionUrl: "https://example.com/sub.yaml",
     groupName: "CODEX_AUTO",
     routeGroupName: "CODEX_ROUTE",
@@ -68,6 +70,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
@@ -581,6 +584,65 @@ test("chatgpt scheduler lets paused jobs complete after in-flight attempts finis
   expect(completed?.status).toBe("completed");
   expect(completed?.successCount).toBe(1);
 
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt successful attempt writes back upstream when enabled", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const calls: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({
+      url: String(input),
+      body: JSON.parse(String(init?.body || "{}")),
+      authorization: String(new Headers(init?.headers || {}).get("authorization") || ""),
+    });
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  const scheduler = new ChatGptJobScheduler(
+    appDb,
+    process.cwd(),
+    () =>
+      createSchedulerSettings({
+        upstreamTavregSyncEnabled: true,
+        upstreamTavregApiKey: "upstream-secret",
+        upstreamTavregBaseUrl: "https://upstream.example.test",
+        upstreamTavregWriteback: "success_only",
+        localInstanceId: "chatgpt-instance",
+      }),
+    () => undefined,
+    {
+      createAttemptDraft: async () => createDraft(1),
+    },
+  );
+  const job = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "cgpt@example.test", outputDir: tempDir });
+  await writeFile(
+    path.join(tempDir, "result.json"),
+    JSON.stringify({
+      email: "cgpt@example.test",
+      credentials: {
+        account_id: "chatgpt-account-1",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+        id_token: "id-token",
+        expires_at: "2026-05-01T00:00:00.000Z",
+      },
+    }),
+  );
+
+  await (scheduler as any).handleAttemptExit(job.id, attempt.id, tempDir, 0, null, { stopRequested: null });
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.url).toBe("https://upstream.example.test/api/integration/v1/keys/chatgpt/success");
+  expect(calls[0]?.authorization).toBe("Bearer upstream-secret");
+  expect(calls[0]?.body).toMatchObject({
+    sourceOrigin: "local:chatgpt:chatgpt-instance",
+    sourceKeyId: 1,
+    email: "cgpt@example.test",
+    accountId: "chatgpt-account-1",
+    accessToken: "access-token",
+  });
   await scheduler.shutdown();
   appDb.close();
 });

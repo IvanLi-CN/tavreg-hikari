@@ -216,6 +216,101 @@ describe("integration api", () => {
     appDb.close();
   });
 
+  test("exposes ChatGPT and Grok keys through integration keys API", async () => {
+    const { appDb } = await createTempDb();
+    const chatJob = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: { hidden: true } });
+    const chatAttempt = appDb.createAttempt(chatJob.id, { accountEmail: "cgpt@example.test", outputDir: "" });
+    const { credential } = appDb.completeChatGptAttemptSuccess(chatJob.id, chatAttempt.id, {
+      email: "cgpt@example.test",
+      accountId: "chatgpt-account-1",
+      accessToken: "access-secret",
+      refreshToken: "refresh-secret",
+      idToken: "id-secret",
+      expiresAt: "2026-05-01T00:00:00.000Z",
+      credentialJson: JSON.stringify({ account_id: "chatgpt-account-1" }),
+    });
+    const grokJob = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: { hidden: true } });
+    const grokAttempt = appDb.createAttempt(grokJob.id, { accountEmail: "grok@example.test", outputDir: "" });
+    const { key: grokKey } = appDb.completeGrokAttemptSuccess(grokJob.id, grokAttempt.id, {
+      email: "grok@example.test",
+      password: "grok-pass",
+      sso: "grok-sso-secret",
+      ssoRw: "grok-sso-rw",
+      cfClearance: "cf-clearance",
+      checkoutUrl: "https://grok.example.test/checkout",
+      birthDate: "1999-01-02",
+      extractedIp: "198.51.100.80",
+    });
+
+    const chatListReq = new Request("https://console.example.test/api/integration/v1/keys?site=chatgpt&page=1&pageSize=20");
+    const chatListResp = await handleIntegrationApiRequest({
+      req: chatListReq,
+      pathname: new URL(chatListReq.url).pathname,
+      url: new URL(chatListReq.url),
+      db: appDb,
+    });
+    expect(chatListResp?.status).toBe(200);
+    const chatList = await chatListResp!.json();
+    expect(chatList.rows[0]).toMatchObject({
+      site: "chatgpt",
+      id: credential.id,
+      email: "cgpt@example.test",
+      accountId: "chatgpt-account-1",
+    });
+    expect(chatList.rows[0]).not.toHaveProperty("accessToken");
+
+    const grokListReq = new Request("https://console.example.test/api/integration/v1/keys?site=grok&page=1&pageSize=20");
+    const grokListResp = await handleIntegrationApiRequest({
+      req: grokListReq,
+      pathname: new URL(grokListReq.url).pathname,
+      url: new URL(grokListReq.url),
+      db: appDb,
+    });
+    expect(grokListResp?.status).toBe(200);
+    const grokList = await grokListResp!.json();
+    expect(grokList.rows[0]).toMatchObject({
+      site: "grok",
+      id: grokKey.id,
+      email: "grok@example.test",
+    });
+    expect(grokList.rows[0]).not.toHaveProperty("password");
+    expect(grokList.rows[0]).not.toHaveProperty("sso");
+    expect(grokList.rows[0]).not.toHaveProperty("ssoRw");
+    expect(grokList.rows[0]).not.toHaveProperty("cfClearance");
+
+    const chatDetailReq = new Request(`https://console.example.test/api/integration/v1/keys/chatgpt/${credential.id}`);
+    const chatDetailResp = await handleIntegrationApiRequest({
+      req: chatDetailReq,
+      pathname: new URL(chatDetailReq.url).pathname,
+      url: new URL(chatDetailReq.url),
+      db: appDb,
+    });
+    expect((await chatDetailResp!.json()).key).toMatchObject({
+      accessToken: "access-secret",
+      refreshToken: "refresh-secret",
+      idToken: "id-secret",
+    });
+
+    const grokDetailReq = new Request(`https://console.example.test/api/integration/v1/keys/grok/${grokKey.id}`);
+    const grokDetailResp = await handleIntegrationApiRequest({
+      req: grokDetailReq,
+      pathname: new URL(grokDetailReq.url).pathname,
+      url: new URL(grokDetailReq.url),
+      db: appDb,
+    });
+    expect((await grokDetailResp!.json()).key).toMatchObject({
+      site: "grok",
+      id: grokKey.id,
+      email: "grok@example.test",
+      password: "grok-pass",
+      sso: "grok-sso-secret",
+      ssoRw: "grok-sso-rw",
+      cfClearance: "cf-clearance",
+    });
+
+    appDb.close();
+  });
+
   test("preserves active production leases during tavily success writeback", async () => {
     const { appDb } = await createTempDb();
     const { accountId } = await seedAccount(appDb);
@@ -247,6 +342,94 @@ describe("integration api", () => {
     });
     expect(account.leaseStartedAt).toBe(leased.leaseStartedAt);
     expect(appDb.getApiKey(account.apiKeyId!)?.apiKey).toBe("tvly-writeback-while-leased");
+
+    appDb.close();
+  });
+
+  test("requires source origin for ChatGPT and Grok success writeback", async () => {
+    const { appDb } = await createTempDb();
+    const chatReq = new Request("https://console.example.test/api/integration/v1/keys/chatgpt/success", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceKeyId: 1,
+        email: "cgpt@example.test",
+        accountId: "chatgpt-account-1",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+        idToken: "id-token",
+        credentialJson: "{}",
+      }),
+    });
+    const chatResp = await handleIntegrationApiRequest({
+      req: chatReq,
+      pathname: new URL(chatReq.url).pathname,
+      url: new URL(chatReq.url),
+      db: appDb,
+    });
+    expect(chatResp?.status).toBe(422);
+    expect((await chatResp!.json()).error).toBe("sourceOrigin is required");
+
+    const grokReq = new Request("https://console.example.test/api/integration/v1/keys/grok/success", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceOrigin: "   ",
+        sourceKeyId: 1,
+        email: "grok@example.test",
+        password: "grok-pass",
+        sso: "grok-sso-token",
+      }),
+    });
+    const grokResp = await handleIntegrationApiRequest({
+      req: grokReq,
+      pathname: new URL(grokReq.url).pathname,
+      url: new URL(grokReq.url),
+      db: appDb,
+    });
+    expect(grokResp?.status).toBe(422);
+    expect((await grokResp!.json()).error).toBe("sourceOrigin is required");
+
+    appDb.close();
+  });
+
+  test("validates ChatGPT and Grok success writeback payloads before upsert", async () => {
+    const { appDb } = await createTempDb();
+    const chatReq = new Request("https://console.example.test/api/integration/v1/keys/chatgpt/success", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceOrigin: "local:chatgpt:test",
+        sourceKeyId: 1,
+        email: "cgpt@example.test",
+        accountId: "chatgpt-account-1",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+      }),
+    });
+    const chatResp = await handleIntegrationApiRequest({
+      req: chatReq,
+      pathname: new URL(chatReq.url).pathname,
+      url: new URL(chatReq.url),
+      db: appDb,
+    });
+    expect(chatResp?.status).toBe(422);
+    expect((await chatResp!.json()).error).toBe("idToken is required");
+
+    const grokReq = new Request("https://console.example.test/api/integration/v1/keys/grok/success", {
+      method: "POST",
+      body: JSON.stringify({
+        sourceOrigin: "local:grok:test",
+        sourceKeyId: 1,
+        email: "grok@example.test",
+        password: "grok-pass",
+      }),
+    });
+    const grokResp = await handleIntegrationApiRequest({
+      req: grokReq,
+      pathname: new URL(grokReq.url).pathname,
+      url: new URL(grokReq.url),
+      db: appDb,
+    });
+    expect(grokResp?.status).toBe(422);
+    expect((await grokResp!.json()).error).toBe("sso is required");
 
     appDb.close();
   });
