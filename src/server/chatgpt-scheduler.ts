@@ -18,6 +18,7 @@ import { normalizeChatGptUpstreamGroupName, readChatGptJobUpstreamGroupName } fr
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { pickAutoProxyNode } from "./proxy-node-allocation.js";
+import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpstreamSuccess } from "./upstream-sync.js";
 import {
   formatMailboxProviderCooldownReason,
   getMailboxProviderCooldownSnapshot,
@@ -857,6 +858,22 @@ export class ChatGptJobScheduler {
       this.emit("attempt.updated", { site: this.site, attempt });
       this.emit("job.updated", { site: this.site, job });
       this.emit("toast", { level: "success", message: `chatgpt credential saved #${credential.id}` });
+      try {
+        const config = buildUpstreamSyncConfig(this.getSettings());
+        await writeBackUpstreamSuccess({
+          site: "chatgpt",
+          credential,
+        }, {
+          config,
+          sourceOrigin: buildLocalWritebackSourceOrigin("chatgpt", config.localInstanceId),
+        });
+      } catch (writebackError) {
+        const message = writebackError instanceof Error ? writebackError.message : String(writebackError);
+        this.emit("toast", {
+          level: "warning",
+          message: `chatgpt credential #${credential.id} saved locally, but upstream writeback failed: ${message}`,
+        });
+      }
       const upstreamGroupName = readChatGptJobUpstreamGroupName(job);
       if (upstreamGroupName && this.supplementCredential) {
         const supplementTask = this.supplementCredential({ credential, groupName: upstreamGroupName })

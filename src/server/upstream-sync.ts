@@ -1,7 +1,11 @@
 import {
   type AppSettings,
   type AppDatabase,
+  type ChatGptCredentialRecord,
+  type GrokApiKeyRecord,
   type MicrosoftAccountRecord,
+  type UpstreamChatGptCredentialSyncInput,
+  type UpstreamGrokKeySyncInput,
   type UpstreamMicrosoftAccountSyncInput,
 } from "../storage/app-db.js";
 
@@ -13,11 +17,12 @@ export interface UpstreamSyncConfig {
   baseUrl: string;
   apiKey: string;
   writeback: UpstreamTavregWritebackMode;
+  localInstanceId?: string | null;
 }
 
 export type UpstreamSyncSettingsInput = Pick<
   AppSettings,
-  "upstreamTavregSyncEnabled" | "upstreamTavregBaseUrl" | "upstreamTavregApiKey" | "upstreamTavregWriteback"
+  "upstreamTavregSyncEnabled" | "upstreamTavregBaseUrl" | "upstreamTavregApiKey" | "upstreamTavregWriteback" | "localInstanceId"
 >;
 
 export interface UpstreamAccountSyncSummary {
@@ -29,10 +34,17 @@ export interface UpstreamAccountSyncSummary {
   created: number;
   updated: number;
   linkedApiKeys: number;
+  syncedKeys: {
+    tavily: number;
+    chatgpt: number;
+    grok: number;
+  };
 }
 
 export interface UpstreamTavilySuccessPayload {
+  site?: "tavily";
   account: MicrosoftAccountRecord;
+  keyId?: number | null;
   apiKey: string;
   extractedIp?: string | null;
   lastSuccessAt?: string | null;
@@ -40,6 +52,18 @@ export interface UpstreamTavilySuccessPayload {
   browserFingerprintSnapshot?: unknown | null;
   apiKeyPrefix?: string | null;
 }
+
+export interface UpstreamChatGptSuccessPayload {
+  site: "chatgpt";
+  credential: ChatGptCredentialRecord;
+}
+
+export interface UpstreamGrokSuccessPayload {
+  site: "grok";
+  key: GrokApiKeyRecord;
+}
+
+export type UpstreamSuccessPayload = UpstreamTavilySuccessPayload | UpstreamChatGptSuccessPayload | UpstreamGrokSuccessPayload;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -70,7 +94,13 @@ export function buildUpstreamSyncConfig(settings: Partial<UpstreamSyncSettingsIn
     baseUrl: normalizeUpstreamBaseUrl(settings.upstreamTavregBaseUrl),
     apiKey: String(settings.upstreamTavregApiKey || "").trim(),
     writeback: normalizeUpstreamWritebackMode(settings.upstreamTavregWriteback),
+    localInstanceId: String(settings.localInstanceId || "").trim() || null,
   };
+}
+
+export function buildLocalWritebackSourceOrigin(site: "chatgpt" | "grok", localInstanceId?: string | null): string {
+  const instanceId = String(localInstanceId || "").trim();
+  return instanceId ? `local:${site}:${instanceId}` : `local:${site}`;
 }
 
 async function fetchJson<T>(
@@ -193,6 +223,93 @@ function toSyncInput(account: JsonRecord, upstreamOrigin: string, syncedAt: stri
   };
 }
 
+function toChatGptSyncInput(key: JsonRecord, upstreamOrigin: string, syncedAt: string): UpstreamChatGptCredentialSyncInput {
+  const upstreamKeyId = asNumber(key.id);
+  if (!upstreamKeyId) throw new Error("upstream chatgpt key is missing id");
+  const email = asString(key.email);
+  const accountId = asString(key.accountId);
+  const accessToken = asString(key.accessToken);
+  const refreshToken = asString(key.refreshToken);
+  const idToken = asString(key.idToken);
+  if (!email) throw new Error(`upstream chatgpt key ${upstreamKeyId} is missing email`);
+  if (!accountId) throw new Error(`upstream chatgpt key ${upstreamKeyId} is missing accountId`);
+  if (!accessToken) throw new Error(`upstream chatgpt key ${upstreamKeyId} is missing accessToken`);
+  if (!refreshToken) throw new Error(`upstream chatgpt key ${upstreamKeyId} is missing refreshToken`);
+  if (!idToken) throw new Error(`upstream chatgpt key ${upstreamKeyId} is missing idToken`);
+  return {
+    upstreamOrigin,
+    upstreamKeyId,
+    upstreamSyncedAt: syncedAt,
+    email,
+    accountId,
+    accessToken,
+    refreshToken,
+    idToken,
+    expiresAt: asString(key.expiresAt),
+    credentialJson: asString(key.credentialJson) || "{}",
+    createdAt: asString(key.createdAt),
+  };
+}
+
+function toGrokSyncInput(key: JsonRecord, upstreamOrigin: string, syncedAt: string): UpstreamGrokKeySyncInput {
+  const upstreamKeyId = asNumber(key.id);
+  if (!upstreamKeyId) throw new Error("upstream grok key is missing id");
+  const email = asString(key.email);
+  const password = asString(key.password);
+  const sso = asString(key.sso);
+  if (!email) throw new Error(`upstream grok key ${upstreamKeyId} is missing email`);
+  if (!password) throw new Error(`upstream grok key ${upstreamKeyId} is missing password`);
+  if (!sso) throw new Error(`upstream grok key ${upstreamKeyId} is missing sso`);
+  return {
+    upstreamOrigin,
+    upstreamKeyId,
+    upstreamSyncedAt: syncedAt,
+    email,
+    password,
+    sso,
+    ssoRw: asString(key.ssoRw),
+    cfClearance: asString(key.cfClearance),
+    checkoutUrl: asString(key.checkoutUrl),
+    birthDate: asString(key.birthDate),
+    extractedIp: asString(key.extractedIp),
+    extractedAt: asString(key.extractedAt),
+    lastVerifiedAt: asString(key.lastVerifiedAt),
+    createdAt: asString(key.createdAt),
+  };
+}
+
+async function fetchKeyDetails(config: UpstreamSyncConfig, site: "tavily" | "chatgpt" | "grok", pageSize: number): Promise<JsonRecord[]> {
+  const details: JsonRecord[] = [];
+  let page = 1;
+  let total = 0;
+  while (true) {
+    const listUrl = new URL("/api/integration/v1/keys", `${config.baseUrl}/`);
+    listUrl.searchParams.set("site", site);
+    listUrl.searchParams.set("page", String(page));
+    listUrl.searchParams.set("pageSize", String(pageSize));
+    let payload: { rows?: unknown[]; total?: unknown };
+    try {
+      payload = await fetchJson<{ rows?: unknown[]; total?: unknown }>(listUrl.toString(), config);
+    } catch (error) {
+      if (error instanceof Error && /upstream_http_failed:404:/.test(error.message)) return [];
+      throw error;
+    }
+    const rows = Array.isArray(payload.rows) ? payload.rows.map(asRecord) : [];
+    total = Number(payload.total || rows.length);
+    const pageDetails = await mapWithConcurrency(rows, DEFAULT_UPSTREAM_DETAIL_CONCURRENCY, async (row) => {
+      const keyId = asNumber(row.id);
+      if (!keyId) throw new Error(`upstream ${site} key list row is missing id`);
+      const detailUrl = new URL(`/api/integration/v1/keys/${site}/${keyId}`, `${config.baseUrl}/`);
+      const detailPayload = await fetchJson<{ key?: unknown }>(detailUrl.toString(), config);
+      return asRecord(detailPayload.key);
+    });
+    details.push(...pageDetails);
+    if (rows.length === 0 || page * pageSize >= total) break;
+    page += 1;
+  }
+  return details;
+}
+
 export async function syncAccountsFromUpstream(
   db: AppDatabase,
   options: {
@@ -245,6 +362,45 @@ export async function syncAccountsFromUpstream(
     if (result.updated) updated += 1;
     if (result.linkedApiKey) linkedApiKeys += 1;
   }
+  const syncedKeys = { tavily: 0, chatgpt: 0, grok: 0 };
+  const [tavilyKeys, chatGptKeys, grokKeys] = await Promise.all([
+    fetchKeyDetails(config, "tavily", pageSize),
+    fetchKeyDetails(config, "chatgpt", pageSize),
+    fetchKeyDetails(config, "grok", pageSize),
+  ]);
+  for (const key of tavilyKeys) {
+    const apiKey = asString(key.apiKey);
+    if (!apiKey) continue;
+    const microsoftAccount = asRecord(key.microsoftAccount);
+    const email = asString(microsoftAccount.microsoftEmail);
+    const account = email ? db.getAccountsByEmails([email])[0] : null;
+    if (!account) continue;
+    const apiKeyRecord = db.recordApiKey(account.id, apiKey, asString(key.extractedIp), { preserveLease: true });
+    db.upsertAccountServiceAccess({
+      accountId: account.id,
+      service: "tavily",
+      status: "succeeded",
+      apiKeyId: apiKeyRecord.id,
+      extractedIp: asString(key.extractedIp),
+      lastSuccessAt: asString(key.lastSuccessAt) || asString(key.extractedAt) || syncedAt,
+      snapshotJson: JSON.stringify({
+        cookiesSnapshot: Array.isArray(key.cookiesSnapshot) ? key.cookiesSnapshot : [],
+        browserFingerprintSnapshot:
+          key.browserFingerprintSnapshot && typeof key.browserFingerprintSnapshot === "object" ? key.browserFingerprintSnapshot : null,
+        extractedIp: asString(key.extractedIp),
+        apiKeyPrefix: asString(key.apiKeyPrefix) || apiKeyRecord.apiKeyPrefix,
+      }),
+    });
+    syncedKeys.tavily += 1;
+  }
+  for (const key of chatGptKeys) {
+    db.upsertUpstreamChatGptCredential(toChatGptSyncInput(key, config.baseUrl, syncedAt));
+    syncedKeys.chatgpt += 1;
+  }
+  for (const key of grokKeys) {
+    db.upsertUpstreamGrokApiKey(toGrokSyncInput(key, config.baseUrl, syncedAt));
+    syncedKeys.grok += 1;
+  }
 
   return {
     ok: true,
@@ -255,6 +411,7 @@ export async function syncAccountsFromUpstream(
     created,
     updated,
     linkedApiKeys,
+    syncedKeys,
   };
 }
 
@@ -301,4 +458,71 @@ export async function writeBackUpstreamTavilySuccess(
     }),
   });
   return { ok: true, skipped: false };
+}
+
+function validateWritebackConfig(
+  config: UpstreamSyncConfig | undefined,
+): { ok: true; config: UpstreamSyncConfig } | { ok: false; reason: string } {
+  if (!config) return { ok: false, reason: "settings_missing" };
+  if (!config.enabled) return { ok: false, reason: "sync_disabled" };
+  if (config.writeback !== "success_only") return { ok: false, reason: "writeback_disabled" };
+  if (!config.apiKey) return { ok: false, reason: "api_key_missing" };
+  return { ok: true, config };
+}
+
+export async function writeBackUpstreamSuccess(
+  payload: UpstreamSuccessPayload,
+  options: {
+    config?: UpstreamSyncConfig;
+    sourceOrigin?: string;
+  },
+): Promise<{ ok: true; skipped: false } | { ok: true; skipped: true; reason: string }> {
+  const validated = validateWritebackConfig(options.config);
+  if (!validated.ok) return { ok: true, skipped: true, reason: validated.reason };
+  const config = validated.config;
+  const sourceOrigin = (options.sourceOrigin || "local").trim() || "local";
+  if (payload.site === "chatgpt") {
+    const credential = payload.credential;
+    const url = new URL("/api/integration/v1/keys/chatgpt/success", `${config.baseUrl}/`);
+    await fetchJson(url.toString(), config, {
+      method: "POST",
+      body: JSON.stringify({
+        sourceOrigin,
+        sourceKeyId: credential.id,
+        email: credential.email,
+        accountId: credential.accountId,
+        accessToken: credential.accessToken,
+        refreshToken: credential.refreshToken,
+        idToken: credential.idToken,
+        expiresAt: credential.expiresAt,
+        credentialJson: credential.credentialJson,
+        createdAt: credential.createdAt,
+      }),
+    });
+    return { ok: true, skipped: false };
+  }
+  if (payload.site === "grok") {
+    const key = payload.key;
+    const url = new URL("/api/integration/v1/keys/grok/success", `${config.baseUrl}/`);
+    await fetchJson(url.toString(), config, {
+      method: "POST",
+      body: JSON.stringify({
+        sourceOrigin,
+        sourceKeyId: key.id,
+        email: key.email,
+        password: key.password,
+        sso: key.sso,
+        ssoRw: key.ssoRw,
+        cfClearance: key.cfClearance,
+        checkoutUrl: key.checkoutUrl,
+        birthDate: key.birthDate,
+        extractedIp: key.extractedIp,
+        extractedAt: key.extractedAt,
+        lastVerifiedAt: key.lastVerifiedAt,
+        createdAt: key.createdAt,
+      }),
+    });
+    return { ok: true, skipped: false };
+  }
+  return writeBackUpstreamTavilySuccess(payload, { config });
 }
