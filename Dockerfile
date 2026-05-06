@@ -28,6 +28,7 @@ RUN bash ./scripts/install-fingerprint-browser.sh \
 FROM mcr.microsoft.com/playwright:v1.58.2-noble AS runtime
 ARG TARGETARCH
 RUN test "${TARGETARCH:-$(dpkg --print-architecture)}" = "amd64" || (echo "fingerprint browser runtime supports linux/amd64 only" >&2; exit 1)
+RUN apt-get update && apt-get install -y dumb-init && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ARG APP_EFFECTIVE_VERSION=dev
 ENV NODE_ENV=production \
@@ -44,4 +45,5 @@ COPY --from=build /app/tsconfig.json ./tsconfig.json
 COPY --from=build /app/.env.example ./.env.example
 COPY --from=build /app/scripts/smoke-fingerprint-browser.mjs ./scripts/smoke-fingerprint-browser.mjs
 EXPOSE 3717
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["bun", "run", "src/server/main.ts"]

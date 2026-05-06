@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-04-23
+- Last: 2026-05-07
 
 ## 背景 / 问题陈述
 
@@ -57,6 +57,7 @@
   - `保持登录状态`，默认选 `是`
   - Tavily Login 授权确认
 - 当 Microsoft 实际出现 proof / 备用邮箱验证分支时，若账号已配置备用邮箱映射，程序必须自动填写备用邮箱并通过统一 mailbox waiter/verification-code extractor 获取安全码。
+- 当 Tavily OAuth 回跳在 `login.live.com/oauth20_authorize.srf` 上出现 “Verify your email / We'll send a code to ...” proof confirmation 页面时，必须优先使用账号绑定的 proof mailbox 完成确认与收码，不得先点击 `Use your password` shortcut。
 - 成功后必须回到 `https://app.tavily.com/home` 并继续后续 API key 获取。
 
 ### SHOULD

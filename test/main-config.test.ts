@@ -429,6 +429,42 @@ test("microsoft login waits out the post-email password window before touching t
   );
 });
 
+test("microsoft proof confirmation prioritizes configured proof mailboxes over password fallback", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("async function handleMicrosoftProofConfirmationEmailPrompt");
+  const end = source.indexOf("async function handleMicrosoftProofCodePrompt");
+  const segment = source.slice(start, end);
+  expect(segment).toContain('input[name*="proof" i]');
+  expect(segment).toContain('input[autocomplete="email"]');
+  expect(segment).toContain("const shouldUsePasswordFallback =\n    !configuredProofAddress &&");
+  expect(segment.indexOf("const confirmationState = await collectMicrosoftRecoveryChallengeState")).toBeLessThan(
+    segment.indexOf("const shouldUsePasswordFallback ="),
+  );
+});
+
+test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
+  const source = await readFile(path.join(repoRoot, "src/microsoft-login-state.ts"), "utf8");
+  expect(source).toContain("const onOAuthAuthorizeRoute = /login\\.live\\.com\\/oauth20_authorize\\.srf/i.test(url);");
+  expect(source).toContain('pushSignal(matchedSignals, onOAuthAuthorizeRoute, "route:oauth-authorize");');
+  expect(source).toContain("(onOAuthAuthorizeRoute && hasConfirmCopy)");
+});
+
+test("grok post-provision browsers inherit the active Mihomo proxy", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/grok-worker.ts"), "utf8");
+  expect(source).toContain("const sessionProxyServer = options?.proxyServer ?? mihomo.proxyServer;");
+  const start = source.indexOf("let freshPostProvision");
+  const end = source.indexOf("if (!freshPostProvision)", start);
+  const segment = source.slice(start, end);
+  expect(segment).toContain("proxyServer: mihomo.proxyServer,");
+  expect(segment).not.toContain("proxyServer: undefined");
+});
+
+test("runtime container uses an init process to reap browser subprocesses", async () => {
+  const dockerfile = await readFile(path.join(repoRoot, "Dockerfile"), "utf8");
+  expect(dockerfile).toContain("apt-get install -y dumb-init");
+  expect(dockerfile).toContain('ENTRYPOINT ["dumb-init", "--"]');
+});
+
 test("safeGoto accepts timeout recoveries only after the target document is already interactive", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   const start = source.indexOf("async function safeGoto");
