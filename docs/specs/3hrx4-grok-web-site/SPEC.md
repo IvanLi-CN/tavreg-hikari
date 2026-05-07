@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-05-07
+- Last: 2026-05-08
 
 ## 背景
 
@@ -31,6 +31,7 @@
 
 - 顶部导航顺序固定为 `Tavily / Grok / ChatGPT / 微软账号 / 微软邮箱 / Keys / 代理节点`。
 - `GET /api/jobs/current?site=grok` 与 `POST /api/jobs/current/control` 必须支持 `site=grok`。
+- Grok `stop / force_stop` 必须幂等收束：当 active worker 已退出，或 force stop 超过兜底阈值仍未触发 child `close` 时，scheduler 必须收束 active attempt 并让 job 进入 `stopped`；优雅停止下已退出 worker 必须复用正常 result finalizer，避免把成功工件误标失败；force stop 可在收束时保留 attempt 错误工件信息，避免 UI 永久卡在 `force_stopping`。
 - Grok 成功链路必须以“拿到并可导出 SSO bundle”为准，批量导出默认只输出 `sso`。
 - Grok UI 主数据持久化 `grok_api_keys` 中的账号与 SSO 信息，额外 cookies 仍只保留在 attempt 工件。
 - 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `fingerprint` 走持久 profile 并在登录成功或可接管 challenge 时保留浏览器。
@@ -55,6 +56,7 @@
 
 - 打开首页后可以看到 `Grok` 顶部导航，且 `/grok` 页面可正常渲染。
 - `site=grok` 的 start / pause / resume / stop / force_stop / update_limits 只影响 Grok current job。
+- Grok force stop 在 DB 仍有 running attempt、但 worker 已 stale、已退出，或 attempt 目录已有 `error.json` 且 force-stop 兜底阈值已过时，必须能在无需重启服务的情况下收束到 `stopped`。
 - Grok key 列表默认直接显示邮箱、密码与 SSO 原文，批量导出可以稳定输出“每行一个 SSO token”。
 - `bun run typecheck` 与相关 Bun tests 通过。
 - 从微软账号页以 `fingerprint` 启动 Grok 单账号业务流时，到达已登录或可接管 challenge 页面后浏览器保持打开，并把保留状态回传到账号页。
