@@ -110,6 +110,33 @@ const previewFixture: AccountImportPreviewPayload = {
   ],
 };
 
+const longPasswordPreviewFixture: AccountImportPreviewPayload = {
+  summary: {
+    parsed: 30,
+    invalid: 0,
+    create: 30,
+    updatePassword: 0,
+    keepExisting: 0,
+    inputDuplicate: 0,
+  },
+  effectiveEntries: Array.from({ length: 30 }, (_, index) => ({
+    email: `overflow-preview-${String(index + 1).padStart(2, "0")}@hotmail.com`,
+    password: `Password${index + 1}BeforeIgnoredSuffix`,
+  })),
+  items: Array.from({ length: 30 }, (_, index) => {
+    const email = `overflow-preview-${String(index + 1).padStart(2, "0")}@hotmail.com`;
+    return {
+      lineNumber: index + 1,
+      rawLine: `${email}----Password${index + 1}BeforeIgnoredSuffix----M.C${500 + index}_BAY.0.U.-ignored-extra-token-${"x".repeat(120)}----4e5f-86f1-ddba2230dcf2`,
+      email,
+      normalizedEmail: email,
+      password: `Password${index + 1}BeforeIgnoredSuffix`,
+      decision: "create" as const,
+      note: "新增账号",
+    };
+  }),
+};
+
 const baseArgs = {
   accounts: sampleAccounts,
   importContent: "",
@@ -653,6 +680,15 @@ async function getSessionProxyViewport(): Promise<HTMLElement> {
   return scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")!;
 }
 
+async function getImportPreviewViewport(): Promise<HTMLElement> {
+  const scrollRoot = within(document.body).getByTestId("account-import-preview-scroll-area");
+  await waitFor(() => {
+    const viewport = scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
+    expect(viewport).not.toBeNull();
+  });
+  return scrollRoot.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]")!;
+}
+
 async function expectNoHorizontalOverflow(element: HTMLElement, tolerance = 12): Promise<void> {
   await waitFor(() => {
     expect(element.scrollWidth).toBeLessThanOrEqual(element.clientWidth + tolerance);
@@ -667,6 +703,24 @@ async function expectHistoryViewportToScroll(viewport: HTMLElement): Promise<voi
   viewport.dispatchEvent(new Event("scroll"));
   await waitFor(() => {
     expect(viewport.scrollTop).toBeGreaterThan(0);
+  });
+}
+
+async function expectImportPreviewHeaderFrozen(viewport: HTMLElement): Promise<void> {
+  const header = within(document.body).getByRole("columnheader", { name: "行号" });
+  viewport.scrollTop = 0;
+  viewport.dispatchEvent(new Event("scroll"));
+  await waitFor(() => {
+    expect(viewport.scrollTop).toBe(0);
+  });
+  viewport.scrollTop = 240;
+  viewport.dispatchEvent(new Event("scroll"));
+  await waitFor(() => {
+    expect(viewport.scrollTop).toBeGreaterThan(0);
+    const headerTop = header.getBoundingClientRect().top;
+    const viewportTop = viewport.getBoundingClientRect().top;
+    expect(headerTop).toBeGreaterThanOrEqual(viewportTop - 2);
+    expect(headerTop).toBeLessThanOrEqual(viewportTop + 8);
   });
 }
 
@@ -803,6 +857,33 @@ export const Empty: Story = {
 export const PreviewDialog: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface preview={previewFixture} previewOpen />,
+};
+
+export const PreviewDialogLongContent: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface preview={longPasswordPreviewFixture} previewOpen frameClassName="mx-auto max-w-[1500px]" />,
+  globals: {
+    viewport: { value: "keysWide1120", isRotated: false },
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "长密码、多行导入预览场景，验证弹窗内部滚动、长字段断词和底部操作按钮可见。",
+      },
+    },
+  },
+  play: async () => {
+    const body = within(document.body);
+    const dialog = body.getByRole("dialog", { name: "导入预览" });
+    const viewport = await getImportPreviewViewport();
+    await expectHistoryViewportToScroll(viewport);
+    await expectImportPreviewHeaderFrozen(viewport);
+    await expect(body.queryByRole("columnheader", { name: "说明" })).not.toBeInTheDocument();
+    await expect(body.queryByRole("columnheader", { name: "现有分组" })).not.toBeInTheDocument();
+    await expect(body.getByRole("button", { name: "取消" })).toBeVisible();
+    await expect(body.getByRole("button", { name: /确认导入 30 条/ })).toBeVisible();
+    await expectNoHorizontalOverflow(dialog, 16);
+  },
 };
 
 export const ImportPreviewPlay: Story = {

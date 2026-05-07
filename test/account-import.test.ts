@@ -44,6 +44,33 @@ describe("parseImportLine", () => {
     });
   });
 
+  test("ignores dashed suffixes after the password field", () => {
+    const rawLine =
+      "lruvcadbq441@hotmail.com----QM5W1M9ViGYQ----M.C503_BAY.0.U.-Cn!6t5GUnYsAONed9OKN7ex*oR!1yq9XooIvqN1LlqMnNkr1XeapBghKl4kBj!*xjrjgHipJOwuufsfsZ8CO2i9OWxSVh29VKYFma*!SxmPtd----4e5f-86f1-ddba2230dcf2";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "lruvcadbq441@hotmail.com",
+      password: "QM5W1M9ViGYQ",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "lruvcadbq441@hotmail.com",
+      password: "QM5W1M9ViGYQ",
+    });
+  });
+
+  test("trims dashed suffixes for space-separated passwords after email", () => {
+    const rawLine = "user@example.com PASSWORD-123----metadata-that-should-be-ignored";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
+    });
+  });
+
   test("supports microsoft consumer mailboxes with multi-level domains", () => {
     const rawLine =
       "user@outlook.co.uk----secret123----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-abcdefghijklmnopqrstuvwxyz1234567890token$$";
@@ -58,42 +85,68 @@ describe("parseImportLine", () => {
     });
   });
 
-  test("keeps dashed passwords intact when trailing fields do not look like microsoft metadata", () => {
+  test("keeps only the first dashed password segment after email", () => {
     const rawLine = "user@example.com----abc----def";
 
     expect(parseImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "abc----def",
+      password: "abc",
     });
     expect(parseWebImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "abc----def",
+      password: "abc",
     });
   });
 
-  test("keeps dashed passwords intact when the suffix is only uuid-like", () => {
+  test("keeps only the first dashed password segment before uuid-like suffixes", () => {
     const rawLine = "user@example.com----secret----123e4567-e89b-12d3-a456-426614174000";
 
     expect(parseImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "secret----123e4567-e89b-12d3-a456-426614174000",
+      password: "secret",
     });
     expect(parseWebImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "secret----123e4567-e89b-12d3-a456-426614174000",
+      password: "secret",
     });
   });
 
-  test("keeps dashed passwords intact when the token-like suffix does not match the microsoft sample shape", () => {
+  test("keeps only the first dashed password segment before token-like suffixes", () => {
     const rawLine = "user@example.com----secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$";
 
     expect(parseImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$",
+      password: "secret",
     });
     expect(parseWebImportLine(rawLine, 1)).toMatchObject({
       email: "user@example.com",
-      password: "secret----123e4567-e89b-12d3-a456-426614174000----M.C531_BL2.0.U.-token-part-more-token$$",
+      password: "secret",
+    });
+  });
+
+  test("keeps password-before-email records compatible", () => {
+    const rawLine = "PASSWORD-123 ---- user@example.com";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
+    });
+  });
+
+  test("trims dashed suffixes for password-before-email records", () => {
+    const rawLine = "PASSWORD-123----ignored-token user@example.com";
+
+    expect(parseImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
+    });
+    expect(parseWebImportLine(rawLine, 1)).toMatchObject({
+      email: "user@example.com",
+      password: "PASSWORD-123",
     });
   });
 

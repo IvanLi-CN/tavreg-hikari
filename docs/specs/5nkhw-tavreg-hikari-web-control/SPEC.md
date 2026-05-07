@@ -312,6 +312,19 @@
 - state: drawer header latest-code quick copy success feedback
 - evidence_note: 验证账号页右侧 Mailbox Drawer 里的钥匙复制按钮与“已复制”反馈气泡保持一致，不再需要额外工具栏或手动复制步骤。
 
+![Accounts import preview long content](./assets/import-preview-long-content.png)
+
+- source_type: storybook_canvas
+- target_program: mock-only
+- capture_scope: element
+- requested_viewport: keysWide1120
+- viewport_strategy: storybook-viewport
+- sensitive_exclusion: N/A
+- submission_gate: pending-owner-approval
+- story_id_or_title: Views/AccountsView/PreviewDialogLongContent
+- state: long Microsoft import preview dialog
+- evidence_note: 验证导入预览弹窗在 30 行长后缀账号输入下保持头尾可见、表格在弹窗内滚动，列标题冻结在滚动区域顶部，密码只展示 `----` 前的有效字段，且没有空分组列或重复说明列。
+
 ## 里程碑
 
 - [x] M1: 建立 spec、前端工具链与 Web/Bun 入口

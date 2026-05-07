@@ -45,6 +45,7 @@ import type {
   ProxyCheckState,
   ProxyNode,
   UpstreamAccountSyncPayload,
+  AccountImportPreviewItem,
 } from "@/lib/app-types";
 import { DEFAULT_ACCOUNT_QUERY_SORT, isDefaultAccountQuerySort } from "@/lib/account-query";
 import { formatDate } from "@/lib/format";
@@ -78,6 +79,15 @@ const MAILBOX_STATUS_OPTIONS = [
 const DESKTOP_TOOLS_STORAGE_KEY = "tavreg-hikari.accounts.desktopToolsCollapsed";
 const ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY = "tavreg-hikari.accounts.businessFlowMode";
 const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
+
+function hasMeaningfulImportPreviewNote(item: AccountImportPreviewItem): boolean {
+  const note = item.note.trim();
+  if (!note) return false;
+  if (item.decision === "create" && note === "新增账号") return false;
+  if (item.decision === "update_password" && note === "已有账号，密码会更新") return false;
+  if (item.decision === "keep_existing" && note === "已有账号且密码未变") return false;
+  return true;
+}
 
 function formatAccountImportedAt(row: AccountRecord): string {
   if (row.upstreamOrigin && row.importedAt === UNKNOWN_UPSTREAM_IMPORTED_AT) return "—";
@@ -830,6 +840,9 @@ export function AccountsView({
     1,
     Math.ceil(Math.max(1, extractorHistory.total) / Math.max(1, extractorHistory.pageSize)),
   );
+  const previewItems = preview?.items ?? [];
+  const showImportPreviewGroupColumn = previewItems.some((item) => Boolean(item.groupName?.trim()));
+  const showImportPreviewNoteColumn = previewItems.some(hasMeaningfulImportPreviewNote);
   const extractorSseBadge = extractorSseStateCopy(extractorSseState);
   const extractorSummarySources =
     extractorRuntime.enabledSources.length > 0 ? extractorRuntime.enabledSources : extractorRunDraft.sources;
@@ -1792,13 +1805,14 @@ export function AccountsView({
               <CardDescription>
                 每行一个账号。支持 <code>email,password</code>、<code>email:password</code>、<code>email|password</code>、
                 <code>email password</code>、<code>email----password</code>，也会自动纠正邮箱前后顺序。
+                如果密码后面还有 <code>----</code> 分隔的附加内容，只导入 <code>----</code> 前面的密码。
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <Textarea
                 name="account-import"
                 className="min-h-72"
-                placeholder={"example@example.test,password123\nexample@example.test----password123\npassword123 example@example.test"}
+                placeholder={"example@example.test,password123\nexample@example.test----password123----ignored-token\npassword123 example@example.test"}
                 value={importContent}
                 onChange={(event) => onImportContentChange(event.target.value)}
               />
@@ -2246,8 +2260,8 @@ export function AccountsView({
       </section>
 
       <Dialog open={previewOpen} onOpenChange={onPreviewOpenChange}>
-        <DialogContent className="w-[min(96vw,78rem)]">
-          <DialogHeader>
+        <DialogContent className="!flex w-[min(96vw,78rem)] max-h-[88vh] flex-col">
+          <DialogHeader className="shrink-0 pr-16">
             <DialogTitle>导入预览</DialogTitle>
             <DialogDescription>
               这一轮会先展示解析结果、输入内重复和与现有账号的冲突决策。确认后才会真正写入数据库。
@@ -2255,7 +2269,7 @@ export function AccountsView({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 px-6 py-2">
+          <div className="min-h-0 flex-1 space-y-4 overflow-hidden px-6 py-2">
             <div className="flex flex-wrap gap-2">
               <Badge variant="info">parsed · {preview?.summary.parsed || 0}</Badge>
               <Badge variant="success">create · {preview?.summary.create || 0}</Badge>
@@ -2265,39 +2279,43 @@ export function AccountsView({
               <Badge variant="danger">invalid · {preview?.summary.invalid || 0}</Badge>
             </div>
 
-            <ScrollArea className="max-h-[52vh] rounded-[24px] border border-white/8 bg-[#08111d]/88">
+            <ScrollArea className="h-[min(52vh,34rem)] min-h-0 rounded-[24px] border border-white/8 bg-[#08111d]/88" scrollbars="both" data-testid="account-import-preview-scroll-area">
               {preview?.items?.length ? (
-                <Table className="min-w-[940px]">
+                <table className="w-full min-w-[760px] table-fixed text-sm">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-20">行号</TableHead>
-                      <TableHead>邮箱</TableHead>
-                      <TableHead>密码</TableHead>
-                      <TableHead>决策</TableHead>
-                      <TableHead>现有分组</TableHead>
-                      <TableHead>说明</TableHead>
+                      <TableHead className="sticky top-0 z-10 w-16 bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">行号</TableHead>
+                      <TableHead className="sticky top-0 z-10 w-[24%] bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">邮箱</TableHead>
+                      <TableHead className="sticky top-0 z-10 w-[42%] bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">密码</TableHead>
+                      <TableHead className="sticky top-0 z-10 w-32 bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">决策</TableHead>
+                      {showImportPreviewGroupColumn ? <TableHead className="sticky top-0 z-10 w-[14%] bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">现有分组</TableHead> : null}
+                      {showImportPreviewNoteColumn ? <TableHead className="sticky top-0 z-10 bg-[#0b1624] shadow-[0_1px_0_rgba(255,255,255,0.08)]">说明</TableHead> : null}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {preview.items.map((item) => (
                       <TableRow key={`${item.lineNumber}-${item.rawLine}`}>
-                        <TableCell>#{item.lineNumber}</TableCell>
-                        <TableCell className="min-w-[14rem] whitespace-nowrap">{item.email || "—"}</TableCell>
-                        <TableCell className="font-mono text-sm text-slate-200">{item.password || "—"}</TableCell>
+                        <TableCell className="whitespace-nowrap">#{item.lineNumber}</TableCell>
+                        <TableCell className="break-all">{item.email || "—"}</TableCell>
+                        <TableCell className="break-all font-mono text-sm leading-6 text-slate-200">{item.password || "—"}</TableCell>
                         <TableCell className="whitespace-nowrap"><ImportDecisionBadge decision={item.decision} /></TableCell>
-                        <TableCell>{item.groupName || "—"}</TableCell>
-                        <TableCell className="min-w-[18rem] text-slate-300">{item.note}</TableCell>
+                        {showImportPreviewGroupColumn ? <TableCell className="break-words">{item.groupName || "—"}</TableCell> : null}
+                        {showImportPreviewNoteColumn ? (
+                          <TableCell className="break-words text-slate-300">
+                            {hasMeaningfulImportPreviewNote(item) ? item.note : "—"}
+                          </TableCell>
+                        ) : null}
                       </TableRow>
                     ))}
                   </TableBody>
-                </Table>
+                </table>
               ) : (
                 <div className="px-4 py-10 text-center text-sm text-slate-500">还没有预览数据。</div>
               )}
             </ScrollArea>
           </div>
 
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button variant="secondary" onClick={() => onPreviewOpenChange(false)}>
               取消
             </Button>
