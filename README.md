@@ -12,7 +12,7 @@
 ## Web 管理台
 
 - 主流程页：启动任务、暂停、恢复、动态调整 `parallel / need / maxAttempts`，并支持在缺号时按站点开关自动提取微软账号；当前支持 `账号鸭 / 闪邮箱 / 闪客云 / Hotmail666` 四个渠道，按单源 `500ms/次` 轮转、最多 `4` 个并发请求。
-- 微软账号页：支持 `email,password`、`email:password`、`email|password` 或 `email password` 的批量导入，按邮箱去重，查看是否已有 API key、最近状态、导入时间、跳过原因与收信状态，并提供四个提取器 KEY 设置与本地提取历史查询。
+- 微软账号页：支持 `email,password`、`email:password`、`email|password` 或 `email password` 的批量导入，按邮箱去重，查看是否已有 API key、最近状态、导入时间、跳过原因与收信状态，并提供四个提取器 KEY 设置与最近 7 天的本地提取历史查询。
 - 微软账号页可在本地实例手动“从线上同步”，通过 production integration API 拉取线上账号、proof mailbox、分组、Tavily key 与服务快照，用本地 SQLite 重建可运行账号数据。
 - 微软账号页现在会在导入/自动提取后立即为账号创建持久浏览器会话 bootstrap：自动选取代理池 IP、记住登录态、保存 `output/browser-profiles/accounts/<accountId>/chrome`，并在账号列表展示 session 状态、代理/IP 与 profile 路径摘要。
 - 后续 Tavily attempt 会优先复用账号上次成功的代理 IP；若原 IP 不在池中，则按同 region、再按全池健康节点的 LRU 选择代理，并继续复用同一持久 profile。
