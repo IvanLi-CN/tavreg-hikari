@@ -11,6 +11,8 @@ import {
 
 const require = createRequire(import.meta.url);
 const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
+const ACCOUNT_EXTRACT_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const ACCOUNT_EXTRACT_HISTORY_PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 type SqliteBindValue = string | number | boolean | null | undefined;
 type SqliteNamedParams = Record<string, SqliteBindValue>;
@@ -1122,6 +1124,7 @@ function shouldPreserveManualStopStatus(status: JobStatus): boolean {
 export class AppDatabase {
   readonly dbPath: string;
   private readonly db: SqliteDatabase;
+  private lastAccountExtractHistoryPruneAtMs = 0;
 
   constructor(dbPath: string) {
     this.dbPath = dbPath;
@@ -1138,6 +1141,7 @@ export class AppDatabase {
     await mkdir(path.dirname(dbPath), { recursive: true });
     const appDb = new AppDatabase(dbPath);
     appDb.recoverStaleState();
+    appDb.pruneAccountExtractHistoryIfDue();
     if (legacyProxyUsagePath) {
       await appDb.importLegacyProxyUsage(legacyProxyUsagePath);
     }
@@ -1684,6 +1688,7 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_checks_node_checked ON proxy_checks(node_name, checked_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_job_started ON account_extract_batches(job_id, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_provider_started ON account_extract_batches(provider, started_at DESC);");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_batches_started_at ON account_extract_batches(started_at);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_batch_created ON account_extract_items(batch_id, created_at ASC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_account_extract_items_email ON account_extract_items(email, created_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_mailboxes_status_updated ON microsoft_mailboxes(status, updated_at DESC);");
@@ -4196,6 +4201,7 @@ export class AppDatabase {
     startedAt?: string;
     completedAt?: string | null;
   }): AccountExtractBatchRecord {
+    this.pruneAccountExtractHistoryIfDue();
     const row = this.db
       .query(`
         INSERT INTO account_extract_batches (
@@ -4219,6 +4225,36 @@ export class AppDatabase {
         input.completedAt ?? null,
       ) as Record<string, unknown>;
     return mapAccountExtractBatchRow(row);
+  }
+
+  pruneAccountExtractHistory(nowMs: number = Date.now()): { deletedBatches: number; cutoffStartedAt: string } {
+    const cutoffStartedAt = this.getAccountExtractHistoryCutoff(nowMs);
+    const deletedBatches = Number(
+      (
+        this.db
+          .query("SELECT COUNT(*) AS count FROM account_extract_batches WHERE started_at < ?")
+          .get(cutoffStartedAt) as { count?: number } | null
+      )?.count || 0,
+    );
+    if (deletedBatches > 0) {
+      this.db.query("DELETE FROM account_extract_batches WHERE started_at < ?").run(cutoffStartedAt);
+    }
+    return { deletedBatches, cutoffStartedAt };
+  }
+
+  private pruneAccountExtractHistoryIfDue(nowMs: number = Date.now()): void {
+    if (
+      this.lastAccountExtractHistoryPruneAtMs > 0
+      && nowMs - this.lastAccountExtractHistoryPruneAtMs < ACCOUNT_EXTRACT_HISTORY_PRUNE_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.lastAccountExtractHistoryPruneAtMs = nowMs;
+    this.pruneAccountExtractHistory(nowMs);
+  }
+
+  private getAccountExtractHistoryCutoff(nowMs: number = Date.now()): string {
+    return new Date(nowMs - ACCOUNT_EXTRACT_HISTORY_RETENTION_MS).toISOString();
   }
 
   updateAccountExtractBatch(
@@ -4318,10 +4354,12 @@ export class AppDatabase {
     page: number;
     pageSize: number;
   } {
+    const nowMs = Date.now();
+    this.pruneAccountExtractHistoryIfDue(nowMs);
     const page = Math.max(1, filters.page || 1);
     const pageSize = Math.max(1, Math.min(100, filters.pageSize || 20));
-    const where: string[] = [];
-    const params: unknown[] = [];
+    const where: string[] = ["b.started_at >= ?"];
+    const params: unknown[] = [this.getAccountExtractHistoryCutoff(nowMs)];
     if (filters.provider) {
       where.push("b.provider = ?");
       params.push(filters.provider);

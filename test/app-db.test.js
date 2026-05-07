@@ -1427,6 +1427,163 @@ describe("AppDatabase account import", () => {
 
     appDb.close();
   });
+
+  test("prunes account extract history older than seven days and cascades items", async () => {
+    const { appDb } = await createTempDb();
+    const nowMs = Date.parse("2026-05-08T12:00:00.000Z");
+    const oldStartedAt = "2026-04-30T11:59:59.000Z";
+    const freshStartedAt = "2026-05-01T12:00:00.000Z";
+    const oldBatch = appDb.createAccountExtractBatch({
+      jobId: null,
+      provider: "zhanghaoya",
+      requestedUsableCount: 1,
+      attemptBudget: 1,
+      acceptedCount: 0,
+      status: "parse_failed",
+      rawResponse: "old-response",
+      startedAt: oldStartedAt,
+      completedAt: oldStartedAt,
+    });
+    appDb.createAccountExtractItem({
+      batchId: oldBatch.id,
+      provider: "zhanghaoya",
+      rawPayload: "old-extractor@example.test:pass",
+      email: "old-extractor@example.test",
+      password: "pass",
+      parseStatus: "parsed",
+      acceptStatus: "rejected",
+      rejectReason: "expired_history_fixture",
+    });
+    const freshBatch = appDb.createAccountExtractBatch({
+      jobId: null,
+      provider: "shanyouxiang",
+      requestedUsableCount: 1,
+      attemptBudget: 1,
+      acceptedCount: 1,
+      status: "accepted",
+      rawResponse: "fresh-response",
+      startedAt: freshStartedAt,
+      completedAt: freshStartedAt,
+    });
+    appDb.createAccountExtractItem({
+      batchId: freshBatch.id,
+      provider: "shanyouxiang",
+      rawPayload: "fresh-extractor@example.test:pass",
+      email: "fresh-extractor@example.test",
+      password: "pass",
+      parseStatus: "parsed",
+      acceptStatus: "accepted",
+    });
+
+    const result = appDb.pruneAccountExtractHistory(nowMs);
+
+    expect(result).toEqual({
+      deletedBatches: 1,
+      cutoffStartedAt: "2026-05-01T12:00:00.000Z",
+    });
+    expect(appDb.listAccountExtractHistory({ page: 1, pageSize: 10 }).total).toBe(1);
+    expect(appDb.listAccountExtractHistory({ q: "old-extractor@", page: 1, pageSize: 10 }).total).toBe(0);
+    expect(appDb.listAccountExtractHistory({ q: "fresh-extractor@", page: 1, pageSize: 10 }).total).toBe(1);
+    const orphanCount = Number(
+      appDb.db.query("SELECT COUNT(*) AS count FROM account_extract_items WHERE batch_id = ?").get(oldBatch.id)?.count || 0,
+    );
+    expect(orphanCount).toBe(0);
+
+    appDb.close();
+  });
+
+  test("prunes stale account extract history when reopening the database", async () => {
+    const { dbPath, appDb } = await createTempDb();
+    const nowMs = Date.parse("2026-05-08T12:00:00.000Z");
+    const oldDateNow = Date.now;
+    Date.now = () => nowMs;
+    try {
+      const oldStartedAt = "2026-04-30T11:59:59.000Z";
+      const freshStartedAt = "2026-05-01T12:00:00.000Z";
+      appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "zhanghaoya",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 0,
+        status: "error",
+        rawResponse: "old-response",
+        startedAt: oldStartedAt,
+        completedAt: oldStartedAt,
+      });
+      appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "hotmail666",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 1,
+        status: "accepted",
+        rawResponse: "fresh-response",
+        startedAt: freshStartedAt,
+        completedAt: freshStartedAt,
+      });
+      appDb.close();
+
+      const reopened = await AppDatabase.open(dbPath);
+      const history = reopened.listAccountExtractHistory({ page: 1, pageSize: 10 });
+      expect(history.total).toBe(1);
+      expect(history.rows[0]).toMatchObject({
+        provider: "hotmail666",
+        status: "accepted",
+      });
+      reopened.close();
+    } finally {
+      Date.now = oldDateNow;
+    }
+  });
+
+  test("history listing filters stale account extract history within the prune interval", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-hikari-"));
+    tempDirs.push(tempDir);
+    const dbPath = path.join(tempDir, "app.sqlite");
+    const baseNowMs = Date.parse("2026-05-08T12:00:00.000Z");
+    const oldDateNow = Date.now;
+    Date.now = () => baseNowMs;
+    const appDb = await AppDatabase.open(dbPath);
+    try {
+      appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "zhanghaoya",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 0,
+        status: "error",
+        rawResponse: "old-response",
+        startedAt: "2026-04-30T11:59:59.000Z",
+        completedAt: "2026-04-30T11:59:59.000Z",
+      });
+      appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "shanyouxiang",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 1,
+        status: "accepted",
+        rawResponse: "fresh-response",
+        startedAt: "2026-05-01T13:00:00.000Z",
+        completedAt: "2026-05-01T13:00:00.000Z",
+      });
+      Date.now = () => baseNowMs + 30 * 60 * 1000;
+
+      const history = appDb.listAccountExtractHistory({ page: 1, pageSize: 10 });
+
+      expect(history.total).toBe(1);
+      expect(history.rows[0]).toMatchObject({
+        provider: "shanyouxiang",
+        status: "accepted",
+      });
+      const storedBatchCount = Number(appDb.db.query("SELECT COUNT(*) AS count FROM account_extract_batches").get()?.count || 0);
+      expect(storedBatchCount).toBe(2);
+    } finally {
+      Date.now = oldDateNow;
+      appDb.close();
+    }
+  });
 });
 
 describe("scheduler helpers", () => {
