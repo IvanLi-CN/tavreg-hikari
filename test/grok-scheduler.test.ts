@@ -102,7 +102,7 @@ test("grok scheduler supports pause resume update and stop on its own site", asy
 
   const stopped = scheduler.stopCurrentJob();
   expect(stopped.site).toBe("grok");
-  expect(stopped.status).toBe("stopping");
+  expect(stopped.status).toBe("stopped");
 
   await scheduler.shutdown();
   appDb.close();
@@ -132,7 +132,7 @@ test("grok scheduler state changes do not mutate other site jobs", async () => {
   expect(appDb.getCurrentJob("tavily")?.id).toBe(tavilyJob.id);
 
   scheduler.forceStopCurrentJob(true);
-  expect(appDb.getCurrentJob("grok")?.status).toBe("force_stopping");
+  expect(appDb.getCurrentJob("grok")?.status).toBe("stopped");
   expect(appDb.getCurrentJob("tavily")?.status).toBe("running");
 
   await scheduler.shutdown();
@@ -226,6 +226,215 @@ test("grok scheduler does not create a launch storm while mailbox cooldown is ac
   expect(attempts).toHaveLength(1);
   expect(attempts[0]?.errorCode).toBe("mailbox_rate_limited");
   expect(scheduler.getCooldownSnapshot()?.sourceErrorCode).toBe("mailbox_rate_limited");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok force stop is idempotent and reaps stale active attempts", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "stale@example.test", outputDir: tempDir });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  let released = false;
+  const signals: string[] = [];
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: (signal: string) => {
+        signals.push(signal);
+        return true;
+      },
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now() - 31_000,
+    releaseResources: async () => {
+      released = true;
+    },
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  const stopped = scheduler.forceStopCurrentJob(true);
+
+  expect(stopped.status).toBe("stopped");
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("stopped");
+  expect(appDb.getAttempt(attempt.id)?.errorCode).toBe("force_stopped");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+  expect(released).toBe(true);
+  expect(signals).toEqual([]);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok force stop reaps running attempts that already wrote an error artifact", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "artifact@example.test", outputDir: tempDir });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  await writeFile(path.join(tempDir, "error.json"), JSON.stringify({ error: "native_turnstile_token_missing" }), "utf8");
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39091, mixedPort: 49091 },
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now() - 31_000,
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  const stopped = scheduler.forceStopCurrentJob(true);
+  const stoppedAttempt = appDb.getAttempt(attempt.id);
+
+  expect(stopped.status).toBe("stopped");
+  expect(stoppedAttempt?.status).toBe("stopped");
+  expect(stoppedAttempt?.errorCode).toBe("force_stopped");
+  expect(stoppedAttempt?.errorMessage).toBe("native_turnstile_token_missing");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok force stop keeps ownership of error-artifact attempts until exit or reap timeout", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "live-artifact@example.test", outputDir: tempDir });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  await writeFile(path.join(tempDir, "error.json"), JSON.stringify({ error: "native_turnstile_token_missing" }), "utf8");
+  let released = false;
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39093, mixedPort: 49093 },
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now(),
+    releaseResources: async () => {
+      released = true;
+    },
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  const stillStopping = scheduler.forceStopCurrentJob(true);
+
+  expect(stillStopping.status).toBe("force_stopping");
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].has(attempt.id)).toBe(true);
+  expect(released).toBe(false);
+
+  scheduler["activeAttempts"].clear();
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok graceful stop reaps exited attempts even without an error artifact", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "exited@example.test", outputDir: tempDir });
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: 1,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39092, mixedPort: 49092 },
+    stopRequested: null,
+    stopRequestedAtMs: null,
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  const stopped = scheduler.stopCurrentJob();
+  const failedAttempt = appDb.getAttempt(attempt.id);
+
+  expect(stopped.status).toBe("stopped");
+  expect(failedAttempt?.status).toBe("failed");
+  expect(failedAttempt?.errorCode).toBe("exit_1");
+  expect(failedAttempt?.errorMessage).toBe("process exited with code 1");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok graceful stop lets exited successful attempts use the normal result finalizer", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "success-exit@example.test", outputDir: tempDir });
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  await writeFile(
+    path.join(tempDir, "result.json"),
+    JSON.stringify({
+      email: "success-exit@example.test",
+      password: "grok-pass",
+      sso: "grok-sso-token",
+    }),
+    "utf8",
+  );
+  let resolveFinalizer!: () => void;
+  const finalizerDone = new Promise<void>((resolve) => {
+    resolveFinalizer = resolve;
+  });
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: 0,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39094, mixedPort: 49094 },
+    stopRequested: null,
+    stopRequestedAtMs: null,
+    finalize: (runner: () => Promise<void> | void) => {
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        scheduler["maybeFinalizeStoppedJob"](job.id);
+        resolveFinalizer();
+      })();
+    },
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  const stopping = scheduler.stopCurrentJob();
+  await finalizerDone;
+
+  expect(stopping.status).toBe("stopping");
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("succeeded");
+  expect(appDb.getGrokApiKey(1)?.sso).toBe("grok-sso-token");
+  expect(appDb.getJob(job.id)?.status).toBe("stopped");
+  expect(scheduler["activeAttempts"].size).toBe(0);
 
   await scheduler.shutdown();
   appDb.close();
