@@ -382,7 +382,7 @@ describe("account extractor runtime helpers", () => {
         return true;
       },
     );
-    const now = "2026-04-03T03:30:00.000Z";
+    const now = new Date().toISOString();
     runtime["state"] = {
       runId: 9,
       status: "running",
@@ -495,7 +495,7 @@ describe("account extractor runtime helpers", () => {
         return true;
       },
     );
-    const now = "2026-04-03T03:40:00.000Z";
+    const now = new Date().toISOString();
     runtime["state"] = {
       runId: 11,
       status: "running",
