@@ -224,6 +224,8 @@ export interface MicrosoftAccountRecord {
   lastResultStatus: AccountStatus;
   lastResultAt: string | null;
   lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  lastFailureStage: string | null;
   skipReason: AccountSkipReason | null;
   groupName: string | null;
   disabledAt: string | null;
@@ -760,7 +762,22 @@ function accountSelectSql(whereClause = "", orderClause = ""): string {
       s.last_error_code AS browser_session_last_error_code,
       s.last_error_message AS browser_session_last_error_message,
       s.created_at AS browser_session_created_at,
-      s.updated_at AS browser_session_updated_at
+      s.updated_at AS browser_session_updated_at,
+      (
+        SELECT ja.error_message
+        FROM job_attempts ja
+        WHERE ja.account_id = a.id
+          AND COALESCE(TRIM(ja.error_message), '') <> ''
+        ORDER BY ja.started_at DESC, ja.id DESC
+        LIMIT 1
+      ) AS latest_attempt_error_message,
+      (
+        SELECT ja.stage
+        FROM job_attempts ja
+        WHERE ja.account_id = a.id
+        ORDER BY ja.started_at DESC, ja.id DESC
+        LIMIT 1
+      ) AS latest_attempt_stage
     FROM microsoft_accounts a
     LEFT JOIN microsoft_mailboxes m ON m.account_id = a.id
     LEFT JOIN account_browser_sessions s ON s.account_id = a.id
@@ -855,6 +872,8 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     lastResultStatus: String(row.last_result_status || "ready") as AccountStatus,
     lastResultAt: row.last_result_at == null ? null : String(row.last_result_at),
     lastErrorCode: row.last_error_code == null ? null : String(row.last_error_code),
+    lastErrorMessage: row.latest_attempt_error_message == null ? null : String(row.latest_attempt_error_message),
+    lastFailureStage: row.latest_attempt_stage == null ? null : String(row.latest_attempt_stage),
     skipReason: row.skip_reason == null ? null : (String(row.skip_reason) as AccountSkipReason),
     groupName: row.group_name == null ? null : String(row.group_name),
     disabledAt: row.disabled_at == null ? null : String(row.disabled_at),

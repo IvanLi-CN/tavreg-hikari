@@ -20,7 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { GroupCombobox } from "@/components/group-combobox";
-import { StatusBadge } from "@/components/status-badge";
+import { formatFailureTooltip, StatusBadge } from "@/components/status-badge";
 import { CopyIconButton } from "@/components/ui/copy-icon-button";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
@@ -251,20 +251,27 @@ function formatAvailabilitySummary(account: Pick<AccountRecord, "skipReason" | "
 }
 
 function buildAccountStatusBadges(
-  account: Pick<AccountRecord, "hasApiKey" | "skipReason" | "disabledAt" | "lastResultStatus" | "browserSession" | "lastErrorCode">,
-): Array<{ label: string; variant: "success" | "warning" | "danger" }> {
-  const badges: Array<{ label: string; variant: "success" | "warning" | "danger" }> = [];
+  account: Pick<AccountRecord, "hasApiKey" | "skipReason" | "disabledAt" | "disabledReason" | "lastResultStatus" | "lastErrorCode" | "lastErrorMessage" | "lastFailureStage" | "browserSession">,
+): Array<{ label: string; variant: "success" | "warning" | "danger"; tooltip: string | null }> {
+  const badges: Array<{ label: string; variant: "success" | "warning" | "danger"; tooltip: string | null }> = [];
   const usedByTavily = account.hasApiKey || account.skipReason === "has_api_key";
   const failedRecently = account.lastResultStatus === "failed" || account.browserSession?.status === "failed" || account.browserSession?.status === "blocked";
   const retired = Boolean(account.disabledAt) || isLockedAccountBlock(account);
+  const failureTooltip = formatFailureTooltip({
+    heading: "Tavily 失败详情",
+    stage: account.lastFailureStage,
+    errorCode: account.lastErrorCode || account.browserSession?.lastErrorCode || account.skipReason,
+    errorMessage: account.lastErrorMessage || account.browserSession?.lastErrorMessage || account.disabledReason,
+    fallbackMessage: formatAccountBlockReason(account),
+  });
   if (usedByTavily) {
-    badges.push({ label: "Tavily", variant: "success" });
+    badges.push({ label: "Tavily", variant: "success", tooltip: null });
   }
   if (failedRecently) {
-    badges.push({ label: usedByTavily ? "已失败" : "Tavily 失败", variant: "warning" });
+    badges.push({ label: usedByTavily ? "已失败" : "Tavily 失败", variant: "warning", tooltip: failureTooltip });
   }
   if (retired) {
-    badges.push({ label: usedByTavily ? "已废弃" : "Tavily 废弃", variant: "danger" });
+    badges.push({ label: usedByTavily ? "已废弃" : "Tavily 废弃", variant: "danger", tooltip: failureTooltip });
   }
 
   return badges;
@@ -450,9 +457,27 @@ function UsageBadgesRow(props: { account: AccountRecord; fallback?: ReactNode })
   return (
     <>
       {usageBadges.map((badge) => (
-        <Badge key={`${props.account.id}-${badge.label}`} variant={badge.variant} className="px-2 py-0.5 text-[0.62rem] tracking-[0.12em]">
-          {badge.label}
-        </Badge>
+        badge.tooltip ? (
+          <Tooltip key={`${props.account.id}-${badge.label}`}>
+            <TooltipTrigger asChild>
+              <Badge
+                variant={badge.variant}
+                className="px-2 py-0.5 text-[0.62rem] tracking-[0.12em]"
+                title={badge.tooltip}
+                aria-label={badge.tooltip}
+              >
+                {badge.label}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-[26rem] whitespace-pre-wrap text-left leading-5 normal-case tracking-normal">
+              {badge.tooltip}
+            </TooltipContent>
+          </Tooltip>
+        ) : (
+          <Badge key={`${props.account.id}-${badge.label}`} variant={badge.variant} className="px-2 py-0.5 text-[0.62rem] tracking-[0.12em]">
+            {badge.label}
+          </Badge>
+        )
       ))}
     </>
   );
