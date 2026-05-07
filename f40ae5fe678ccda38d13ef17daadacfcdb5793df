@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.17.3",
+  "base_stable_version": "0.17.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-07T21:17:05Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.17.3",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "8bff28ea08d949a6bb1bc5400856933d11bd2ae2",
+  "pr_number": 70,
+  "pr_title": "fix: harden Grok force stop reaping",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.17.3",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.17.3",
+  "target_sha": "f40ae5fe678ccda38d13ef17daadacfcdb5793df",
+  "type_label": "type:patch"
+}
