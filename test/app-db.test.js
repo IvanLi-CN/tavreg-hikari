@@ -629,6 +629,29 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("lists latest Tavily failure detail with Microsoft accounts", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "abuse-detail@example.test", password: "pass-a" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, "/tmp/tavreg-abuse-detail");
+
+    appDb.completeAttemptFailure(job.id, attempt.id, accountId, {
+      errorCode: "microsoft_account_locked",
+      errorMessage: "提交密码后被打到 account.live.com/Abuse",
+    });
+
+    const row = appDb.listAccounts({ page: 1, pageSize: 10 }).rows.find((account) => account.id === accountId);
+    expect(row).toMatchObject({
+      lastErrorCode: "microsoft_account_locked",
+      lastErrorMessage: "提交密码后被打到 account.live.com/Abuse",
+      lastFailureStage: "failed",
+    });
+
+    appDb.close();
+  });
+
   test("supports importedAt sorting across the full filtered result set", async () => {
     const { appDb } = await createTempDb();
     appDb.importAccounts([{ email: "first@example.test", password: "pass-a" }]);

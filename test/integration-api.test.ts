@@ -68,6 +68,11 @@ async function seedAccount(appDb: AppDatabase) {
   return { accountId, mailboxId: mailbox.id };
 }
 
+function markRowRevoked(appDb: AppDatabase, table: "api_keys" | "grok_api_keys", id: number) {
+  const rawDb = (appDb as unknown as { db: { query: (sql: string) => { run: (...params: unknown[]) => void } } }).db;
+  rawDb.query(`UPDATE ${table} SET status = 'revoked' WHERE id = ?`).run(id);
+}
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   if (originalCfmailApiKey === undefined) {
@@ -307,6 +312,64 @@ describe("integration api", () => {
       ssoRw: "grok-sso-rw",
       cfClearance: "cf-clearance",
     });
+
+    appDb.close();
+  });
+
+  test("exports only active Tavily and Grok keys for integration sync", async () => {
+    const { appDb } = await createTempDb();
+    const active = await seedAccount(appDb);
+    const revokedImport = appDb.importAccounts([{ email: "revoked@example.test", password: "revoked-pass" }], { groupName: "relay" });
+    const revokedTavilyKey = appDb.recordApiKey(revokedImport.affectedIds[0]!, "tvly-revoked-secret", "198.51.100.99");
+    markRowRevoked(appDb, "api_keys", revokedTavilyKey.id);
+
+    const activeGrokJob = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: { hidden: true } });
+    const activeGrokAttempt = appDb.createAttempt(activeGrokJob.id, { accountEmail: "active-grok@example.test", outputDir: "" });
+    const { key: activeGrokKey } = appDb.completeGrokAttemptSuccess(activeGrokJob.id, activeGrokAttempt.id, {
+      email: "active-grok@example.test",
+      password: "grok-pass",
+      sso: "active-sso",
+      ssoRw: "active-sso-rw",
+      cfClearance: "active-cf-clearance",
+      checkoutUrl: "https://grok.example.test/checkout",
+      birthDate: "1999-01-02",
+    });
+    const revokedGrokJob = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: { hidden: true } });
+    const revokedGrokAttempt = appDb.createAttempt(revokedGrokJob.id, { accountEmail: "revoked-grok@example.test", outputDir: "" });
+    const { key: revokedGrokKey } = appDb.completeGrokAttemptSuccess(revokedGrokJob.id, revokedGrokAttempt.id, {
+      email: "revoked-grok@example.test",
+      password: "grok-pass",
+      sso: "revoked-sso",
+      ssoRw: "revoked-sso-rw",
+      cfClearance: "revoked-cf-clearance",
+      checkoutUrl: "https://grok.example.test/checkout",
+      birthDate: "1999-01-02",
+    });
+    markRowRevoked(appDb, "grok_api_keys", revokedGrokKey.id);
+
+    const tavilyReq = new Request("https://console.example.test/api/integration/v1/keys?site=tavily&page=1&pageSize=20");
+    const tavilyResp = await handleIntegrationApiRequest({
+      req: tavilyReq,
+      pathname: new URL(tavilyReq.url).pathname,
+      url: new URL(tavilyReq.url),
+      db: appDb,
+    });
+    expect(tavilyResp?.status).toBe(200);
+    const tavilyList = await tavilyResp!.json();
+    expect(tavilyList.total).toBe(1);
+    expect(tavilyList.rows.map((row: { id: number }) => row.id)).toEqual([appDb.getAccount(active.accountId)!.apiKeyId]);
+
+    const grokReq = new Request("https://console.example.test/api/integration/v1/keys?site=grok&page=1&pageSize=20");
+    const grokResp = await handleIntegrationApiRequest({
+      req: grokReq,
+      pathname: new URL(grokReq.url).pathname,
+      url: new URL(grokReq.url),
+      db: appDb,
+    });
+    expect(grokResp?.status).toBe(200);
+    const grokList = await grokResp!.json();
+    expect(grokList.total).toBe(1);
+    expect(grokList.rows.map((row: { id: number }) => row.id)).toEqual([activeGrokKey.id]);
 
     appDb.close();
   });

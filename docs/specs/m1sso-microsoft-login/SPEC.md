@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-04-23
+- Last: 2026-05-07
 
 ## 背景 / 问题陈述
 
@@ -57,6 +57,7 @@
   - `保持登录状态`，默认选 `是`
   - Tavily Login 授权确认
 - 当 Microsoft 实际出现 proof / 备用邮箱验证分支时，若账号已配置备用邮箱映射，程序必须自动填写备用邮箱并通过统一 mailbox waiter/verification-code extractor 获取安全码。
+- 当 Tavily OAuth 回跳在 `login.live.com/oauth20_authorize.srf` 上出现 “Verify your email / We'll send a code to ...” proof confirmation 页面时，必须优先使用账号绑定的 proof mailbox 完成确认与收码，不得先点击 `Use your password` shortcut。
 - 成功后必须回到 `https://app.tavily.com/home` 并继续后续 API key 获取。
 
 ### SHOULD
@@ -99,6 +100,20 @@
 - `bun run typecheck`
 - `bun test`
 - 至少一次有头实跑，确认 Microsoft OAuth 能进入 Tavily Home
+
+## Visual Evidence
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-accountsview--failure-reuse-matrix`
+  state: `Microsoft accounts Tavily failure badge hover`
+  evidence_note: Microsoft 账号列表中悬浮 `Tavily 失败` badge 会显示 Tavily 失败详情、阶段、错误代码与 `提交密码后被打到 account.live.com/Abuse` 级别的具体原因。
+  ![Microsoft accounts Tavily failure tooltip](./assets/accounts-tavily-tooltip.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-dashboardview--running`
+  state: `Attempt status badge hover`
+  evidence_note: 任务执行记录中悬浮失败 attempt 状态 badge 会显示失败阶段、错误代码与详细失败原因。
+  ![Dashboard attempt failure tooltip](./assets/dashboard-attempt-tooltip.png)
 
 ## 文档更新（Docs to Update）
 

@@ -119,12 +119,14 @@ const defaultBusinessFlowAvailability = {
 
 const defaultBusinessFlowState = null;
 
-const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt">>): AccountRecord => ({
+const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage">>): AccountRecord => ({
   businessFlowAvailability: defaultBusinessFlowAvailability,
   businessFlowState: defaultBusinessFlowState,
   upstreamOrigin: null,
   upstreamAccountId: null,
   upstreamSyncedAt: null,
+  lastErrorMessage: null,
+  lastFailureStage: null,
   ...row,
 });
 
@@ -281,6 +283,8 @@ export const sampleAccounts = {
       lastResultStatus: "disabled",
       lastResultAt: "2026-03-18T07:01:00.000Z",
       lastErrorCode: "microsoft_account_locked",
+      lastErrorMessage: "提交密码后被打到 account.live.com/Abuse",
+      lastFailureStage: "login_home",
       skipReason: "microsoft_account_locked",
       groupName: "failed-pool",
       disabledAt: "2026-03-18T07:01:00.000Z",
@@ -326,6 +330,8 @@ export const sampleAccounts = {
       lastResultStatus: "failed",
       lastResultAt: "2026-03-18T07:02:00.000Z",
       lastErrorCode: "browser_proxy_ip_mismatch",
+      lastErrorMessage: "浏览器代理出口 IP 与会话绑定节点不一致，Tavily 登录前校验失败",
+      lastFailureStage: "browser_ready",
       skipReason: null,
       groupName: "retry-pool",
       disabledAt: null,

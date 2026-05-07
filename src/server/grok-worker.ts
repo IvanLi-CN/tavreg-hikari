@@ -2587,7 +2587,7 @@ async function run(): Promise<void> {
     let nextContext: any = null;
     let nextPage: any = null;
     let nextNativeChromeStop: (() => Promise<void>) | null = null;
-    const sessionProxyServer = options?.proxyServer;
+    const sessionProxyServer = options?.proxyServer ?? mihomo.proxyServer;
     const shouldUseNativeChrome = useNativeChrome && !options?.forcePlaywright;
     if (shouldUseNativeChrome) {
       const launched = await launchNativeChromeCdp(
@@ -2914,7 +2914,7 @@ async function run(): Promise<void> {
     let postProvisionError = "grok_post_provision_page_not_ready";
     for (let handoffAttempt = 1; handoffAttempt <= 3; handoffAttempt += 1) {
       const candidate = await launchWorkerBrowserSession(`post-provision-browser-identity-${handoffAttempt}.json`, {
-        proxyServer: undefined,
+        proxyServer: mihomo.proxyServer,
         forcePlaywright: true,
       });
       await candidate.context

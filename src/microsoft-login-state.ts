@@ -339,6 +339,7 @@ export function classifyMicrosoftProofSurface(
   const onProofRoute = /account\.live\.com\/proofs\//i.test(url);
   const onAddRoute = /account\.live\.com\/proofs\/add/i.test(url);
   const onVerifyRoute = /account\.live\.com\/proofs\/verify/i.test(url);
+  const onOAuthAuthorizeRoute = /login\.live\.com\/oauth20_authorize\.srf/i.test(url);
   const hasAddCopy = hasPatternMatch(combined, MICROSOFT_PROOF_ADD_COPY);
   const hasConfirmCopy = hasPatternMatch(combined, MICROSOFT_PROOF_CONFIRM_COPY);
   const hasVerifyCopy = hasPatternMatch(combined, MICROSOFT_PROOF_VERIFY_COPY);
@@ -348,6 +349,7 @@ export function classifyMicrosoftProofSurface(
   pushSignal(matchedSignals, onProofRoute, "route:proof");
   pushSignal(matchedSignals, onAddRoute, "route:add");
   pushSignal(matchedSignals, onVerifyRoute, "route:verify");
+  pushSignal(matchedSignals, onOAuthAuthorizeRoute, "route:oauth-authorize");
   pushSignal(matchedSignals, !!input.hasProofOptionsSelect, "selector:#iProofOptions");
   pushSignal(matchedSignals, !!input.hasAddEmailInput, "selector:#EmailAddress");
   pushSignal(matchedSignals, !!input.hasConfirmationEmailInput, "selector:#iProofEmail");
@@ -367,18 +369,6 @@ export function classifyMicrosoftProofSurface(
   } else if (onVerifyRoute && input.hasProofRadio) {
     kind = "verify_choice";
   } else if (
-    input.hasConfirmationEmailInput ||
-    (onProofRoute && hasConfirmCopy && !input.hasAddEmailInput)
-  ) {
-    kind = "confirm_email";
-  } else if (
-    (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
-    (onAddRoute && hasAddCopy && !hasConfirmCopy && !input.hasConfirmationEmailInput)
-  ) {
-    kind = "add_email";
-  } else if (onAddRoute && hasAddCopy && !input.hasAddEmailInput) {
-    kind = "add_method";
-  } else if (
     input.hasCodeInput ||
     (onProofRoute &&
       hasCodeCopy &&
@@ -388,6 +378,19 @@ export function classifyMicrosoftProofSurface(
       !input.hasConfirmationEmailInput)
   ) {
     kind = "code_entry";
+  } else if (
+    input.hasConfirmationEmailInput ||
+    (onProofRoute && hasConfirmCopy && !input.hasAddEmailInput) ||
+    (onOAuthAuthorizeRoute && hasConfirmCopy)
+  ) {
+    kind = "confirm_email";
+  } else if (
+    (input.hasAddEmailInput && (onProofRoute || input.hasProofOptionsSelect || hasAddCopy || hasConfirmCopy)) ||
+    (onAddRoute && hasAddCopy && !hasConfirmCopy && !input.hasConfirmationEmailInput)
+  ) {
+    kind = "add_email";
+  } else if (onAddRoute && hasAddCopy && !input.hasAddEmailInput) {
+    kind = "add_method";
   } else if (input.hasProofRadio) {
     kind = "verify_choice";
   } else if (onVerifyRoute || (onProofRoute && hasVerifyCopy)) {

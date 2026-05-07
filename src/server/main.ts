@@ -465,6 +465,8 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     lastResultStatus: row.lastResultStatus,
     lastResultAt: row.lastResultAt,
     lastErrorCode: row.lastErrorCode,
+    lastErrorMessage: row.lastErrorMessage,
+    lastFailureStage: row.lastFailureStage,
     skipReason: row.skipReason,
     groupName: row.groupName,
     disabledAt: row.disabledAt,

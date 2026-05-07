@@ -6295,6 +6295,10 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     '#proof-confirmation-email-input',
     'input[id*="proof-confirmation-email" i]',
     'input[data-testid*="proof-confirmation-email" i]',
+    'input[name*="proof" i]',
+    'input[name*="email" i]',
+    'input[autocomplete="email"]',
+    'input[type="email"]',
   ];
   const confirmationSelector = confirmationSelectors.join(", ");
   const confirmationSurfaceKey = page.url();
@@ -6306,12 +6310,14 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
     throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
   }
-  const shouldUsePasswordFallback = shouldAttemptMicrosoftProofPasswordFallback({
-    hasConfiguredMailbox: !!configuredProofAddress,
-    configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
-    passwordFallbackAttempted: proofState.passwordFallbackAttempted,
-    passwordFallbackBlocked: proofState.passwordFallbackBlocked,
-  });
+  const shouldUsePasswordFallback =
+    !configuredProofAddress &&
+    shouldAttemptMicrosoftProofPasswordFallback({
+      hasConfiguredMailbox: false,
+      configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
+      passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+      passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+    });
   if (shouldUsePasswordFallback) {
     if (await clickMicrosoftPasswordFallbackAction(page)) {
       proofState.passwordFallbackAttempted = true;

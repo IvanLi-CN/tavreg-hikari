@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-10
-- Last: 2026-04-23
+- Last: 2026-05-07
 
 ## 背景
 
@@ -41,6 +41,8 @@
 - Grok worker 对齐 ChatGPT 邮箱生成方案：由服务端先 provision `cfmail + mailboxId`，worker 只消费受控邮箱与 mihomo 代理租约。
 - 当请求来自微软账号页单账号 launcher 且 auth provider 为 Microsoft 时，worker 先点击 `Continue with Microsoft`，再复用统一 Microsoft 登录状态机；如 SSO 后仍需验证码，则继续轮询共享 mailbox verification-code waiter。
 - Grok worker 在 `accounts.x.ai` 注册成功后提取 SSO 与相关会话信息，并生成可复用的 SSO bundle 工件。
+- Grok worker 在账号创建、TOS、post-provision 校验、checkout/API key 后续步骤中必须继承同一个 Mihomo 代理上下文；post-provision 重新开浏览器时不得以无代理状态访问 `grok.com`。
+- Grok / Tavily runtime 容器必须使用 init 进程回收浏览器子进程，避免 Chrome / crashpad 子进程在批量失败与重试中累积。
 - Storybook 至少覆盖 Grok idle / running / failed、导航新增 Grok、Keys > Grok。
 
 ## 接口与数据
@@ -56,6 +58,7 @@
 - Grok key 列表默认直接显示邮箱、密码与 SSO 原文，批量导出可以稳定输出“每行一个 SSO token”。
 - `bun run typecheck` 与相关 Bun tests 通过。
 - 从微软账号页以 `fingerprint` 启动 Grok 单账号业务流时，到达已登录或可接管 challenge 页面后浏览器保持打开，并把保留状态回传到账号页。
+- Grok post-provision browser session 继承当前 Mihomo 代理；回归测试不得出现 `proxyServer: undefined` 的 post-provision handoff。
 
 ## Visual Evidence
 

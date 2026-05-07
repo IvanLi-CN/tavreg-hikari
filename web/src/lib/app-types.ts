@@ -80,6 +80,8 @@ export type AccountRecord = {
   lastResultStatus: string;
   lastResultAt: string | null;
   lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  lastFailureStage: string | null;
   skipReason: string | null;
   groupName: string | null;
   disabledAt: string | null;

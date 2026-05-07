@@ -9,9 +9,10 @@ import { ForceStopDialog } from "@/components/force-stop-dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { MetricCard } from "@/components/metric-card";
-import { StatusBadge } from "@/components/status-badge";
-import type { AccountExtractorProvider, EventRecord, JobControlAction, JobControlOptions, JobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
+import { formatFailureTooltip, StatusBadge } from "@/components/status-badge";
+import type { AccountExtractorProvider, AttemptRecord, EventRecord, JobControlAction, JobControlOptions, JobDraft, JobSnapshot, RunModeAvailability } from "@/lib/app-types";
 import { formatDate } from "@/lib/format";
 import { normalizeJobDraft } from "@/lib/job-draft";
 import {
@@ -67,6 +68,33 @@ function formatRawAttemptProgress(rawAttemptCount: number, attemptBudget: number
 
 function formatAutoExtractConcurrency(inFlightCount: number, sourceCount: number): string {
   return `${inFlightCount}/${Math.max(0, sourceCount) * AUTO_EXTRACT_WORKERS_PER_PROVIDER}`;
+}
+
+function formatAttemptFailureTooltip(attempt: AttemptRecord): string | null {
+  if (attempt.status !== "failed" && !attempt.errorCode && !attempt.errorMessage) return null;
+  return formatFailureTooltip({
+    heading: "Attempt 失败详情",
+    stage: attempt.stage,
+    errorCode: attempt.errorCode,
+    errorMessage: attempt.errorMessage,
+  });
+}
+
+function AttemptStatusBadge({ attempt }: { attempt: AttemptRecord }) {
+  const tooltip = formatAttemptFailureTooltip(attempt);
+  if (!tooltip) return <StatusBadge status={attempt.status} />;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex" title={tooltip} aria-label={tooltip}>
+          <StatusBadge status={attempt.status} title={tooltip} />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[26rem] whitespace-pre-wrap text-left leading-5 normal-case tracking-normal">
+        {tooltip}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 export function DashboardView({
@@ -143,6 +171,7 @@ export function DashboardView({
   const stopHint = resolveStopHint(currentStatus);
 
   return (
+    <TooltipProvider>
     <section className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
       <div className="min-w-0 space-y-4">
         <div className="flex justify-end">
@@ -413,7 +442,7 @@ export function DashboardView({
                             {attempt.accountEmail || `#${attempt.accountId}`}
                           </div>
                         </div>
-                        <StatusBadge status={attempt.status} />
+                        <AttemptStatusBadge attempt={attempt} />
                       </div>
                       <dl className="mt-4 grid gap-3 text-sm text-slate-300">
                         <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3">
@@ -464,7 +493,7 @@ export function DashboardView({
                               </span>
                             </div>
                             <div className="whitespace-nowrap">
-                              <StatusBadge status={attempt.status} />
+                              <AttemptStatusBadge attempt={attempt} />
                             </div>
                             <div className="min-w-0">
                               <span className="block truncate whitespace-nowrap" title={attempt.stage}>
@@ -519,7 +548,7 @@ export function DashboardView({
                 <article key={attempt.id} className="min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 p-4">
                   <div className="flex min-w-0 items-start justify-between gap-4">
                     <div className="min-w-0 font-medium text-white">Attempt #{attempt.id}</div>
-                    <StatusBadge status={attempt.status} />
+                    <AttemptStatusBadge attempt={attempt} />
                   </div>
                   <div className="mt-3 break-all text-sm text-slate-300">
                     {attempt.accountEmail || `账号 #${attempt.accountId}`} · {attempt.proxyNode || "未绑定代理"}
@@ -563,5 +592,6 @@ export function DashboardView({
         </Card>
       </div>
     </section>
+    </TooltipProvider>
   );
 }

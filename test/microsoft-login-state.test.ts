@@ -278,12 +278,28 @@ describe("Microsoft login state", () => {
         title: "Verify your email",
         bodyText:
           "Verify your email. We'll send a code to no*****@mail.ivanli.asia. Already received a code? Use your password.",
-        hasConfirmationEmailInput: true,
       }),
     ).toMatchObject({
       kind: "confirm_email",
       onProofRoute: false,
       allowProvision: false,
+      matchedSignals: expect.arrayContaining(["route:oauth-authorize", "copy:confirm"]),
+    });
+  });
+
+  test("classifies login.live OAuth otp surfaces as code-entry before confirm-email copy", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=3f026981-b1b0-4305-b12f-e60015126b8c",
+        title: "Verify your email",
+        bodyText: "Verify your email. Enter the security code we sent to no*****@mail.ivanli.asia.",
+        hasCodeInput: true,
+      }),
+    ).toMatchObject({
+      kind: "code_entry",
+      onProofRoute: false,
+      allowProvision: false,
+      matchedSignals: expect.arrayContaining(["route:oauth-authorize", "copy:confirm", "copy:code", "selector:otp-input"]),
     });
   });
 
