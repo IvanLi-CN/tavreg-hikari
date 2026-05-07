@@ -101,6 +101,20 @@
 - `bun test`
 - 至少一次有头实跑，确认 Microsoft OAuth 能进入 Tavily Home
 
+## Visual Evidence
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-accountsview--failure-reuse-matrix`
+  state: `Microsoft accounts Tavily failure badge hover`
+  evidence_note: Microsoft 账号列表中悬浮 `Tavily 失败` badge 会显示 Tavily 失败详情、阶段、错误代码与 `提交密码后被打到 account.live.com/Abuse` 级别的具体原因。
+  ![Microsoft accounts Tavily failure tooltip](./assets/accounts-tavily-tooltip.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-dashboardview--running`
+  state: `Attempt status badge hover`
+  evidence_note: 任务执行记录中悬浮失败 attempt 状态 badge 会显示失败阶段、错误代码与详细失败原因。
+  ![Dashboard attempt failure tooltip](./assets/dashboard-attempt-tooltip.png)
+
 ## 文档更新（Docs to Update）
 
 - `.env.example`
