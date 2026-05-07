@@ -622,7 +622,7 @@ export async function handleIntegrationApiRequest(input: {
     const page = normalizePage(input.url.searchParams.get("page"), 1, 500);
     const pageSize = normalizePage(input.url.searchParams.get("pageSize"), 20, 100);
     if (site === "tavily") {
-      const payload = input.db.listApiKeys({ page, pageSize });
+      const payload = input.db.listApiKeys({ page, pageSize, status: "active" });
       return json({
         ok: true,
         site,
@@ -651,7 +651,7 @@ export async function handleIntegrationApiRequest(input: {
       });
     }
     if (site === "grok") {
-      const payload = input.db.listGrokApiKeys({ page, pageSize });
+      const payload = input.db.listGrokApiKeys({ page, pageSize, status: "active" });
       return json({
         ok: true,
         site,
