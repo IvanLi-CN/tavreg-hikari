@@ -15,6 +15,7 @@ import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { createGrokMailbox, rememberGrokBlockedMailbox } from "./grok-mail-service.js";
 import { pickAutoProxyNode } from "./proxy-node-allocation.js";
+import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpstreamSuccess } from "./upstream-sync.js";
 import {
   getMailboxProviderCooldownSnapshot,
   isMailboxProviderCooldownErrorCode,
@@ -588,6 +589,22 @@ export class GrokJobScheduler {
       this.emit("attempt.updated", { site: this.site, attempt });
       this.emit("job.updated", { site: this.site, job });
       this.emit("toast", { level: "success", message: `grok sso saved #${key.id}` });
+      try {
+        const config = buildUpstreamSyncConfig(this.getSettings());
+        await writeBackUpstreamSuccess({
+          site: "grok",
+          key,
+        }, {
+          config,
+          sourceOrigin: buildLocalWritebackSourceOrigin("grok", config.localInstanceId),
+        });
+      } catch (writebackError) {
+        const message = writebackError instanceof Error ? writebackError.message : String(writebackError);
+        this.emit("toast", {
+          level: "warning",
+          message: `grok sso #${key.id} saved locally, but upstream writeback failed: ${message}`,
+        });
+      }
       return;
     }
 

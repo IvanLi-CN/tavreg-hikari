@@ -29,7 +29,12 @@ import {
   type ServerEvent,
 } from "./scheduler.js";
 import type { CfMailHttpJson } from "../cfmail-api.js";
-import { buildUpstreamSyncConfig, writeBackUpstreamTavilySuccess } from "./upstream-sync.js";
+import {
+  buildLocalWritebackSourceOrigin,
+  buildUpstreamSyncConfig,
+  writeBackUpstreamSuccess,
+  writeBackUpstreamTavilySuccess,
+} from "./upstream-sync.js";
 
 export type AccountBusinessFlowSite = "none" | "tavily" | "grok" | "chatgpt";
 export type AccountBusinessFlowMode = "headless" | "headed" | "fingerprint";
@@ -905,7 +910,7 @@ export class AccountBusinessFlowManager {
           const idToken = String(result?.credentials?.id_token || "").trim();
           const accountId = String(result?.credentials?.account_id || "").trim();
           if (code === 0 && signal == null && accessToken && refreshToken && idToken) {
-            this.db.completeChatGptAttemptSuccess(hiddenJob.id, attemptId, {
+            const { credential } = this.db.completeChatGptAttemptSuccess(hiddenJob.id, attemptId, {
               email: String(result?.email || account.microsoftEmail).trim().toLowerCase(),
               accountId,
               accessToken,
@@ -923,6 +928,23 @@ export class AccountBusinessFlowManager {
                 tokenType: result?.credentials?.token_type || null,
               }),
             });
+            try {
+              const config = buildUpstreamSyncConfig(this.getSettings());
+              await writeBackUpstreamSuccess({
+                site: "chatgpt",
+                credential,
+              }, {
+                config,
+                sourceOrigin: buildLocalWritebackSourceOrigin("chatgpt", config.localInstanceId),
+              });
+            } catch (writebackError) {
+              this.broadcastToast(
+                "warning",
+                `${account.microsoftEmail}：ChatGPT 已在本地完成，但线上成功结果回写失败：${
+                  writebackError instanceof Error ? writebackError.message : String(writebackError)
+                }`,
+              );
+            }
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
             if (lifecycle.isCurrent()) {
@@ -1079,7 +1101,7 @@ export class AccountBusinessFlowManager {
           const password = String(result?.password || "").trim();
           const sso = String(result?.sso || "").trim();
           if (code === 0 && signal == null && email && password && sso) {
-            this.db.completeGrokAttemptSuccess(hiddenJob.id, attemptId, {
+            const { key: grokKey } = this.db.completeGrokAttemptSuccess(hiddenJob.id, attemptId, {
               email,
               password,
               sso,
@@ -1092,6 +1114,23 @@ export class AccountBusinessFlowManager {
               proxyNode: result?.proxy?.nodeName || null,
               proxyIp: result?.proxy?.ip || null,
             });
+            try {
+              const config = buildUpstreamSyncConfig(this.getSettings());
+              await writeBackUpstreamSuccess({
+                site: "grok",
+                key: grokKey,
+              }, {
+                config,
+                sourceOrigin: buildLocalWritebackSourceOrigin("grok", config.localInstanceId),
+              });
+            } catch (writebackError) {
+              this.broadcastToast(
+                "warning",
+                `${account.microsoftEmail}：Grok 已在本地完成，但线上成功结果回写失败：${
+                  writebackError instanceof Error ? writebackError.message : String(writebackError)
+                }`,
+              );
+            }
             this.db.releaseAccountLease(account.id, hiddenJob.id);
             this.db.completeJob(hiddenJob.id, true);
             if (lifecycle.isCurrent()) {

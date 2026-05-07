@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -12,9 +12,11 @@ import {
 } from "../src/server/mailbox-provider-guard";
 
 const tempDirs: string[] = [];
+const originalFetch = globalThis.fetch;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
+    localInstanceId: "test-instance",
     subscriptionUrl: "https://example.com/sub.yaml",
     groupName: "CODEX_AUTO",
     routeGroupName: "CODEX_ROUTE",
@@ -58,6 +60,7 @@ async function createTempDb() {
 }
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
   resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
@@ -132,6 +135,63 @@ test("grok scheduler state changes do not mutate other site jobs", async () => {
   expect(appDb.getCurrentJob("grok")?.status).toBe("force_stopping");
   expect(appDb.getCurrentJob("tavily")?.status).toBe("running");
 
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok successful attempt writes back upstream when enabled", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const calls: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({
+      url: String(input),
+      body: JSON.parse(String(init?.body || "{}")),
+      authorization: String(new Headers(init?.headers || {}).get("authorization") || ""),
+    });
+    return Response.json({ ok: true });
+  }) as typeof fetch;
+  const scheduler = new GrokJobScheduler(
+    appDb,
+    process.cwd(),
+    () =>
+      createSchedulerSettings({
+        upstreamTavregSyncEnabled: true,
+        upstreamTavregApiKey: "upstream-secret",
+        upstreamTavregBaseUrl: "https://upstream.example.test",
+        upstreamTavregWriteback: "success_only",
+        localInstanceId: "grok-instance",
+      }),
+    () => undefined,
+  );
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "grok@example.test", outputDir: tempDir });
+  await writeFile(
+    path.join(tempDir, "result.json"),
+    JSON.stringify({
+      email: "grok@example.test",
+      password: "grok-pass",
+      sso: "grok-sso-token",
+      ssoRw: "grok-sso-rw",
+      cfClearance: "cf-clearance",
+      checkoutUrl: "https://grok.example.test/checkout",
+      birthDate: "1999-01-02",
+      proxy: { ip: "198.51.100.88" },
+    }),
+  );
+
+  await (scheduler as any).handleAttemptExit(job.id, attempt.id, tempDir, 0, null, { stopRequested: null });
+
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.url).toBe("https://upstream.example.test/api/integration/v1/keys/grok/success");
+  expect(calls[0]?.authorization).toBe("Bearer upstream-secret");
+  expect(calls[0]?.body).toMatchObject({
+    sourceOrigin: "local:grok:grok-instance",
+    sourceKeyId: 1,
+    email: "grok@example.test",
+    password: "grok-pass",
+    sso: "grok-sso-token",
+    extractedIp: "198.51.100.88",
+  });
   await scheduler.shutdown();
   appDb.close();
 });

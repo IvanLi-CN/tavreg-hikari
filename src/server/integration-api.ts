@@ -12,6 +12,8 @@ import {
   type ApiKeyRecord,
   type AppSettings,
   type AppDatabase,
+  type ChatGptCredentialRecord,
+  type GrokApiKeyRecord,
   type MicrosoftAccountRecord,
   type MicrosoftMailboxRecord,
   type MicrosoftMailMessageRecord,
@@ -204,6 +206,91 @@ function serializeMailboxRecord(row: MicrosoftMailboxRecord): Record<string, unk
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     isAuthorized: Boolean(row.refreshToken),
+  };
+}
+
+function serializeIntegrationTavilyKey(input: {
+  key: ApiKeyRecord;
+  account: MicrosoftAccountRecord | null;
+  access: AccountServiceAccessRecord | null;
+  detailed: boolean;
+}): Record<string, unknown> {
+  const snapshot = parseSnapshotJson(input.access);
+  return {
+    site: "tavily",
+    id: input.key.id,
+    status: input.key.status,
+    apiKeyPrefix: input.key.apiKeyPrefix,
+    extractedIp: input.key.extractedIp || input.access?.extractedIp || null,
+    extractedAt: input.key.extractedAt,
+    lastVerifiedAt: input.key.lastVerifiedAt,
+    lastSuccessAt: input.access?.lastSuccessAt || input.key.extractedAt,
+    microsoftAccount: input.account
+      ? {
+          id: input.account.id,
+          microsoftEmail: input.account.microsoftEmail,
+          groupName: input.account.groupName,
+          upstreamOrigin: input.account.upstreamOrigin,
+          upstreamAccountId: input.account.upstreamAccountId,
+        }
+      : null,
+    ...(input.detailed
+      ? {
+          apiKey: input.key.apiKey,
+          cookiesSnapshot: Array.isArray(snapshot.cookiesSnapshot) ? snapshot.cookiesSnapshot : [],
+          browserFingerprintSnapshot:
+            snapshot.browserFingerprintSnapshot && typeof snapshot.browserFingerprintSnapshot === "object"
+              ? snapshot.browserFingerprintSnapshot
+              : null,
+        }
+      : {}),
+  };
+}
+
+function serializeIntegrationChatGptKey(row: ChatGptCredentialRecord, detailed: boolean): Record<string, unknown> {
+  return {
+    site: "chatgpt",
+    id: row.id,
+    email: row.email,
+    accountId: row.accountId,
+    expiresAt: row.expiresAt,
+    createdAt: row.createdAt,
+    upstreamOrigin: row.upstreamOrigin,
+    upstreamKeyId: row.upstreamKeyId,
+    ...(detailed
+      ? {
+          accessToken: row.accessToken,
+          refreshToken: row.refreshToken,
+          idToken: row.idToken,
+          credentialJson: row.credentialJson,
+        }
+      : {}),
+  };
+}
+
+function serializeIntegrationGrokKey(row: GrokApiKeyRecord, detailed: boolean): Record<string, unknown> {
+  return {
+    site: "grok",
+    id: row.id,
+    email: row.email,
+    ssoPrefix: row.ssoPrefix,
+    status: row.status,
+    extractedIp: row.extractedIp,
+    extractedAt: row.extractedAt,
+    lastVerifiedAt: row.lastVerifiedAt,
+    createdAt: row.createdAt,
+    birthDate: row.birthDate,
+    checkoutUrl: row.checkoutUrl,
+    upstreamOrigin: row.upstreamOrigin,
+    upstreamKeyId: row.upstreamKeyId,
+    ...(detailed
+      ? {
+          password: row.password,
+          sso: row.sso,
+          ssoRw: row.ssoRw,
+          cfClearance: row.cfClearance,
+        }
+      : {}),
   };
 }
 
@@ -501,6 +588,8 @@ export async function handleIntegrationApiRequest(input: {
 }): Promise<Response | null> {
   const accountDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)$/);
   const accountTavilySuccessMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)\/tavily-success$/);
+  const keyDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/keys\/(tavily|chatgpt|grok)\/(\d+)$/);
+  const keySuccessMatch = input.pathname.match(/^\/api\/integration\/v1\/keys\/(tavily|chatgpt|grok)\/success$/);
   const proofMailboxCodesMatch = input.pathname.match(/^\/api\/integration\/v1\/microsoft-accounts\/(\d+)\/proof-mailbox\/codes$/);
   const mailboxMessagesMatch = input.pathname.match(/^\/api\/integration\/v1\/mailboxes\/(\d+)\/messages$/);
   const messageDetailMatch = input.pathname.match(/^\/api\/integration\/v1\/messages\/(\d+)$/);
@@ -526,6 +615,179 @@ export async function handleIntegrationApiRequest(input: {
       pageSize,
       total: payload.total,
     });
+  }
+
+  if (input.pathname === "/api/integration/v1/keys" && input.req.method === "GET") {
+    const site = input.url.searchParams.get("site");
+    const page = normalizePage(input.url.searchParams.get("page"), 1, 500);
+    const pageSize = normalizePage(input.url.searchParams.get("pageSize"), 20, 100);
+    if (site === "tavily") {
+      const payload = input.db.listApiKeys({ page, pageSize });
+      return json({
+        ok: true,
+        site,
+        rows: payload.rows.map((key) =>
+          serializeIntegrationTavilyKey({
+            key,
+            account: input.db.getAccount(key.accountId),
+            access: input.db.getAccountServiceAccess(key.accountId, "tavily"),
+            detailed: false,
+          }),
+        ),
+        page,
+        pageSize,
+        total: payload.total,
+      });
+    }
+    if (site === "chatgpt") {
+      const payload = input.db.listChatGptCredentials({ page, pageSize });
+      return json({
+        ok: true,
+        site,
+        rows: payload.rows.map((row) => serializeIntegrationChatGptKey(row, false)),
+        page,
+        pageSize,
+        total: payload.total,
+      });
+    }
+    if (site === "grok") {
+      const payload = input.db.listGrokApiKeys({ page, pageSize });
+      return json({
+        ok: true,
+        site,
+        rows: payload.rows.map((row) => serializeIntegrationGrokKey(row, false)),
+        page,
+        pageSize,
+        total: payload.total,
+      });
+    }
+    return badRequest("site must be tavily, chatgpt, or grok", 422);
+  }
+
+  if (keyDetailMatch && input.req.method === "GET") {
+    const site = keyDetailMatch[1] as "tavily" | "chatgpt" | "grok";
+    const keyId = Number.parseInt(keyDetailMatch[2] || "", 10);
+    if (!Number.isInteger(keyId) || keyId < 1) return badRequest("invalid key id");
+    if (site === "tavily") {
+      const key = input.db.getApiKey(keyId);
+      if (!key) return badRequest(`key not found: ${keyId}`, 404);
+      return json({
+        ok: true,
+        key: serializeIntegrationTavilyKey({
+          key,
+          account: input.db.getAccount(key.accountId),
+          access: input.db.getAccountServiceAccess(key.accountId, "tavily"),
+          detailed: true,
+        }),
+      });
+    }
+    if (site === "chatgpt") {
+      const credential = input.db.getChatGptCredential(keyId);
+      if (!credential) return badRequest(`key not found: ${keyId}`, 404);
+      return json({ ok: true, key: serializeIntegrationChatGptKey(credential, true) });
+    }
+    const key = input.db.getGrokApiKey(keyId);
+    if (!key) return badRequest(`key not found: ${keyId}`, 404);
+    return json({ ok: true, key: serializeIntegrationGrokKey(key, true) });
+  }
+
+  if (keySuccessMatch && input.req.method === "POST") {
+    const site = keySuccessMatch[1] as "tavily" | "chatgpt" | "grok";
+    const body = (await input.req.json().catch(() => null)) as JsonRecord | null;
+    if (site === "tavily") {
+      const accountId = parseOptionalPositiveInteger(body?.accountId == null ? null : String(body.accountId));
+      if (!accountId) return badRequest("accountId is required", 422);
+      const account = input.db.getAccount(accountId);
+      if (!account) return badRequest(`account not found: ${accountId}`, 404);
+      const apiKey = String(body?.apiKey || "").trim();
+      if (!apiKey) return badRequest("apiKey is required", 422);
+      const extractedIp = body?.extractedIp == null ? null : String(body.extractedIp).trim() || null;
+      const lastSuccessAt = body?.lastSuccessAt == null ? null : String(body.lastSuccessAt).trim() || null;
+      const key = input.db.recordApiKey(account.id, apiKey, extractedIp, { preserveLease: true });
+      const access = input.db.upsertAccountServiceAccess({
+        accountId: account.id,
+        service: "tavily",
+        status: "succeeded",
+        apiKeyId: key.id,
+        extractedIp,
+        lastSuccessAt: lastSuccessAt || key.extractedAt,
+        snapshotJson: JSON.stringify({
+          cookiesSnapshot: Array.isArray(body?.cookiesSnapshot) ? body.cookiesSnapshot : [],
+          browserFingerprintSnapshot:
+            body?.browserFingerprintSnapshot && typeof body.browserFingerprintSnapshot === "object"
+              ? body.browserFingerprintSnapshot
+              : null,
+          extractedIp,
+          apiKeyPrefix: body?.apiKeyPrefix == null ? key.apiKeyPrefix : String(body.apiKeyPrefix).trim() || key.apiKeyPrefix,
+        }),
+      });
+      return json({
+        ok: true,
+        key: serializeIntegrationTavilyKey({
+          key,
+          account: input.db.getAccount(account.id),
+          access,
+          detailed: true,
+        }),
+      });
+    }
+    if (site === "chatgpt") {
+      const sourceKeyId = parseOptionalPositiveInteger(body?.sourceKeyId == null ? null : String(body.sourceKeyId));
+      if (!sourceKeyId) return badRequest("sourceKeyId is required", 422);
+      const sourceOrigin = String(body?.sourceOrigin || "").trim();
+      if (!sourceOrigin) return badRequest("sourceOrigin is required", 422);
+      const email = String(body?.email || "").trim();
+      const accountId = String(body?.accountId || "").trim();
+      const accessToken = String(body?.accessToken || "").trim();
+      const refreshToken = String(body?.refreshToken || "").trim();
+      const idToken = String(body?.idToken || "").trim();
+      if (!email) return badRequest("email is required", 422);
+      if (!accountId) return badRequest("accountId is required", 422);
+      if (!accessToken) return badRequest("accessToken is required", 422);
+      if (!refreshToken) return badRequest("refreshToken is required", 422);
+      if (!idToken) return badRequest("idToken is required", 422);
+      const credential = input.db.upsertUpstreamChatGptCredential({
+        upstreamOrigin: sourceOrigin,
+        upstreamKeyId: sourceKeyId,
+        upstreamSyncedAt: new Date().toISOString(),
+        email,
+        accountId,
+        accessToken,
+        refreshToken,
+        idToken,
+        expiresAt: body?.expiresAt == null ? null : String(body.expiresAt),
+        credentialJson: String(body?.credentialJson || "{}"),
+        createdAt: body?.createdAt == null ? null : String(body.createdAt),
+      }).credential;
+      return json({ ok: true, key: serializeIntegrationChatGptKey(credential, true) });
+    }
+    const sourceKeyId = parseOptionalPositiveInteger(body?.sourceKeyId == null ? null : String(body.sourceKeyId));
+    if (!sourceKeyId) return badRequest("sourceKeyId is required", 422);
+    const sourceOrigin = String(body?.sourceOrigin || "").trim();
+    if (!sourceOrigin) return badRequest("sourceOrigin is required", 422);
+    const email = String(body?.email || "").trim();
+    const password = String(body?.password || "").trim();
+    const sso = String(body?.sso || "").trim();
+    if (!email) return badRequest("email is required", 422);
+    if (!password) return badRequest("password is required", 422);
+    if (!sso) return badRequest("sso is required", 422);
+    const key = input.db.upsertUpstreamGrokApiKey({
+      upstreamOrigin: sourceOrigin,
+      upstreamKeyId: sourceKeyId,
+      upstreamSyncedAt: new Date().toISOString(),
+      email,
+      password,
+      sso,
+      ssoRw: body?.ssoRw == null ? null : String(body.ssoRw),
+      cfClearance: body?.cfClearance == null ? null : String(body.cfClearance),
+      checkoutUrl: body?.checkoutUrl == null ? null : String(body.checkoutUrl),
+      birthDate: body?.birthDate == null ? null : String(body.birthDate),
+      extractedIp: body?.extractedIp == null ? null : String(body.extractedIp),
+      extractedAt: body?.extractedAt == null ? null : String(body.extractedAt),
+      lastVerifiedAt: body?.lastVerifiedAt == null ? null : String(body.lastVerifiedAt),
+      createdAt: body?.createdAt == null ? null : String(body.createdAt),
+    }).key;
+    return json({ ok: true, key: serializeIntegrationGrokKey(key, true) });
   }
 
   if (accountDetailMatch && input.req.method === "GET") {

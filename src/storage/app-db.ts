@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { access, mkdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import {
@@ -174,6 +175,7 @@ function normalizeMailboxStatusValue(value: unknown, fallback: MailboxStatus = "
 }
 
 export interface AppSettings extends Record<string, unknown> {
+  localInstanceId?: string;
   subscriptionUrl: string;
   groupName: string;
   routeGroupName: string;
@@ -247,6 +249,37 @@ export interface UpstreamTavilyAccessSyncInput {
   lastSuccessAt?: string | null;
   cookiesSnapshot?: unknown[];
   browserFingerprintSnapshot?: unknown | null;
+}
+
+export interface UpstreamChatGptCredentialSyncInput {
+  upstreamOrigin: string;
+  upstreamKeyId: number;
+  upstreamSyncedAt?: string | null;
+  email: string;
+  accountId: string;
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+  expiresAt?: string | null;
+  credentialJson: string;
+  createdAt?: string | null;
+}
+
+export interface UpstreamGrokKeySyncInput {
+  upstreamOrigin: string;
+  upstreamKeyId: number;
+  upstreamSyncedAt?: string | null;
+  email: string;
+  password: string;
+  sso: string;
+  ssoRw?: string | null;
+  cfClearance?: string | null;
+  checkoutUrl?: string | null;
+  birthDate?: string | null;
+  extractedIp?: string | null;
+  extractedAt?: string | null;
+  lastVerifiedAt?: string | null;
+  createdAt?: string | null;
 }
 
 export interface UpstreamMicrosoftAccountSyncInput {
@@ -392,6 +425,9 @@ export interface ChatGptCredentialRecord {
   expiresAt: string | null;
   credentialJson: string;
   createdAt: string;
+  upstreamOrigin: string | null;
+  upstreamKeyId: number | null;
+  upstreamSyncedAt: string | null;
 }
 
 export interface GrokApiKeyRecord {
@@ -411,6 +447,9 @@ export interface GrokApiKeyRecord {
   extractedAt: string;
   lastVerifiedAt: string | null;
   createdAt: string;
+  upstreamOrigin: string | null;
+  upstreamKeyId: number | null;
+  upstreamSyncedAt: string | null;
 }
 
 export interface ProxyNodeRecord {
@@ -1030,6 +1069,9 @@ function mapChatGptCredentialRow(row: Record<string, unknown>): ChatGptCredentia
     expiresAt: row.expires_at == null ? null : String(row.expires_at),
     credentialJson: String(row.credential_json || "{}"),
     createdAt: String(row.created_at || ""),
+    upstreamOrigin: row.upstream_origin == null ? null : String(row.upstream_origin),
+    upstreamKeyId: row.upstream_key_id == null ? null : Number(row.upstream_key_id),
+    upstreamSyncedAt: row.upstream_synced_at == null ? null : String(row.upstream_synced_at),
   };
 }
 
@@ -1051,6 +1093,9 @@ function mapGrokApiKeyRow(row: Record<string, unknown>): GrokApiKeyRecord {
     extractedAt: String(row.extracted_at || ""),
     lastVerifiedAt: row.last_verified_at == null ? null : String(row.last_verified_at),
     createdAt: String(row.created_at || ""),
+    upstreamOrigin: row.upstream_origin == null ? null : String(row.upstream_origin),
+    upstreamKeyId: row.upstream_key_id == null ? null : Number(row.upstream_key_id),
+    upstreamSyncedAt: row.upstream_synced_at == null ? null : String(row.upstream_synced_at),
   };
 }
 
@@ -1306,7 +1351,10 @@ export class AppDatabase {
         id_token TEXT NOT NULL,
         expires_at TEXT,
         credential_json TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        upstream_origin TEXT,
+        upstream_key_id INTEGER,
+        upstream_synced_at TEXT
       );
 
       CREATE TABLE IF NOT EXISTS grok_api_keys (
@@ -1322,11 +1370,14 @@ export class AppDatabase {
         birth_date TEXT,
         api_key_prefix TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'active',
-        extracted_ip TEXT,
-        extracted_at TEXT NOT NULL,
-        last_verified_at TEXT,
-        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-      );
+	        extracted_ip TEXT,
+	        extracted_at TEXT NOT NULL,
+	        last_verified_at TEXT,
+	        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+	        upstream_origin TEXT,
+	        upstream_key_id INTEGER,
+	        upstream_synced_at TEXT
+	      );
 
       CREATE TABLE IF NOT EXISTS proxy_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1534,6 +1585,19 @@ export class AppDatabase {
     if (!accountColumns.has("upstream_synced_at")) {
       this.db.exec("ALTER TABLE microsoft_accounts ADD COLUMN upstream_synced_at TEXT;");
     }
+    const chatGptCredentialTableInfo = this.db.query("PRAGMA table_info(chatgpt_credentials);").all() as Array<Record<string, unknown>>;
+    const chatGptCredentialColumns = new Set(chatGptCredentialTableInfo.map((item) => String(item.name || "").toLowerCase()));
+    if (chatGptCredentialTableInfo.length > 0) {
+      if (!chatGptCredentialColumns.has("upstream_origin")) {
+        this.db.exec("ALTER TABLE chatgpt_credentials ADD COLUMN upstream_origin TEXT;");
+      }
+      if (!chatGptCredentialColumns.has("upstream_key_id")) {
+        this.db.exec("ALTER TABLE chatgpt_credentials ADD COLUMN upstream_key_id INTEGER;");
+      }
+      if (!chatGptCredentialColumns.has("upstream_synced_at")) {
+        this.db.exec("ALTER TABLE chatgpt_credentials ADD COLUMN upstream_synced_at TEXT;");
+      }
+    }
     const jobTableInfo = this.db.query("PRAGMA table_info(jobs);").all() as Array<Record<string, unknown>>;
     const jobColumns = new Set(jobTableInfo.map((item) => String(item.name || "").toLowerCase()));
     if (!jobColumns.has("site")) {
@@ -1597,6 +1661,15 @@ export class AppDatabase {
       if (!grokApiKeyColumns.has("created_at")) {
         this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN created_at TEXT;");
         this.db.exec("UPDATE grok_api_keys SET created_at = COALESCE(created_at, extracted_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));");
+      }
+      if (!grokApiKeyColumns.has("upstream_origin")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN upstream_origin TEXT;");
+      }
+      if (!grokApiKeyColumns.has("upstream_key_id")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN upstream_key_id INTEGER;");
+      }
+      if (!grokApiKeyColumns.has("upstream_synced_at")) {
+        this.db.exec("ALTER TABLE grok_api_keys ADD COLUMN upstream_synced_at TEXT;");
       }
     }
     const mailboxTableInfo = this.db.query("PRAGMA table_info(microsoft_mailboxes);").all() as Array<Record<string, unknown>>;
@@ -1679,10 +1752,12 @@ export class AppDatabase {
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_proof_mailbox ON microsoft_accounts(proof_mailbox_address, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_source ON microsoft_accounts(account_source, updated_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_microsoft_accounts_upstream ON microsoft_accounts(upstream_origin, upstream_account_id);");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_attempt ON grok_api_keys(attempt_id);");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_job_extracted ON grok_api_keys(job_id, extracted_at DESC);");
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_email_extracted ON grok_api_keys(email, extracted_at DESC);");
+	    this.db.exec("CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);");
+	    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_chatgpt_credentials_upstream ON chatgpt_credentials(upstream_origin, upstream_key_id) WHERE upstream_origin IS NOT NULL AND upstream_key_id IS NOT NULL;");
+	    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_attempt ON grok_api_keys(attempt_id);");
+	    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_job_extracted ON grok_api_keys(job_id, extracted_at DESC);");
+	    this.db.exec("CREATE INDEX IF NOT EXISTS idx_grok_api_keys_email_extracted ON grok_api_keys(email, extracted_at DESC);");
+	    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_grok_api_keys_upstream ON grok_api_keys(upstream_origin, upstream_key_id) WHERE upstream_origin IS NOT NULL AND upstream_key_id IS NOT NULL;");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_status_started ON jobs(status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_job_attempts_job_status ON job_attempts(job_id, status, started_at DESC);");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_proxy_checks_node_checked ON proxy_checks(node_name, checked_at DESC);");
@@ -1888,6 +1963,16 @@ export class AppDatabase {
           updated_at = excluded.updated_at
       `)
       .run(key, JSON.stringify(value), now);
+  }
+
+  getOrCreateLocalInstanceId(): string {
+    const existing = this.getJsonSetting("localInstanceId", "");
+    if (typeof existing === "string" && existing.trim()) {
+      return existing.trim();
+    }
+    const id = randomUUID();
+    this.setJsonSetting("localInstanceId", id);
+    return id;
   }
 
   deleteSetting(key: string): void {
@@ -2938,6 +3023,65 @@ export class AppDatabase {
     const row = this.db
       .query("SELECT * FROM grok_api_keys WHERE id = ?")
       .get(keyId) as Record<string, unknown> | null;
+    return row ? mapGrokApiKeyRow(row) : null;
+  }
+
+  private createSyntheticUpstreamAttempt(input: {
+    site: Extract<JobSite, "chatgpt" | "grok">;
+    accountEmail: string;
+    startedAt?: string | null;
+  }): { job: JobRecord; attempt: JobAttemptRecord } {
+    const now = nowIso();
+    const startedAt = input.startedAt?.trim() || now;
+    const payloadJson = JSON.stringify({ hidden: true, upstreamSync: true });
+    const jobRow = this.db
+      .query(`
+        INSERT INTO jobs (
+          site, status, run_mode, need, parallel, max_attempts, success_count, failure_count, skip_count, launched_count,
+          auto_extract_sources_json, auto_extract_quantity, auto_extract_max_wait_sec, auto_extract_account_type,
+          started_at, paused_at, completed_at, last_error, payload_json, updated_at
+        ) VALUES (?, 'completed', 'headless', 1, 1, 1, 1, 0, 0, 1, '[]', 0, 0, 'outlook', ?, NULL, ?, NULL, ?, ?)
+        RETURNING *
+      `)
+      .get(input.site, startedAt, now, payloadJson, now) as Record<string, unknown>;
+    const job = mapJobRow(jobRow);
+    const attemptRow = this.db
+      .query(`
+        INSERT INTO job_attempts (
+          job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message, output_dir,
+          started_at, completed_at, duration_ms
+        ) VALUES (?, NULL, ?, 'upstream-sync', 'succeeded', 'completed', NULL, NULL, NULL, NULL, '', ?, ?, 0)
+        RETURNING *
+      `)
+      .get(job.id, input.accountEmail.trim().toLowerCase(), startedAt, now) as Record<string, unknown>;
+    return { job, attempt: mapAttemptRow(attemptRow) };
+  }
+
+  private getChatGptCredentialByUpstream(upstreamOrigin: string, upstreamKeyId: number): ChatGptCredentialRecord | null {
+    const row = this.db
+      .query("SELECT * FROM chatgpt_credentials WHERE upstream_origin = ? AND upstream_key_id = ?")
+      .get(upstreamOrigin, upstreamKeyId) as Record<string, unknown> | null;
+    return row ? mapChatGptCredentialRow(row) : null;
+  }
+
+  private getChatGptCredentialByToken(accessToken: string, refreshToken: string): ChatGptCredentialRecord | null {
+    const row = this.db
+      .query(`
+        SELECT *
+        FROM chatgpt_credentials
+        WHERE access_token = ?
+           OR refresh_token = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get(accessToken, refreshToken) as Record<string, unknown> | null;
+    return row ? mapChatGptCredentialRow(row) : null;
+  }
+
+  private getGrokApiKeyByUpstream(upstreamOrigin: string, upstreamKeyId: number): GrokApiKeyRecord | null {
+    const row = this.db
+      .query("SELECT * FROM grok_api_keys WHERE upstream_origin = ? AND upstream_key_id = ?")
+      .get(upstreamOrigin, upstreamKeyId) as Record<string, unknown> | null;
     return row ? mapGrokApiKeyRow(row) : null;
   }
 
@@ -4619,12 +4763,18 @@ export class AppDatabase {
     idToken: string;
     expiresAt?: string | null;
     credentialJson: string;
+    createdAt?: string | null;
+    upstreamOrigin?: string | null;
+    upstreamKeyId?: number | null;
+    upstreamSyncedAt?: string | null;
   }): ChatGptCredentialRecord {
+    const now = nowIso();
     const row = this.db
       .query(`
         INSERT INTO chatgpt_credentials (
-          job_id, attempt_id, email, account_id, access_token, refresh_token, id_token, expires_at, credential_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          job_id, attempt_id, email, account_id, access_token, refresh_token, id_token, expires_at, credential_json,
+          created_at, upstream_origin, upstream_key_id, upstream_synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(attempt_id) DO UPDATE SET
           email = excluded.email,
           account_id = excluded.account_id,
@@ -4632,7 +4782,11 @@ export class AppDatabase {
           refresh_token = excluded.refresh_token,
           id_token = excluded.id_token,
           expires_at = excluded.expires_at,
-          credential_json = excluded.credential_json
+          credential_json = excluded.credential_json,
+          created_at = excluded.created_at,
+          upstream_origin = excluded.upstream_origin,
+          upstream_key_id = excluded.upstream_key_id,
+          upstream_synced_at = excluded.upstream_synced_at
         RETURNING *
       `)
       .get(
@@ -4645,8 +4799,50 @@ export class AppDatabase {
         input.idToken,
         input.expiresAt ?? null,
         input.credentialJson,
+        input.createdAt?.trim() || now,
+        input.upstreamOrigin?.trim().replace(/\/+$/, "") || null,
+        input.upstreamKeyId ?? null,
+        input.upstreamSyncedAt?.trim() || null,
       ) as Record<string, unknown>;
     return mapChatGptCredentialRow(row);
+  }
+
+  upsertUpstreamChatGptCredential(input: UpstreamChatGptCredentialSyncInput): { credential: ChatGptCredentialRecord; created: boolean } {
+    const upstreamOrigin = input.upstreamOrigin.trim().replace(/\/+$/, "");
+    const upstreamKeyId = Number(input.upstreamKeyId);
+    if (!upstreamOrigin) throw new Error("upstream origin is required");
+    if (!Number.isSafeInteger(upstreamKeyId) || upstreamKeyId < 1) throw new Error("upstream key id is invalid");
+    if (!input.email.trim()) throw new Error("upstream chatgpt credential email is required");
+    if (!input.accountId.trim()) throw new Error("upstream chatgpt account id is required");
+    if (!input.accessToken.trim()) throw new Error("upstream chatgpt access token is required");
+    if (!input.refreshToken.trim()) throw new Error("upstream chatgpt refresh token is required");
+    if (!input.idToken.trim()) throw new Error("upstream chatgpt id token is required");
+    const existing =
+      this.getChatGptCredentialByUpstream(upstreamOrigin, upstreamKeyId)
+      || this.getChatGptCredentialByToken(input.accessToken, input.refreshToken);
+    const ids = existing
+      ? { jobId: existing.jobId, attemptId: existing.attemptId }
+      : this.createSyntheticUpstreamAttempt({
+          site: "chatgpt",
+          accountEmail: input.email,
+          startedAt: input.createdAt,
+        });
+    const credential = this.recordChatGptCredential({
+      jobId: "job" in ids ? ids.job.id : ids.jobId,
+      attemptId: "attempt" in ids ? ids.attempt.id : ids.attemptId,
+      email: input.email,
+      accountId: input.accountId,
+      accessToken: input.accessToken,
+      refreshToken: input.refreshToken,
+      idToken: input.idToken,
+      expiresAt: input.expiresAt ?? null,
+      credentialJson: input.credentialJson,
+      createdAt: input.createdAt ?? null,
+      upstreamOrigin,
+      upstreamKeyId,
+      upstreamSyncedAt: input.upstreamSyncedAt ?? null,
+    });
+    return { credential, created: !existing };
   }
 
   recordGrokApiKey(input: {
@@ -4660,7 +4856,12 @@ export class AppDatabase {
     checkoutUrl?: string | null;
     birthDate?: string | null;
     extractedIp?: string | null;
+    extractedAt?: string | null;
     lastVerifiedAt?: string | null;
+    createdAt?: string | null;
+    upstreamOrigin?: string | null;
+    upstreamKeyId?: number | null;
+    upstreamSyncedAt?: string | null;
   }): GrokApiKeyRecord {
     const now = nowIso();
     const sso = input.sso.trim();
@@ -4672,9 +4873,22 @@ export class AppDatabase {
     const normalizedCheckoutUrl = input.checkoutUrl == null ? null : String(input.checkoutUrl).trim() || null;
     const normalizedBirthDate = input.birthDate == null ? null : String(input.birthDate).trim() || null;
     const normalizedExtractedIp = input.extractedIp == null ? null : String(input.extractedIp).trim() || null;
+    const extractedAt = input.extractedAt?.trim() || now;
+    const createdAt = input.createdAt?.trim() || extractedAt;
+    const upstreamOrigin = input.upstreamOrigin?.trim().replace(/\/+$/, "") || null;
+    const upstreamKeyId = input.upstreamKeyId ?? null;
+    const upstreamSyncedAt = input.upstreamSyncedAt?.trim() || null;
     const previous = this.db
-      .query("SELECT id FROM grok_api_keys WHERE attempt_id = ? OR api_key = ? ORDER BY id DESC LIMIT 1")
-      .get(input.attemptId, sso) as { id?: number } | null;
+      .query(`
+        SELECT id
+        FROM grok_api_keys
+        WHERE attempt_id = ?
+           OR api_key = ?
+           OR (upstream_origin = ? AND upstream_key_id = ?)
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get(input.attemptId, sso, upstreamOrigin, upstreamKeyId) as { id?: number } | null;
     let row: Record<string, unknown>;
     if (previous?.id) {
       row = this.db
@@ -4693,7 +4907,11 @@ export class AppDatabase {
               status = 'active',
               extracted_ip = COALESCE(?, extracted_ip),
               extracted_at = ?,
-              last_verified_at = ?
+              last_verified_at = ?,
+              created_at = ?,
+              upstream_origin = ?,
+              upstream_key_id = ?,
+              upstream_synced_at = ?
           WHERE id = ?
           RETURNING *
         `)
@@ -4709,16 +4927,21 @@ export class AppDatabase {
           normalizedBirthDate,
           prefix,
           normalizedExtractedIp,
-          now,
+          extractedAt,
           input.lastVerifiedAt ?? now,
+          createdAt,
+          upstreamOrigin,
+          upstreamKeyId,
+          upstreamSyncedAt,
           previous.id,
         ) as Record<string, unknown>;
     } else {
       row = this.db
         .query(`
           INSERT INTO grok_api_keys (
-            job_id, attempt_id, email, password, api_key, sso_rw, cf_clearance, checkout_url, birth_date, api_key_prefix, status, extracted_ip, extracted_at, last_verified_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            job_id, attempt_id, email, password, api_key, sso_rw, cf_clearance, checkout_url, birth_date, api_key_prefix,
+            status, extracted_ip, extracted_at, last_verified_at, created_at, upstream_origin, upstream_key_id, upstream_synced_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)
           RETURNING *
         `)
         .get(
@@ -4733,11 +4956,52 @@ export class AppDatabase {
           normalizedBirthDate,
           prefix,
           normalizedExtractedIp,
-          now,
+          extractedAt,
           input.lastVerifiedAt ?? now,
+          createdAt,
+          upstreamOrigin,
+          upstreamKeyId,
+          upstreamSyncedAt,
         ) as Record<string, unknown>;
     }
     return mapGrokApiKeyRow(row);
+  }
+
+  upsertUpstreamGrokApiKey(input: UpstreamGrokKeySyncInput): { key: GrokApiKeyRecord; created: boolean } {
+    const upstreamOrigin = input.upstreamOrigin.trim().replace(/\/+$/, "");
+    const upstreamKeyId = Number(input.upstreamKeyId);
+    if (!upstreamOrigin) throw new Error("upstream origin is required");
+    if (!Number.isSafeInteger(upstreamKeyId) || upstreamKeyId < 1) throw new Error("upstream key id is invalid");
+    if (!input.email.trim()) throw new Error("upstream grok email is required");
+    if (!input.password.trim()) throw new Error("upstream grok password is required");
+    if (!input.sso.trim()) throw new Error("upstream grok sso is required");
+    const existing = this.getGrokApiKeyByUpstream(upstreamOrigin, upstreamKeyId);
+    const ids = existing
+      ? { jobId: existing.jobId, attemptId: existing.attemptId }
+      : this.createSyntheticUpstreamAttempt({
+          site: "grok",
+          accountEmail: input.email,
+          startedAt: input.extractedAt || input.createdAt,
+        });
+    const key = this.recordGrokApiKey({
+      jobId: "job" in ids ? ids.job.id : ids.jobId,
+      attemptId: "attempt" in ids ? ids.attempt.id : ids.attemptId,
+      email: input.email,
+      password: input.password,
+      sso: input.sso,
+      ssoRw: input.ssoRw ?? null,
+      cfClearance: input.cfClearance ?? null,
+      checkoutUrl: input.checkoutUrl ?? null,
+      birthDate: input.birthDate ?? null,
+      extractedIp: input.extractedIp ?? null,
+      extractedAt: input.extractedAt ?? null,
+      lastVerifiedAt: input.lastVerifiedAt ?? null,
+      createdAt: input.createdAt ?? null,
+      upstreamOrigin,
+      upstreamKeyId,
+      upstreamSyncedAt: input.upstreamSyncedAt ?? null,
+    });
+    return { key, created: !existing };
   }
 
   listChatGptCredentials(filters?: {
