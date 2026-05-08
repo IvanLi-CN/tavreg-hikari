@@ -10,6 +10,7 @@ tags:
 status: active
 related_specs:
   - docs/specs/3hrx4-grok-web-site/SPEC.md
+  - docs/specs/r6h9s-job-stop-controls/SPEC.md
 ---
 
 # Detached worker stop reaper
@@ -35,6 +36,7 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 - Add a scheduler-level reaper that runs during stop polling and duplicate stop requests.
 - Reap an active attempt when its DB row is no longer running, its child has an exit or signal code, or force stop has exceeded the final reap threshold; error artifacts are diagnostic input once the reaper is allowed to clean up.
 - For graceful stops, route exited children through the same result finalizer used by the child `close` handler so a successful `result.json` is preserved instead of being converted into an exit failure.
+- Store the active attempt's resource-release callback and force-stop request timestamp with the scheduler-owned active entry, so stale attempts can be reaped without leaking reserved runtime resources.
 - After reaping active attempts, finalize the job with the same terminal `stopped` path used by normal stop completion.
 
 ## Guardrails / Reuse notes
@@ -48,4 +50,6 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 ## References
 
 - `src/server/grok-scheduler.ts`
+- `src/server/scheduler.ts`
+- `test/job-stop-controls.test.ts`
 - `test/grok-scheduler.test.ts`
