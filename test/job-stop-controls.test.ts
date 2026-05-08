@@ -353,6 +353,256 @@ test("force stop aborts tracked auto extract requests and terminates active atte
   appDb.close();
 });
 
+test("force stop reaps stale Tavily active attempts after the reap timeout", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "stale-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(path.dirname(dbPath), "stale-attempt"),
+  });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  let released = false;
+  const signals: string[] = [];
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: (signal: string) => {
+        signals.push(signal);
+        return true;
+      },
+    },
+    attempt,
+    account,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    tail: [],
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now() - 31_000,
+    releaseResources: async () => {
+      released = true;
+    },
+  } as any);
+
+  const stopped = scheduler.forceStopCurrentJob(true);
+
+  expect(stopped.status).toBe("stopped");
+  expect(appDb.getAttempt(attempt.id)).toMatchObject({
+    status: "stopped",
+    stage: "stopped",
+    errorCode: "force_stopped",
+  });
+  expect(scheduler["activeAttempts"].size).toBe(0);
+  expect(released).toBe(true);
+  expect(signals).toEqual([]);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("force stop reaps Tavily attempts with stale error artifacts after timeout", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "artifact-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "artifact-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "error.json"), JSON.stringify({ error: "stage_login_home: stale worker" }), "utf8");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39091, mixedPort: 49091 },
+    tail: [],
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now() - 31_000,
+  } as any);
+
+  const stopped = scheduler.forceStopCurrentJob(true);
+  const stoppedAttempt = appDb.getAttempt(attempt.id);
+
+  expect(stopped.status).toBe("stopped");
+  expect(stoppedAttempt?.status).toBe("stopped");
+  expect(stoppedAttempt?.errorCode).toBe("force_stopped");
+  expect(stoppedAttempt?.errorMessage).toBe("stage_login_home: stale worker");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("force stop keeps Tavily error artifacts owned until child exit or reap timeout", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "live-artifact-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "live-artifact-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "error.json"), JSON.stringify({ error: "stage_login_home: still live" }), "utf8");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
+  let released = false;
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39092, mixedPort: 49092 },
+    tail: [],
+    stopRequested: "force_stop",
+    stopRequestedAtMs: Date.now(),
+    releaseResources: async () => {
+      released = true;
+    },
+  } as any);
+
+  const stillStopping = scheduler.forceStopCurrentJob(true);
+
+  expect(stillStopping.status).toBe("force_stopping");
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].has(attempt.id)).toBe(true);
+  expect(released).toBe(false);
+
+  scheduler["activeAttempts"].clear();
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("graceful stop reaps exited Tavily attempts through normal success finalizer", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "exited-success-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "exited-success-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "result.json"), JSON.stringify({ apiKey: "tvly-stop-reap-success-001" }), "utf8");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  let resolveFinalizer!: () => void;
+  const finalizerDone = new Promise<void>((resolve) => {
+    resolveFinalizer = resolve;
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: 0,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39093, mixedPort: 49093 },
+    tail: [],
+    stopRequested: null,
+    stopRequestedAtMs: null,
+    finalize: (runner: () => Promise<void> | void) => {
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        resolveFinalizer();
+      })();
+    },
+  } as any);
+
+  scheduler.stopCurrentJob();
+  await finalizerDone;
+  const stopped = scheduler["maybeFinalizeStoppedJob"](job.id);
+
+  expect(stopped?.status).toBe("stopped");
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("succeeded");
+  expect(appDb.getAccount(accountId)?.hasApiKey).toBe(true);
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("graceful stop reaps exited Tavily failures without waiting forever", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "exited-failure-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "exited-failure-attempt");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "stopping", pausedAt: null });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: 1,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39094, mixedPort: 49094 },
+    tail: [],
+    stopRequested: null,
+    stopRequestedAtMs: null,
+  } as any);
+
+  const stopped = scheduler.stopCurrentJob();
+  const failedAttempt = appDb.getAttempt(attempt.id);
+
+  expect(stopped.status).toBe("stopped");
+  expect(failedAttempt?.status).toBe("failed");
+  expect(failedAttempt?.errorCode).toBe("exit_1");
+  expect(failedAttempt?.errorMessage).toBe("process exited with code 1");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("force stop records aborted auto extract requests as manual stops", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(

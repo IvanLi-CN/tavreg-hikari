@@ -1454,65 +1454,70 @@ describe("AppDatabase account import", () => {
   test("prunes account extract history older than seven days and cascades items", async () => {
     const { appDb } = await createTempDb();
     const nowMs = Date.parse("2026-05-08T12:00:00.000Z");
-    const oldStartedAt = "2026-04-30T11:59:59.000Z";
-    const freshStartedAt = "2026-05-01T12:00:00.000Z";
-    const oldBatch = appDb.createAccountExtractBatch({
-      jobId: null,
-      provider: "zhanghaoya",
-      requestedUsableCount: 1,
-      attemptBudget: 1,
-      acceptedCount: 0,
-      status: "parse_failed",
-      rawResponse: "old-response",
-      startedAt: oldStartedAt,
-      completedAt: oldStartedAt,
-    });
-    appDb.createAccountExtractItem({
-      batchId: oldBatch.id,
-      provider: "zhanghaoya",
-      rawPayload: "old-extractor@example.test:pass",
-      email: "old-extractor@example.test",
-      password: "pass",
-      parseStatus: "parsed",
-      acceptStatus: "rejected",
-      rejectReason: "expired_history_fixture",
-    });
-    const freshBatch = appDb.createAccountExtractBatch({
-      jobId: null,
-      provider: "shanyouxiang",
-      requestedUsableCount: 1,
-      attemptBudget: 1,
-      acceptedCount: 1,
-      status: "accepted",
-      rawResponse: "fresh-response",
-      startedAt: freshStartedAt,
-      completedAt: freshStartedAt,
-    });
-    appDb.createAccountExtractItem({
-      batchId: freshBatch.id,
-      provider: "shanyouxiang",
-      rawPayload: "fresh-extractor@example.test:pass",
-      email: "fresh-extractor@example.test",
-      password: "pass",
-      parseStatus: "parsed",
-      acceptStatus: "accepted",
-    });
+    const oldDateNow = Date.now;
+    Date.now = () => nowMs;
+    try {
+      const oldStartedAt = "2026-04-30T11:59:59.000Z";
+      const freshStartedAt = "2026-05-01T12:00:00.000Z";
+      const oldBatch = appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "zhanghaoya",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 0,
+        status: "parse_failed",
+        rawResponse: "old-response",
+        startedAt: oldStartedAt,
+        completedAt: oldStartedAt,
+      });
+      appDb.createAccountExtractItem({
+        batchId: oldBatch.id,
+        provider: "zhanghaoya",
+        rawPayload: "old-extractor@example.test:pass",
+        email: "old-extractor@example.test",
+        password: "pass",
+        parseStatus: "parsed",
+        acceptStatus: "rejected",
+        rejectReason: "expired_history_fixture",
+      });
+      const freshBatch = appDb.createAccountExtractBatch({
+        jobId: null,
+        provider: "shanyouxiang",
+        requestedUsableCount: 1,
+        attemptBudget: 1,
+        acceptedCount: 1,
+        status: "accepted",
+        rawResponse: "fresh-response",
+        startedAt: freshStartedAt,
+        completedAt: freshStartedAt,
+      });
+      appDb.createAccountExtractItem({
+        batchId: freshBatch.id,
+        provider: "shanyouxiang",
+        rawPayload: "fresh-extractor@example.test:pass",
+        email: "fresh-extractor@example.test",
+        password: "pass",
+        parseStatus: "parsed",
+        acceptStatus: "accepted",
+      });
 
-    const result = appDb.pruneAccountExtractHistory(nowMs);
+      const result = appDb.pruneAccountExtractHistory(nowMs);
 
-    expect(result).toEqual({
-      deletedBatches: 1,
-      cutoffStartedAt: "2026-05-01T12:00:00.000Z",
-    });
-    expect(appDb.listAccountExtractHistory({ page: 1, pageSize: 10 }).total).toBe(1);
-    expect(appDb.listAccountExtractHistory({ q: "old-extractor@", page: 1, pageSize: 10 }).total).toBe(0);
-    expect(appDb.listAccountExtractHistory({ q: "fresh-extractor@", page: 1, pageSize: 10 }).total).toBe(1);
-    const orphanCount = Number(
-      appDb.db.query("SELECT COUNT(*) AS count FROM account_extract_items WHERE batch_id = ?").get(oldBatch.id)?.count || 0,
-    );
-    expect(orphanCount).toBe(0);
-
-    appDb.close();
+      expect(result).toEqual({
+        deletedBatches: 1,
+        cutoffStartedAt: "2026-05-01T12:00:00.000Z",
+      });
+      expect(appDb.listAccountExtractHistory({ page: 1, pageSize: 10 }).total).toBe(1);
+      expect(appDb.listAccountExtractHistory({ q: "old-extractor@", page: 1, pageSize: 10 }).total).toBe(0);
+      expect(appDb.listAccountExtractHistory({ q: "fresh-extractor@", page: 1, pageSize: 10 }).total).toBe(1);
+      const orphanCount = Number(
+        appDb.db.query("SELECT COUNT(*) AS count FROM account_extract_items WHERE batch_id = ?").get(oldBatch.id)?.count || 0,
+      );
+      expect(orphanCount).toBe(0);
+    } finally {
+      Date.now = oldDateNow;
+      appDb.close();
+    }
   });
 
   test("prunes stale account extract history when reopening the database", async () => {

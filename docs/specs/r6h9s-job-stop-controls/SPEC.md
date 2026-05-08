@@ -68,6 +68,8 @@
 - `stop` 不杀死已启动 worker；当 active attempts 与 in-flight 自动补号请求全部归零后，job 进入 `stopped`。
 - `force_stop` 允许从 `running / paused / stopping` 升级。
 - `force_stop` 会中断 tracked 自动补号请求，并对 active workers 发送终止信号；被这条路径打断的 attempt 落到 `stopped`。
+- stop 过渡态必须能收束 stale active attempts：当 worker 已退出、DB attempt 已非 `running`，或 `force_stop` 超过兜底阈值仍未触发 child `close` 时，scheduler 必须清理 active entry、释放运行资源，并允许 job 进入 `stopped`。
+- 优雅停止下已退出 worker 必须复用正常 result finalizer；成功工件继续写入 `succeeded`，失败退出继续写入 `failed`，不得为了收束 stop 状态而改写成 `stopped`。
 - 当 job 处于 stop 过渡态时，不允许再执行 `update_limits` 或启动新 job。
 
 ## 验收标准（Acceptance Criteria）
@@ -76,6 +78,8 @@
 - Given job 为 `paused`，When 用户点击上下文主按钮，Then 客户端发送 `resume`，调度循环与自动补号预算按当前 job 状态继续。
 - Given job 为 `running` 或 `paused`，When 用户点击 `停止`，Then job 进入 `stopping`，不会再启动新的 attempt 或新的补号请求，并在现有工作收尾后进入 `stopped`。
 - Given job 已在 `stopping`，When 用户确认 `强行停止`，Then scheduler 会中断 tracked 自动补号请求、终止 active workers，并最终把 job 标记为 `stopped`。
+- Given job 已在 `force_stopping` 且 worker 进程已经不可观测或错过 child `close`，When stop reaper 运行，Then stale attempt 被收束、runtime resources 被释放，job 不会永久停留在 `force_stopping`。
+- Given job 已在 `stopping` 且 worker 已退出并写出成功结果，When stop reaper 运行，Then attempt 保留正常 `succeeded` 结果，并在 active attempts 清零后 job 进入 `stopped`。
 - Given `force_stop` 请求缺少 `confirmForceStop=true`，When 请求到达服务端，Then 服务端拒绝执行危险动作。
 - Given attempt 是因强停退出，When 运行记录刷新，Then 该 attempt 显示 `stopped` 且不并入普通失败统计。
 - Given Dashboard 渲染 `stopping / force_stopping / stopped`，When 用户查看主流程控制区，Then 能看到明确的禁用态主按钮、停止提示和次级操作文案。
