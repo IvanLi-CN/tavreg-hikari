@@ -457,6 +457,9 @@ export const sampleMicrosoftGraphSettings: MicrosoftGraphSettings = {
   microsoftGraphClientSecretMasked: "************c0de",
   microsoftGraphRedirectUri: "https://console.example.test/api/microsoft-mail/oauth/callback",
   microsoftGraphAuthority: "common",
+  microsoftAccountBootstrapConcurrency: 3,
+  microsoftAccountBootstrapWorkerTimeoutMs: 300000,
+  microsoftAccountBootstrapKillGraceMs: 10000,
   configured: true,
 };
 

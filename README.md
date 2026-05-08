@@ -15,6 +15,7 @@
 - 微软账号页：支持 `email,password`、`email:password`、`email|password` 或 `email password` 的批量导入，按邮箱去重，查看是否已有 API key、最近状态、导入时间、跳过原因与收信状态，并提供四个提取器 KEY 设置与最近 7 天的本地提取历史查询。
 - 微软账号页可在本地实例手动“从线上同步”，通过 production integration API 拉取线上账号、proof mailbox、分组、Tavily key 与服务快照，用本地 SQLite 重建可运行账号数据。
 - 微软账号页现在会在导入/自动提取后立即为账号创建持久浏览器会话 bootstrap：自动选取代理池 IP、记住登录态、保存 `output/browser-profiles/accounts/<accountId>/chrome`，并在账号列表展示 session 状态、代理/IP 与 profile 路径摘要。
+- 账号 session bootstrap 使用有界并发池，默认同时处理 3 个账号；可通过 `.env.local` 的 `MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY`、`MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS`、`MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS`，或 Microsoft Graph 设置页调整并发、worker 超时和强杀宽限。
 - 后续 Tavily attempt 会优先复用账号上次成功的代理 IP；若原 IP 不在池中，则按同 region、再按全池健康节点的 LRU 选择代理，并继续复用同一持久 profile。
 - 微软邮箱页：通过 Microsoft Graph OAuth 接入 Inbox，只读显示导入账号对应的收信状态、邮件列表与正文；主工作台固定为三栏收件箱视图，Graph 凭据改到独立设置页维护。
 - Microsoft mailbox Bootstrap 以 Graph callback 写入的 token 状态为最终事实源：如果浏览器最终停在 SSO 中继页，但 DB 已写入 `refresh_token` / `oauth_connected_at`，服务端会按成功收敛，避免把已授权账号误标失败。

@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccountSessionBootstrapDispatcher,
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
   hasSuccessfulAccountBootstrap,
   isLockedAccountRecord,
+  normalizeMicrosoftAccountBootstrapConcurrency,
+  normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
   normalizeAccountSessionRebootstrapRequest,
   resolveAccountBatchBootstrapDecision,
   resolveBootstrapQueueDisposition,
@@ -92,6 +96,89 @@ describe("account session bootstrap helpers", () => {
         redirectUri: "https://example.com/callback",
       }),
     ).toBe(false);
+  });
+
+  test("normalizes bootstrap concurrency and timeout settings", () => {
+    expect(normalizeMicrosoftAccountBootstrapConcurrency("0")).toBe(1);
+    expect(normalizeMicrosoftAccountBootstrapConcurrency("12")).toBe(10);
+    expect(normalizeMicrosoftAccountBootstrapConcurrency("4")).toBe(4);
+    expect(normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(500)).toBe(1000);
+    expect(normalizeMicrosoftAccountBootstrapWorkerTimeoutMs("90000")).toBe(90000);
+    expect(normalizeMicrosoftAccountBootstrapKillGraceMs(500)).toBe(1000);
+    expect(normalizeMicrosoftAccountBootstrapKillGraceMs("12000")).toBe(12000);
+  });
+
+  test("bootstrap dispatcher runs different accounts in parallel while deduping the same account", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const started: number[] = [];
+    const releaseByAccount = new Map<number, () => void>();
+    const dispatcher = new AccountSessionBootstrapDispatcher(
+      () => 2,
+      async (accountId) => {
+        started.push(accountId);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise<void>((resolve) => {
+          releaseByAccount.set(accountId, resolve);
+        });
+        active -= 1;
+      },
+    );
+
+    expect(dispatcher.enqueue(1)).toBe(true);
+    expect(dispatcher.enqueue(1)).toBe(false);
+    expect(dispatcher.enqueue(2)).toBe(true);
+    expect(dispatcher.enqueue(3)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(started).toEqual([1, 2]);
+    expect(maxActive).toBe(2);
+    expect(dispatcher.isQueuedOrActive(1)).toBe(true);
+
+    releaseByAccount.get(1)?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(started).toEqual([1, 2, 3]);
+    releaseByAccount.get(2)?.();
+    releaseByAccount.get(3)?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatcher.activeCount()).toBe(0);
+  });
+
+  test("bootstrap dispatcher settlement callback can requeue the same account after active release", async () => {
+    const started: number[] = [];
+    const releases: Array<() => void> = [];
+    let requeued = false;
+    const dispatcher = new AccountSessionBootstrapDispatcher(
+      () => 1,
+      async (accountId) => {
+        started.push(accountId);
+        await new Promise<void>((resolve) => {
+          releases.push(resolve);
+        });
+      },
+      (accountId) => {
+        if (!requeued) {
+          requeued = true;
+          expect(dispatcher.enqueue(accountId)).toBe(true);
+        }
+      },
+    );
+
+    expect(dispatcher.enqueue(1)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual([1]);
+
+    releases.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toEqual([1, 1]);
+
+    releases.shift()?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(dispatcher.activeCount()).toBe(0);
   });
 
   test("force rebootstrap requests are deferred instead of dropped while a bootstrap is already queued", () => {
