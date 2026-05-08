@@ -1,0 +1,198 @@
+export interface ProxyBrokerConfig {
+  baseUrl: string;
+  profileId: string;
+  apiKey: string;
+  timeoutMs: number;
+}
+
+export interface ProxyBrokerOpenSessionRequest {
+  selection_mode?: "any" | "geo" | "ip";
+  country_codes?: string[];
+  cities?: string[];
+  specified_ips?: string[];
+  excluded_ips?: string[];
+  sort_mode?: "mru" | "lru";
+  desired_port?: number | null;
+}
+
+export interface ProxyBrokerSession {
+  session_id: string;
+  listen: string;
+  bind_host: string;
+  display_host: string;
+  display_address: string;
+  port: number;
+  selected_ip: string;
+  proxy_name: string;
+  node_id: string;
+  candidate_node_ids?: string[];
+}
+
+export interface ProxyBrokerCatalogNode {
+  import_id: string;
+  node_id: string;
+  proxy_name: string;
+  proxy_type: string;
+  server: string;
+  resolved_ips: string[];
+  primary_ip?: string | null;
+  ip_metadata?: Array<Record<string, unknown>>;
+  can_open_session: boolean;
+}
+
+export interface ProxyBrokerCatalogGroup {
+  import: {
+    import_id: string;
+    name?: string | null;
+    proxy_count: number;
+    distinct_ip_count: number;
+  };
+  nodes: ProxyBrokerCatalogNode[];
+}
+
+export interface ProxyBrokerCatalog {
+  view: string;
+  profile_id?: string | null;
+  groups: ProxyBrokerCatalogGroup[];
+}
+
+export class ProxyBrokerError extends Error {
+  code: string;
+  status: number;
+  details: unknown;
+
+  constructor(status: number, code: string, message: string, details?: unknown) {
+    super(message);
+    this.name = "ProxyBrokerError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+function normalizeBaseUrl(value: string): string {
+  const trimmed = value.trim().replace(/\/+$/g, "");
+  if (!trimmed) return "";
+  return trimmed;
+}
+
+function buildUrl(cfg: ProxyBrokerConfig, path: string, query?: Record<string, string>): string {
+  const url = new URL(`${normalizeBaseUrl(cfg.baseUrl)}${path}`);
+  for (const [key, value] of Object.entries(query || {})) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+function mapBrokerStatusCode(status: number): string {
+  if (status === 401) return "unauthorized";
+  if (status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status >= 500) return "server_error";
+  return `proxy_broker_http_${status}`;
+}
+
+async function parseBrokerResponse(resp: Response): Promise<unknown> {
+  const text = await resp.text();
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+export class ProxyBrokerClient {
+  private cfg: ProxyBrokerConfig;
+
+  constructor(cfg: ProxyBrokerConfig) {
+    this.cfg = {
+      ...cfg,
+      baseUrl: normalizeBaseUrl(cfg.baseUrl),
+      profileId: cfg.profileId.trim() || "Tavily",
+      apiKey: cfg.apiKey.trim(),
+      timeoutMs: Math.max(1000, Math.trunc(cfg.timeoutMs || 8000)),
+    };
+  }
+
+  get configured(): boolean {
+    return Boolean(this.cfg.baseUrl && this.cfg.profileId && this.cfg.apiKey);
+  }
+
+  proxyUrl(session: Pick<ProxyBrokerSession, "display_address">): string {
+    return `http://${session.display_address}`;
+  }
+
+  async authMe(): Promise<unknown> {
+    return await this.request("/api/v1/auth/me");
+  }
+
+  async listCatalog(): Promise<ProxyBrokerCatalog> {
+    return (await this.request("/api/v1/proxy-catalog", "GET", undefined, {
+      profile_id: this.cfg.profileId,
+    })) as ProxyBrokerCatalog;
+  }
+
+  async listSessions(): Promise<{ sessions: ProxyBrokerSession[] }> {
+    const payload = await this.request(`/api/v1/projects/${encodeURIComponent(this.cfg.profileId)}/sessions`);
+    if (Array.isArray(payload)) return { sessions: payload as ProxyBrokerSession[] };
+    if (payload && typeof payload === "object" && Array.isArray((payload as { sessions?: unknown }).sessions)) {
+      return { sessions: (payload as { sessions: ProxyBrokerSession[] }).sessions };
+    }
+    return { sessions: [] };
+  }
+
+  async openSession(input: ProxyBrokerOpenSessionRequest = {}): Promise<ProxyBrokerSession> {
+    return (await this.request(`/api/v1/projects/${encodeURIComponent(this.cfg.profileId)}/sessions/open`, "POST", {
+      selection_mode: input.selection_mode || "any",
+      country_codes: input.country_codes || [],
+      cities: input.cities || [],
+      specified_ips: input.specified_ips || [],
+      excluded_ips: input.excluded_ips || [],
+      sort_mode: input.sort_mode || "lru",
+      desired_port: input.desired_port ?? null,
+    })) as ProxyBrokerSession;
+  }
+
+  async closeSession(sessionId: string): Promise<void> {
+    await this.request(`/api/v1/projects/${encodeURIComponent(this.cfg.profileId)}/sessions/${encodeURIComponent(sessionId)}`, "DELETE");
+  }
+
+  private async request(
+    path: string,
+    method = "GET",
+    body?: unknown,
+    query?: Record<string, string>,
+  ): Promise<unknown> {
+    if (!this.cfg.baseUrl) throw new ProxyBrokerError(0, "proxy_broker_not_configured", "PROXY_BROKER_BASE_URL is not configured");
+    if (!this.cfg.apiKey) throw new ProxyBrokerError(0, "proxy_broker_not_configured", "PROXY_BROKER_API_KEY is not configured");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.cfg.timeoutMs);
+    try {
+      const resp = await fetch(buildUrl(this.cfg, path, query), {
+        method,
+        signal: controller.signal,
+        headers: {
+          "accept": "application/json",
+          "content-type": "application/json",
+          "authorization": `Bearer ${this.cfg.apiKey}`,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const payload = await parseBrokerResponse(resp);
+      if (!resp.ok) {
+        const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+        const code = typeof record.code === "string" ? record.code : mapBrokerStatusCode(resp.status);
+        const message = typeof record.message === "string" ? record.message : `${resp.status} ${resp.statusText}`;
+        throw new ProxyBrokerError(resp.status, code, message, payload);
+      }
+      return payload;
+    } catch (error) {
+      if (error instanceof ProxyBrokerError) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ProxyBrokerError(0, "proxy_broker_request_failed", message);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}

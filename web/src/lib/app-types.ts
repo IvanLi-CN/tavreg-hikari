@@ -628,6 +628,8 @@ export type AutoExtractState = {
 
 export type ProxySettings = {
   subscriptionUrl: string;
+  proxyBrokerBaseUrl: string;
+  proxyBrokerProfileId: string;
   groupName: string;
   routeGroupName: string;
   checkUrl: string;
@@ -645,19 +647,15 @@ export type ProxySettings = {
 
 export type ProxySettingsUpdate = Pick<
   ProxySettings,
-  "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs" | "apiPort" | "mixedPort"
+  "proxyBrokerProfileId" | "checkUrl" | "timeoutMs" | "maxLatencyMs"
 >;
 
 export function pickProxySettingsUpdate(settings: ProxySettings): ProxySettingsUpdate {
   return {
-    subscriptionUrl: settings.subscriptionUrl,
-    groupName: settings.groupName,
-    routeGroupName: settings.routeGroupName,
+    proxyBrokerProfileId: settings.proxyBrokerProfileId,
     checkUrl: settings.checkUrl,
     timeoutMs: settings.timeoutMs,
     maxLatencyMs: settings.maxLatencyMs,
-    apiPort: settings.apiPort,
-    mixedPort: settings.mixedPort,
   };
 }
 
@@ -674,6 +672,36 @@ export type ProxyNode = {
   lastCheckedAt: string | null;
   lastLeasedAt: string | null;
   success24h: number;
+};
+
+export type ProxyBrokerSession = {
+  session_id: string;
+  display_address: string;
+  selected_ip: string;
+  proxy_name: string;
+  node_id: string;
+  created_at?: string;
+};
+
+export type ProxyBrokerCatalogNode = {
+  import_id: string;
+  node_id: string;
+  proxy_name: string;
+  proxy_type: string;
+  server: string;
+  resolved_ips: string[];
+  primary_ip?: string | null;
+  can_open_session: boolean;
+};
+
+export type ProxyBrokerCatalogGroup = {
+  import: {
+    import_id: string;
+    name?: string | null;
+    proxy_count: number;
+    distinct_ip_count: number;
+  };
+  nodes: ProxyBrokerCatalogNode[];
 };
 
 export type ProxyCheckStatus = "idle" | "running" | "completed" | "failed";
@@ -697,6 +725,14 @@ export type ProxyCheckState = {
 export type ProxyPayload = {
   settings: ProxySettings;
   nodes: ProxyNode[];
+  broker: {
+    baseUrl: string;
+    profileId: string;
+    apiKeyConfigured: boolean;
+    configured: boolean;
+    catalogGroups: ProxyBrokerCatalogGroup[];
+    sessions: ProxyBrokerSession[];
+  };
   checkState: ProxyCheckState;
   syncError?: string | null;
 };

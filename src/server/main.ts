@@ -10,6 +10,15 @@ import {
 } from "../cfmail-api.js";
 import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { startMihomo } from "../proxy/mihomo.js";
+import { ProxyBrokerError } from "../proxy/broker.js";
+import {
+  buildProxyBrokerConfig,
+  buildProxyBrokerEnv,
+  closeProxyBrokerRuntimeSession,
+  createProxyBrokerClient,
+  openProxyBrokerRuntimeSession,
+  type ProxyBrokerRuntimeSession,
+} from "./proxy-broker-runtime.js";
 import {
   createMihomoNodeCheckRunner,
   createProxyCheckCoordinator,
@@ -23,6 +32,7 @@ import {
   normalizeAccountExtractorAccountType,
   normalizeJobMaxAttempts,
   type AccountExtractorProvider,
+  type AccountBrowserSessionRecord,
   type AppSettings,
   type ChatGptCredentialRecord,
   type GrokApiKeyRecord,
@@ -359,6 +369,8 @@ function buildSettingsCodeDefaults(): AppSettings {
   return {
     localInstanceId: "",
     subscriptionUrl: "",
+    proxyBrokerBaseUrl: "https://proxy-broker.ivanli.cc",
+    proxyBrokerProfileId: "Tavily",
     groupName: "CODEX_AUTO",
     routeGroupName: "CODEX_ROUTE",
     checkUrl: "https://www.cloudflare.com/cdn-cgi/trace",
@@ -392,10 +404,14 @@ function buildSettingsCodeDefaults(): AppSettings {
 }
 
 function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
+  const defaultProxyBrokerBaseUrl = baseDefaults.proxyBrokerBaseUrl || "https://proxy-broker.ivanli.cc";
+  const defaultProxyBrokerProfileId = baseDefaults.proxyBrokerProfileId || "Tavily";
   return {
     ...baseDefaults,
     localInstanceId: baseDefaults.localInstanceId,
     subscriptionUrl: (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim(),
+    proxyBrokerBaseUrl: (process.env.PROXY_BROKER_BASE_URL || defaultProxyBrokerBaseUrl).trim() || defaultProxyBrokerBaseUrl,
+    proxyBrokerProfileId: (process.env.PROXY_BROKER_PROFILE_ID || defaultProxyBrokerProfileId).trim() || defaultProxyBrokerProfileId,
     groupName: (process.env.MIHOMO_GROUP_NAME || baseDefaults.groupName).trim() || baseDefaults.groupName,
     routeGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || baseDefaults.routeGroupName).trim() || baseDefaults.routeGroupName,
     checkUrl: (process.env.PROXY_CHECK_URL || baseDefaults.checkUrl).trim(),
@@ -1018,14 +1034,102 @@ function serializeProxyPayload(input: {
   settings: AppSettings;
   nodes: ReturnType<AppDatabase["listProxyNodes"]>;
   checkState: ProxyCheckState;
+  broker?: {
+    catalogGroups: unknown[];
+    sessions: unknown[];
+  };
   syncError?: string | null;
 }) {
+  const brokerConfig = buildProxyBrokerConfig(input.settings);
   return {
     settings: input.settings,
     nodes: input.nodes,
+    broker: {
+      baseUrl: brokerConfig.baseUrl,
+      profileId: brokerConfig.profileId,
+      apiKeyConfigured: Boolean(brokerConfig.apiKey),
+      configured: Boolean(brokerConfig.baseUrl && brokerConfig.profileId && brokerConfig.apiKey),
+      catalogGroups: input.broker?.catalogGroups || [],
+      sessions: input.broker?.sessions || [],
+    },
     checkState: input.checkState,
     syncError: input.syncError ?? null,
   };
+}
+
+type BrokerProxySnapshot = {
+  catalogGroups: unknown[];
+  sessions: unknown[];
+};
+
+function brokerCatalogNodeName(node: any): string {
+  return String(node?.proxy_name || node?.node_id || "").trim();
+}
+
+function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): void {
+  const nodeNames: string[] = [];
+  for (const group of catalogGroups) {
+    for (const node of Array.isArray(group?.nodes) ? group.nodes : []) {
+      const nodeName = brokerCatalogNodeName(node);
+      if (!nodeName) continue;
+      nodeNames.push(nodeName);
+    }
+  }
+  db.upsertProxyInventory(nodeNames);
+  for (const group of catalogGroups) {
+    for (const node of Array.isArray(group?.nodes) ? group.nodes : []) {
+      const nodeName = brokerCatalogNodeName(node);
+      if (!nodeName) continue;
+      const primaryMetadata = Array.isArray(node.ip_metadata) ? node.ip_metadata[0] : null;
+      db.recordProxyCheck({
+        nodeName,
+        status: node.can_open_session ? "ok" : "catalog",
+        latencyMs: typeof primaryMetadata?.median_latency_ms === "number" ? primaryMetadata.median_latency_ms : null,
+        egressIp: String(node.primary_ip || node.resolved_ips?.[0] || "").trim() || null,
+        country: typeof primaryMetadata?.country_name === "string" ? primaryMetadata.country_name : null,
+        region: typeof primaryMetadata?.region_name === "string" ? primaryMetadata.region_name : null,
+        city: typeof primaryMetadata?.city === "string" ? primaryMetadata.city : null,
+        org: null,
+        error: null,
+      });
+    }
+  }
+}
+
+async function fetchBrokerProxyPayload(
+  db: AppDatabase,
+  settings: AppSettings,
+  checkState: ProxyCheckState,
+  fallbackBroker?: BrokerProxySnapshot,
+) {
+  const client = createProxyBrokerClient(settings);
+  let catalogGroups: Array<any> = Array.isArray(fallbackBroker?.catalogGroups) ? fallbackBroker.catalogGroups : [];
+  let syncError: string | null = null;
+  try {
+    const catalog = await client.listCatalog();
+    catalogGroups = catalog.groups || [];
+    syncBrokerCatalogSnapshot(db, catalogGroups);
+  } catch (error) {
+    syncError = proxyBrokerErrorMessage(error);
+  }
+  const sessions = await client.listSessions();
+  return serializeProxyPayload({
+    settings,
+    nodes: db.listProxyNodes(),
+    broker: {
+      catalogGroups,
+      sessions: sessions.sessions || [],
+    },
+    checkState,
+    syncError,
+  });
+}
+
+function proxyBrokerErrorMessage(error: unknown): string {
+  if (error instanceof ProxyBrokerError) {
+    return `${error.code}: ${error.message}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function serveStatic(req: Request): Promise<Response> {
@@ -1130,6 +1234,7 @@ async function runMailboxOauthWorker(input: {
   mailboxId: number;
   settings: AppSettings;
   proxyNode: string;
+  brokerSession: ProxyBrokerRuntimeSession;
   profilePath: string;
   redirectUri: string;
   authUrl: string;
@@ -1167,6 +1272,7 @@ async function runMailboxOauthWorker(input: {
       PROXY_CHECK_URL: input.settings.checkUrl,
       PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
       PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
+      ...buildProxyBrokerEnv(input.brokerSession),
       KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
       KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
       CHROME_AUTO_OPEN_DEVTOOLS: process.env.CHROME_AUTO_OPEN_DEVTOOLS || "false",
@@ -1275,51 +1381,86 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   const selectedProxyNode = requestedProxyNode
     ? input.db.getProxyNode(requestedProxyNode)
     : input.db.selectReusableProxyNodeForAccount(input.accountId);
-  const proxyNode = selectedProxyNode?.nodeName || null;
-  if (!proxyNode) {
+  if (requestedProxyNode && !selectedProxyNode?.lastEgressIp) {
+    const message = `指定代理节点缺少 Broker 出口 IP 快照，无法保证选择生效：${requestedProxyNode}`;
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
-      errorCode: "proxy_node_unavailable",
-      errorMessage: requestedProxyNode
-        ? `指定代理节点不可用：${requestedProxyNode}`
-        : "当前代理池中没有可复用的健康节点",
+      proxyNode: requestedProxyNode,
+      proxyIp: null,
+      errorCode: "proxy_broker_requested_node_unavailable",
+      errorMessage: message,
     });
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
-    throw new Error(
-      requestedProxyNode
-        ? `指定代理节点不可用：${requestedProxyNode}`
-        : "当前代理池中没有可复用的健康节点",
-    );
+    throw new Error(message);
   }
-  const session = input.db.markBrowserSessionBootstrapping(input.accountId, {
-    browserEngine: "chrome",
-    proxyNode,
+  const brokerSession = await openProxyBrokerRuntimeSession({
+    settings: runtimeSettings,
+    preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? account.browserSession?.proxyIp : null) || null,
+    fallbackOnPreferredIpFailure: !requestedProxyNode,
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    input.db.markBrowserSessionFailure(input.accountId, {
+      status: "failed",
+      browserEngine: "chrome",
+      proxyNode: selectedProxyNode?.nodeName || requestedProxyNode || account.browserSession?.proxyNode || null,
+      proxyIp: selectedProxyNode?.lastEgressIp || account.browserSession?.proxyIp || null,
+      errorCode: "proxy_broker_session_open_failed",
+      errorMessage: message || "Proxy Broker session 创建失败",
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
+    throw error;
   });
-  input.db.touchProxyLease(proxyNode);
-  broadcastAccountAction(input.broadcast, input.accountId, "session_bootstrap_started");
-  const mailbox = input.db.ensureMailboxForAccount(input.accountId);
-  const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
-  const oauthState = createMicrosoftOauthState();
-  const nextMailbox = input.db.saveMailboxOauthStart(mailbox.id, {
-    oauthState,
-    oauthCodeVerifier: codeVerifier,
-    authority: graphSettings.authority,
-  });
-  const authUrl = buildMicrosoftAuthorizeUrl({
-    clientId: graphSettings.clientId,
-    redirectUri: graphSettings.redirectUri,
-    authority: graphSettings.authority,
-    state: oauthState,
-    codeChallenge,
-    loginHint: account.microsoftEmail,
-  });
-  input.broadcast({
-    type: "mailbox.updated",
-    payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
-    timestamp: nowIso(),
-  });
-  broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+  let proxyNode = brokerSession.session.proxy_name;
+  let session: AccountBrowserSessionRecord;
+  let nextMailbox: MicrosoftMailboxRecord;
+  let authUrl: string;
+  try {
+    if (requestedProxyNode && proxyNode !== requestedProxyNode) {
+      const message = `Proxy Broker 返回节点与显式选择不一致：expected=${requestedProxyNode} actual=${proxyNode || "unknown"}`;
+      input.db.markBrowserSessionFailure(input.accountId, {
+        status: "failed",
+        browserEngine: "chrome",
+        proxyNode: requestedProxyNode,
+        proxyIp: brokerSession.session.selected_ip || selectedProxyNode?.lastEgressIp || null,
+        errorCode: "proxy_broker_requested_node_mismatch",
+        errorMessage: message,
+      });
+      broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
+      throw new Error(message);
+    }
+    session = input.db.markBrowserSessionBootstrapping(input.accountId, {
+      browserEngine: "chrome",
+      proxyNode,
+    });
+    input.db.touchProxyLease(proxyNode, { egressIp: brokerSession.session.selected_ip });
+    broadcastAccountAction(input.broadcast, input.accountId, "session_bootstrap_started");
+    const mailbox = input.db.ensureMailboxForAccount(input.accountId);
+    const { codeVerifier, codeChallenge } = createMicrosoftPkcePair();
+    const oauthState = createMicrosoftOauthState();
+    nextMailbox = input.db.saveMailboxOauthStart(mailbox.id, {
+      oauthState,
+      oauthCodeVerifier: codeVerifier,
+      authority: graphSettings.authority,
+    });
+    authUrl = buildMicrosoftAuthorizeUrl({
+      clientId: graphSettings.clientId,
+      redirectUri: graphSettings.redirectUri,
+      authority: graphSettings.authority,
+      state: oauthState,
+      codeChallenge,
+      loginHint: account.microsoftEmail,
+    });
+    input.broadcast({
+      type: "mailbox.updated",
+      payload: { mailboxIds: [nextMailbox.id], action: "oauth_start" },
+      timestamp: nowIso(),
+    });
+    broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
+  } catch (error) {
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
+    throw error;
+  }
 
   let workerResult: MailboxOauthWorkerResult | null = null;
   try {
@@ -1328,6 +1469,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       mailboxId: nextMailbox.id,
       settings: runtimeSettings,
       proxyNode,
+      brokerSession,
       profilePath: session.profilePath,
       redirectUri: graphSettings.redirectUri,
       authUrl,
@@ -1449,6 +1591,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     });
     broadcastAccountAction(input.broadcast, input.accountId, sessionStatus === "blocked" ? "session_blocked" : "session_failed");
     throw error;
+  } finally {
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
   }
 }
 
@@ -1472,6 +1616,7 @@ async function main(): Promise<void> {
   const sessionBootstrapPendingForceIds = new Set<number>();
   const sessionBootstrapRequestedProxyNodes = new Map<number, string | null>();
   let latestProxySyncError: string | null = null;
+  let latestBrokerSnapshot: BrokerProxySnapshot = { catalogGroups: [], sessions: [] };
   const proxyCheckCoordinator = createProxyCheckCoordinator({
     defaultConcurrency: resolveProxyCheckConcurrency(process.env.PROXY_CHECK_CONCURRENCY, 5),
     readSettings,
@@ -3080,15 +3225,26 @@ async function main(): Promise<void> {
 
       if (pathname === "/api/proxies" && req.method === "GET") {
         const settings = readSettings();
-        const nodes = settings.subscriptionUrl.trim() ? db.listProxyNodes() : [];
-        return json(
-          serializeProxyPayload({
-            settings,
-            nodes,
-            checkState: proxyCheckCoordinator.getState(),
-            syncError: latestProxySyncError,
-          }),
-        );
+        try {
+          const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
+          latestProxySyncError = payload.syncError;
+          latestBrokerSnapshot = {
+            catalogGroups: payload.broker.catalogGroups,
+            sessions: payload.broker.sessions,
+          };
+          return json(payload);
+        } catch (error) {
+          latestProxySyncError = proxyBrokerErrorMessage(error);
+          return json(
+            serializeProxyPayload({
+              settings,
+              nodes: db.listProxyNodes(),
+              broker: latestBrokerSnapshot,
+              checkState: proxyCheckCoordinator.getState(),
+              syncError: latestProxySyncError,
+            }),
+          );
+        }
       }
 
       if (pathname === "/api/proxies/settings" && req.method === "POST") {
@@ -3096,68 +3252,49 @@ async function main(): Promise<void> {
         if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
           return badRequest("proxy settings payload must be a JSON object");
         }
-        if (proxyCheckCoordinator.isRunning()) {
-          return badRequest("proxy check is running; wait until it finishes before saving settings", 409);
-        }
         const unexpectedProxySettingsKeys = listUnexpectedProxySettingsKeys(body);
         if (unexpectedProxySettingsKeys.length > 0) {
           return badRequest(`unsupported proxy settings keys: ${unexpectedProxySettingsKeys.join(", ")}`);
         }
         const current = readSettings();
         const optimisticNext = buildNextProxySettings(current, body as Partial<ProxySettingsUpdate> | null);
-        if (!optimisticNext.subscriptionUrl.trim()) {
-          latestProxySyncError = null;
-          db.setSettings(optimisticNext);
-          db.upsertProxyInventory([]);
-          return json(
-            serializeProxyPayload({
-              settings: optimisticNext,
-              nodes: [],
-              checkState: proxyCheckCoordinator.getState(),
-              syncError: null,
-            }),
-          );
-        }
         try {
-          const { settings: next, result: inventory } = await runExclusiveProxyOp(() =>
-            validateProxySettingsBeforePersist({
-              current,
-              input: body as Partial<ProxySettingsUpdate> | null,
-              sync: fetchProxyInventory,
-              persist: (validatedSettings) => db.setSettings(validatedSettings),
-            }),
-          );
-          latestProxySyncError = null;
-          db.upsertProxyInventory(inventory.nodeNames);
+          const payload = await fetchBrokerProxyPayload(db, optimisticNext, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
+          latestProxySyncError = payload.syncError;
+          latestBrokerSnapshot = {
+            catalogGroups: payload.broker.catalogGroups,
+            sessions: payload.broker.sessions,
+          };
+          db.setSettings(optimisticNext);
+          return json(payload);
+        } catch (error) {
+          latestProxySyncError = proxyBrokerErrorMessage(error);
           return json(
             serializeProxyPayload({
-              settings: next,
+              settings: current,
               nodes: db.listProxyNodes(),
+              broker: latestBrokerSnapshot,
               checkState: proxyCheckCoordinator.getState(),
-              syncError: null,
+              syncError: latestProxySyncError,
             }),
           );
-        } catch (error) {
-          latestProxySyncError = error instanceof Error ? error.message : String(error);
-          throw error;
         }
       }
 
       if (pathname === "/api/proxies/check" && req.method === "POST") {
-        const body = (await req.json().catch(() => null)) as { scope?: string; nodeName?: string } | null;
-        const scope = body?.scope === "node" ? "node" : body?.scope == null || body.scope === "all" ? "all" : null;
-        if (!scope) {
-          return badRequest(`unsupported proxy check scope: ${String(body?.scope)}`);
+        const settings = readSettings();
+        try {
+          const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
+          latestProxySyncError = payload.syncError;
+          latestBrokerSnapshot = {
+            catalogGroups: payload.broker.catalogGroups,
+            sessions: payload.broker.sessions,
+          };
+          return json({ ok: true, accepted: true, checkState: proxyCheckCoordinator.getState() });
+        } catch (error) {
+          latestProxySyncError = proxyBrokerErrorMessage(error);
+          return badRequest(latestProxySyncError, 502);
         }
-        const started = await proxyCheckCoordinator.startCheck({
-          scope: scope as ProxyCheckScope,
-          nodeName: body?.nodeName,
-        });
-        return json({
-          ok: true,
-          accepted: started.accepted,
-          checkState: started.checkState,
-        });
       }
 
         return await serveStatic(req);
@@ -3174,20 +3311,25 @@ async function main(): Promise<void> {
 
   console.log(`Tavreg Hikari web admin ready at http://${server.hostname}:${server.port}`);
 
-  void runExclusiveProxyOp(() => syncProxyInventory(db, defaults))
-    .then((inventory) => {
-      latestProxySyncError = null;
+  void fetchBrokerProxyPayload(db, defaults, proxyCheckCoordinator.getState(), latestBrokerSnapshot)
+    .then((payload) => {
+      latestProxySyncError = payload.syncError;
+      latestBrokerSnapshot = {
+        catalogGroups: payload.broker.catalogGroups,
+        sessions: payload.broker.sessions,
+      };
       broadcast({
         type: "proxy.updated",
         payload: {
-          nodes: inventory.nodes,
+          nodes: payload.nodes,
+          broker: payload.broker,
           checkState: proxyCheckCoordinator.getState(),
         },
         timestamp: nowIso(),
       });
     })
     .catch((error) => {
-      latestProxySyncError = error instanceof Error ? error.message : String(error);
+      latestProxySyncError = proxyBrokerErrorMessage(error);
     });
 
   const shutdown = async () => {

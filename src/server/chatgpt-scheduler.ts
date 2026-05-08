@@ -11,14 +11,18 @@ import {
   type JobAttemptRecord,
   type JobRecord,
   type JobSite,
-  type ProxyNodeRecord,
 } from "../storage/app-db.js";
 import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
 import { normalizeChatGptUpstreamGroupName, readChatGptJobUpstreamGroupName } from "./chatgpt-upstream-supplement.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
-import { pickAutoProxyNode } from "./proxy-node-allocation.js";
 import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpstreamSuccess } from "./upstream-sync.js";
+import {
+  buildProxyBrokerEnv,
+  closeProxyBrokerRuntimeSession,
+  openProxyBrokerRuntimeSession,
+  type ProxyBrokerRuntimeSession,
+} from "./proxy-broker-runtime.js";
 import {
   formatMailboxProviderCooldownReason,
   getMailboxProviderCooldownSnapshot,
@@ -31,7 +35,9 @@ interface ActiveAttempt {
   attempt: JobAttemptRecord;
   outputDir: string;
   reservedPorts: { apiPort: number; mixedPort: number };
+  brokerSession: ProxyBrokerRuntimeSession;
   stopRequested: "force_stop" | null;
+  releaseResources?: () => Promise<void>;
 }
 
 interface ChatGptAttemptDraft {
@@ -181,15 +187,6 @@ function attemptOutputShowsAuthChallenge(attempt: Pick<JobAttemptRecord, "output
   }
 }
 
-function isBlockedChatGptProxyNode(nodeName: string): boolean {
-  return /香港|hong\s*kong|\bhk\b/i.test(String(nodeName || "").trim());
-}
-
-function isHealthyChatGptProxyNode(node: Pick<ProxyNodeRecord, "lastStatus">): boolean {
-  const status = String(node.lastStatus || "").trim().toLowerCase();
-  return !status || status === "ok" || status === "succeeded" || status === "running";
-}
-
 function shouldBlockChatGptProxyAfterFailure(input: { errorCode: string; errorMessage: string }): boolean {
   const errorCode = String(input.errorCode || "").trim().toLowerCase();
   const errorMessage = String(input.errorMessage || "").trim().toLowerCase();
@@ -199,19 +196,6 @@ function shouldBlockChatGptProxyAfterFailure(input: { errorCode: string; errorMe
     return /__cf_chl_rt_tk=|just a moment|checking your browser|cloudflare|security verification/.test(errorMessage);
   }
   return false;
-}
-
-function resolveChatGptProxyNode(
-  db: Pick<AppDatabase, "listProxyNodes">,
-  activeAttempts: JobAttemptRecord[],
-): ProxyNodeRecord | null {
-  return pickAutoProxyNode({
-    nodes: db.listProxyNodes().filter((node) => isHealthyChatGptProxyNode(node)),
-    activeAttempts,
-    policy: {
-      allowNode: (node) => !isBlockedChatGptProxyNode(node.nodeName),
-    },
-  });
 }
 
 export class ChatGptJobScheduler {
@@ -338,8 +322,8 @@ export class ChatGptJobScheduler {
     upstreamGroupName?: string | null;
   }): Promise<JobRecord> {
     const settings = this.getSettings();
-    if (!settings.subscriptionUrl.trim()) {
-      throw new Error("configure a Mihomo subscription before starting a ChatGPT job");
+    if (!process.env.PROXY_BROKER_API_KEY?.trim()) {
+      throw new Error("configure PROXY_BROKER_API_KEY before starting a ChatGPT job");
     }
     const cooldown = this.getCooldownSnapshot();
     if (cooldown?.active) {
@@ -500,6 +484,7 @@ export class ChatGptJobScheduler {
       active.stopRequested = "force_stop";
       signalChildProcess(active.child, "SIGTERM");
     }
+    await Promise.allSettled(Array.from(this.activeAttempts.values()).map((active) => active.releaseResources?.()));
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
     await Promise.allSettled(Array.from(this.pendingSupplementTasks));
     await this.loopPromise;
@@ -695,56 +680,94 @@ export class ChatGptJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const selectedProxy = resolveChatGptProxyNode(this.db, this.activeAttemptRows());
-    if (selectedProxy) {
-      this.db.updateAttempt(attempt.id, { proxyNode: selectedProxy.nodeName, proxyIp: selectedProxy.lastEgressIp });
-      this.db.touchProxyLease(selectedProxy.nodeName, {
-        egressIp: selectedProxy.lastEgressIp,
-        leasedAt: nowIso(),
+    const brokerSession = await openProxyBrokerRuntimeSession({
+      settings,
+      excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
+      excludedNodeNamePattern: /(?:hong\s*kong|\bhk\b|香港)/i,
+    }).catch(async (error) => {
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      throw error;
+    });
+    this.db.updateAttempt(attempt.id, {
+      proxyNode: brokerSession.session.proxy_name,
+      proxyIp: brokerSession.session.selected_ip,
+      brokerSessionId: brokerSession.session.session_id,
+      proxyDisplayAddress: brokerSession.session.display_address,
+      proxyNodeId: brokerSession.session.node_id,
+    });
+    this.db.touchProxyLease(brokerSession.session.proxy_name, {
+      egressIp: brokerSession.session.selected_ip,
+      leasedAt: nowIso(),
+    });
+    const refreshedJob = this.db.getJob(job.id);
+    if (refreshedJob && (isStopInProgressStatus(refreshedJob.status) || refreshedJob.status === "stopped")) {
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(job.id, attempt.id, null, {
+        errorCode: refreshedJob.status === "force_stopping" ? "force_stopped" : "stopped_before_launch",
+        errorMessage: "stopped before launch",
       });
+      this.emit("attempt.updated", { site: this.site, attempt: stoppedAttempt });
+      this.emit("job.updated", { site: this.site, job: this.maybeFinalizeStoppedJob(job.id) || stoppedJob });
+      return;
     }
     const args =
       runtime.command === "bun"
         ? ["run", "src/server/chatgpt-worker.ts"]
         : ["--import", "tsx", "src/server/chatgpt-worker.ts"];
-    if (selectedProxy?.nodeName.trim()) {
-      args.push("--proxy-node", selectedProxy.nodeName.trim());
+    args.push("--proxy-node", brokerSession.session.proxy_name);
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(runtime.command, args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, {
+          env: {
+            ...process.env,
+            RUN_MODE: job.runMode,
+            CHATGPT_JOB_EMAIL: payload.email,
+            CHATGPT_JOB_PASSWORD: payload.password,
+            CHATGPT_JOB_NICKNAME: payload.nickname,
+            CHATGPT_JOB_BIRTH_DATE: payload.birthDate,
+            CHATGPT_JOB_MAILBOX_ID: payload.mailboxId,
+            CHATGPT_JOB_OUTPUT_DIR: outputDir,
+            MIHOMO_SUBSCRIPTION_URL: settings.subscriptionUrl,
+            MIHOMO_GROUP_NAME: settings.groupName,
+            MIHOMO_ROUTE_GROUP_NAME: settings.routeGroupName,
+            MIHOMO_API_PORT: String(reservedPorts.apiPort),
+            MIHOMO_MIXED_PORT: String(reservedPorts.mixedPort),
+            PROXY_CHECK_URL: settings.checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(settings.timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(settings.maxLatencyMs),
+            ...buildProxyBrokerEnv(brokerSession),
+            OUTPUT_ROOT_DIR: outputDir,
+            CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
+            INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+            KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
+            KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
+          },
+        }),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      throw error;
     }
-    const child = spawn(runtime.command, args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, {
-        env: {
-          ...process.env,
-          RUN_MODE: job.runMode,
-          CHATGPT_JOB_EMAIL: payload.email,
-          CHATGPT_JOB_PASSWORD: payload.password,
-          CHATGPT_JOB_NICKNAME: payload.nickname,
-          CHATGPT_JOB_BIRTH_DATE: payload.birthDate,
-          CHATGPT_JOB_MAILBOX_ID: payload.mailboxId,
-          CHATGPT_JOB_OUTPUT_DIR: outputDir,
-          MIHOMO_SUBSCRIPTION_URL: settings.subscriptionUrl,
-          MIHOMO_GROUP_NAME: settings.groupName,
-          MIHOMO_ROUTE_GROUP_NAME: settings.routeGroupName,
-          MIHOMO_API_PORT: String(reservedPorts.apiPort),
-          MIHOMO_MIXED_PORT: String(reservedPorts.mixedPort),
-          PROXY_CHECK_URL: settings.checkUrl,
-          PROXY_CHECK_TIMEOUT_MS: String(settings.timeoutMs),
-          PROXY_LATENCY_MAX_MS: String(settings.maxLatencyMs),
-          OUTPUT_ROOT_DIR: outputDir,
-          CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
-          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-          KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
-          KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
-        },
-      }),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
     child.stdin.end();
+    let resourcesReleased = false;
+    const releaseResources = async () => {
+      if (resourcesReleased) return;
+      resourcesReleased = true;
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+    };
     const active: ActiveAttempt = {
       child,
       attempt,
       outputDir,
       reservedPorts,
+      brokerSession,
       stopRequested: null,
+      releaseResources,
     };
     this.activeAttempts.set(attempt.id, active);
     let stdout = "";
@@ -765,7 +788,7 @@ export class ChatGptJobScheduler {
         } finally {
           await flushWorkerLog();
           this.activeAttempts.delete(attempt.id);
-          await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+          await active.releaseResources?.();
         }
       })();
       this.pendingAttemptFinalizers.add(finalizer);

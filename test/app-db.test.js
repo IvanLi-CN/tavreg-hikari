@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -30,6 +30,7 @@ const tempDirs = [];
 const originalFetch = globalThis.fetch;
 const originalDateNow = Date.now;
 const originalSetTimeout = globalThis.setTimeout;
+const originalProxyBrokerApiKey = process.env.PROXY_BROKER_API_KEY;
 
 function createSchedulerSettings(overrides = {}) {
   return {
@@ -87,10 +88,19 @@ function markImportedAccountsReady(appDb, accountIds, overrides) {
   });
 }
 
+beforeEach(() => {
+  process.env.PROXY_BROKER_API_KEY = "pbk_test";
+});
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   Date.now = originalDateNow;
   globalThis.setTimeout = originalSetTimeout;
+  if (originalProxyBrokerApiKey == null) {
+    delete process.env.PROXY_BROKER_API_KEY;
+  } else {
+    process.env.PROXY_BROKER_API_KEY = originalProxyBrokerApiKey;
+  }
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();
     if (!target) continue;
@@ -1498,6 +1508,7 @@ describe("AppDatabase account import", () => {
       acceptStatus: "accepted",
     });
 
+    Date.now = () => nowMs;
     const result = appDb.pruneAccountExtractHistory(nowMs);
 
     expect(result).toEqual({
@@ -2057,14 +2068,90 @@ describe("scheduler helpers", () => {
     appDb.close();
   });
 
-  test("rejects job starts before proxy subscription is configured", async () => {
+  test("preserves Broker proxy diagnostics when ledger output omits proxy fields", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "broker-success@example.test", password: "pass-a" },
+      { email: "broker-failure@example.test", password: "pass-b" },
+      { email: "broker-stop@example.test", password: "pass-c" },
+    ]);
+    const [successAccountId, failureAccountId, stoppedAccountId] = imported.affectedIds;
+    const job = appDb.createJob({ runMode: "headed", need: 3, parallel: 1, maxAttempts: 3 });
+    const successAttempt = appDb.updateAttempt(
+      appDb.createAttempt(job.id, successAccountId, "/tmp/tavreg-broker-success").id,
+      {
+        runId: "broker-run-success",
+        proxyNode: "Broker Tokyo",
+        proxyIp: "203.0.113.10",
+        brokerSessionId: "pbs_success",
+        proxyDisplayAddress: "127.0.0.1:18080",
+        proxyNodeId: "node_success",
+      },
+    );
+    const failureAttempt = appDb.updateAttempt(
+      appDb.createAttempt(job.id, failureAccountId, "/tmp/tavreg-broker-failure").id,
+      {
+        runId: "broker-run-failure",
+        proxyNode: "Broker Osaka",
+        proxyIp: "203.0.113.11",
+        brokerSessionId: "pbs_failure",
+        proxyDisplayAddress: "127.0.0.1:18081",
+        proxyNodeId: "node_failure",
+      },
+    );
+    const stoppedAttempt = appDb.updateAttempt(
+      appDb.createAttempt(job.id, stoppedAccountId, "/tmp/tavreg-broker-stopped").id,
+      {
+        runId: "broker-run-stopped",
+        proxyNode: "Broker Fukuoka",
+        proxyIp: "203.0.113.12",
+        brokerSessionId: "pbs_stopped",
+        proxyDisplayAddress: "127.0.0.1:18082",
+        proxyNodeId: "node_stopped",
+      },
+    );
+
+    const success = appDb.completeAttemptSuccess(job.id, successAttempt.id, successAccountId, "tvly-broker-preserve", null).attempt;
+    const failure = appDb.completeAttemptFailure(job.id, failureAttempt.id, failureAccountId, { errorCode: "network_timeout" }, null).attempt;
+    const stopped = appDb.completeAttemptStopped(job.id, stoppedAttempt.id, stoppedAccountId, { errorCode: "force_stopped" }, null).attempt;
+
+    expect(success).toMatchObject({
+      runId: "broker-run-success",
+      proxyNode: "Broker Tokyo",
+      proxyIp: "203.0.113.10",
+      brokerSessionId: "pbs_success",
+      proxyDisplayAddress: "127.0.0.1:18080",
+      proxyNodeId: "node_success",
+    });
+    expect(failure).toMatchObject({
+      runId: "broker-run-failure",
+      proxyNode: "Broker Osaka",
+      proxyIp: "203.0.113.11",
+      brokerSessionId: "pbs_failure",
+      proxyDisplayAddress: "127.0.0.1:18081",
+      proxyNodeId: "node_failure",
+    });
+    expect(stopped).toMatchObject({
+      runId: "broker-run-stopped",
+      proxyNode: "Broker Fukuoka",
+      proxyIp: "203.0.113.12",
+      brokerSessionId: "pbs_stopped",
+      proxyDisplayAddress: "127.0.0.1:18082",
+      proxyNodeId: "node_stopped",
+    });
+
+    appDb.close();
+  });
+
+  test("rejects job starts before Proxy Broker API key is configured", async () => {
     const { appDb, dbPath } = await createTempDb();
+    delete process.env.PROXY_BROKER_API_KEY;
     const scheduler = new JobScheduler(
       appDb,
       "tavily",
       process.cwd(),
       dbPath,
-      () => createSchedulerSettings({ subscriptionUrl: "" }),
+      () => createSchedulerSettings(),
       () => undefined,
     );
 
@@ -2075,7 +2162,7 @@ describe("scheduler helpers", () => {
         parallel: 1,
         maxAttempts: 1,
       }),
-    ).rejects.toThrow("configure a Mihomo subscription before starting a job");
+    ).rejects.toThrow("configure PROXY_BROKER_API_KEY before starting a job");
 
     await scheduler.shutdown();
     appDb.close();
@@ -3242,11 +3329,11 @@ describe("settings updates", () => {
   test("rejects non-proxy keys from proxy settings updates", () => {
     expect(
       listUnexpectedProxySettingsKeys({
-        subscriptionUrl: "https://example.com/next.yaml",
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
         defaultRunMode: "headless",
         defaultNeed: 2,
       }),
-    ).toEqual(["defaultRunMode", "defaultNeed"]);
+    ).toEqual(["proxyBrokerBaseUrl", "defaultRunMode", "defaultNeed"]);
   });
 
   test("proxy settings updates only change proxy fields", async () => {
@@ -3255,12 +3342,11 @@ describe("settings updates", () => {
     const { settings, result } = await validateProxySettingsBeforePersist({
       current: currentSettings,
       input: {
-        subscriptionUrl: " https://next.example/sub.yaml ",
-        apiPort: 0,
-        mixedPort: 2,
+        proxyBrokerBaseUrl: " https://proxy-broker.example.test/ ",
+        proxyBrokerProfileId: " prod ",
         defaultRunMode: "headless",
       },
-      sync: async (nextSettings) => ({ selected: null, subscriptionUrl: nextSettings.subscriptionUrl }),
+      sync: async (nextSettings) => ({ selected: null, baseUrl: nextSettings.proxyBrokerBaseUrl, profileId: nextSettings.proxyBrokerProfileId }),
       persist: (nextSettings) => {
         persisted = nextSettings;
       },
@@ -3268,19 +3354,19 @@ describe("settings updates", () => {
 
     expect(result).toEqual({
       selected: null,
-      subscriptionUrl: "https://next.example/sub.yaml",
+      baseUrl: currentSettings.proxyBrokerBaseUrl,
+      profileId: "prod",
     });
     expect(settings).toMatchObject({
-      subscriptionUrl: "https://next.example/sub.yaml",
-      apiPort: 1,
-      mixedPort: 2,
+      subscriptionUrl: "https://example.com/sub.yaml",
+      proxyBrokerProfileId: "prod",
       defaultRunMode: "headed",
     });
     expect(buildNextProxySettings(currentSettings, { defaultRunMode: "headless" })).toMatchObject({
       defaultRunMode: "headed",
     });
     expect(persisted).toMatchObject({
-      subscriptionUrl: "https://next.example/sub.yaml",
+      proxyBrokerProfileId: "prod",
       defaultRunMode: "headed",
     });
   });
@@ -3422,7 +3508,7 @@ describe("api key queries", () => {
 });
 
 describe("scheduler runtime spec", () => {
-  test("forwards proxy settings, selected node, and isolated mihomo ports to child attempts", () => {
+  test("forwards broker session proxy settings and selected node to child attempts", () => {
     const runtime = buildAttemptRuntimeSpec({
       job: { id: 8, runMode: "headed" },
       account: {
@@ -3449,6 +3535,21 @@ describe("scheduler runtime spec", () => {
       },
       chromeExecutablePath: "/opt/fingerprint-browser/chrome",
       selectedProxyNode: "Tokyo-01",
+      brokerSession: {
+        session: {
+          session_id: "sess_123",
+          profile_id: "default",
+          node_id: "node_tokyo_01",
+          proxy_name: "Tokyo-01",
+          selected_ip: "203.0.113.10",
+          display_address: "127.0.0.1:43123",
+          listener_type: "mixed",
+          status: "active",
+          opened_at: "2026-05-09T00:00:00.000Z",
+          last_used_at: null,
+        },
+        proxyUrl: "http://127.0.0.1:43123",
+      },
       baseEnv: {
         PATH: process.env.PATH,
         EXISTING_EMAIL: "legacy@example.com",
@@ -3473,11 +3574,12 @@ describe("scheduler runtime spec", () => {
     expect(runtime.args.slice(0, expectedRuntime.bootstrapArgs.length)).toEqual(expectedRuntime.bootstrapArgs);
     expect(runtime.args[expectedRuntime.bootstrapArgs.length]).toBe("--mode");
     expect(runtime.env).toMatchObject({
-      MIHOMO_SUBSCRIPTION_URL: "https://example.com/sub.yaml",
-      MIHOMO_GROUP_NAME: "WEB_AUTO",
-      MIHOMO_ROUTE_GROUP_NAME: "WEB_ROUTE",
-      MIHOMO_API_PORT: "40123",
-      MIHOMO_MIXED_PORT: "40124",
+      PROXY_BROKER_SESSION_ID: "sess_123",
+      PROXY_BROKER_PROXY_URL: "http://127.0.0.1:43123",
+      PROXY_BROKER_PROXY_NODE: "Tokyo-01",
+      PROXY_BROKER_PROXY_NODE_ID: "node_tokyo_01",
+      PROXY_BROKER_PROXY_IP: "203.0.113.10",
+      PROXY_BROKER_PROXY_DISPLAY_ADDRESS: "127.0.0.1:43123",
       PROXY_CHECK_URL: "https://example.com/trace",
       PROXY_CHECK_TIMEOUT_MS: "4321",
       PROXY_LATENCY_MAX_MS: "987",

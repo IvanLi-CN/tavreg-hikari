@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { Impit } from "impit";
 import { buildAcceptLanguage, deriveLocale, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
 import { startMihomo } from "../proxy/mihomo.js";
+import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import {
   cleanupManagedChromeProcessesUnder,
   completeMicrosoftLogin,
@@ -368,8 +369,8 @@ async function main(): Promise<void> {
   try {
     await mkdir(outputDir, { recursive: true });
     await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
-    if (args.proxyNode) {
-      mihomoController = await startMihomo({
+    if (args.proxyNode || process.env.PROXY_BROKER_PROXY_URL?.trim()) {
+      mihomoController = createInjectedProxyController() || await startMihomo({
         subscriptionUrl: cfg.mihomoSubscriptionUrl,
         groupName: cfg.mihomoGroupName,
         routeGroupName: cfg.mihomoRouteGroupName,
@@ -379,7 +380,9 @@ async function main(): Promise<void> {
         workDir: path.join(outputDir, "mihomo"),
         downloadDir: downloadsDir,
       });
-      await mihomoController.setGroupProxy(args.proxyNode);
+      if (args.proxyNode) {
+        await mihomoController.setGroupProxy(args.proxyNode);
+      }
       proxyServer = mihomoController.proxyServer;
       proxyGeo = await fetchProxyGeo(proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({ ip: "" }));
     }

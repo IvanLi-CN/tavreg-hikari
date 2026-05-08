@@ -15,8 +15,13 @@ import {
 import { buildAttemptSpawnOptions, resolveWorkerRuntime, type ServerEvent } from "./scheduler.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import { createGrokMailbox, rememberGrokBlockedMailbox } from "./grok-mail-service.js";
-import { pickAutoProxyNode } from "./proxy-node-allocation.js";
 import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpstreamSuccess } from "./upstream-sync.js";
+import {
+  buildProxyBrokerEnv,
+  closeProxyBrokerRuntimeSession,
+  openProxyBrokerRuntimeSession,
+  type ProxyBrokerRuntimeSession,
+} from "./proxy-broker-runtime.js";
 import {
   getMailboxProviderCooldownSnapshot,
   isMailboxProviderCooldownErrorCode,
@@ -29,6 +34,7 @@ interface ActiveAttempt {
   attempt: JobAttemptRecord;
   outputDir: string;
   reservedPorts: { apiPort: number; mixedPort: number };
+  brokerSession?: ProxyBrokerRuntimeSession | null;
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
   releaseResources?: () => Promise<void>;
@@ -184,8 +190,8 @@ export class GrokJobScheduler {
     maxAttempts: number;
   }): Promise<JobRecord> {
     const settings = this.getSettings();
-    if (!settings.subscriptionUrl.trim()) {
-      throw new Error("configure a Mihomo subscription before starting a Grok job");
+    if (!process.env.PROXY_BROKER_API_KEY?.trim()) {
+      throw new Error("configure PROXY_BROKER_API_KEY before starting a Grok job");
     }
     const cooldown = this.getCooldownSnapshot();
     if (cooldown?.active) {
@@ -332,6 +338,7 @@ export class GrokJobScheduler {
     for (const active of this.activeAttempts.values()) {
       this.requestForceStop(active);
     }
+    await Promise.allSettled(Array.from(this.activeAttempts.values()).map((active) => active.releaseResources?.()));
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
     await this.loopPromise;
   }
@@ -559,69 +566,94 @@ export class GrokJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const selectedProxy = pickAutoProxyNode({
-      nodes: this.db.listProxyNodes(),
-      activeAttempts: this.activeAttemptRows(),
+    const brokerSession = await openProxyBrokerRuntimeSession({
+      settings,
+      excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
+    }).catch(async (error) => {
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      throw error;
     });
     this.db.updateAttempt(attempt.id, {
       accountEmail: mailbox.address.toLowerCase(),
+      proxyNode: brokerSession.session.proxy_name,
+      proxyIp: brokerSession.session.selected_ip,
+      brokerSessionId: brokerSession.session.session_id,
+      proxyDisplayAddress: brokerSession.session.display_address,
+      proxyNodeId: brokerSession.session.node_id,
     });
-    const proxyRecord = resolveProxyRecord(this.db, selectedProxy?.nodeName);
-    if (selectedProxy?.nodeName) {
-      this.db.updateAttempt(attempt.id, {
-        proxyNode: selectedProxy.nodeName,
-        proxyIp: proxyRecord?.lastEgressIp ?? null,
+    this.db.touchProxyLease(brokerSession.session.proxy_name, {
+      leasedAt: nowIso(),
+      egressIp: brokerSession.session.selected_ip || null,
+    });
+    const refreshedJob = this.db.getJob(job.id);
+    if (refreshedJob && (isStopInProgressStatus(refreshedJob.status) || refreshedJob.status === "stopped")) {
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(job.id, attempt.id, null, {
+        errorCode: refreshedJob.status === "force_stopping" ? "force_stopped" : "stopped_before_launch",
+        errorMessage: "stopped before launch",
       });
-      this.db.touchProxyLease(selectedProxy.nodeName, {
-        leasedAt: nowIso(),
-        egressIp: proxyRecord?.lastEgressIp ?? null,
-      });
+      this.emit("attempt.updated", { site: this.site, attempt: stoppedAttempt });
+      this.emit("job.updated", { site: this.site, job: this.maybeFinalizeStoppedJob(job.id) || stoppedJob });
+      return;
     }
     const args =
       runtime.command === "bun"
         ? ["run", "src/server/grok-worker.ts"]
         : ["--import", "tsx", "src/server/grok-worker.ts"];
-    if (selectedProxy?.nodeName.trim()) {
-      args.push("--proxy-node", selectedProxy.nodeName.trim());
+    args.push("--proxy-node", brokerSession.session.proxy_name);
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = spawn(runtime.command, args, {
+        ...buildAttemptSpawnOptions(this.repoRoot, {
+          env: {
+            ...process.env,
+            RUN_MODE: job.runMode,
+            GROK_JOB_OUTPUT_DIR: outputDir,
+            GROK_JOB_EMAIL: mailbox.address.toLowerCase(),
+            GROK_JOB_MAILBOX_ID: mailbox.accountId,
+            OUTPUT_ROOT_DIR: outputDir,
+            MIHOMO_SUBSCRIPTION_URL: settings.subscriptionUrl,
+            MIHOMO_GROUP_NAME: settings.groupName,
+            MIHOMO_ROUTE_GROUP_NAME: settings.routeGroupName,
+            MIHOMO_API_PORT: String(reservedPorts.apiPort),
+            MIHOMO_MIXED_PORT: String(reservedPorts.mixedPort),
+            PROXY_CHECK_URL: settings.checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(settings.timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(settings.maxLatencyMs),
+            ...buildProxyBrokerEnv(brokerSession),
+            CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
+            INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
+            KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
+            KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
+            ...(process.env.GROK_KEY_NAME_PREFIX ? { GROK_KEY_NAME_PREFIX: process.env.GROK_KEY_NAME_PREFIX } : {}),
+            ...(process.env.KEY_NAME ? { KEY_NAME: process.env.KEY_NAME } : {}),
+          },
+        }),
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch (error) {
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      throw error;
     }
-    const child = spawn(runtime.command, args, {
-      ...buildAttemptSpawnOptions(this.repoRoot, {
-        env: {
-          ...process.env,
-          RUN_MODE: job.runMode,
-          GROK_JOB_OUTPUT_DIR: outputDir,
-          GROK_JOB_EMAIL: mailbox.address.toLowerCase(),
-          GROK_JOB_MAILBOX_ID: mailbox.accountId,
-          OUTPUT_ROOT_DIR: outputDir,
-          MIHOMO_SUBSCRIPTION_URL: settings.subscriptionUrl,
-          MIHOMO_GROUP_NAME: settings.groupName,
-          MIHOMO_ROUTE_GROUP_NAME: settings.routeGroupName,
-          MIHOMO_API_PORT: String(reservedPorts.apiPort),
-          MIHOMO_MIXED_PORT: String(reservedPorts.mixedPort),
-          PROXY_CHECK_URL: settings.checkUrl,
-          PROXY_CHECK_TIMEOUT_MS: String(settings.timeoutMs),
-          PROXY_LATENCY_MAX_MS: String(settings.maxLatencyMs),
-          CHROME_PROFILE_DIR: path.join(outputDir, "chrome-profile"),
-          INSPECT_CHROME_PROFILE_DIR: path.join(outputDir, "chrome-inspect-profile"),
-          KEEP_BROWSER_OPEN_ON_FAILURE: process.env.KEEP_BROWSER_OPEN_ON_FAILURE || "false",
-          KEEP_BROWSER_OPEN_MS: process.env.KEEP_BROWSER_OPEN_MS || "0",
-          ...(process.env.GROK_KEY_NAME_PREFIX ? { GROK_KEY_NAME_PREFIX: process.env.GROK_KEY_NAME_PREFIX } : {}),
-          ...(process.env.KEY_NAME ? { KEY_NAME: process.env.KEY_NAME } : {}),
-        },
-      }),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
     child.stdin.end();
+    let resourcesReleased = false;
+    const releaseResources = async () => {
+      if (resourcesReleased) return;
+      resourcesReleased = true;
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+    };
     const active: ActiveAttempt = {
       child,
       attempt,
       outputDir,
       reservedPorts,
+      brokerSession,
       stopRequested: null,
       stopRequestedAtMs: null,
-      releaseResources: async () => {
-        await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
-      },
+      releaseResources,
     };
     this.activeAttempts.set(attempt.id, active);
     let stdout = "";

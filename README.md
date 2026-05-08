@@ -5,7 +5,7 @@
 ## 入口
 
 - `bun run start`
-  - 保留原有 CLI 流程，适合单次调试或兼容旧脚本。
+  - 保留原有 CLI 流程，适合单次调试或兼容旧脚本；该入口仍直接使用 Mihomo，需要配置 `MIHOMO_SUBSCRIPTION_URL`。
 - `bun run web:build && bun run web:start`
   - 启动 Web 管理台服务；当前默认面向反向代理 / Forward Auth 场景，提供账号导入、主流程控制、API key 查询、`/settings` → `API Access` 与代理节点面板。
 
@@ -20,7 +20,7 @@
 - Microsoft mailbox Bootstrap 以 Graph callback 写入的 token 状态为最终事实源：如果浏览器最终停在 SSO 中继页，但 DB 已写入 `refresh_token` / `oauth_connected_at`，服务端会按成功收敛，避免把已授权账号误标失败。
 - API Keys 页：查询已提取的完整 KEY、状态、账号归属与提取时间，并支持行内复制。
 - 设置页（API Access）：管理 `/api/integration/v1/*` 的外部接入 API key，支持多 key 创建、一次性明文展示、轮换、禁用与 last-used 审计。
-- 代理节点页：修改 Mihomo 订阅设置、同步节点、检查当前节点/全部节点/单节点，并查看出口 IP、地理信息和 24 小时成功提取数量。
+- 代理节点页：查看 Proxy Broker profile catalog、活动 listener sessions、出口 IP / 地理信息诊断快照和 24 小时成功提取数量。
 
 ## 访问控制与外部接入
 
@@ -61,7 +61,7 @@
 - 复制 `.env.example` 为 `.env.local` 并填写必要配置。
 - 至少需要：
   - OCR/OpenAI 兼容接口配置
-  - `MIHOMO_SUBSCRIPTION_URL`
+  - `PROXY_BROKER_API_KEY`
   - 浏览器与邮箱相关配置（按当前运行模式选择）
   - 如需自动补号，请配置一个或多个提取器 KEY：`EXTRACTOR_ZHANGHAOYA_KEY`、`EXTRACTOR_SHANYOUXIANG_KEY`、`EXTRACTOR_SHANKEYUN_KEY`、`EXTRACTOR_HOTMAIL666_KEY`
 
@@ -83,10 +83,16 @@
   - env: `CHROME_EXECUTABLE_PATH=/opt/fingerprint-browser/chrome`
 - 当前 Linux 发布资产与 Docker 运行镜像都**仅支持 amd64 / x86_64**；arm64 Linux 会在安装阶段直接失败，避免装入错误架构的浏览器。
 
-## 代理设置与发布治理
+## Proxy Broker 代理运行时
 
-- `POST /api/proxies/settings` 现在只接受代理字段：`subscriptionUrl`、`groupName`、`routeGroupName`、`checkUrl`、`timeoutMs`、`maxLatencyMs`、`apiPort`、`mixedPort`。
-- 代理页再次保存订阅地址时，不会再把 `defaultRunMode` 等无关设置一起写回。
+- Web 调度路径不再启动本地 Mihomo 或读取订阅代理池；任务、账号 bootstrap、ChatGPT / Grok / Tavily worker 会通过 Proxy Broker 创建 mixed listener session。
+- 默认 Broker 地址为 `https://proxy-broker.ivanli.cc`，默认 Broker project/profile 为 `Tavily`；可通过 `.env.local` 设置 `PROXY_BROKER_BASE_URL` 与 `PROXY_BROKER_PROFILE_ID` 覆盖。
+- `PROXY_BROKER_API_KEY` 只从运行环境读取，不写入 SQLite，也不会返回给前端；未配置时 Web 任务启动会直接失败。
+- 代理页只读展示 Broker base URL；保存配置时只接受 `proxyBrokerProfileId`、`checkUrl`、`timeoutMs`、`maxLatencyMs`，旧 Mihomo subscription / group / port 字段不再作为 Web 配置入口。
+- 旧 Mihomo CLI 与兼容源码暂时保留，供历史调试路径使用；只运行 Web 管理台时不需要 `MIHOMO_SUBSCRIPTION_URL`。
+
+## 发布治理
+
 - 仓库已补齐 release-intent labels 与质量门禁：`type:*` + `channel:*`、`Review Policy Gate`、`CI PR`、`CI Main`、`Release`、release snapshot、PR release comment。
 - 对外发布到 GHCR 的稳定 tag（例如 `v*` 与 `latest`）现在必须解析为**公开可读**的 single-platform image index / manifest list，而不是单 manifest 镜像对象。
 - 上述公开 tag 必须至少暴露一个 `linux/amd64` 平台描述符，供外部检测链直接读取架构；镜像本体仍保持 amd64-only，不因此承诺 arm64。

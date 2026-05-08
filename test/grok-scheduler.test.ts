@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
 
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
+const originalProxyBrokerApiKey = process.env.PROXY_BROKER_API_KEY;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
@@ -59,8 +60,17 @@ async function createTempDb() {
   return { tempDir, dbPath, appDb };
 }
 
+beforeEach(() => {
+  process.env.PROXY_BROKER_API_KEY = "pbk_test";
+});
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  if (originalProxyBrokerApiKey == null) {
+    delete process.env.PROXY_BROKER_API_KEY;
+  } else {
+    process.env.PROXY_BROKER_API_KEY = originalProxyBrokerApiKey;
+  }
   resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();

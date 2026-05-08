@@ -79,7 +79,6 @@ import type {
   MicrosoftGraphSettingsPayload,
   PageKey,
   JobSite,
-  ProxyCheckScope,
   ProxyCheckState,
   ProxyPayload,
   ProxySettingsUpdate,
@@ -476,7 +475,6 @@ export function App() {
     page: 1,
     pageSize: 10,
   });
-  const [proxyCheckScope, setProxyCheckScope] = useState<ProxyCheckScope>("all");
   const [jobDraftTouched, setJobDraftTouched] = useState(false);
   const [chatGptJobDraftTouched, setChatGptJobDraftTouched] = useState(false);
   const [importBusy, setImportBusy] = useState(false);
@@ -674,12 +672,13 @@ export function App() {
     const payload = await api<ProxyPayload>("/api/proxies");
     setProxies(payload);
   };
-  const applyProxyEventPayload = (payload: { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"] }) => {
+  const applyProxyEventPayload = (payload: { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"]; broker?: ProxyPayload["broker"] }) => {
     setProxies((current) => {
       if (!current) return current;
       return {
         ...current,
         nodes: Array.isArray(payload.nodes) ? payload.nodes : current.nodes,
+        broker: payload.broker || current.broker,
         checkState: payload.checkState || current.checkState,
       };
     });
@@ -1383,7 +1382,7 @@ export function App() {
           || next.type === "proxy.check.completed"
           || next.type === "proxy.check.failed"
         ) {
-          applyProxyEventPayload(next.payload as { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"] });
+          applyProxyEventPayload(next.payload as { checkState?: ProxyCheckState; nodes?: ProxyPayload["nodes"]; broker?: ProxyPayload["broker"] });
         }
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
@@ -1768,22 +1767,10 @@ export function App() {
       setError(null);
       const payload = await api<{ ok: true; accepted: boolean; checkState: ProxyCheckState }>("/api/proxies/check", {
         method: "POST",
-        body: JSON.stringify({ scope: proxyCheckScope }),
+        body: JSON.stringify({ scope: "all" }),
       });
       applyProxyEventPayload({ checkState: payload.checkState });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const handleCheckSingleNode = async (nodeName: string) => {
-    try {
-      setError(null);
-      const payload = await api<{ ok: true; accepted: boolean; checkState: ProxyCheckState }>("/api/proxies/check", {
-        method: "POST",
-        body: JSON.stringify({ scope: "node", nodeName }),
-      });
-      applyProxyEventPayload({ checkState: payload.checkState });
+      await refreshProxies();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -2591,7 +2578,6 @@ export function App() {
               graphSettingsConfigured={microsoftGraphSettings?.configured ?? false}
               connectingAccountIds={connectingAccountIds}
               proxyNodes={proxies?.nodes || []}
-              proxyCheckState={proxies?.checkState || null}
               onImportContentChange={setImportContent}
               onImportGroupChange={setImportGroupName}
               onBatchGroupNameChange={setBatchGroupName}
@@ -2610,7 +2596,6 @@ export function App() {
               onClearSelection={() => setSelectedAccountIds([])}
               onConnectAccount={handleConnectAccount}
               onConnectSelectedAccounts={handleConnectSelectedAccounts}
-              onCheckProxyNode={handleCheckSingleNode}
               onSwitchSessionProxy={handleSwitchAccountSessionProxy}
               onSaveProofMailbox={handleSaveProofMailbox}
               onSaveAvailability={handleSaveAvailability}
@@ -2658,12 +2643,9 @@ export function App() {
       {activePage === "proxies" && proxies ? (
         <ProxiesView
           proxies={proxies}
-          proxyCheckScope={proxyCheckScope}
-          onProxyCheckScopeChange={setProxyCheckScope}
           onProxySettingsChange={updateProxySettings}
           onSaveProxySettings={handleSaveProxySettings}
           onCheckScope={handleProxyCheck}
-          onCheckNode={handleCheckSingleNode}
         />
       ) : null}
 

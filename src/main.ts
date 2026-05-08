@@ -42,6 +42,7 @@ import {
 } from "./microsoft-login-state.js";
 import { isMicrosoftPasskeyInterruptUrl } from "./microsoft-passkey.js";
 import { startMihomo, type MihomoConfig } from "./proxy/mihomo.js";
+import { createInjectedProxyController } from "./server/proxy-broker-runtime.js";
 import { resolveLocalEgressIp, type NodeCheckResult } from "./proxy/check.js";
 import { buildAcceptLanguage, deriveLocale, lookupIpInfo, type GeoInfo } from "./proxy/geo.js";
 import { resolveTaskLedgerDbPath } from "./storage/db-paths.js";
@@ -9771,6 +9772,8 @@ export function loadConfig(): AppConfig {
     : undefined;
   const microsoftProofMailboxAddress = (process.env.MICROSOFT_PROOF_MAILBOX_ADDRESS || "").trim() || undefined;
   const microsoftProofMailboxId = (process.env.MICROSOFT_PROOF_MAILBOX_ID || "").trim() || undefined;
+  const proxyBrokerProxyUrl = (process.env.PROXY_BROKER_PROXY_URL || "").trim();
+  const mihomoSubscriptionUrl = (process.env.MIHOMO_SUBSCRIPTION_URL || "").trim();
   const resolvedChromeExecutablePath = resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH);
   if (resolvedChromeExecutablePath && !isFingerprintChromiumExecutable(resolvedChromeExecutablePath)) {
     throw new Error(`Unsupported CHROME_EXECUTABLE_PATH: ${resolvedChromeExecutablePath}. Only the provided fingerprint browser is allowed.`);
@@ -9835,7 +9838,7 @@ export function loadConfig(): AppConfig {
     microsoftProofMailboxAddress,
     microsoftProofMailboxId,
     microsoftKeepSignedIn: toBool(process.env.MICROSOFT_KEEP_SIGNED_IN, true),
-    mihomoSubscriptionUrl: mustEnv("MIHOMO_SUBSCRIPTION_URL"),
+    mihomoSubscriptionUrl: mihomoSubscriptionUrl || (proxyBrokerProxyUrl ? "proxy-broker://injected" : mustEnv("MIHOMO_SUBSCRIPTION_URL")),
     mihomoGroupName: (process.env.MIHOMO_GROUP_NAME || "CODEX_AUTO").trim() || "CODEX_AUTO",
     mihomoRouteGroupName: (process.env.MIHOMO_ROUTE_GROUP_NAME || "CODEX_ROUTE").trim() || "CODEX_ROUTE",
     mihomoApiPort: toInt(process.env.MIHOMO_API_PORT, defaultApiPort),
@@ -11273,6 +11276,20 @@ async function preselectTaskProxy(
     );
   }
 
+  const injectedController = createInjectedProxyController();
+  if (injectedController) {
+    return await selectProxyNode(
+      injectedController,
+      cfg,
+      args.proxyNode,
+      blockedIps,
+      runtimeRecentProxyIps,
+      undefined,
+      busyProxyNames,
+      busyProxyIps,
+    );
+  }
+
   const batchEnabled = args.need > 1 || args.parallel > 1;
   let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
   if (batchEnabled) {
@@ -11301,6 +11318,14 @@ async function createTaskMailboxSession(
   proxyIpHint?: string,
 ): Promise<MailboxSession> {
   let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
+  const injectedController = createInjectedProxyController();
+  if (injectedController) {
+    const mailbox = await createMailboxSession(cfg, blockedDomains, injectedController.proxyServer);
+    log(
+      `mailbox created via proxy broker task proxy: provider=${mailbox.provider} node=${proxyName} proxy_ip_hint=${proxyIpHint || "unknown"} address=${mailbox.address}`,
+    );
+    return mailbox;
+  }
   const ports = await reserveMihomoPorts();
   mihomoOverrides = {
     apiPort: ports.apiPort,
@@ -11535,7 +11560,8 @@ async function runSingleMode(
     };
   }
 
-  const mihomoController = existingMihomoController || (await startMihomo(buildMihomoConfig(cfg, mihomoOverrides)));
+  const injectedController = createInjectedProxyController();
+  const mihomoController = existingMihomoController || injectedController || (await startMihomo(buildMihomoConfig(cfg, mihomoOverrides)));
   const browserEngine = args.browserEngine || cfg.browserEngine;
   const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.chromeNativeAutomation);
   let browser: Browser | null = null;
@@ -12800,7 +12826,7 @@ async function runSingleMode(
     if (!preserveBrowserCleanup && !useNativeChrome && nativeChromeStop != null) {
       await awaitCleanupBestEffort((nativeChromeStop as () => Promise<void>)(), 5_000);
     }
-    if (!existingMihomoController) {
+    if (!existingMihomoController && !injectedController) {
       await mihomoController.stop();
     }
   }
@@ -12809,7 +12835,8 @@ async function runSingleMode(
 async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
   const mode: "headed" = "headed";
   const notes: string[] = [];
-  const mihomoController = await startMihomo(buildMihomoConfig(cfg));
+  const injectedController = createInjectedProxyController();
+  const mihomoController = injectedController || await startMihomo(buildMihomoConfig(cfg));
   const browserEngine = args.browserEngine || cfg.inspectBrowserEngine;
   const useNativeChrome = shouldUseNativeChromeAutomation(browserEngine, mode, cfg.inspectChromeNative);
   let browser: Browser | null = null;
@@ -12934,7 +12961,9 @@ async function runInspectSites(cfg: AppConfig, args: CliArgs): Promise<void> {
     if (!useNativeChrome && nativeChromeStop) {
       await awaitCleanupBestEffort(nativeChromeStop(), 5_000);
     }
-    await mihomoController.stop();
+    if (!injectedController) {
+      await mihomoController.stop();
+    }
   }
 }
 
@@ -12991,8 +13020,9 @@ async function run(): Promise<void> {
     const blockedMailboxDomains = new Set<string>(historicalBlockedMailboxDomains);
 
     const runOne = async (runIndex: number): Promise<ResultPayload> => {
+      const injectedTaskController = createInjectedProxyController();
       let mihomoOverrides: { apiPort?: number; mixedPort?: number; workDir?: string } | undefined;
-      const ports = batchEnabled
+      const ports = !injectedTaskController && batchEnabled
         ? await reserveMihomoPorts()
         : {
             apiPort: cfg.mihomoApiPort,
@@ -13003,7 +13033,7 @@ async function run(): Promise<void> {
         mixedPort: ports.mixedPort,
         workDir: path.join(OUTPUT_PATH, "mihomo", batchId, `task-${runIndex}`),
       };
-      const taskMihomoController = await startMihomo(buildMihomoConfig(cfg, mihomoOverrides));
+      const taskMihomoController = injectedTaskController || (await startMihomo(buildMihomoConfig(cfg, mihomoOverrides)));
       let preparedTask: PreparedSignupTask | null = null;
       let lastError: Error | null = null;
 
@@ -13053,7 +13083,7 @@ async function run(): Promise<void> {
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             lastError = error instanceof Error ? error : new Error(message);
-            if (attempt < taskRetryMax && preparedTask && shouldRotatePreparedTaskProxy(message)) {
+            if (attempt < taskRetryMax && preparedTask && !injectedTaskController && shouldRotatePreparedTaskProxy(message)) {
               try {
                 await rotatePreparedTaskProxy(
                   cfg,
@@ -13098,7 +13128,9 @@ async function run(): Promise<void> {
           activeProxyNames.delete(preparedTask.proxyName);
           if (preparedTask.proxyIp) activeProxyIps.delete(preparedTask.proxyIp);
         }
-        await taskMihomoController.stop().catch(() => {});
+        if (!injectedTaskController) {
+          await taskMihomoController.stop().catch(() => {});
+        }
       }
 
       throw lastError || new Error(`[${requestedMode}] task failed without result`);

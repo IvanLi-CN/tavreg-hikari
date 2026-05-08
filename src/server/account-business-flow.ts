@@ -22,6 +22,12 @@ import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { buildCodexVibeMonitorCredentialJson } from "./chatgpt-credential-format.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import {
+  buildProxyBrokerEnv,
+  closeProxyBrokerRuntimeSession,
+  openProxyBrokerRuntimeSession,
+  type ProxyBrokerRuntimeSession,
+} from "./proxy-broker-runtime.js";
+import {
   buildAttemptRuntimeSpec,
   buildAttemptSpawnOptions,
   resolveReusableAttemptProxyNode,
@@ -413,28 +419,38 @@ export class AccountBusinessFlowManager {
       outputDir,
     });
     let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    let brokerSession: ProxyBrokerRuntimeSession | null = null;
+    let brokerSettings = this.getSettings();
     try {
       const chromeExecutablePath = assertUsableFingerprintChromiumExecutablePath(
         resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
       );
-      const settings = this.getSettings();
+      brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
-      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-      if (selectedProxyNode) {
-        this.db.touchProxyLease(selectedProxyNode);
-      }
+      brokerSession = await openProxyBrokerRuntimeSession({
+        settings: brokerSettings,
+        preferredIp: account.browserSession?.proxyIp || null,
+      });
+      this.db.updateAttempt(attemptId, {
+        proxyNode: brokerSession.session.proxy_name,
+        proxyIp: brokerSession.session.selected_ip,
+        brokerSessionId: brokerSession.session.session_id,
+        proxyDisplayAddress: brokerSession.session.display_address,
+        proxyNodeId: brokerSession.session.node_id,
+      });
       const runtimeSpec = buildAttemptRuntimeSpec({
         job: hiddenJob,
         account,
         outputDir,
         sharedLedgerPath: this.taskLedgerDbPath,
-        settings,
+        settings: brokerSettings,
         reservedPorts: {
           apiPort: portLeases.apiPort.port,
           mixedPort: portLeases.mixedPort.port,
         },
+        brokerSession,
         chromeExecutablePath,
-        selectedProxyNode,
+        selectedProxyNode: brokerSession.session.proxy_name,
         baseEnv: this.buildCommonFlowEnv({ account, mode, site, outputDir, retainPath }),
       });
       const child = spawn(runtimeSpec.command, runtimeSpec.args, {
@@ -457,6 +473,9 @@ export class AccountBusinessFlowManager {
         jobId: hiddenJob.id,
         attemptId,
         onClose: async (code, signal, lifecycle) => {
+          if (brokerSession) {
+            await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+          }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
             apiKey?: string | null;
@@ -567,6 +586,9 @@ export class AccountBusinessFlowManager {
         },
       });
     } catch (error) {
+      if (brokerSession) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+      }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
         hiddenJobId: hiddenJob.id,
@@ -593,16 +615,27 @@ export class AccountBusinessFlowManager {
       outputDir,
     });
     let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    let brokerSession: ProxyBrokerRuntimeSession | null = null;
+    let brokerSettings = this.getSettings();
     try {
+      brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       const runtime = process.versions.bun
         ? { command: process.execPath || "bun", bootstrapArgs: ["run", "src/server/microsoft-account-worker.ts"] }
         : resolveWorkerRuntime();
       const workerArgs = buildWorkerScriptArgs(runtime, "src/server/microsoft-account-worker.ts");
-      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id) || account.browserSession?.proxyNode?.trim() || null;
-      if (selectedProxyNode) {
-        this.db.touchProxyLease(selectedProxyNode);
-      }
+      brokerSession = await openProxyBrokerRuntimeSession({
+        settings: brokerSettings,
+        preferredIp: account.browserSession?.proxyIp || null,
+      });
+      const selectedProxyNode = brokerSession.session.proxy_name;
+      this.db.updateAttempt(attemptId, {
+        proxyNode: brokerSession.session.proxy_name,
+        proxyIp: brokerSession.session.selected_ip,
+        brokerSessionId: brokerSession.session.session_id,
+        proxyDisplayAddress: brokerSession.session.display_address,
+        proxyNodeId: brokerSession.session.node_id,
+      });
       await mkdir(outputDir, { recursive: true });
       const args = selectedProxyNode ? [...workerArgs, "--proxy-node", selectedProxyNode] : [...workerArgs];
       const child = spawn(runtime.command, args, {
@@ -616,14 +649,15 @@ export class AccountBusinessFlowManager {
               retainPath,
             }),
             MICROSOFT_ACCOUNT_JOB_OUTPUT_DIR: outputDir,
-            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-            MIHOMO_GROUP_NAME: this.getSettings().groupName,
-            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_SUBSCRIPTION_URL: brokerSettings.subscriptionUrl,
+            MIHOMO_GROUP_NAME: brokerSettings.groupName,
+            MIHOMO_ROUTE_GROUP_NAME: brokerSettings.routeGroupName,
             MIHOMO_API_PORT: String(portLeases.apiPort.port),
             MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-            PROXY_CHECK_URL: this.getSettings().checkUrl,
-            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            PROXY_CHECK_URL: brokerSettings.checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(brokerSettings.timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(brokerSettings.maxLatencyMs),
+            ...buildProxyBrokerEnv(brokerSession),
             CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
               ? path.resolve(account.browserSession.profilePath.trim())
               : path.join(outputDir, "chrome-profile"),
@@ -649,6 +683,10 @@ export class AccountBusinessFlowManager {
         jobId: hiddenJob.id,
         attemptId,
         onClose: async (code, signal, lifecycle) => {
+          const sessionId = brokerSession?.session.session_id;
+          if (sessionId) {
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+          }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
           const error = await readJsonFile<{ error?: string }>(path.join(outputDir, "error.json"));
@@ -711,6 +749,9 @@ export class AccountBusinessFlowManager {
         },
       });
     } catch (error) {
+      if (brokerSession) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+      }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
         hiddenJobId: hiddenJob.id,
@@ -829,16 +870,27 @@ export class AccountBusinessFlowManager {
       outputDir,
     });
     let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    let brokerSession: ProxyBrokerRuntimeSession | null = null;
+    let brokerSettings = this.getSettings();
     try {
       const draft = await this.createChatGptDraft();
+      brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
-      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
+      brokerSession = await openProxyBrokerRuntimeSession({
+        settings: brokerSettings,
+        preferredIp: account.browserSession?.proxyIp || null,
+      });
+      const selectedProxyNode = brokerSession.session.proxy_name;
       const args = buildWorkerScriptArgs(runtime, "src/server/chatgpt-worker.ts");
-      if (selectedProxyNode?.trim()) {
-        args.push("--proxy-node", selectedProxyNode.trim());
-        this.db.touchProxyLease(selectedProxyNode.trim());
-      }
+      args.push("--proxy-node", selectedProxyNode);
+      this.db.updateAttempt(attemptId, {
+        proxyNode: brokerSession.session.proxy_name,
+        proxyIp: brokerSession.session.selected_ip,
+        brokerSessionId: brokerSession.session.session_id,
+        proxyDisplayAddress: brokerSession.session.display_address,
+        proxyNodeId: brokerSession.session.node_id,
+      });
       await mkdir(outputDir, { recursive: true });
       const child = spawn(runtime.command, args, {
         ...buildAttemptSpawnOptions(this.repoRoot, {
@@ -858,14 +910,15 @@ export class AccountBusinessFlowManager {
             CHATGPT_JOB_BIRTH_DATE: draft.birthDate,
             CHATGPT_JOB_MAILBOX_ID: String(mailbox.id),
             CHATGPT_JOB_OUTPUT_DIR: outputDir,
-            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-            MIHOMO_GROUP_NAME: this.getSettings().groupName,
-            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_SUBSCRIPTION_URL: brokerSettings.subscriptionUrl,
+            MIHOMO_GROUP_NAME: brokerSettings.groupName,
+            MIHOMO_ROUTE_GROUP_NAME: brokerSettings.routeGroupName,
             MIHOMO_API_PORT: String(portLeases.apiPort.port),
             MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-            PROXY_CHECK_URL: this.getSettings().checkUrl,
-            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            PROXY_CHECK_URL: brokerSettings.checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(brokerSettings.timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(brokerSettings.maxLatencyMs),
+            ...buildProxyBrokerEnv(brokerSession),
             CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
               ? path.resolve(account.browserSession.profilePath.trim())
               : path.join(outputDir, "chrome-profile"),
@@ -891,6 +944,10 @@ export class AccountBusinessFlowManager {
         jobId: hiddenJob.id,
         attemptId,
         onClose: async (code, signal, lifecycle) => {
+          const sessionId = brokerSession?.session.session_id;
+          if (sessionId) {
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+          }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
             email?: string;
@@ -998,6 +1055,9 @@ export class AccountBusinessFlowManager {
         },
       });
     } catch (error) {
+      if (brokerSession) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+      }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
         hiddenJobId: hiddenJob.id,
@@ -1025,15 +1085,26 @@ export class AccountBusinessFlowManager {
       outputDir,
     });
     let portLeases: Awaited<ReturnType<typeof reserveMihomoPortLeases>> | null = null;
+    let brokerSession: ProxyBrokerRuntimeSession | null = null;
+    let brokerSettings = this.getSettings();
     try {
+      brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
-      const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
+      brokerSession = await openProxyBrokerRuntimeSession({
+        settings: brokerSettings,
+        preferredIp: account.browserSession?.proxyIp || null,
+      });
+      const selectedProxyNode = brokerSession.session.proxy_name;
       const args = buildWorkerScriptArgs(runtime, "src/server/grok-worker.ts");
-      if (selectedProxyNode?.trim()) {
-        args.push("--proxy-node", selectedProxyNode.trim());
-        this.db.touchProxyLease(selectedProxyNode.trim());
-      }
+      args.push("--proxy-node", selectedProxyNode);
+      this.db.updateAttempt(attemptId, {
+        proxyNode: brokerSession.session.proxy_name,
+        proxyIp: brokerSession.session.selected_ip,
+        brokerSessionId: brokerSession.session.session_id,
+        proxyDisplayAddress: brokerSession.session.display_address,
+        proxyNodeId: brokerSession.session.node_id,
+      });
       await mkdir(outputDir, { recursive: true });
       const child = spawn(runtime.command, args, {
         ...buildAttemptSpawnOptions(this.repoRoot, {
@@ -1050,14 +1121,15 @@ export class AccountBusinessFlowManager {
             GROK_JOB_OUTPUT_DIR: outputDir,
             GROK_JOB_EMAIL: account.microsoftEmail,
             GROK_JOB_MAILBOX_ID: String(mailbox.id),
-            MIHOMO_SUBSCRIPTION_URL: this.getSettings().subscriptionUrl,
-            MIHOMO_GROUP_NAME: this.getSettings().groupName,
-            MIHOMO_ROUTE_GROUP_NAME: this.getSettings().routeGroupName,
+            MIHOMO_SUBSCRIPTION_URL: brokerSettings.subscriptionUrl,
+            MIHOMO_GROUP_NAME: brokerSettings.groupName,
+            MIHOMO_ROUTE_GROUP_NAME: brokerSettings.routeGroupName,
             MIHOMO_API_PORT: String(portLeases.apiPort.port),
             MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port),
-            PROXY_CHECK_URL: this.getSettings().checkUrl,
-            PROXY_CHECK_TIMEOUT_MS: String(this.getSettings().timeoutMs),
-            PROXY_LATENCY_MAX_MS: String(this.getSettings().maxLatencyMs),
+            PROXY_CHECK_URL: brokerSettings.checkUrl,
+            PROXY_CHECK_TIMEOUT_MS: String(brokerSettings.timeoutMs),
+            PROXY_LATENCY_MAX_MS: String(brokerSettings.maxLatencyMs),
+            ...buildProxyBrokerEnv(brokerSession),
             CHROME_PROFILE_DIR: account.browserSession?.profilePath?.trim()
               ? path.resolve(account.browserSession.profilePath.trim())
               : path.join(outputDir, "chrome-profile"),
@@ -1083,6 +1155,10 @@ export class AccountBusinessFlowManager {
         jobId: hiddenJob.id,
         attemptId,
         onClose: async (code, signal, lifecycle) => {
+          const sessionId = brokerSession?.session.session_id;
+          if (sessionId) {
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+          }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
             email?: string;
@@ -1184,6 +1260,9 @@ export class AccountBusinessFlowManager {
         },
       });
     } catch (error) {
+      if (brokerSession) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+      }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
         hiddenJobId: hiddenJob.id,
