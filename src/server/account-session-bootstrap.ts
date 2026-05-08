@@ -1,5 +1,10 @@
 import type { MicrosoftAccountRecord } from "../storage/app-db.js";
 
+export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY = 3;
+export const MAX_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY = 10;
+export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS = 5 * 60_000;
+export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS = 10_000;
+
 export type AccountBatchBootstrapMode = "pending_only" | "force";
 export type AccountSessionRebootstrapRequest = {
   force: boolean;
@@ -169,6 +174,95 @@ export function resolveBootstrapQueueDisposition(input: { alreadyQueued: boolean
     return "queue";
   }
   return input.force ? "defer_force" : "skip";
+}
+
+export function normalizeMicrosoftAccountBootstrapConcurrency(value: unknown): number {
+  const parsed = typeof value === "string" && value.trim()
+    ? Number.parseInt(value.trim(), 10)
+    : typeof value === "number"
+      ? value
+      : DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY;
+  if (!Number.isFinite(parsed)) return DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY;
+  return Math.min(MAX_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY, Math.max(1, Math.trunc(parsed)));
+}
+
+export function normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(value: unknown): number {
+  const parsed = typeof value === "string" && value.trim()
+    ? Number.parseInt(value.trim(), 10)
+    : typeof value === "number"
+      ? value
+      : DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS;
+  if (!Number.isFinite(parsed)) return DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS;
+  return Math.max(1_000, Math.trunc(parsed));
+}
+
+export function normalizeMicrosoftAccountBootstrapKillGraceMs(value: unknown): number {
+  const parsed = typeof value === "string" && value.trim()
+    ? Number.parseInt(value.trim(), 10)
+    : typeof value === "number"
+      ? value
+      : DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS;
+  if (!Number.isFinite(parsed)) return DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS;
+  return Math.max(1_000, Math.trunc(parsed));
+}
+
+export class AccountSessionBootstrapDispatcher {
+  private readonly pendingAccountIds: number[] = [];
+  private readonly pendingAccountIdSet = new Set<number>();
+  private readonly activeAccountIds = new Set<number>();
+  private pumping = false;
+
+  constructor(
+    private readonly getConcurrency: () => number,
+    private readonly runAccount: (accountId: number) => Promise<void>,
+    private readonly onAccountSettled?: (accountId: number) => void,
+  ) {}
+
+  queuedAccountIds(): ReadonlySet<number> {
+    return new Set([...this.pendingAccountIdSet, ...this.activeAccountIds]);
+  }
+
+  activeCount(): number {
+    return this.activeAccountIds.size;
+  }
+
+  isQueuedOrActive(accountId: number): boolean {
+    return this.pendingAccountIdSet.has(accountId) || this.activeAccountIds.has(accountId);
+  }
+
+  enqueue(accountId: number): boolean {
+    if (!Number.isInteger(accountId) || accountId < 1 || this.isQueuedOrActive(accountId)) {
+      return false;
+    }
+    this.pendingAccountIds.push(accountId);
+    this.pendingAccountIdSet.add(accountId);
+    this.pump();
+    return true;
+  }
+
+  private pump(): void {
+    if (this.pumping) return;
+    this.pumping = true;
+    queueMicrotask(() => {
+      this.pumping = false;
+      const concurrency = normalizeMicrosoftAccountBootstrapConcurrency(this.getConcurrency());
+      while (this.activeAccountIds.size < concurrency && this.pendingAccountIds.length > 0) {
+        const accountId = this.pendingAccountIds.shift()!;
+        this.pendingAccountIdSet.delete(accountId);
+        if (this.activeAccountIds.has(accountId)) continue;
+        this.activeAccountIds.add(accountId);
+        void this.runAccount(accountId)
+          .catch(() => {
+            // The bootstrap flow owns account/session failure state.
+          })
+          .finally(() => {
+            this.activeAccountIds.delete(accountId);
+            this.onAccountSettled?.(accountId);
+            this.pump();
+          });
+      }
+    });
+  }
 }
 
 export function shouldForceImportedAccountBootstrap(

@@ -202,6 +202,9 @@ export interface AppSettings extends Record<string, unknown> {
   microsoftGraphClientSecret: string;
   microsoftGraphRedirectUri: string;
   microsoftGraphAuthority: string;
+  microsoftAccountBootstrapConcurrency: number;
+  microsoftAccountBootstrapWorkerTimeoutMs: number;
+  microsoftAccountBootstrapKillGraceMs: number;
   upstreamTavregSyncEnabled: boolean;
   upstreamTavregBaseUrl: string;
   upstreamTavregApiKey: string;

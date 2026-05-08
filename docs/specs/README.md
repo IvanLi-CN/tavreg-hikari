@@ -26,7 +26,7 @@
 | 9h2xd | 收敛 macOS 下 fingerprint Chromium + CDP 登录恢复链路 | 已完成 | `9h2xd-macos-headless-chrome-launch/SPEC.md` | 2026-03-27 | 保持 fingerprint-chromium + CDP，worker 优先走 Node，并修正 Tavily home / passkey 恢复链路 |
 | jg53e | 微软邮箱 Graph/OAuth 收信模块 | 已完成 | `jg53e-microsoft-mail-inbox/SPEC.md` | 2026-04-19 | `/mailboxes` 三栏页、独立 Graph 设置页、账号页收信状态与 Storybook 视觉证据已完成收口 |
 | rxae7 | 默认 SQLite 数据库文件名规范化 | 已完成 | `rxae7-registry-db-filename/SPEC.md` | 2026-03-31 | 默认库名收敛为 tavreg-hikari.sqlite，并兼容历史 signup-tasks.sqlite |
-| wht6n | 微软账号持久会话、代理复用与 Profile 落库改造 | 已完成 | `wht6n-persistent-account-browser-sessions/SPEC.md` | 2026-04-19 | 账号级 session bootstrap、proxy reuse、profile path 落库、服务端筛选与账号页视觉证据已闭环 |
+| wht6n | 微软账号持久会话、代理复用与 Profile 落库改造 | 已完成 | `wht6n-persistent-account-browser-sessions/SPEC.md` | 2026-05-09 | 账号级 session bootstrap、proxy reuse、profile path 落库、服务端筛选、并发 bootstrap 与 worker 超时回收已闭环 |
 | 3jg3v | 提号器 Outlook/Hotmail/不限 类型全链路支持 | 已完成 | `3jg3v-extractor-account-type-switch/SPEC.md` | 2026-04-04 | 提号器、自动补号与号源请求参数统一支持 `outlook \| hotmail \| unlimited`，含 Storybook 证据 |
 | pakwp | ChatGPT 站点接入现有 Web 管理台 | 已完成 | `pakwp-chatgpt-web-site/SPEC.md` | 2026-04-19 | 多站点 current job、ChatGPT 页面、完整凭据入库、导出与视觉证据已闭环 |
 | 3hrx4 | Grok 第三站点接入现有 Web 管理台 | 已完成 | `3hrx4-grok-web-site/SPEC.md` | 2026-04-19 | 第三站点路由、Grok scheduler/worker、独立 keys tab、SSO 导出与 Storybook 证据已闭环 |

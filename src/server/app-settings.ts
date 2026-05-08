@@ -1,3 +1,8 @@
+import {
+  normalizeMicrosoftAccountBootstrapConcurrency,
+  normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
+} from "./account-session-bootstrap.js";
 import { normalizeAccountExtractorAccountType, type AppSettings } from "../storage/app-db.js";
 
 export const PROXY_SETTINGS_KEYS = [
@@ -60,6 +65,15 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   if (typeof input.microsoftGraphAuthority === "string") {
     const normalizedAuthority = input.microsoftGraphAuthority.trim().replace(/^\/+|\/+$/g, "");
     next.microsoftGraphAuthority = normalizedAuthority || "common";
+  }
+  if (input.microsoftAccountBootstrapConcurrency !== undefined) {
+    next.microsoftAccountBootstrapConcurrency = normalizeMicrosoftAccountBootstrapConcurrency(input.microsoftAccountBootstrapConcurrency);
+  }
+  if (input.microsoftAccountBootstrapWorkerTimeoutMs !== undefined) {
+    next.microsoftAccountBootstrapWorkerTimeoutMs = normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(input.microsoftAccountBootstrapWorkerTimeoutMs);
+  }
+  if (input.microsoftAccountBootstrapKillGraceMs !== undefined) {
+    next.microsoftAccountBootstrapKillGraceMs = normalizeMicrosoftAccountBootstrapKillGraceMs(input.microsoftAccountBootstrapKillGraceMs);
   }
   if (typeof input.upstreamTavregSyncEnabled === "boolean") {
     next.upstreamTavregSyncEnabled = input.upstreamTavregSyncEnabled;

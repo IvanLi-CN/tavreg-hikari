@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-31
-- Last: 2026-04-26
+- Last: 2026-05-09
 
 ## 背景 / 问题陈述
 
@@ -19,6 +19,7 @@
 
 - 为每个微软账号维护唯一的持久浏览器会话记录，保存 profile 绝对路径、代理节点/IP/地区快照与最近 bootstrap/使用时间。
 - 手工导入与自动提取账号后立即进入 bootstrap 队列，只有 Tavily 登录 + Graph 邮箱 Bootstrap 成功后才标记为可调度。
+- 账号 session bootstrap 支持有界并发，默认同时处理 3 个账号，并可通过环境变量与 Graph 设置页调整。
 - Tavily 主流程在账号已有 ready 会话时复用该 profile 和代理选择结果，不再创建新的账号级临时 profile。
 - 代理选择遵循固定规则：同 IP 仍可用优先；否则同 `region` 内健康节点按 LRU；否则全池健康节点按 LRU。
 - 在账号页展示最小可见的会话状态、代理/IP、profile 路径摘要和重试入口，并补齐 Storybook 与视觉证据。
@@ -36,6 +37,7 @@
 
 - `account_browser_sessions` 数据模型、proxy region/LRU 扩展与相关 repository API
 - 导入/自动提取后的统一 bootstrap 队列与状态机
+- Bootstrap 有界并发、worker 超时终止与资源释放兜底
 - Tavily 登录 profile 持久化、Graph OAuth 自动 Bootstrap、失败留痕与手动重试
 - 调度器对 ready session 的准入控制与 profile/proxy 复用
 - 账号页最小 UI、Storybook、视觉证据、README/spec 更新
@@ -62,6 +64,7 @@
 ### SHOULD
 
 - 自动 bootstrap 使用与后续调度一致的代理选择规则。
+- bootstrap worker 超过配置超时后必须先 `SIGTERM`，超过 kill grace 后 `SIGKILL` 兜底，且释放 mihomo 端口 lease。
 - 会话 bootstrap 和调度成功后都更新 proxy/session 的 lease 时间，避免 LRU 失真。
 - Graph 设置缺失时把会话标记为 blocked，并允许后续手动重试恢复。
 
@@ -75,6 +78,7 @@
 
 - 手工导入账号：账号落库 -> ensure session row -> 进入 bootstrap 队列 -> 选代理 -> 用持久 profile 登录 Tavily Home -> 自动完成 Graph 邮箱 Bootstrap -> 成功后 `browserSession.status=ready`。
 - 自动提取账号：候选账号先导入本地 -> 进入 bootstrap 队列 -> 只有 bootstrap 成功后才计入当前 job 的可调度账号池。
+- 并发控制：不同账号可按 `microsoftAccountBootstrapConcurrency` 并行 bootstrap；同一账号在 pending/active 期间只能存在一个 bootstrap，重复 force 请求沿用 defer 语义在当前账号结束后重新排队。
 - 主流程调度：选到 ready session 的账号时，复用其持久 profile；若原 IP 不再可用，则按同 region / 全池 LRU 选择代理并继续复用同一 profile。
 - 手动重试：账号页点击重试入口后重新排队 bootstrap，并刷新会话状态。
 - 批量工具栏：默认“批量 Bootstrap”只处理未成功 Bootstrap 的账号；“强制 Bootstrap”允许忽略成功判定，但两者都继续跳过锁定、禁用、已被占用或当前正在 bootstrapping 的账号。
@@ -85,6 +89,7 @@
 - 代理池中找不到原 IP：按 `proxy_region` 匹配健康节点 LRU；仍找不到则退到全池健康节点 LRU。
 - proxy inventory 不再包含历史 pinned/lease 节点时，必须自动清理陈旧引用。
 - bootstrap 任一步失败时保留账号与 session 行，状态写入 `failed` 或 `blocked`，允许后续重试。
+- bootstrap worker 卡住或超时：父进程必须终止 worker 进程组、释放端口租约、写入失败态并继续调度队列中的其他账号。
 - 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
 
 ## 接口契约（Interfaces & Contracts）
@@ -100,6 +105,7 @@
 | `GET /api/accounts?sessionStatus=&mailboxStatus=` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React accounts view | 服务端真相源筛选 |
 | `POST /api/accounts/session-bootstrap/preview` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 跨分页批量 Bootstrap preview |
 | `POST /api/accounts/:id/session/rebootstrap` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 手动重试 bootstrap |
+| `GET/POST /api/microsoft-mail/settings` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React settings view | Graph 设置与 bootstrap 性能参数 |
 | `account.updated session_*` | events | internal | Modify | ./contracts/events.md | server/scheduler | web SSE client | 会话状态推送 |
 
 ### 契约文档（按 Kind 拆分）
@@ -121,6 +127,9 @@
 - Given 账号页桌面态空间不足，When 点击“收起工具列”，Then 左侧提号器与导入区整列收起，右侧账号池占满主体宽度，并保留“展开工具列”入口。
 - Given 在账号页设置 `Session` 或 `收信状态` 筛选，When 触发查询，Then 过滤作用于筛选后的全量结果集，而不是当前页前端假过滤。
 - Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 仅未成功 Bootstrap 的账号会进入队列；When 触发“强制 Bootstrap”，Then 已成功账号也可重新进入队列。
+- Given 多个账号同时排队 Bootstrap，When `microsoftAccountBootstrapConcurrency=3`，Then 任意时刻最多 3 个 worker 同时运行，且一个 worker 失败或超时不会阻塞后续账号。
+- Given worker 超过 `microsoftAccountBootstrapWorkerTimeoutMs`，When kill grace 也耗尽，Then 父进程必须对 worker 进程组执行 `SIGKILL` 兜底，并释放本次 mihomo 端口租约。
+- Given 打开 Microsoft Graph 设置页，When 修改 Bootstrap 并发、Worker 超时秒数与强杀宽限秒数，Then `/api/microsoft-mail/settings` 能保存并返回规范化后的毫秒字段值。
 - Given mailbox OAuth 已写入 token 且相关验证测试需要读取 integration detail API，When 当前日期晚于旧固定样例过期时间，Then 测试必须使用相对未来的 access-token 过期时间，避免误走 refresh 分支掩盖实际 bootstrap 行为。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
@@ -155,6 +164,7 @@
 
 - `docs/specs/README.md`: 新增 spec 索引并更新状态
 - `README.md`: 补充持久 session/profile/代理复用说明
+- `.env.example`: 补充 Microsoft account bootstrap 并发与超时参数
 
 ## 计划资产（Plan assets）
 
@@ -199,6 +209,11 @@
 
 ![账号页 Session 与收信状态筛选](./assets/accounts-status-filters.png)
 
+- Storybook canvas：`Views/MailboxSettingsView / Configured`
+  - 证明 Microsoft Graph 设置页已暴露 Bootstrap 并发、Worker 超时与强杀宽限三个运行时调优项，时间项以秒展示，并在当前状态摘要中回显生效值。
+
+![Microsoft Graph 设置页 Bootstrap 性能参数](./assets/mailbox-settings-bootstrap-performance.png)
+
 ## 资产晋升（Asset promotion）
 
 None
@@ -210,23 +225,27 @@ None
 - [x] M3: 调度器改为消费 ready session 并复用 profile/proxy
 - [x] M4: 账号页、Storybook 与视觉证据完成
 - [x] M5: 验证、review 收敛与 PR-ready 收口
+- [x] M6: Bootstrap 有界并发、超时强杀与设置页调优收口
 
 ## 方案概述（Approach, high-level）
 
 - 新增账号级 session 表作为账号、代理、持久 profile 的真相源。
 - bootstrap 与调度都复用同一套代理选择规则，并通过 proxy node `last_leased_at` 保持 LRU。
+- bootstrap 调度由串行 exclusive runner 升级为有界并发池；同账号去重，不同账号按配置并行。
 - 通过统一 Node worker 串起 Tavily 登录与 Graph OAuth；主流程只消费 ready session，不感知 bootstrap 细节。
-- UI 只暴露最小状态，不新增独立工作台。
+- UI 只暴露最小状态与 Graph 设置页调优项，不新增独立工作台。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：持久 profile 与旧临时 profile 的清理边界处理不当会误杀其他账号会话。
 - 风险：自动提取场景若 bootstrap 过慢，会拖慢补号节奏，需要通过 waiting/ready 准入控制避免过量补号。
+- 风险：并发过高会放大代理、浏览器与本机资源压力，因此默认 3、上限 10。
 - 假设：Graph 设置完整是会话 ready 的必要条件。
 - 假设：同账号不会并发启动多个使用同一持久 profile 的任务。
 
 ## 变更记录（Change log）
 
+- 2026-05-09: 增加账号 session bootstrap 有界并发、worker timeout + SIGKILL 兜底，以及 Graph 设置页性能参数。
 - 2026-04-26: 补充 Graph OAuth/收信 integration detail API 的 token 过期测试边界，避免日期推进导致验证误判。
 - 2026-04-07: 补充账号页桌面态工具列收起、`Session / 收信状态` 服务端筛选，以及批量 Bootstrap preview / 强制模式的收口说明与视觉证据。
 - 2026-03-31: 初版 spec，冻结账号持久会话、代理复用与 profile 落库改造范围。
