@@ -6,14 +6,10 @@ import {
 import { normalizeAccountExtractorAccountType, type AppSettings } from "../storage/app-db.js";
 
 export const PROXY_SETTINGS_KEYS = [
-  "subscriptionUrl",
-  "groupName",
-  "routeGroupName",
+  "proxyBrokerProfileId",
   "checkUrl",
   "timeoutMs",
   "maxLatencyMs",
-  "apiPort",
-  "mixedPort",
 ] as const;
 
 export type ProxySettingsKey = typeof PROXY_SETTINGS_KEYS[number];
@@ -32,6 +28,8 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
     );
   };
   if (typeof input.subscriptionUrl === "string") next.subscriptionUrl = input.subscriptionUrl.trim();
+  if (typeof input.proxyBrokerBaseUrl === "string") next.proxyBrokerBaseUrl = input.proxyBrokerBaseUrl.trim().replace(/\/+$/g, "");
+  if (typeof input.proxyBrokerProfileId === "string") next.proxyBrokerProfileId = input.proxyBrokerProfileId.trim() || "Tavily";
   if (typeof input.groupName === "string") next.groupName = input.groupName.trim();
   if (typeof input.routeGroupName === "string") next.routeGroupName = input.routeGroupName.trim();
   if (typeof input.checkUrl === "string") next.checkUrl = input.checkUrl.trim();
@@ -95,14 +93,10 @@ export function listUnexpectedProxySettingsKeys(input: Record<string, unknown> |
 export function normalizeProxySettings(input: Partial<ProxySettingsUpdate>): Partial<ProxySettingsUpdate> {
   const normalized = normalizeSettings(input);
   return {
-    ...(Object.prototype.hasOwnProperty.call(normalized, "subscriptionUrl") ? { subscriptionUrl: normalized.subscriptionUrl as string } : {}),
-    ...(Object.prototype.hasOwnProperty.call(normalized, "groupName") ? { groupName: normalized.groupName as string } : {}),
-    ...(Object.prototype.hasOwnProperty.call(normalized, "routeGroupName") ? { routeGroupName: normalized.routeGroupName as string } : {}),
+    ...(Object.prototype.hasOwnProperty.call(normalized, "proxyBrokerProfileId") ? { proxyBrokerProfileId: normalized.proxyBrokerProfileId as string } : {}),
     ...(Object.prototype.hasOwnProperty.call(normalized, "checkUrl") ? { checkUrl: normalized.checkUrl as string } : {}),
     ...(Object.prototype.hasOwnProperty.call(normalized, "timeoutMs") ? { timeoutMs: normalized.timeoutMs as number } : {}),
     ...(Object.prototype.hasOwnProperty.call(normalized, "maxLatencyMs") ? { maxLatencyMs: normalized.maxLatencyMs as number } : {}),
-    ...(Object.prototype.hasOwnProperty.call(normalized, "apiPort") ? { apiPort: normalized.apiPort as number } : {}),
-    ...(Object.prototype.hasOwnProperty.call(normalized, "mixedPort") ? { mixedPort: normalized.mixedPort as number } : {}),
   };
 }
 

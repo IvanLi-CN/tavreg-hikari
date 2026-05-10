@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { Impit } from "impit";
 import { startMihomo } from "../proxy/mihomo.js";
+import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import { buildAcceptLanguage, lookupIpInfo, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
 import { buildCfMailAuthHeaders, normalizeCfMailBaseUrl } from "../cfmail-api.js";
 import { isFingerprintChromiumExecutable } from "../fingerprint-browser.js";
@@ -2533,7 +2534,8 @@ async function run(): Promise<void> {
   const displayName = randomName();
   let failureStage = "bootstrap_mihomo";
 
-  const mihomo = await startMihomo({
+  const injectedProxy = createInjectedProxyController();
+  const mihomo = injectedProxy || await startMihomo({
     subscriptionUrl: requireEnv("MIHOMO_SUBSCRIPTION_URL"),
     apiPort: Number.parseInt(requireEnv("MIHOMO_API_PORT"), 10),
     mixedPort: Number.parseInt(requireEnv("MIHOMO_MIXED_PORT"), 10),
@@ -2543,7 +2545,7 @@ async function run(): Promise<void> {
     workDir: path.join(outputDir, "mihomo"),
     downloadDir: path.join(process.cwd(), "downloads", "mihomo"),
   });
-  await writeStageMarker(outputDir, "bootstrap:mihomo_ready", {
+  await writeStageMarker(outputDir, injectedProxy ? "bootstrap:proxy_broker_ready" : "bootstrap:mihomo_ready", {
     proxyServer: mihomo.proxyServer,
   });
   if (args.proxyNode) {

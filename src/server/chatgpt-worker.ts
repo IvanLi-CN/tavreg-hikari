@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { getCfMailMessage, listCfMailMessages, normalizeCfMailBaseUrl, type CfMailMessageSummary } from "../cfmail-api.js";
 import { assertUsableFingerprintChromiumExecutablePath } from "../fingerprint-browser.js";
 import { startMihomo } from "../proxy/mihomo.js";
+import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import { calculateAgeYears, isBirthDateReadyFromVisibleValues, profileFullName } from "./chatgpt-profile.js";
 import { completeMicrosoftLogin, isMicrosoftLoginFlowUrl, launchBrowserWithEngine, launchNativeChromeCdp, loadConfig, type AppConfig } from "../main.js";
 import {
@@ -1646,7 +1647,8 @@ async function run(): Promise<void> {
     callbackUrl: CALLBACK_URL,
     mode: "observed_url_only",
   });
-  const mihomo = await startMihomo({
+  const injectedProxy = createInjectedProxyController();
+  const mihomo = injectedProxy || await startMihomo({
     subscriptionUrl: requireEnv("MIHOMO_SUBSCRIPTION_URL"),
     apiPort: Number.parseInt(requireEnv("MIHOMO_API_PORT"), 10),
     mixedPort: Number.parseInt(requireEnv("MIHOMO_MIXED_PORT"), 10),
@@ -1656,7 +1658,7 @@ async function run(): Promise<void> {
     workDir: `${outputDir}/mihomo`,
     downloadDir: `${process.cwd()}/downloads/mihomo`,
   });
-  await writeStageMarker(outputDir, "bootstrap:mihomo_ready", {
+  await writeStageMarker(outputDir, injectedProxy ? "bootstrap:proxy_broker_ready" : "bootstrap:mihomo_ready", {
     proxyServer: mihomo.proxyServer,
   });
   let browser: any = null;

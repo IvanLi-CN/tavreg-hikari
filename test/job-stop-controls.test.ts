@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import { AppDatabase, type AppSettings } from "../src/storage/app-db";
 const tempDirs: string[] = [];
 const originalFetch = globalThis.fetch;
 const originalChromeExecutablePath = process.env.CHROME_EXECUTABLE_PATH;
+const originalProxyBrokerApiKey = process.env.PROXY_BROKER_API_KEY;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
@@ -79,12 +80,21 @@ async function createFakeFingerprintBrowser(rootDir: string): Promise<string> {
   return executablePath;
 }
 
+beforeEach(() => {
+  process.env.PROXY_BROKER_API_KEY = "pbk_test";
+});
+
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   if (originalChromeExecutablePath == null) {
     delete process.env.CHROME_EXECUTABLE_PATH;
   } else {
     process.env.CHROME_EXECUTABLE_PATH = originalChromeExecutablePath;
+  }
+  if (originalProxyBrokerApiKey == null) {
+    delete process.env.PROXY_BROKER_API_KEY;
+  } else {
+    process.env.PROXY_BROKER_API_KEY = originalProxyBrokerApiKey;
   }
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();

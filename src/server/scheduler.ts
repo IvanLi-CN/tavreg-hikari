@@ -28,6 +28,12 @@ import {
 } from "../fingerprint-browser.js";
 import { reserveMihomoPortLeases, type PortLease } from "./port-lease.js";
 import { buildUpstreamSyncConfig, writeBackUpstreamTavilySuccess } from "./upstream-sync.js";
+import {
+  buildProxyBrokerEnv,
+  closeProxyBrokerRuntimeSession,
+  openProxyBrokerRuntimeSession,
+  type ProxyBrokerRuntimeSession,
+} from "./proxy-broker-runtime.js";
 
 export interface ServerEvent {
   type:
@@ -54,6 +60,7 @@ interface ActiveAttempt {
   account: MicrosoftAccountRecord;
   outputDir: string;
   reservedPorts: { apiPort: number; mixedPort: number };
+  brokerSession?: ProxyBrokerRuntimeSession | null;
   tail: string[];
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
@@ -358,6 +365,7 @@ export function buildAttemptRuntimeSpec(input: {
   sharedLedgerPath: string;
   settings: Pick<AppSettings, "subscriptionUrl" | "groupName" | "routeGroupName" | "checkUrl" | "timeoutMs" | "maxLatencyMs">;
   reservedPorts: { apiPort: number; mixedPort: number };
+  brokerSession?: ProxyBrokerRuntimeSession | null;
   chromeExecutablePath: string;
   selectedProxyNode?: string | null;
   baseEnv?: NodeJS.ProcessEnv;
@@ -390,6 +398,7 @@ export function buildAttemptRuntimeSpec(input: {
       PROXY_CHECK_URL: input.settings.checkUrl,
       PROXY_CHECK_TIMEOUT_MS: String(input.settings.timeoutMs),
       PROXY_LATENCY_MAX_MS: String(input.settings.maxLatencyMs),
+      ...(input.brokerSession ? buildProxyBrokerEnv(input.brokerSession) : {}),
       TASK_LEDGER_JOB_ID: String(input.job.id),
       TASK_LEDGER_ACCOUNT_ID: String(input.account.id),
       TASK_LEDGER_DB_PATH: input.sharedLedgerPath,
@@ -592,8 +601,8 @@ export class JobScheduler {
     autoExtractAccountType?: AccountExtractorAccountType;
   }): Promise<JobRecord> {
     const settings = this.getSettings();
-    if (!settings.subscriptionUrl.trim()) {
-      throw new Error("configure a Mihomo subscription before starting a job");
+    if (!process.env.PROXY_BROKER_API_KEY?.trim()) {
+      throw new Error("configure PROXY_BROKER_API_KEY before starting a job");
     }
     const autoExtract = this.normalizeAutoExtractConfig(params, settings);
     const requestedNeed = Math.max(1, Number.isFinite(params.need) ? Math.trunc(params.need) : 1);
@@ -1146,6 +1155,8 @@ export class JobScheduler {
   ): Promise<boolean> {
     let reservedPorts: { apiPort: number; mixedPort: number } | null = null;
     let portLeases: { apiPort: PortLease; mixedPort: PortLease } | null = null;
+    let brokerSession: ProxyBrokerRuntimeSession | null = null;
+    let brokerSettings = this.getSettings();
     try {
       const latestJob = this.db.getJob(job.id);
       const launchBlockedByStop =
@@ -1179,25 +1190,36 @@ export class JobScheduler {
         resolveExplicitChromeExecutablePath(process.env.CHROME_EXECUTABLE_PATH),
       );
       await mkdir(outputDir, { recursive: true });
-      const settings = this.getSettings();
+      brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       reservedPorts = {
         apiPort: portLeases.apiPort.port,
         mixedPort: portLeases.mixedPort.port,
       };
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-      if (selectedProxyNode) {
-        this.db.touchProxyLease(selectedProxyNode);
-      }
+      brokerSession = await openProxyBrokerRuntimeSession({
+        settings: brokerSettings,
+        preferredIp: account.browserSession?.proxyIp || null,
+        excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
+      });
+      this.db.updateAttempt(attempt.id, {
+        proxyNode: brokerSession.session.proxy_name,
+        proxyIp: brokerSession.session.selected_ip,
+        brokerSessionId: brokerSession.session.session_id,
+        proxyDisplayAddress: brokerSession.session.display_address,
+        proxyNodeId: brokerSession.session.node_id,
+      });
+      this.db.touchProxyLease(brokerSession.session.proxy_name, { egressIp: brokerSession.session.selected_ip });
       const runtimeSpec = buildAttemptRuntimeSpec({
         job,
         account,
         outputDir,
         sharedLedgerPath: this.sharedLedgerPath,
-        settings,
+        settings: brokerSettings,
         reservedPorts,
+        brokerSession,
         chromeExecutablePath,
-        selectedProxyNode,
+        selectedProxyNode: brokerSession.session.proxy_name || selectedProxyNode,
         baseEnv: attemptBaseEnv,
       });
       const refreshedJob = this.db.getJob(job.id);
@@ -1205,6 +1227,7 @@ export class JobScheduler {
         pendingLaunch.stopRequested === "force_stop"
         || Boolean(refreshedJob && (refreshedJob.status === "stopped" || isStopInProgressStatus(refreshedJob.status)));
       if (launchBlockedAfterSetup) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession?.session.session_id).catch(() => {});
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
         if (pendingLaunch.stopRequested === "force_stop") {
           const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
@@ -1242,6 +1265,7 @@ export class JobScheduler {
         account,
         outputDir,
         reservedPorts,
+        brokerSession,
         tail: [],
         stopRequested: null,
       };
@@ -1254,6 +1278,9 @@ export class JobScheduler {
       const releasePortLeases = async () => {
         if (leasesReleased) return;
         leasesReleased = true;
+        if (brokerSession?.session.session_id) {
+          await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        }
         await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       };
       let listenersReleased = false;
@@ -1329,6 +1356,9 @@ export class JobScheduler {
     } catch (error) {
       if (portLeases) {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
+      }
+      if (brokerSession?.session.session_id) {
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
       }
       throw error;
     }

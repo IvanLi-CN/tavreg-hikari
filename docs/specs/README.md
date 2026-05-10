@@ -6,6 +6,7 @@
 
 | ID | Title | Status | Spec | Last | Notes |
 | ---: | --- | --- | --- | --- | --- |
+| pbk7x | Proxy Broker 代理运行时迁移 | active | `pbk7x-proxy-broker-migration/SPEC.md` | 2026-05-09 | Web 调度路径迁移到 Proxy Broker catalog/session/listener 运行时，保留旧 Mihomo 兼容源码 |
 | 8tmtv | 微软账号列表双字段分组与图标化操作 | 已完成 | `8tmtv-microsoft-account-list-two-field-layout/SPEC.md` | 2026-04-19 | 双字段布局、辅助邮箱命名、图标 tooltip、默认导入时间倒序与复制失败回退交互已完成收口 |
 | gvabx | Keys 页面信息架构与大数据列表性能收敛 | 已完成 | `gvabx-keys-page-ia-virtualization/SPEC.md` | 2026-04-23 | 删除错误 Keys 说明壳子、批量操作改为底部浮动条、统一 7 档分页并为三套列表接入整页虚拟化 |
 | kq7rv | 跨站点任务控制区对齐：ChatGPT 补齐更新限制，Tavily / ChatGPT 对齐 Grok | 已完成 | `kq7rv-cross-site-job-control-alignment/SPEC.md` | 2026-04-17 | PR #48；ChatGPT 补 pause/resume/update_limits，Tavily 控制区文案与按钮顺序对齐 Grok |

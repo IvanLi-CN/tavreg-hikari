@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +13,7 @@ import {
 import { AppDatabase, type AppSettings } from "../src/storage/app-db";
 
 const tempDirs: string[] = [];
+const originalProxyBrokerApiKey = process.env.PROXY_BROKER_API_KEY;
 
 function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
@@ -61,7 +62,16 @@ async function createTempDb() {
   return { appDb };
 }
 
+beforeEach(() => {
+  process.env.PROXY_BROKER_API_KEY = "pbk_test";
+});
+
 afterEach(async () => {
+  if (originalProxyBrokerApiKey == null) {
+    delete process.env.PROXY_BROKER_API_KEY;
+  } else {
+    process.env.PROXY_BROKER_API_KEY = originalProxyBrokerApiKey;
+  }
   resetMailboxProviderGuardStateForTests();
   while (tempDirs.length > 0) {
     const target = tempDirs.pop();

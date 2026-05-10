@@ -887,6 +887,8 @@ export const sampleRevealedChatGptCredential: ChatGptCredentialRecord = {
 export const sampleProxies: ProxyPayload = {
   settings: {
     subscriptionUrl: "https://example.com/subscription.yaml",
+    proxyBrokerBaseUrl: "https://proxy-broker.ivanli.cc",
+    proxyBrokerProfileId: "Tavily",
     groupName: "Auto",
     routeGroupName: "Global",
     checkUrl: "https://www.gstatic.com/generate_204",
@@ -900,6 +902,53 @@ export const sampleProxies: ProxyPayload = {
     defaultNeed: 5,
     defaultParallel: 2,
     defaultMaxAttempts: 9,
+  },
+  broker: {
+    baseUrl: "https://proxy-broker.ivanli.cc",
+    profileId: "Tavily",
+    apiKeyConfigured: true,
+    configured: true,
+    catalogGroups: [
+      {
+        import: {
+          import_id: "imp-demo-global",
+          name: "Asia exit pool",
+          proxy_count: 2,
+          distinct_ip_count: 2,
+        },
+        nodes: [
+          {
+            import_id: "imp-demo-global",
+            node_id: "node-tokyo-01",
+            proxy_name: "Tokyo-01",
+            proxy_type: "hysteria2",
+            server: "edge-tokyo.example.test",
+            resolved_ips: ["34.91.22.10"],
+            primary_ip: "34.91.22.10",
+            can_open_session: true,
+          },
+          {
+            import_id: "imp-demo-global",
+            node_id: "node-seoul-02",
+            proxy_name: "Seoul-02",
+            proxy_type: "vless",
+            server: "edge-seoul.example.test",
+            resolved_ips: ["52.11.12.44"],
+            primary_ip: "52.11.12.44",
+            can_open_session: true,
+          },
+        ],
+      },
+    ],
+    sessions: [
+      {
+        session_id: "sess-demo-001",
+        display_address: "broker.example.test:21080",
+        selected_ip: "34.91.22.10",
+        proxy_name: "Tokyo-01",
+        node_id: "node-tokyo-01",
+      },
+    ],
   },
   checkState: {
     runId: null,

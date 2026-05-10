@@ -42,7 +42,6 @@ import type {
   AccountsPayload,
   ExtractorSseState,
   MailboxStatus,
-  ProxyCheckState,
   ProxyNode,
   UpstreamAccountSyncPayload,
   AccountImportPreviewItem,
@@ -663,7 +662,6 @@ export function AccountsView({
   graphSettingsConfigured,
   connectingAccountIds,
   proxyNodes,
-  proxyCheckState,
   onImportContentChange,
   onImportGroupChange,
   onBatchGroupNameChange,
@@ -679,7 +677,6 @@ export function AccountsView({
   onClearSelection,
   onConnectAccount,
   onConnectSelectedAccounts,
-  onCheckProxyNode,
   onSwitchSessionProxy,
   onSaveProofMailbox,
   onSaveAvailability,
@@ -728,7 +725,6 @@ export function AccountsView({
   graphSettingsConfigured: boolean;
   connectingAccountIds: number[];
   proxyNodes: ProxyNode[];
-  proxyCheckState: ProxyCheckState | null;
   onImportContentChange: (value: string) => void;
   onImportGroupChange: (value: string) => void;
   onBatchGroupNameChange: (value: string) => void;
@@ -744,7 +740,6 @@ export function AccountsView({
   onClearSelection: () => void;
   onConnectAccount: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts: (mode?: AccountBatchBootstrapMode) => Promise<void>;
-  onCheckProxyNode: (nodeName: string) => Promise<void>;
   onSwitchSessionProxy: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
@@ -773,7 +768,6 @@ export function AccountsView({
   const [sessionProxyDialogOpen, setSessionProxyDialogOpen] = useState(false);
   const [sessionProxyAccountId, setSessionProxyAccountId] = useState<number | null>(null);
   const [sessionProxyActionError, setSessionProxyActionError] = useState<string | null>(null);
-  const [checkingProxyNodeName, setCheckingProxyNodeName] = useState<string | null>(null);
   const [selectingProxyNodeName, setSelectingProxyNodeName] = useState<string | null>(null);
   const [extractorDialogOpen, setExtractorDialogOpen] = useState(false);
   const [extractorKeyDrafts, setExtractorKeyDrafts] = useState<Record<AccountExtractorProvider, string>>({
@@ -1112,7 +1106,6 @@ export function AccountsView({
   const openSessionProxyDialog = (account: AccountRecord) => {
     setSessionProxyAccountId(account.id);
     setSessionProxyActionError(null);
-    setCheckingProxyNodeName(null);
     setSelectingProxyNodeName(null);
     setSessionProxyDialogOpen(true);
   };
@@ -1122,20 +1115,7 @@ export function AccountsView({
     if (open) return;
     setSessionProxyAccountId(null);
     setSessionProxyActionError(null);
-    setCheckingProxyNodeName(null);
     setSelectingProxyNodeName(null);
-  };
-
-  const handleCheckProxyNode = async (nodeName: string) => {
-    try {
-      setCheckingProxyNodeName(nodeName);
-      setSessionProxyActionError(null);
-      await onCheckProxyNode(nodeName);
-    } catch (error) {
-      setSessionProxyActionError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setCheckingProxyNodeName((current) => (current === nodeName ? null : current));
-    }
   };
 
   const handleSwitchSessionProxy = async (nodeName: string) => {
@@ -1155,13 +1135,6 @@ export function AccountsView({
   const isSessionProxySwitchBlocked = (
     account: Pick<AccountRecord, "disabledAt" | "skipReason" | "lastErrorCode" | "browserSession">,
   ) => isConnectBlockedAccount(account) || account.browserSession?.status === "bootstrapping";
-  const isProxyNodeChecking = (nodeName: string) =>
-    checkingProxyNodeName === nodeName
-    || (
-      proxyCheckState?.status === "running"
-      && Array.isArray(proxyCheckState.currentNodeNames)
-      && proxyCheckState.currentNodeNames.includes(nodeName)
-    );
 
   const openExtractorDialog = () => {
     setExtractorKeyDrafts({
@@ -2656,15 +2629,14 @@ export function AccountsView({
                     <table className="w-full min-w-0 table-fixed text-sm">
                       <TableHeader>
                         <TableRow>
-                          <TableHead className="sticky top-0 z-10 w-[34%] min-w-[10rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">名称</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[25%] min-w-[8.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">IP</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[16%] min-w-[6.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">延迟</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[25%] min-w-[9rem] bg-[#132033]/95 text-right backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">操作</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[40%] min-w-[10rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">名称</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[28%] min-w-[8.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">IP</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[17%] min-w-[6.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">延迟</TableHead>
+                          <TableHead className="sticky top-0 z-10 w-[15%] min-w-[6.5rem] bg-[#132033]/95 text-right backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">操作</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {proxyNodes.map((node) => {
-                          const checking = isProxyNodeChecking(node.nodeName);
                           const selecting = selectingProxyNodeName === node.nodeName;
                           const current = currentSessionProxyNode === node.nodeName;
                           const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
@@ -2680,27 +2652,17 @@ export function AccountsView({
                                 <span className="block truncate">{node.lastEgressIp || "—"}</span>
                               </TableCell>
                               <TableCell className="whitespace-nowrap text-slate-200">
-                                {checking ? "测速中…" : formatProxyLatency(node.lastLatencyMs)}
+                                {formatProxyLatency(node.lastLatencyMs)}
                               </TableCell>
                               <TableCell className="text-right">
                                 <div className="ml-auto flex max-w-full items-center justify-end gap-2">
-                                  <Button
-                                    type="button"
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-8 shrink-0 px-2.5 text-xs"
-                                    onClick={() => void handleCheckProxyNode(node.nodeName)}
-                                    disabled={selectingProxyNodeName != null || blocked || checking}
-                                  >
-                                    {checking ? "测速中…" : "测速"}
-                                  </Button>
                                   <Button
                                     type="button"
                                     variant={current ? "secondary" : "default"}
                                     size="sm"
                                     className="h-8 shrink-0 px-2.5 text-xs"
                                     onClick={() => void handleSwitchSessionProxy(node.nodeName)}
-                                    disabled={blocked || checking || selecting || current}
+                                    disabled={blocked || selecting || current}
                                   >
                                     {selecting ? "切换中…" : current ? "已选中" : "选择"}
                                   </Button>

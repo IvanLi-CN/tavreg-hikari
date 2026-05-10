@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { Impit } from "impit";
 import { buildAcceptLanguage, deriveLocale, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
 import { startMihomo } from "../proxy/mihomo.js";
+import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import {
   cleanupManagedChromeProcessesUnder,
   completeMicrosoftLogin,
@@ -340,7 +341,7 @@ async function main(): Promise<void> {
 
   try {
     await cleanupManagedChromeProcessesUnder(cfg.chromeProfileDir).catch(() => {});
-    mihomoController = await startMihomo({
+    mihomoController = createInjectedProxyController() || await startMihomo({
       subscriptionUrl: cfg.mihomoSubscriptionUrl,
       groupName: cfg.mihomoGroupName,
       routeGroupName: cfg.mihomoRouteGroupName,

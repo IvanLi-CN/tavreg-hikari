@@ -177,6 +177,8 @@ function normalizeMailboxStatusValue(value: unknown, fallback: MailboxStatus = "
 export interface AppSettings extends Record<string, unknown> {
   localInstanceId?: string;
   subscriptionUrl: string;
+  proxyBrokerBaseUrl?: string;
+  proxyBrokerProfileId?: string;
   groupName: string;
   routeGroupName: string;
   checkUrl: string;
@@ -410,6 +412,9 @@ export interface JobAttemptRecord {
   stage: string;
   proxyNode: string | null;
   proxyIp: string | null;
+  brokerSessionId: string | null;
+  proxyDisplayAddress: string | null;
+  proxyNodeId: string | null;
   errorCode: string | null;
   errorMessage: string | null;
   outputDir: string | null;
@@ -1069,6 +1074,9 @@ function mapAttemptRow(row: Record<string, unknown>): JobAttemptRecord {
     stage: String(row.stage || ""),
     proxyNode: row.proxy_node == null ? null : String(row.proxy_node),
     proxyIp: row.proxy_ip == null ? null : String(row.proxy_ip),
+    brokerSessionId: row.broker_session_id == null ? null : String(row.broker_session_id),
+    proxyDisplayAddress: row.proxy_display_address == null ? null : String(row.proxy_display_address),
+    proxyNodeId: row.proxy_node_id == null ? null : String(row.proxy_node_id),
     errorCode: row.error_code == null ? null : String(row.error_code),
     errorMessage: row.error_message == null ? null : String(row.error_message),
     outputDir: row.output_dir == null ? null : String(row.output_dir),
@@ -1246,6 +1254,9 @@ export class AppDatabase {
         stage TEXT NOT NULL,
         proxy_node TEXT,
         proxy_ip TEXT,
+        broker_session_id TEXT,
+        proxy_display_address TEXT,
+        proxy_node_id TEXT,
         error_code TEXT,
         error_message TEXT,
         output_dir TEXT,
@@ -1257,13 +1268,16 @@ export class AppDatabase {
     const tableInfo = this.db.query("PRAGMA table_info(job_attempts);").all() as Array<Record<string, unknown>>;
     const columns = new Set(tableInfo.map((item) => String(item.name || "").toLowerCase()));
     const accountEmailSelect = columns.has("account_email") ? "account_email" : "NULL AS account_email";
+    const brokerSessionIdSelect = columns.has("broker_session_id") ? "broker_session_id" : "NULL AS broker_session_id";
+    const proxyDisplayAddressSelect = columns.has("proxy_display_address") ? "proxy_display_address" : "NULL AS proxy_display_address";
+    const proxyNodeIdSelect = columns.has("proxy_node_id") ? "proxy_node_id" : "NULL AS proxy_node_id";
     this.db.exec(`
       INSERT INTO job_attempts_v2 (
-        id, job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message,
+        id, job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, broker_session_id, proxy_display_address, proxy_node_id, error_code, error_message,
         output_dir, started_at, completed_at, duration_ms
       )
       SELECT
-        id, job_id, account_id, ${accountEmailSelect}, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message,
+        id, job_id, account_id, ${accountEmailSelect}, run_id, status, stage, proxy_node, proxy_ip, ${brokerSessionIdSelect}, ${proxyDisplayAddressSelect}, ${proxyNodeIdSelect}, error_code, error_message,
         output_dir, started_at, completed_at, duration_ms
       FROM job_attempts;
       DROP TABLE job_attempts;
@@ -1354,6 +1368,9 @@ export class AppDatabase {
         stage TEXT NOT NULL,
         proxy_node TEXT,
         proxy_ip TEXT,
+        broker_session_id TEXT,
+        proxy_display_address TEXT,
+        proxy_node_id TEXT,
         error_code TEXT,
         error_message TEXT,
         output_dir TEXT,
@@ -1644,7 +1661,13 @@ export class AppDatabase {
     const jobAttemptTableInfo = this.db.query("PRAGMA table_info(job_attempts);").all() as Array<Record<string, unknown>>;
     const jobAttemptColumns = new Set(jobAttemptTableInfo.map((item) => String(item.name || "").toLowerCase()));
     const accountIdColumn = jobAttemptTableInfo.find((item) => String(item.name || "").toLowerCase() === "account_id");
-    if (!jobAttemptColumns.has("account_email") || Number(accountIdColumn?.notnull || 0) === 1) {
+    if (
+      !jobAttemptColumns.has("account_email") ||
+      !jobAttemptColumns.has("broker_session_id") ||
+      !jobAttemptColumns.has("proxy_display_address") ||
+      !jobAttemptColumns.has("proxy_node_id") ||
+      Number(accountIdColumn?.notnull || 0) === 1
+    ) {
       this.rebuildJobAttemptsTable();
     }
     const apiKeyTableInfo = this.db.query("PRAGMA table_info(api_keys);").all() as Array<Record<string, unknown>>;
@@ -4311,7 +4334,19 @@ export class AppDatabase {
     patch: Partial<
       Pick<
         JobAttemptRecord,
-        "accountEmail" | "runId" | "stage" | "proxyNode" | "proxyIp" | "errorCode" | "errorMessage" | "status" | "completedAt" | "durationMs"
+        | "accountEmail"
+        | "runId"
+        | "stage"
+        | "proxyNode"
+        | "proxyIp"
+        | "brokerSessionId"
+        | "proxyDisplayAddress"
+        | "proxyNodeId"
+        | "errorCode"
+        | "errorMessage"
+        | "status"
+        | "completedAt"
+        | "durationMs"
       >
     >,
   ): JobAttemptRecord {
@@ -4321,7 +4356,7 @@ export class AppDatabase {
     this.db
       .query(`
         UPDATE job_attempts
-        SET account_email = ?, run_id = ?, stage = ?, proxy_node = ?, proxy_ip = ?, error_code = ?, error_message = ?, status = ?, completed_at = ?, duration_ms = ?
+        SET account_email = ?, run_id = ?, stage = ?, proxy_node = ?, proxy_ip = ?, broker_session_id = ?, proxy_display_address = ?, proxy_node_id = ?, error_code = ?, error_message = ?, status = ?, completed_at = ?, duration_ms = ?
         WHERE id = ?
       `)
       .run(
@@ -4330,6 +4365,9 @@ export class AppDatabase {
         next.stage,
         next.proxyNode,
         next.proxyIp,
+        next.brokerSessionId,
+        next.proxyDisplayAddress,
+        next.proxyNodeId,
         next.errorCode,
         next.errorMessage,
         next.status,
@@ -4405,6 +4443,7 @@ export class AppDatabase {
     if (deletedBatches > 0) {
       this.db.query("DELETE FROM account_extract_batches WHERE started_at < ?").run(cutoffStartedAt);
     }
+    this.lastAccountExtractHistoryPruneAtMs = nowMs;
     return { deletedBatches, cutoffStartedAt };
   }
 
@@ -4724,9 +4763,9 @@ export class AppDatabase {
       stage: "completed",
       completedAt: now,
       durationMs,
-      runId: signupTask?.run_id ? String(signupTask.run_id) : null,
-      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
-      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
+      runId: signupTask?.run_id ? String(signupTask.run_id) : currentAttempt?.runId || null,
+      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : currentAttempt?.proxyNode || null,
+      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null,
     });
     this.touchBrowserSessionUsage(accountId, {
       proxyNode: attempt.proxyNode,
@@ -5299,7 +5338,8 @@ export class AppDatabase {
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
     const currentAccount = accountId == null ? null : this.getAccount(accountId);
-    const startedAt = this.getAttempt(attemptId)?.startedAt || now;
+    const currentAttempt = this.getAttempt(attemptId);
+    const startedAt = currentAttempt?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const errorCode = failure.errorCode || (signupTask?.error_code ? String(signupTask.error_code) : null);
     const errorMessage = failure.errorMessage || (signupTask?.error_message ? String(signupTask.error_message) : null);
@@ -5310,9 +5350,9 @@ export class AppDatabase {
       durationMs,
       errorCode,
       errorMessage,
-      runId: signupTask?.run_id ? String(signupTask.run_id) : null,
-      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
-      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
+      runId: signupTask?.run_id ? String(signupTask.run_id) : currentAttempt?.runId || null,
+      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : currentAttempt?.proxyNode || null,
+      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null,
     });
     if (accountId != null) {
       this.touchBrowserSessionUsage(accountId, {
@@ -5439,7 +5479,8 @@ export class AppDatabase {
     const now = nowIso();
     const currentJob = this.getJob(jobId);
     if (!currentJob) throw new Error(`job not found: ${jobId}`);
-    const startedAt = this.getAttempt(attemptId)?.startedAt || now;
+    const currentAttempt = this.getAttempt(attemptId);
+    const startedAt = currentAttempt?.startedAt || now;
     const durationMs = Math.max(0, Date.parse(now) - Date.parse(startedAt));
     const errorCode = input?.errorCode || "force_stopped";
     const errorMessage = input?.errorMessage || "stopped by user";
@@ -5450,9 +5491,9 @@ export class AppDatabase {
       durationMs,
       errorCode,
       errorMessage,
-      runId: signupTask?.run_id ? String(signupTask.run_id) : null,
-      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : null,
-      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : null,
+      runId: signupTask?.run_id ? String(signupTask.run_id) : currentAttempt?.runId || null,
+      proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : currentAttempt?.proxyNode || null,
+      proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null,
     });
     if (accountId != null) {
       this.touchBrowserSessionUsage(accountId, {

@@ -192,7 +192,6 @@ const baseArgs = {
   onClearSelection: fn(),
   onConnectAccount: fn(async () => undefined),
   onConnectSelectedAccounts: fn(async () => undefined),
-  onCheckProxyNode: fn(async () => undefined),
   onSwitchSessionProxy: fn(async () => undefined),
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
@@ -341,7 +340,6 @@ type AccountsStorySurfaceProps = {
   onConnectAccount?: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
   onSyncUpstreamAccounts?: () => Promise<void>;
-  onCheckProxyNode?: (nodeName: string) => Promise<void>;
   onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
@@ -412,54 +410,6 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
     if (!props.proxies) return;
     setProxyState(props.proxies);
   }, [props.proxies]);
-
-  const handleStoryCheckProxyNode = props.onCheckProxyNode
-    ?? (async (nodeName: string) => {
-      setProxyState((current) => ({
-        ...current,
-        checkState: {
-          ...current.checkState,
-          status: "running",
-          scope: "node",
-          concurrency: 1,
-          total: 1,
-          completed: 0,
-          succeeded: 0,
-          failed: 0,
-          activeWorkers: 1,
-          currentNodeNames: [nodeName],
-          startedAt: "2026-04-15T12:00:00.000Z",
-          finishedAt: null,
-          error: null,
-        },
-      }));
-      await Promise.resolve();
-      setProxyState((current) => ({
-        ...current,
-        checkState: {
-          ...current.checkState,
-          status: "completed",
-          completed: 1,
-          succeeded: 1,
-          failed: 0,
-          activeWorkers: 0,
-          currentNodeNames: [],
-          finishedAt: "2026-04-15T12:00:03.000Z",
-          error: null,
-        },
-        nodes: current.nodes.map((node) =>
-          node.nodeName === nodeName
-            ? {
-                ...node,
-                lastLatencyMs: 208,
-                lastEgressIp: node.lastEgressIp || "52.11.12.44",
-                lastCheckedAt: "2026-04-15T12:00:03.000Z",
-                lastStatus: "ok",
-              }
-            : node,
-        ),
-      }));
-    });
 
   const handleStorySwitchSessionProxy = props.onSwitchSessionProxy
     ?? (async (accountId: number, proxyNode: string) => {
@@ -545,7 +495,6 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         graphSettingsConfigured={props.graphSettingsConfigured ?? true}
         connectingAccountIds={props.connectingAccountIds ?? []}
         proxyNodes={proxyState.nodes}
-        proxyCheckState={proxyState.checkState}
         onImportContentChange={setContent}
         onImportGroupChange={setImportGroupName}
         onBatchGroupNameChange={setBatchGroupName}
@@ -561,7 +510,6 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onClearSelection={() => setSelectedIds([])}
         onConnectAccount={props.onConnectAccount ?? (async () => undefined)}
         onConnectSelectedAccounts={props.onConnectSelectedAccounts ?? (async () => undefined)}
-        onCheckProxyNode={handleStoryCheckProxyNode}
         onSwitchSessionProxy={handleStorySwitchSessionProxy}
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
@@ -1401,7 +1349,7 @@ export const SessionProxySwitchDialogPlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "账号页 Session Proxy 单元格支持行内编辑，弹窗内展示名称、IP、延迟与测速/选择操作，并可立即切换到新节点。",
+        story: "账号页 Session Proxy 单元格支持行内编辑，弹窗内展示名称、IP、延迟与选择操作，并可立即切换到新节点。",
       },
     },
   },
@@ -1435,8 +1383,6 @@ export const SessionProxySwitchDialogPlay: Story = {
     await waitFor(() => {
       expect(Math.abs(Math.round(nameHeader.getBoundingClientRect().top) - stickyTop)).toBeLessThanOrEqual(2);
     });
-    await userEvent.click(within(dialog).getAllByRole("button", { name: "测速" })[1]!);
-    await expect(within(dialog).getByText("208 ms")).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole("button", { name: "选择" }));
     await waitFor(() => {
       expect(within(document.body).queryByRole("dialog", { name: "更换 Session Proxy" })).not.toBeInTheDocument();
