@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.19.1",
+  "base_stable_version": "0.19.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-10T06:39:58Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.19.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "ee2c845ac86ea1754b0f1b2389f72da87a591024",
+  "pr_number": 75,
+  "pr_title": "fix: use project catalog for proxy broker",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.19.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.19.1",
+  "target_sha": "8b3fa192acb948ad78db86fc3af7e60996ae2807",
+  "type_label": "type:patch"
+}
