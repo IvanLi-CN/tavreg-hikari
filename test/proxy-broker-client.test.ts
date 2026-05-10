@@ -51,7 +51,7 @@ test("proxy broker client opens lists and closes project sessions", async () => 
     if (String(url).endsWith("/sessions/open")) {
       return Response.json({
         session_id: "sess_1",
-        profile_id: "Tavily",
+        project_id: "Tavily",
         node_id: "node_1",
         proxy_name: "Tokyo-01",
         selected_ip: "203.0.113.10",
@@ -274,7 +274,7 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
     if (String(url).includes("/proxy-catalog")) {
       return Response.json({
         view: "global",
-        profile_id: "Tavily",
+        project_id: "Tavily",
         groups: [
           {
             import: { import_id: "imp_1", proxy_count: 2, distinct_ip_count: 2 },
@@ -319,7 +319,7 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
       excludedIps: ["203.0.113.30"],
       excludedNodeNamePattern: /hong\s*kong/i,
     });
-    expect(requests[0]?.url).toBe("https://ignored.example.test/api/v1/proxy-catalog?profile_id=Tavily");
+    expect(requests[0]?.url).toBe("https://ignored.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily");
     expect(requests[1]?.body).toMatchObject({
       excluded_ips: ["203.0.113.30", "198.51.100.11", "198.51.100.10"],
     });
@@ -364,7 +364,7 @@ test("proxy broker runtime still opens sessions when catalog is admin-only", asy
 
     expect(runtime.session.session_id).toBe("sess_without_catalog");
     expect(requests.map((request) => request.url)).toEqual([
-      "https://proxy-broker.example.test/api/v1/proxy-catalog?profile_id=Tavily",
+      "https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
       "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
     ]);
   } finally {

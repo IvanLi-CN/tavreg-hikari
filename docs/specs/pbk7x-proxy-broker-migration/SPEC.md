@@ -32,7 +32,7 @@
   - `Authorization: Bearer pbk_<key_id>_<secret>`
 - Broker API：
   - `GET /api/v1/auth/me`
-  - `GET /api/v1/proxy-catalog?profile_id=<profile>`，用于代理页与节点排除提示；若 Broker 对机器 key 返回 admin-only 错误，任务启动不得被阻断。
+  - `GET /api/v1/proxy-catalog?view=project&project_id=<profile>`，用于代理页与节点排除提示；若 Broker 对机器 key 返回 admin-only 错误，任务启动不得被阻断。
   - `GET /api/v1/projects/{profile_id}/sessions`
   - `POST /api/v1/projects/{profile_id}/sessions/open`
   - `DELETE /api/v1/projects/{profile_id}/sessions/{session_id}`
