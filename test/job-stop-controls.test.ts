@@ -580,7 +580,7 @@ test("running job reaps Tavily attempts that already wrote a successful result",
   expect(scheduler["activeAttempts"].size).toBe(1);
 
   const active = scheduler["activeAttempts"].get(attempt.id)!;
-  active.child.exitCode = 0;
+  Object.defineProperty(active.child, "exitCode", { value: 0, configurable: true });
   scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
   await finalizerDone;
 
