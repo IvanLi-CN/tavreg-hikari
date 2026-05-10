@@ -602,18 +602,18 @@ const sessionProxyDenseProxies: ProxyPayload = {
   nodes: [
     sampleProxies.nodes[0]!,
     sampleProxies.nodes[1]!,
-    { ...sampleProxies.nodes[1]!, id: 3, nodeName: "Sydney-03", lastLatencyMs: 707, lastEgressIp: "207.211.147.108", lastCountry: "Australia", lastRegion: "New South Wales", lastCity: "Sydney", lastLeasedAt: "2026-03-18T07:02:00.000Z" },
-    { ...sampleProxies.nodes[1]!, id: 4, nodeName: "Melbourne-04", lastLatencyMs: 701, lastEgressIp: "168.138.12.140", lastCountry: "Australia", lastRegion: "Victoria", lastCity: "Melbourne", lastLeasedAt: "2026-03-18T07:01:00.000Z" },
-    { ...sampleProxies.nodes[1]!, id: 5, nodeName: "Zurich-05", lastLatencyMs: 1323, lastEgressIp: "152.67.70.103", lastCountry: "Switzerland", lastRegion: "Zurich", lastCity: "Zurich", lastLeasedAt: "2026-03-18T06:58:00.000Z" },
-    { ...sampleProxies.nodes[0]!, id: 6, nodeName: "Hong Kong-06", lastLatencyMs: 650, lastEgressIp: "103.197.71.112", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:21:00.000Z" },
-    { ...sampleProxies.nodes[1]!, id: 7, nodeName: "Hong Kong-07", lastLatencyMs: 7714, lastEgressIp: "103.197.71.115", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:04:00.000Z" },
-    { ...sampleProxies.nodes[0]!, id: 8, nodeName: "Hong Kong-08", lastLatencyMs: 644, lastEgressIp: "103.197.71.113", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:05:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 3, nodeName: "Sydney-03", lastLatencyMs: 707, lastEgressIp: "203.0.113.108", lastCountry: "Australia", lastRegion: "New South Wales", lastCity: "Sydney", lastLeasedAt: "2026-03-18T07:02:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 4, nodeName: "Melbourne-04", lastLatencyMs: 701, lastEgressIp: "198.51.100.140", lastCountry: "Australia", lastRegion: "Victoria", lastCity: "Melbourne", lastLeasedAt: "2026-03-18T07:01:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 5, nodeName: "Zurich-05", lastLatencyMs: 1323, lastEgressIp: "192.0.2.103", lastCountry: "Switzerland", lastRegion: "Zurich", lastCity: "Zurich", lastLeasedAt: "2026-03-18T06:58:00.000Z" },
+    { ...sampleProxies.nodes[0]!, id: 6, nodeName: "Hong Kong-06", lastLatencyMs: 650, lastEgressIp: "192.0.2.112", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:21:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 7, nodeName: "Hong Kong-07", lastLatencyMs: 7714, lastEgressIp: "192.0.2.115", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:04:00.000Z" },
+    { ...sampleProxies.nodes[0]!, id: 8, nodeName: "Hong Kong-08", lastLatencyMs: 644, lastEgressIp: "192.0.2.113", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:05:00.000Z" },
     { ...sampleProxies.nodes[1]!, id: 9, nodeName: "Hong Kong-09", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
-    { ...sampleProxies.nodes[0]!, id: 10, nodeName: "Hong Kong-10", lastLatencyMs: 648, lastEgressIp: "103.197.71.114", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:06:00.000Z" },
+    { ...sampleProxies.nodes[0]!, id: 10, nodeName: "Hong Kong-10", lastLatencyMs: 648, lastEgressIp: "192.0.2.114", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:06:00.000Z" },
     { ...sampleProxies.nodes[1]!, id: 11, nodeName: "Hong Kong-11", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
     { ...sampleProxies.nodes[1]!, id: 12, nodeName: "Hong Kong-12", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
     { ...sampleProxies.nodes[1]!, id: 13, nodeName: "Hong Kong-13", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
-    { ...sampleProxies.nodes[1]!, id: 14, nodeName: "Hong Kong-14", lastLatencyMs: 2549, lastEgressIp: "103.197.71.236", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: "2026-03-18T06:57:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 14, nodeName: "Hong Kong-14", lastLatencyMs: 2549, lastEgressIp: "192.0.2.236", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: "2026-03-18T06:57:00.000Z" },
     { ...sampleProxies.nodes[1]!, id: 15, nodeName: "Hong Kong-15", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
   ],
 };
@@ -1348,8 +1348,8 @@ export const SessionBootstrapStates: Story = {
     await expect(canvas.getByText("BLOCKED")).toBeInTheDocument();
     await expect(canvas.getByRole("button", { name: /alpha@example\.test Bootstrap 中/ })).toBeDisabled();
     await expect(canvas.getAllByRole("button", { name: /重试 Bootstrap/ }).length).toBeGreaterThanOrEqual(2);
-    await expect(canvas.getByText("34.91.22.10 · Tokyo-01")).toBeInTheDocument();
-    await expect(canvas.getByText("52.11.12.44 · Seoul-02")).toBeInTheDocument();
+    await expect(canvas.getByText("203.0.113.24 · Tokyo-01")).toBeInTheDocument();
+    await expect(canvas.getByText("198.51.100.18 · Seoul-02")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/1/chrome")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/2/chrome")).toBeInTheDocument();
     await expect(canvas.getByText("…/browser-profiles/accounts/3/chrome")).toBeInTheDocument();
@@ -1431,7 +1431,7 @@ export const SessionProxySwitchDialogPlay: Story = {
       expect(within(document.body).queryByRole("dialog", { name: "更换 Session Proxy" })).not.toBeInTheDocument();
     });
     await expect(canvas.getByText("Seoul-02")).toBeInTheDocument();
-    await expect(canvas.queryByText("52.11.12.44 · Seoul-02")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("198.51.100.18 · Seoul-02")).not.toBeInTheDocument();
 
     await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
     const reopenedDialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });

@@ -32,19 +32,29 @@
   - `Authorization: Bearer pbk_<key_id>_<secret>`
 - Broker API：
   - `GET /api/v1/auth/me`
-  - `GET /api/v1/proxy-catalog?view=project&project_id=<profile>`，用于代理页与节点排除提示；若 Broker 对机器 key 返回 admin-only 错误，任务启动不得被阻断。
+  - `GET /api/v1/proxy-catalog?view=project&project_id=<profile>`，用于代理页、节点排除提示与任务启动前健康候选筛选；若 Broker key 不能读取 catalog，任务启动必须明确失败。
+  - `POST /api/v1/projects/{profile_id}/refresh`，用于刷新 project 节点元数据、IP 地理信息与延迟探测。
   - `GET /api/v1/projects/{profile_id}/sessions`
   - `POST /api/v1/projects/{profile_id}/sessions/open`
   - `DELETE /api/v1/projects/{profile_id}/sessions/{session_id}`
+- 节点可用性：
+  - `can_open_session` 只表示 Broker 可以尝试打开 listener，不等同于代理节点健康。
+  - 任务运行时只使用 `last_probe_ok=true` 且 `median_latency_ms` 或 `last_latency_ms` 不超过 `maxLatencyMs` 的 IP。
+  - 探测结果超过 30 分钟或没有健康候选时，任务启动前必须触发一次 project refresh 后重新读取 catalog。
+  - refresh 后仍没有健康低延迟候选时，任务必须明确失败，不得降级到任意 session。
 
 ## 验收
 
 - 未配置 `PROXY_BROKER_API_KEY` 时，Web 任务启动必须明确失败，不再提示配置 Mihomo subscription。
 - 启动 attempt 前必须创建 Broker session，并向 worker 注入 `PROXY_BROKER_PROXY_URL`。
+- 创建 Broker session 前必须先通过 Broker 探测元数据筛选健康低延迟候选 IP。
 - worker 检测到 Broker proxy env 后不得启动 Mihomo。
 - attempt 完成、失败或停止后必须 best-effort 关闭 Broker session。
-- 代理页不再暴露 Mihomo subscription / group / apiPort / mixedPort 编辑入口。
+- 代理页不再暴露 Mihomo subscription / group / apiPort / mixedPort 编辑入口，并且必须展示 Broker 探测状态、延迟、探测时间与 session 可开性。
 
 ## Visual Evidence
 
 - Proxy Broker 代理页 Storybook default state: `docs/specs/pbk7x-proxy-broker-migration/assets/proxy-broker-proxies-view.png`
+- Proxy Broker 探测状态与延迟展示:
+
+![Proxy Broker 探测状态与延迟展示](./assets/proxy-broker-probe-states.png)

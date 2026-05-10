@@ -100,6 +100,75 @@ test("proxy broker client opens lists and closes project sessions", async () => 
   ]);
 });
 
+test("proxy broker client refreshes project probe metadata", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown; authorization: string | null }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    requests.push({
+      method: init?.method || "GET",
+      url: String(url),
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : null,
+      authorization: headers.get("authorization"),
+    });
+    return Response.json({ probed_ips: 12, geo_updated: 3, skipped_cached: 9 });
+  }) as unknown as typeof fetch;
+
+  const refreshed = await createClient().refreshProject();
+
+  expect(refreshed).toMatchObject({ probed_ips: 12, geo_updated: 3, skipped_cached: 9 });
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      url: "https://proxy-broker.example.test/api/v1/projects/Tavily/refresh",
+      body: {},
+      authorization: "Bearer pbk_test_secret",
+    },
+  ]);
+});
+
+function freshProbeTime(): string {
+  return new Date().toISOString();
+}
+
+function staleProbeTime(): string {
+  return new Date(Date.now() - 60 * 60 * 1000).toISOString();
+}
+
+function brokerCatalog(nodes: Array<Record<string, unknown>>) {
+  return {
+    view: "project",
+    project_id: "Tavily",
+    groups: [
+      {
+        import: { import_id: "imp_1", proxy_count: nodes.length, distinct_ip_count: nodes.length },
+        nodes,
+      },
+    ],
+  };
+}
+
+function healthyNode(input: { nodeId: string; name: string; ip: string; latencyMs?: number; probeUpdatedAt?: string; canOpen?: boolean }) {
+  return {
+    import_id: "imp_1",
+    node_id: input.nodeId,
+    proxy_name: input.name,
+    proxy_type: "ss",
+    server: `${input.nodeId}.example`,
+    resolved_ips: [input.ip],
+    primary_ip: input.ip,
+    can_open_session: input.canOpen ?? true,
+    ip_metadata: [
+      {
+        ip: input.ip,
+        last_probe_ok: true,
+        last_latency_ms: input.latencyMs ?? 220,
+        median_latency_ms: input.latencyMs ?? 220,
+        probe_updated_at: input.probeUpdatedAt ?? freshProbeTime(),
+      },
+    ],
+  };
+}
+
 test("proxy broker client normalizes bare-array session lists", async () => {
   globalThis.fetch = (async () =>
     Response.json([
@@ -166,18 +235,24 @@ test("proxy broker client requires base url and api key", async () => {
 });
 
 test("proxy broker runtime falls back when preferred ip cannot open", async () => {
-  const bodies: unknown[] = [];
-  globalThis.fetch = (async (_url: RequestInfo | URL, init?: RequestInit) => {
+  const requests: Array<{ url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
-    bodies.push(body);
-    if (bodies.length === 1) {
+    requests.push({ url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "preferred", name: "Preferred", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "fallback", name: "Fallback", ip: "203.0.113.20" }),
+      ]));
+    }
+    if (requests.filter((request) => request.url.endsWith("/sessions/open")).length === 1) {
       return new Response(JSON.stringify({ code: "not_found", message: "preferred ip unavailable" }), {
         status: 404,
         headers: { "content-type": "application/json" },
       });
     }
     return Response.json({
-      session_id: "sess_fallback",
+          session_id: "sess_fallback",
       listen: "127.0.0.1:43124",
       bind_host: "127.0.0.1",
       display_host: "127.0.0.1",
@@ -197,12 +272,13 @@ test("proxy broker runtime falls back when preferred ip cannot open", async () =
         proxyBrokerBaseUrl: "https://proxy-broker.example.test",
         proxyBrokerProfileId: "Tavily",
         timeoutMs: 1000,
+        maxLatencyMs: 500,
       },
       preferredIp: "203.0.113.10",
     });
 
     expect(runtime.session.session_id).toBe("sess_fallback");
-    expect(bodies).toEqual([
+    expect(requests.map((request) => request.body).filter(Boolean)).toEqual([
       {
         selection_mode: "ip",
         specified_ips: ["203.0.113.10"],
@@ -213,8 +289,8 @@ test("proxy broker runtime falls back when preferred ip cannot open", async () =
         desired_port: null,
       },
       {
-        selection_mode: "any",
-        specified_ips: [],
+        selection_mode: "ip",
+        specified_ips: ["203.0.113.10", "203.0.113.20"],
         excluded_ips: [],
         country_codes: [],
         cities: [],
@@ -233,8 +309,13 @@ test("proxy broker runtime falls back when preferred ip cannot open", async () =
 
 test("proxy broker runtime can require an exact preferred ip", async () => {
   let calls = 0;
-  globalThis.fetch = (async () => {
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
     calls += 1;
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "other", name: "Other", ip: "203.0.113.20" }),
+      ]));
+    }
     return new Response(JSON.stringify({ code: "not_found", message: "preferred ip unavailable" }), {
       status: 404,
       headers: { "content-type": "application/json" },
@@ -250,6 +331,7 @@ test("proxy broker runtime can require an exact preferred ip", async () => {
           proxyBrokerBaseUrl: "https://ignored.example.test",
           proxyBrokerProfileId: "Tavily",
           timeoutMs: 1000,
+          maxLatencyMs: 500,
         },
         preferredIp: "203.0.113.10",
         fallbackOnPreferredIpFailure: false,
@@ -272,27 +354,14 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
     const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
     requests.push({ method, url: String(url), body });
     if (String(url).includes("/proxy-catalog")) {
-      return Response.json({
-        view: "global",
-        project_id: "Tavily",
-        groups: [
-          {
-            import: { import_id: "imp_1", proxy_count: 2, distinct_ip_count: 2 },
-            nodes: [
-              {
-                import_id: "imp_1",
-                node_id: "hk_1",
-                proxy_name: "Hong Kong-01",
-                proxy_type: "ss",
-                server: "hk.example",
-                resolved_ips: ["198.51.100.10"],
-                primary_ip: "198.51.100.11",
-                can_open_session: true,
-              },
-            ],
-          },
-        ],
-      });
+      return Response.json(brokerCatalog([
+        {
+          ...healthyNode({ nodeId: "hk_1", name: "Hong Kong-01", ip: "198.51.100.11" }),
+          resolved_ips: ["198.51.100.10"],
+          primary_ip: "198.51.100.11",
+        },
+        healthyNode({ nodeId: "tokyo_1", name: "Tokyo-01", ip: "203.0.113.20" }),
+      ]));
     }
     return Response.json({
       session_id: "sess_1",
@@ -315,6 +384,7 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
         proxyBrokerBaseUrl: "https://ignored.example.test",
         proxyBrokerProfileId: "Tavily",
         timeoutMs: 1000,
+        maxLatencyMs: 500,
       },
       excludedIps: ["203.0.113.30"],
       excludedNodeNamePattern: /hong\s*kong/i,
@@ -322,6 +392,7 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
     expect(requests[0]?.url).toBe("https://ignored.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily");
     expect(requests[1]?.body).toMatchObject({
       excluded_ips: ["203.0.113.30", "198.51.100.11", "198.51.100.10"],
+      specified_ips: ["203.0.113.20"],
     });
   } finally {
     if (previousApiKey == null) {
@@ -332,7 +403,7 @@ test("proxy broker runtime excludes catalog nodes by name pattern", async () => 
   }
 });
 
-test("proxy broker runtime still opens sessions when catalog is admin-only", async () => {
+test("proxy broker runtime fails clearly when catalog is not readable", async () => {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
   globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
     const method = init?.method || "GET";
@@ -353,20 +424,178 @@ test("proxy broker runtime still opens sessions when catalog is admin-only", asy
   const previousApiKey = process.env.PROXY_BROKER_API_KEY;
   process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
   try {
+    await expect(openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+      excludedNodeNamePattern: /hong\s*kong/i,
+    })).rejects.toBeInstanceOf(ProxyBrokerError);
+
+    expect(requests.map((request) => request.url)).toEqual([
+      "https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime refreshes stale probes before opening a healthy session", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  let catalogCalls = 0;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      catalogCalls += 1;
+      return Response.json(brokerCatalog([
+        healthyNode({
+          nodeId: "tokyo_1",
+          name: "Tokyo-01",
+          ip: "203.0.113.20",
+          probeUpdatedAt: catalogCalls === 1 ? staleProbeTime() : freshProbeTime(),
+        }),
+      ]));
+    }
+    if (String(url).endsWith("/refresh")) {
+      return Response.json({ probed_ips: 1, geo_updated: 0, skipped_cached: 0 });
+    }
+    return Response.json({
+      session_id: "sess_refreshed",
+      display_address: "127.0.0.1:43127",
+      selected_ip: "203.0.113.20",
+      proxy_name: "Tokyo-01",
+      node_id: "tokyo_1",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
     const runtime = await openProxyBrokerRuntimeSession({
       settings: {
         proxyBrokerBaseUrl: "https://proxy-broker.example.test",
         proxyBrokerProfileId: "Tavily",
         timeoutMs: 1000,
+        maxLatencyMs: 500,
       },
-      excludedNodeNamePattern: /hong\s*kong/i,
     });
 
-    expect(runtime.session.session_id).toBe("sess_without_catalog");
-    expect(requests.map((request) => request.url)).toEqual([
-      "https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
-      "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
+    expect(runtime.session.session_id).toBe("sess_refreshed");
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/refresh",
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
     ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime refreshes mixed fresh and stale catalogs before opening", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  let catalogCalls = 0;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      catalogCalls += 1;
+      return Response.json(brokerCatalog([
+        healthyNode({
+          nodeId: "fresh_1",
+          name: "Fresh-01",
+          ip: "203.0.113.20",
+          probeUpdatedAt: freshProbeTime(),
+        }),
+        healthyNode({
+          nodeId: "stale_1",
+          name: "Stale-01",
+          ip: "203.0.113.21",
+          probeUpdatedAt: catalogCalls === 1 ? staleProbeTime() : freshProbeTime(),
+        }),
+      ]));
+    }
+    if (String(url).endsWith("/refresh")) {
+      return Response.json({ probed_ips: 2, geo_updated: 0, skipped_cached: 0 });
+    }
+    return Response.json({
+      session_id: "sess_mixed_refreshed",
+      display_address: "127.0.0.1:43128",
+      selected_ip: "203.0.113.21",
+      proxy_name: "Stale-01",
+      node_id: "stale_1",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+    });
+
+    expect(runtime.session.session_id).toBe("sess_mixed_refreshed");
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/refresh",
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
+    ]);
+    expect(requests.at(-1)?.body).toMatchObject({
+      selection_mode: "ip",
+      specified_ips: ["203.0.113.20", "203.0.113.21"],
+    });
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime rejects when no probed node passes latency gate", async () => {
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "slow_1", name: "Slow-01", ip: "203.0.113.40", latencyMs: 1200 }),
+      ]));
+    }
+    if (String(url).endsWith("/refresh")) {
+      return Response.json({ probed_ips: 1, geo_updated: 0, skipped_cached: 1 });
+    }
+    throw new Error("openSession should not be called without healthy candidates");
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    await expect(openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+    })).rejects.toMatchObject({ code: "proxy_broker_no_healthy_node" });
   } finally {
     if (previousApiKey == null) {
       delete process.env.PROXY_BROKER_API_KEY;

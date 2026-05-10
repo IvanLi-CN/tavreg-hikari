@@ -15,6 +15,19 @@ export interface ProxyBrokerOpenSessionRequest {
   desired_port?: number | null;
 }
 
+export interface ProxyBrokerIpMetadata {
+  ip?: string | null;
+  last_probe_ok?: boolean | null;
+  last_latency_ms?: number | null;
+  median_latency_ms?: number | null;
+  probe_updated_at?: string | number | null;
+  last_probe_samples?: unknown;
+  recent_probe_samples?: unknown;
+  country_name?: string | null;
+  region_name?: string | null;
+  city?: string | null;
+}
+
 export interface ProxyBrokerSession {
   session_id: string;
   listen: string;
@@ -36,7 +49,7 @@ export interface ProxyBrokerCatalogNode {
   server: string;
   resolved_ips: string[];
   primary_ip?: string | null;
-  ip_metadata?: Array<Record<string, unknown>>;
+  ip_metadata?: ProxyBrokerIpMetadata[];
   can_open_session: boolean;
 }
 
@@ -56,6 +69,13 @@ export interface ProxyBrokerCatalog {
   groups: ProxyBrokerCatalogGroup[];
 }
 
+export interface ProxyBrokerRefreshResult {
+  probed_ips?: number;
+  geo_updated?: number;
+  skipped_cached?: number;
+  [key: string]: unknown;
+}
+
 export class ProxyBrokerError extends Error {
   code: string;
   status: number;
@@ -68,6 +88,62 @@ export class ProxyBrokerError extends Error {
     this.code = code;
     this.details = details;
   }
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+export function proxyBrokerMetadataLatencyMs(metadata: ProxyBrokerIpMetadata | null | undefined): number | null {
+  return numberValue(metadata?.median_latency_ms) ?? numberValue(metadata?.last_latency_ms);
+}
+
+export function proxyBrokerProbeUpdatedAtMs(metadata: ProxyBrokerIpMetadata | null | undefined): number | null {
+  const value = metadata?.probe_updated_at;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value < 10_000_000_000 ? value * 1000 : value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+export function proxyBrokerMetadataIp(
+  node: Pick<ProxyBrokerCatalogNode, "primary_ip" | "resolved_ips">,
+  metadata: ProxyBrokerIpMetadata | null | undefined,
+): string | null {
+  const metadataIp = String(metadata?.ip || "").trim();
+  return metadataIp || String(node.primary_ip || node.resolved_ips?.[0] || "").trim() || null;
+}
+
+export function proxyBrokerMetadataFresh(
+  metadata: ProxyBrokerIpMetadata | null | undefined,
+  nowMs = Date.now(),
+  maxAgeMs = 30 * 60 * 1000,
+): boolean {
+  const updatedAtMs = proxyBrokerProbeUpdatedAtMs(metadata);
+  return updatedAtMs != null && nowMs - updatedAtMs <= maxAgeMs;
+}
+
+export function proxyBrokerMetadataHealthy(
+  metadata: ProxyBrokerIpMetadata | null | undefined,
+  maxLatencyMs: number,
+  nowMs = Date.now(),
+  maxAgeMs = 30 * 60 * 1000,
+): boolean {
+  if (metadata?.last_probe_ok !== true) return false;
+  if (!proxyBrokerMetadataFresh(metadata, nowMs, maxAgeMs)) return false;
+  const latencyMs = proxyBrokerMetadataLatencyMs(metadata);
+  return latencyMs != null && latencyMs <= maxLatencyMs;
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -132,6 +208,11 @@ export class ProxyBrokerClient {
       view: "project",
       project_id: this.cfg.profileId,
     })) as ProxyBrokerCatalog;
+  }
+
+  async refreshProject(): Promise<ProxyBrokerRefreshResult> {
+    const payload = await this.request(`/api/v1/projects/${encodeURIComponent(this.cfg.profileId)}/refresh`, "POST", {});
+    return payload && typeof payload === "object" ? payload as ProxyBrokerRefreshResult : {};
   }
 
   async listSessions(): Promise<{ sessions: ProxyBrokerSession[] }> {

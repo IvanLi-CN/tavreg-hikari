@@ -10,7 +10,13 @@ import {
 } from "../cfmail-api.js";
 import { buildChatGptDraft } from "./chatgpt-draft.js";
 import { startMihomo } from "../proxy/mihomo.js";
-import { ProxyBrokerError } from "../proxy/broker.js";
+import {
+  ProxyBrokerError,
+  proxyBrokerMetadataIp,
+  proxyBrokerMetadataLatencyMs,
+  type ProxyBrokerCatalogNode,
+  type ProxyBrokerIpMetadata,
+} from "../proxy/broker.js";
 import {
   buildProxyBrokerConfig,
   buildProxyBrokerEnv,
@@ -1088,6 +1094,22 @@ function brokerCatalogNodeName(node: any): string {
   return String(node?.proxy_name || node?.node_id || "").trim();
 }
 
+function brokerCatalogPrimaryMetadata(node: ProxyBrokerCatalogNode): ProxyBrokerIpMetadata | null {
+  const rows = Array.isArray(node.ip_metadata) ? node.ip_metadata : [];
+  const primaryIp = String(node.primary_ip || node.resolved_ips?.[0] || "").trim();
+  if (primaryIp) {
+    const matched = rows.find((metadata) => proxyBrokerMetadataIp(node, metadata) === primaryIp);
+    if (matched) return matched;
+  }
+  return rows[0] || null;
+}
+
+function brokerCatalogProbeStatus(node: ProxyBrokerCatalogNode, metadata: ProxyBrokerIpMetadata | null): string {
+  if (metadata?.last_probe_ok === true) return "ok";
+  if (metadata?.last_probe_ok === false) return "fail";
+  return node.can_open_session ? "catalog" : "blocked";
+}
+
 function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): void {
   const nodeNames: string[] = [];
   for (const group of catalogGroups) {
@@ -1102,12 +1124,12 @@ function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): 
     for (const node of Array.isArray(group?.nodes) ? group.nodes : []) {
       const nodeName = brokerCatalogNodeName(node);
       if (!nodeName) continue;
-      const primaryMetadata = Array.isArray(node.ip_metadata) ? node.ip_metadata[0] : null;
+      const primaryMetadata = brokerCatalogPrimaryMetadata(node);
       db.recordProxyCheck({
         nodeName,
-        status: node.can_open_session ? "ok" : "catalog",
-        latencyMs: typeof primaryMetadata?.median_latency_ms === "number" ? primaryMetadata.median_latency_ms : null,
-        egressIp: String(node.primary_ip || node.resolved_ips?.[0] || "").trim() || null,
+        status: brokerCatalogProbeStatus(node, primaryMetadata),
+        latencyMs: proxyBrokerMetadataLatencyMs(primaryMetadata),
+        egressIp: proxyBrokerMetadataIp(node, primaryMetadata),
         country: typeof primaryMetadata?.country_name === "string" ? primaryMetadata.country_name : null,
         region: typeof primaryMetadata?.region_name === "string" ? primaryMetadata.region_name : null,
         city: typeof primaryMetadata?.city === "string" ? primaryMetadata.city : null,
@@ -1123,11 +1145,15 @@ async function fetchBrokerProxyPayload(
   settings: AppSettings,
   checkState: ProxyCheckState,
   fallbackBroker?: BrokerProxySnapshot,
+  options?: { refreshProject?: boolean },
 ) {
   const client = createProxyBrokerClient(settings);
   let catalogGroups: Array<any> = Array.isArray(fallbackBroker?.catalogGroups) ? fallbackBroker.catalogGroups : [];
   let syncError: string | null = null;
   try {
+    if (options?.refreshProject) {
+      await client.refreshProject();
+    }
     const catalog = await client.listCatalog();
     catalogGroups = catalog.groups || [];
     syncBrokerCatalogSnapshot(db, catalogGroups);
@@ -3365,31 +3391,13 @@ async function main(): Promise<void> {
       if (pathname === "/api/proxies/check" && req.method === "POST") {
         const settings = readSettings();
         try {
-          const body = parseBody(await req.text()) as {
-            scope?: ProxyCheckScope;
-            nodeName?: string | null;
-            nodeNames?: string[] | null;
+          const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot, { refreshProject: true });
+          latestProxySyncError = payload.syncError;
+          latestBrokerSnapshot = {
+            catalogGroups: payload.broker.catalogGroups,
+            sessions: payload.broker.sessions,
           };
-          const scope = body.scope || "all";
-          if (!["all", "node", "group"].includes(scope)) {
-            return badRequest("invalid proxy check scope");
-          }
-          const result = await proxyCheckCoordinator.startCheck({
-            scope,
-            nodeName: body.nodeName,
-            nodeNames: body.nodeNames,
-          });
-          try {
-            const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
-            latestProxySyncError = payload.syncError;
-            latestBrokerSnapshot = {
-              catalogGroups: payload.broker.catalogGroups,
-              sessions: payload.broker.sessions,
-            };
-          } catch (error) {
-            latestProxySyncError = proxyBrokerErrorMessage(error);
-          }
-          return json({ ok: true, accepted: result.accepted, checkState: proxyCheckCoordinator.getState() });
+          return json({ ok: true, accepted: true, checkState: proxyCheckCoordinator.getState() });
         } catch (error) {
           latestProxySyncError = proxyBrokerErrorMessage(error);
           return badRequest(latestProxySyncError, 502);
