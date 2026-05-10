@@ -135,6 +135,61 @@ test("proxy check coordinator rejects overlapping starts while a run is active",
   expect(terminal.status).toBe("completed");
 });
 
+test("proxy check coordinator accepts grouped node names without inventory sync", async () => {
+  const resolved: string[][] = [];
+  const recorded: string[] = [];
+  const coordinator = createProxyCheckCoordinator({
+    defaultConcurrency: 2,
+    readSettings: createSettings,
+    resolveNodeNames: async ({ scope, nodeNames }) => {
+      expect(scope).toBe("group");
+      const names = nodeNames || [];
+      resolved.push(names);
+      return names;
+    },
+    createWorker: async () => ({
+      checkNode: async (nodeName) => ({ name: nodeName, ok: true }),
+      close: async () => {},
+    }),
+    recordResult: (result) => {
+      recorded.push(result.name);
+    },
+    listNodes: () => [],
+    publish: () => {},
+    createRunId: () => "run-group-001",
+    nowIso: () => "2026-04-15T00:00:00.000Z",
+  });
+
+  const started = await coordinator.startCheck({ scope: "group", nodeNames: ["Tokyo-01", "Seoul-02"] });
+  expect(started.accepted).toBe(true);
+  expect(started.checkState.scope).toBe("group");
+
+  const terminal = await waitForTerminal(() => coordinator.getState());
+  expect(terminal.status).toBe("completed");
+  expect(terminal.completed).toBe(2);
+  expect(recorded).toEqual(["Tokyo-01", "Seoul-02"]);
+  expect(resolved).toEqual([["Tokyo-01", "Seoul-02"]]);
+});
+
+test("proxy check coordinator requires node names for grouped checks", async () => {
+  const coordinator = createProxyCheckCoordinator({
+    defaultConcurrency: 2,
+    readSettings: createSettings,
+    resolveNodeNames: async () => [],
+    createWorker: async () => ({
+      checkNode: async (nodeName) => ({ name: nodeName, ok: true }),
+      close: async () => {},
+    }),
+    recordResult: () => {},
+    listNodes: () => [],
+    publish: () => {},
+    createRunId: () => "run-group-empty",
+    nowIso: () => "2026-04-15T00:00:00.000Z",
+  });
+
+  await expect(coordinator.startCheck({ scope: "group", nodeNames: [] })).rejects.toThrow("nodeNames is required when scope=group");
+});
+
 test("proxy check coordinator marks orchestration failure as failed state", async () => {
   const published: string[] = [];
   const coordinator = createProxyCheckCoordinator({

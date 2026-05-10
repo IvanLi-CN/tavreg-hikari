@@ -16,6 +16,7 @@ import type {
   AccountQuery,
   AccountsPayload,
   ExtractorSseState,
+  ProxyCheckRequest,
   ProxyPayload,
   UpstreamAccountSyncPayload,
 } from "@/lib/app-types";
@@ -193,6 +194,7 @@ const baseArgs = {
   onConnectAccount: fn(async () => undefined),
   onConnectSelectedAccounts: fn(async () => undefined),
   onSwitchSessionProxy: fn(async () => undefined),
+  onCheckSessionProxy: fn(async () => undefined),
   onSaveProofMailbox: fn(async () => undefined),
   onSaveAvailability: fn(async () => undefined),
   onSaveExtractorSettings: fn(async () => undefined),
@@ -341,6 +343,7 @@ type AccountsStorySurfaceProps = {
   onConnectSelectedAccounts?: (mode?: AccountBatchBootstrapMode) => Promise<void>;
   onSyncUpstreamAccounts?: () => Promise<void>;
   onSwitchSessionProxy?: (accountId: number, proxyNode: string) => Promise<void>;
+  onCheckSessionProxy?: (request: ProxyCheckRequest) => Promise<void>;
   onSaveProofMailbox?: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability?: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onStartBusinessFlow?: (accountId: number, site: "none" | "tavily" | "grok" | "chatgpt", mode: "headless" | "headed" | "fingerprint") => Promise<void>;
@@ -458,6 +461,38 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
       }));
     });
 
+  const handleStoryCheckSessionProxy = props.onCheckSessionProxy
+    ?? (async (request: ProxyCheckRequest) => {
+      const nodeNames = request.scope === "node"
+        ? [request.nodeName]
+        : request.scope === "group"
+          ? request.nodeNames
+          : proxyState.nodes.map((node) => node.nodeName);
+      setProxyState((current) => ({
+        ...current,
+        nodes: current.nodes.map((node, index) =>
+          nodeNames.includes(node.nodeName)
+            ? {
+                ...node,
+                lastLatencyMs: 80 + index * 11,
+                lastCheckedAt: "2026-04-15T12:05:00.000Z",
+                lastStatus: "ok",
+              }
+            : node,
+        ),
+        checkState: {
+          ...current.checkState,
+          status: "completed",
+          scope: request.scope,
+          total: nodeNames.length,
+          completed: nodeNames.length,
+          succeeded: nodeNames.length,
+          failed: 0,
+          finishedAt: "2026-04-15T12:05:00.000Z",
+        },
+      }));
+    });
+
   return (
     <div className={props.frameClassName}>
       <AccountsView
@@ -511,6 +546,7 @@ function AccountsStorySurface(props: AccountsStorySurfaceProps) {
         onConnectAccount={props.onConnectAccount ?? (async () => undefined)}
         onConnectSelectedAccounts={props.onConnectSelectedAccounts ?? (async () => undefined)}
         onSwitchSessionProxy={handleStorySwitchSessionProxy}
+        onCheckSessionProxy={handleStoryCheckSessionProxy}
         onSaveProofMailbox={props.onSaveProofMailbox ?? (async () => undefined)}
         onSaveAvailability={props.onSaveAvailability ?? (async () => undefined)}
         onSaveExtractorSettings={
@@ -566,19 +602,19 @@ const sessionProxyDenseProxies: ProxyPayload = {
   nodes: [
     sampleProxies.nodes[0]!,
     sampleProxies.nodes[1]!,
-    { ...sampleProxies.nodes[1]!, id: 3, nodeName: "Sydney-03", lastLatencyMs: 707, lastEgressIp: "207.211.147.108" },
-    { ...sampleProxies.nodes[1]!, id: 4, nodeName: "Melbourne-04", lastLatencyMs: 701, lastEgressIp: "168.138.12.140" },
-    { ...sampleProxies.nodes[1]!, id: 5, nodeName: "Zurich-05", lastLatencyMs: 1323, lastEgressIp: "152.67.70.103" },
-    { ...sampleProxies.nodes[0]!, id: 6, nodeName: "Hong Kong-06", lastLatencyMs: 650, lastEgressIp: "103.197.71.112" },
-    { ...sampleProxies.nodes[1]!, id: 7, nodeName: "Hong Kong-07", lastLatencyMs: 7714, lastEgressIp: "103.197.71.115" },
-    { ...sampleProxies.nodes[0]!, id: 8, nodeName: "Hong Kong-08", lastLatencyMs: 644, lastEgressIp: "103.197.71.113" },
-    { ...sampleProxies.nodes[1]!, id: 9, nodeName: "Hong Kong-09", lastLatencyMs: null, lastEgressIp: null },
-    { ...sampleProxies.nodes[0]!, id: 10, nodeName: "Hong Kong-10", lastLatencyMs: 648, lastEgressIp: "103.197.71.114" },
-    { ...sampleProxies.nodes[1]!, id: 11, nodeName: "Hong Kong-11", lastLatencyMs: null, lastEgressIp: null },
-    { ...sampleProxies.nodes[1]!, id: 12, nodeName: "Hong Kong-12", lastLatencyMs: null, lastEgressIp: null },
-    { ...sampleProxies.nodes[1]!, id: 13, nodeName: "Hong Kong-13", lastLatencyMs: null, lastEgressIp: null },
-    { ...sampleProxies.nodes[1]!, id: 14, nodeName: "Hong Kong-14", lastLatencyMs: 2549, lastEgressIp: "103.197.71.236" },
-    { ...sampleProxies.nodes[1]!, id: 15, nodeName: "Hong Kong-15", lastLatencyMs: null, lastEgressIp: null },
+    { ...sampleProxies.nodes[1]!, id: 3, nodeName: "Sydney-03", lastLatencyMs: 707, lastEgressIp: "207.211.147.108", lastCountry: "Australia", lastRegion: "New South Wales", lastCity: "Sydney", lastLeasedAt: "2026-03-18T07:02:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 4, nodeName: "Melbourne-04", lastLatencyMs: 701, lastEgressIp: "168.138.12.140", lastCountry: "Australia", lastRegion: "Victoria", lastCity: "Melbourne", lastLeasedAt: "2026-03-18T07:01:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 5, nodeName: "Zurich-05", lastLatencyMs: 1323, lastEgressIp: "152.67.70.103", lastCountry: "Switzerland", lastRegion: "Zurich", lastCity: "Zurich", lastLeasedAt: "2026-03-18T06:58:00.000Z" },
+    { ...sampleProxies.nodes[0]!, id: 6, nodeName: "Hong Kong-06", lastLatencyMs: 650, lastEgressIp: "103.197.71.112", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:21:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 7, nodeName: "Hong Kong-07", lastLatencyMs: 7714, lastEgressIp: "103.197.71.115", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:04:00.000Z" },
+    { ...sampleProxies.nodes[0]!, id: 8, nodeName: "Hong Kong-08", lastLatencyMs: 644, lastEgressIp: "103.197.71.113", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:05:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 9, nodeName: "Hong Kong-09", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
+    { ...sampleProxies.nodes[0]!, id: 10, nodeName: "Hong Kong-10", lastLatencyMs: 648, lastEgressIp: "103.197.71.114", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Central", lastLeasedAt: "2026-03-18T07:06:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 11, nodeName: "Hong Kong-11", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
+    { ...sampleProxies.nodes[1]!, id: 12, nodeName: "Hong Kong-12", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
+    { ...sampleProxies.nodes[1]!, id: 13, nodeName: "Hong Kong-13", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
+    { ...sampleProxies.nodes[1]!, id: 14, nodeName: "Hong Kong-14", lastLatencyMs: 2549, lastEgressIp: "103.197.71.236", lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: "2026-03-18T06:57:00.000Z" },
+    { ...sampleProxies.nodes[1]!, id: 15, nodeName: "Hong Kong-15", lastLatencyMs: null, lastEgressIp: null, lastCountry: "Hong Kong", lastRegion: "Hong Kong", lastCity: "Kowloon", lastLeasedAt: null },
   ],
 };
 
@@ -1349,7 +1385,7 @@ export const SessionProxySwitchDialogPlay: Story = {
   parameters: {
     docs: {
       description: {
-        story: "账号页 Session Proxy 单元格支持行内编辑，弹窗内展示名称、IP、延迟与选择操作，并可立即切换到新节点。",
+        story: "账号页 Session Proxy 单元格支持行内编辑，弹窗按当前节点、地区分组、组内节点三块展示，并可测速或立即切换到新节点。",
       },
     },
   },
@@ -1357,16 +1393,20 @@ export const SessionProxySwitchDialogPlay: Story = {
     const canvas = within(canvasElement);
     await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
     const dialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
-    await expect(within(dialog).getByText("当前节点信息")).toBeInTheDocument();
-    await expect(within(dialog).getByText("候选代理节点")).toBeInTheDocument();
+    await expect(within(dialog).getByText("当前账号")).toBeInTheDocument();
+    await expect(within(dialog).getByRole("button", { name: /测速当前节点/ })).toBeInTheDocument();
+    await expect(within(dialog).getByText("分组")).toBeInTheDocument();
+    await expect(within(dialog).getByRole("button", { name: /测速本组/ })).toBeInTheDocument();
+    await expect(within(dialog).getByText("全部")).toBeInTheDocument();
+    await expect(within(dialog).getByText("Hong Kong / Hong Kong / Central")).toBeInTheDocument();
     await expect(within(dialog).getByText("名称")).toBeInTheDocument();
-    await expect(within(dialog).getByText("IP")).toBeInTheDocument();
+    await expect(within(dialog).getByText("上次使用")).toBeInTheDocument();
     await expect(within(dialog).getByText("延迟")).toBeInTheDocument();
     await expect(within(dialog).getByText("操作")).toBeInTheDocument();
     await expect(within(dialog).getByText("Tokyo-01")).toBeInTheDocument();
     await expect(within(dialog).getByText("Seoul-02")).toBeInTheDocument();
     const nameHeader = within(dialog).getByText("名称");
-    expect(window.getComputedStyle(nameHeader).position).toBe("sticky");
+    expect(window.getComputedStyle(nameHeader.parentElement as HTMLElement).position).toBe("sticky");
     const proxyViewport = await getSessionProxyViewport();
     await expectNoHorizontalOverflow(proxyViewport, 2);
     await waitFor(() => {
@@ -1383,7 +1423,10 @@ export const SessionProxySwitchDialogPlay: Story = {
     await waitFor(() => {
       expect(Math.abs(Math.round(nameHeader.getBoundingClientRect().top) - stickyTop)).toBeLessThanOrEqual(2);
     });
-    await userEvent.click(within(dialog).getByRole("button", { name: "选择" }));
+    await userEvent.click(within(dialog).getByRole("button", { name: "名称" }));
+    const seoulRowBeforeSelect = within(dialog).getAllByText("Seoul-02").find((element) => element.closest("div.grid"))?.closest("div.grid");
+    expect(seoulRowBeforeSelect).not.toBeNull();
+    await userEvent.click(within(seoulRowBeforeSelect as HTMLElement).getByRole("button", { name: "选择" }));
     await waitFor(() => {
       expect(within(document.body).queryByRole("dialog", { name: "更换 Session Proxy" })).not.toBeInTheDocument();
     });
@@ -1392,10 +1435,10 @@ export const SessionProxySwitchDialogPlay: Story = {
 
     await userEvent.click(canvas.getByRole("button", { name: "更换 beta@example.test 的 Session Proxy" }));
     const reopenedDialog = within(document.body).getByRole("dialog", { name: "更换 Session Proxy" });
-    await expect(within(reopenedDialog).getByText("当前节点信息")).toBeInTheDocument();
+    await expect(within(reopenedDialog).getByText("当前账号")).toBeInTheDocument();
     await expect(within(reopenedDialog).getByText("Seoul-02")).toBeInTheDocument();
-    await expect(within(reopenedDialog).getByText("当前代理")).toBeInTheDocument();
-    const seoulRow = within(reopenedDialog).getAllByText("Seoul-02").find((element) => element.closest("tr"))?.closest("tr");
+    await expect(within(reopenedDialog).getByText("最近延迟")).toBeInTheDocument();
+    const seoulRow = within(reopenedDialog).getAllByText("Seoul-02").find((element) => element.closest("div.grid"))?.closest("div.grid");
     expect(seoulRow).not.toBeNull();
     await expect(within(seoulRow as HTMLElement).getByText("当前")).toBeInTheDocument();
   },

@@ -79,6 +79,7 @@ import type {
   MicrosoftGraphSettingsPayload,
   PageKey,
   JobSite,
+  ProxyCheckRequest,
   ProxyCheckState,
   ProxyPayload,
   ProxySettingsUpdate,
@@ -1373,7 +1374,7 @@ export function App() {
   }, [activePage]);
 
   useEffect(() => {
-    if (activePage !== "proxies") {
+    if (activePage !== "proxies" && activePage !== "accounts") {
       return;
     }
     const source = new EventSource("/api/proxies/events");
@@ -1768,17 +1769,18 @@ export function App() {
     }
   };
 
-  const handleProxyCheck = async () => {
+  const handleProxyCheck = async (request: ProxyCheckRequest = { scope: "all" }) => {
     try {
       setError(null);
       const payload = await api<{ ok: true; accepted: boolean; checkState: ProxyCheckState }>("/api/proxies/check", {
         method: "POST",
-        body: JSON.stringify({ scope: "all" }),
+        body: JSON.stringify(request),
       });
       applyProxyEventPayload({ checkState: payload.checkState });
       await refreshProxies();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      throw err;
     }
   };
 
@@ -2606,6 +2608,7 @@ export function App() {
               onConnectAccount={handleConnectAccount}
               onConnectSelectedAccounts={handleConnectSelectedAccounts}
               onSwitchSessionProxy={handleSwitchAccountSessionProxy}
+              onCheckSessionProxy={handleProxyCheck}
               onSaveProofMailbox={handleSaveProofMailbox}
               onSaveAvailability={handleSaveAvailability}
               onSaveExtractorSettings={handleSaveExtractorSettings}
@@ -2654,7 +2657,7 @@ export function App() {
           proxies={proxies}
           onProxySettingsChange={updateProxySettings}
           onSaveProxySettings={handleSaveProxySettings}
-          onCheckScope={handleProxyCheck}
+          onCheckScope={() => handleProxyCheck({ scope: "all" })}
         />
       ) : null}
 

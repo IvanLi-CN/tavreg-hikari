@@ -6,7 +6,7 @@ import type { AppSettings } from "../storage/app-db.js";
 import { reserveMihomoPortLeases } from "./port-lease.js";
 import type { ServerEvent } from "./scheduler.js";
 
-export type ProxyCheckScope = "all" | "node";
+export type ProxyCheckScope = "all" | "node" | "group";
 export type ProxyCheckStatus = "idle" | "running" | "completed" | "failed";
 
 export interface ProxyCheckState {
@@ -44,7 +44,7 @@ export interface ProxyCheckWorker {
 interface ProxyCheckCoordinatorOptions<TNode> {
   defaultConcurrency: number;
   readSettings: () => AppSettings;
-  resolveNodeNames: (input: { settings: AppSettings; scope: ProxyCheckScope; nodeName?: string | null }) => Promise<string[]>;
+  resolveNodeNames: (input: { settings: AppSettings; scope: ProxyCheckScope; nodeName?: string | null; nodeNames?: string[] | null }) => Promise<string[]>;
   createWorker: (input: { settings: AppSettings; runId: string; workerSlot: number }) => Promise<ProxyCheckWorker>;
   recordResult: (result: NodeCheckResult) => void;
   listNodes: () => TNode[];
@@ -127,11 +127,17 @@ export function createProxyCheckCoordinator<TNode>(options: ProxyCheckCoordinato
     runId: string;
     scope: ProxyCheckScope;
     nodeName?: string | null;
+    nodeNames?: string[] | null;
     concurrency: number;
     settings: AppSettings;
   }): Promise<void> => {
     try {
-      const names = await options.resolveNodeNames({ settings: input.settings, scope: input.scope, nodeName: input.nodeName });
+      const names = await options.resolveNodeNames({
+        settings: input.settings,
+        scope: input.scope,
+        nodeName: input.nodeName,
+        nodeNames: input.nodeNames,
+      });
       if (activeRunId !== input.runId) return;
       refreshState((state) => {
         state.total = names.length;
@@ -201,7 +207,7 @@ export function createProxyCheckCoordinator<TNode>(options: ProxyCheckCoordinato
     isRunning(): boolean {
       return latestState.status === "running" && Boolean(activeRunId);
     },
-    async startCheck(input: { scope: ProxyCheckScope; nodeName?: string | null; concurrencyOverride?: number }): Promise<ProxyCheckStartResult> {
+    async startCheck(input: { scope: ProxyCheckScope; nodeName?: string | null; nodeNames?: string[] | null; concurrencyOverride?: number }): Promise<ProxyCheckStartResult> {
       if (this.isRunning()) {
         return { accepted: false, checkState: cloneState(latestState) };
       }
@@ -211,6 +217,9 @@ export function createProxyCheckCoordinator<TNode>(options: ProxyCheckCoordinato
       }
       if (input.scope === "node" && !String(input.nodeName || "").trim()) {
         throw new Error("nodeName is required when scope=node");
+      }
+      if (input.scope === "group" && (!Array.isArray(input.nodeNames) || input.nodeNames.filter((name) => String(name || "").trim()).length === 0)) {
+        throw new Error("nodeNames is required when scope=group");
       }
       const runId = createRunId();
       const concurrency = normalizeConcurrency(input.concurrencyOverride, options.defaultConcurrency);
@@ -234,6 +243,7 @@ export function createProxyCheckCoordinator<TNode>(options: ProxyCheckCoordinato
         runId,
         scope: input.scope,
         nodeName: input.nodeName,
+        nodeNames: input.nodeNames,
         concurrency,
         settings,
       });
