@@ -918,6 +918,9 @@ export class JobScheduler {
         this.requestForceStop(active);
         continue;
       }
+      if (canReapRunning && hasTerminalArtifact && !exited) {
+        continue;
+      }
 
       if (canReapStopTransition && (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut)) {
         const signal = child.signalCode ?? null;

@@ -39,6 +39,7 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 - For graceful stops, route exited children through the same result finalizer used by the child `close` handler so a successful `result.json` is preserved instead of being converted into an exit failure.
 - For ordinary running jobs, route terminal `result.json` / `error.json` artifacts through the same result finalizer; if a worker stays quiet long enough without terminal artifacts, terminate the worker first and only release ownership after it exits or the force-stop reap window elapses.
 - Treat ledger-visible signup-task updates as progress as well; quiet output alone should not trip the stale timer if the task ledger is still advancing.
+- If a running worker has already written terminal artifacts but has not closed yet, keep ownership until the child exits rather than finalizing early.
 - Keep the reaper scoped to `running` and stop-transition jobs only; paused, completing, and stopped states must not be treated as stale worker states.
 - Store the active attempt's resource-release callback and force-stop request timestamp with the scheduler-owned active entry, so stale attempts can be reaped without leaking reserved runtime resources.
 - After reaping active attempts, finalize the job with the same terminal `stopped` path used by normal stop completion.
