@@ -91,11 +91,86 @@ export const BrokerAuthError: Story = {
   },
 };
 
+export const ProbeStates: Story = {
+  args: {
+    ...defaultArgs,
+    proxies: withPayload({
+      broker: {
+        ...sampleProxies.broker,
+        catalogGroups: [
+          {
+            import: {
+              import_id: "imp-probe-states",
+              name: "Probe states",
+              proxy_count: 4,
+              distinct_ip_count: 4,
+            },
+            nodes: [
+              {
+                import_id: "imp-probe-states",
+                node_id: "node-healthy",
+                proxy_name: "Tokyo Healthy",
+                proxy_type: "hysteria2",
+                server: "tokyo.example.test",
+                resolved_ips: ["203.0.113.24"],
+                primary_ip: "203.0.113.24",
+                can_open_session: true,
+                ip_metadata: [{ ip: "203.0.113.24", last_probe_ok: true, median_latency_ms: 280, last_latency_ms: 320, probe_updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString() }],
+              },
+              {
+                import_id: "imp-probe-states",
+                node_id: "node-slow",
+                proxy_name: "Sydney Slow",
+                proxy_type: "vless",
+                server: "sydney.example.test",
+                resolved_ips: ["203.0.113.108"],
+                primary_ip: "203.0.113.108",
+                can_open_session: true,
+                ip_metadata: [{ ip: "203.0.113.108", last_probe_ok: true, median_latency_ms: 2887, last_latency_ms: 2335, probe_updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString() }],
+              },
+              {
+                import_id: "imp-probe-states",
+                node_id: "node-failed",
+                proxy_name: "Seoul Failed",
+                proxy_type: "vless",
+                server: "seoul.example.test",
+                resolved_ips: ["198.51.100.18"],
+                primary_ip: "198.51.100.18",
+                can_open_session: true,
+                ip_metadata: [{ ip: "198.51.100.18", last_probe_ok: false, median_latency_ms: 1510, last_latency_ms: 1640, probe_updated_at: new Date(Date.now() - 6 * 60 * 1000).toISOString() }],
+              },
+              {
+                import_id: "imp-probe-states",
+                node_id: "node-unprobed",
+                proxy_name: "Zurich Unprobed",
+                proxy_type: "hysteria2",
+                server: "zurich.example.test",
+                resolved_ips: ["192.0.2.183"],
+                primary_ip: "192.0.2.183",
+                can_open_session: false,
+                ip_metadata: [],
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("健康低延迟")).toBeInTheDocument();
+    await expect(canvas.getByText("Tokyo Healthy")).toBeInTheDocument();
+    await expect(canvas.getByText("Sydney Slow")).toBeInTheDocument();
+    await expect(canvas.getByText("Seoul Failed")).toBeInTheDocument();
+    await expect(canvas.getByText("Zurich Unprobed")).toBeInTheDocument();
+  },
+};
+
 export const ActionsPlay: Story = {
   args: defaultArgs,
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: /刷新 Catalog/ }));
+    await userEvent.click(canvas.getByRole("button", { name: /刷新探测/ }));
     await expect(args.onCheckScope).toHaveBeenCalled();
   },
 };

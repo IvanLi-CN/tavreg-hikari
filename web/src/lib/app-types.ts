@@ -650,13 +650,12 @@ export type ProxySettings = {
 
 export type ProxySettingsUpdate = Pick<
   ProxySettings,
-  "proxyBrokerProfileId" | "checkUrl" | "timeoutMs" | "maxLatencyMs"
+  "proxyBrokerProfileId" | "timeoutMs" | "maxLatencyMs"
 >;
 
 export function pickProxySettingsUpdate(settings: ProxySettings): ProxySettingsUpdate {
   return {
     proxyBrokerProfileId: settings.proxyBrokerProfileId,
-    checkUrl: settings.checkUrl,
     timeoutMs: settings.timeoutMs,
     maxLatencyMs: settings.maxLatencyMs,
   };
@@ -686,6 +685,19 @@ export type ProxyBrokerSession = {
   created_at?: string;
 };
 
+export type ProxyBrokerIpMetadata = {
+  ip?: string | null;
+  last_probe_ok?: boolean | null;
+  last_latency_ms?: number | null;
+  median_latency_ms?: number | null;
+  probe_updated_at?: string | number | null;
+  last_probe_samples?: unknown;
+  recent_probe_samples?: unknown;
+  country_name?: string | null;
+  region_name?: string | null;
+  city?: string | null;
+};
+
 export type ProxyBrokerCatalogNode = {
   import_id: string;
   node_id: string;
@@ -694,6 +706,7 @@ export type ProxyBrokerCatalogNode = {
   server: string;
   resolved_ips: string[];
   primary_ip?: string | null;
+  ip_metadata?: ProxyBrokerIpMetadata[];
   can_open_session: boolean;
 };
 

@@ -1,5 +1,14 @@
 import type { AppSettings } from "../storage/app-db.js";
-import { ProxyBrokerClient, type ProxyBrokerConfig, type ProxyBrokerSession } from "../proxy/broker.js";
+import {
+  ProxyBrokerClient,
+  ProxyBrokerError,
+  proxyBrokerMetadataHealthy,
+  proxyBrokerMetadataIp,
+  proxyBrokerProbeUpdatedAtMs,
+  type ProxyBrokerCatalog,
+  type ProxyBrokerConfig,
+  type ProxyBrokerSession,
+} from "../proxy/broker.js";
 import type { ProxyController, ProxyNode } from "../proxy/adapter.js";
 import type { GeoInfo } from "../proxy/geo.js";
 
@@ -7,6 +16,10 @@ export interface ProxyBrokerRuntimeSession {
   session: ProxyBrokerSession;
   proxyUrl: string;
 }
+
+const PROXY_BROKER_PROBE_MAX_AGE_MS = 30 * 60 * 1000;
+
+type ProxyBrokerRuntimeSettings = Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs" | "maxLatencyMs">;
 
 export function buildProxyBrokerConfig(settings: Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs">): ProxyBrokerConfig {
   return {
@@ -21,36 +34,106 @@ export function createProxyBrokerClient(settings: Pick<AppSettings, "proxyBroker
   return new ProxyBrokerClient(buildProxyBrokerConfig(settings));
 }
 
+function normalizeMaxLatencyMs(settings: Pick<AppSettings, "maxLatencyMs">): number {
+  const value = Number(settings.maxLatencyMs);
+  return Number.isFinite(value) ? Math.max(100, Math.trunc(value)) : 3000;
+}
+
+function catalogHasFreshProbeMetadata(catalog: ProxyBrokerCatalog, nowMs = Date.now()): boolean {
+  for (const group of catalog.groups || []) {
+    for (const node of group.nodes || []) {
+      for (const metadata of node.ip_metadata || []) {
+        const updatedAtMs = proxyBrokerProbeUpdatedAtMs(metadata);
+        if (updatedAtMs != null && nowMs - updatedAtMs <= PROXY_BROKER_PROBE_MAX_AGE_MS) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function collectHealthyCandidateIps(input: {
+  catalog: ProxyBrokerCatalog;
+  maxLatencyMs: number;
+  excludedIps: Set<string>;
+  excludedNodeNamePattern?: RegExp;
+  nowMs?: number;
+}): string[] {
+  const nowMs = input.nowMs ?? Date.now();
+  const candidateIps: string[] = [];
+  const seen = new Set<string>();
+  for (const group of input.catalog.groups || []) {
+    for (const node of group.nodes || []) {
+      if (!node.can_open_session) continue;
+      if (input.excludedNodeNamePattern?.test(node.proxy_name)) continue;
+      const metadataRows = node.ip_metadata || [];
+      for (const metadata of metadataRows) {
+        const ip = proxyBrokerMetadataIp(node, metadata);
+        if (!ip || input.excludedIps.has(ip) || seen.has(ip)) continue;
+        if (!proxyBrokerMetadataHealthy(metadata, input.maxLatencyMs, nowMs, PROXY_BROKER_PROBE_MAX_AGE_MS)) continue;
+        seen.add(ip);
+        candidateIps.push(ip);
+      }
+    }
+  }
+  return candidateIps;
+}
+
+async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number, excludedIps: Set<string>, excludedNodeNamePattern?: RegExp): Promise<{
+  catalog: ProxyBrokerCatalog;
+  candidateIps: string[];
+}> {
+  let catalog = await client.listCatalog();
+  let candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
+  if (candidateIps.length === 0 || !catalogHasFreshProbeMetadata(catalog)) {
+    await client.refreshProject();
+    catalog = await client.listCatalog();
+    candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
+  }
+  return { catalog, candidateIps };
+}
+
+function noHealthyBrokerNodeError(maxLatencyMs: number): ProxyBrokerError {
+  return new ProxyBrokerError(
+    0,
+    "proxy_broker_no_healthy_node",
+    `no Proxy Broker node passed probe health and latency gate (last_probe_ok=true, latency <= ${maxLatencyMs}ms)`,
+  );
+}
+
 export async function openProxyBrokerRuntimeSession(input: {
-  settings: Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs">;
+  settings: ProxyBrokerRuntimeSettings;
   preferredIp?: string | null;
   excludedIps?: string[];
   excludedNodeNamePattern?: RegExp;
   fallbackOnPreferredIpFailure?: boolean;
 }): Promise<ProxyBrokerRuntimeSession> {
   const client = createProxyBrokerClient(input.settings);
+  const maxLatencyMs = normalizeMaxLatencyMs(input.settings);
   const preferredIp = input.preferredIp?.trim();
   const excludedIps = new Set((input.excludedIps || []).map((item) => item.trim()).filter(Boolean));
+  const { catalog, candidateIps } = await listFreshCatalog(client, maxLatencyMs, excludedIps, input.excludedNodeNamePattern);
   if (input.excludedNodeNamePattern) {
-    try {
-      const catalog = await client.listCatalog();
-      for (const group of catalog.groups || []) {
-        for (const node of group.nodes || []) {
-          if (!input.excludedNodeNamePattern.test(node.proxy_name)) continue;
-          if (node.primary_ip) excludedIps.add(node.primary_ip);
-          for (const ip of node.resolved_ips || []) excludedIps.add(ip);
-        }
+    for (const group of catalog.groups || []) {
+      for (const node of group.nodes || []) {
+        if (!input.excludedNodeNamePattern.test(node.proxy_name)) continue;
+        if (node.primary_ip) excludedIps.add(node.primary_ip);
+        for (const ip of node.resolved_ips || []) excludedIps.add(ip);
       }
-    } catch {
-      // Machine keys can open/list sessions even when catalog is admin-only; do not block task launch.
     }
   }
+  const healthyIps = candidateIps.filter((ip) => !excludedIps.has(ip));
+  if (healthyIps.length === 0) throw noHealthyBrokerNodeError(maxLatencyMs);
   const fallbackRequest = {
-    selection_mode: "any" as const,
+    selection_mode: "ip" as const,
+    specified_ips: healthyIps,
     excluded_ips: Array.from(excludedIps),
     sort_mode: "lru" as const,
   };
-  const session = preferredIp
+  const preferredHealthy = preferredIp ? healthyIps.includes(preferredIp) : false;
+  if (preferredIp && !preferredHealthy && input.fallbackOnPreferredIpFailure === false) {
+    throw noHealthyBrokerNodeError(maxLatencyMs);
+  }
+  const session = preferredIp && preferredHealthy
     ? await client.openSession({
         selection_mode: "ip",
         specified_ips: [preferredIp],

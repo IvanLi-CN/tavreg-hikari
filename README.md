@@ -89,7 +89,9 @@
 - Web 调度路径不再启动本地 Mihomo 或读取订阅代理池；任务、账号 bootstrap、ChatGPT / Grok / Tavily worker 会通过 Proxy Broker 创建 mixed listener session。
 - 默认 Broker 地址为 `https://proxy-broker.ivanli.cc`，默认 Broker project/profile 为 `Tavily`；可通过 `.env.local` 设置 `PROXY_BROKER_BASE_URL` 与 `PROXY_BROKER_PROFILE_ID` 覆盖。
 - `PROXY_BROKER_API_KEY` 只从运行环境读取，不写入 SQLite，也不会返回给前端；未配置时 Web 任务启动会直接失败。
-- 代理页只读展示 Broker base URL；保存配置时只接受 `proxyBrokerProfileId`、`checkUrl`、`timeoutMs`、`maxLatencyMs`，旧 Mihomo subscription / group / port 字段不再作为 Web 配置入口。
+- 任务启动前会读取 Broker project catalog；当探测结果超过 30 分钟或没有健康候选时，会调用 Broker project refresh。只有 `last_probe_ok=true` 且中位延迟或最近延迟不超过 `maxLatencyMs` 的节点会进入 session 候选；没有候选时任务会明确失败。
+- 代理页的“刷新探测”会触发 Broker refresh，并展示探测状态、最近/中位延迟、探测时间与 session 可开性；`can_open_session` 只表示 Broker 可以尝试开 listener，不代表节点健康。
+- 代理页只读展示 Broker base URL；保存配置时只接受 `proxyBrokerProfileId`、`timeoutMs`、`maxLatencyMs`，旧 Mihomo subscription / group / port 字段不再作为 Web 配置入口。
 - 旧 Mihomo CLI 与兼容源码暂时保留，供历史调试路径使用；只运行 Web 管理台时不需要 `MIHOMO_SUBSCRIPTION_URL`。
 
 ## 发布治理
