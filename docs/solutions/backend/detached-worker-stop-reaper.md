@@ -38,6 +38,7 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 - Reap an active attempt when its DB row is no longer running, its child has an exit or signal code, or force stop has exceeded the final reap threshold; error artifacts are diagnostic input once the reaper is allowed to clean up.
 - For graceful stops, route exited children through the same result finalizer used by the child `close` handler so a successful `result.json` is preserved instead of being converted into an exit failure.
 - For ordinary running jobs, route terminal `result.json` / `error.json` artifacts through the same result finalizer; use a conservative no-progress timeout only when no terminal artifact exists.
+- Keep the reaper scoped to `running` and stop-transition jobs only; paused, completing, and stopped states must not be treated as stale worker states.
 - Store the active attempt's resource-release callback and force-stop request timestamp with the scheduler-owned active entry, so stale attempts can be reaped without leaking reserved runtime resources.
 - After reaping active attempts, finalize the job with the same terminal `stopped` path used by normal stop completion.
 

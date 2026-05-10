@@ -867,6 +867,10 @@ export class JobScheduler {
   }
 
   private reapActiveAttempts(job: JobRecord): void {
+    const canReapRunning = job.status === "running";
+    const canReapStopTransition = isStopInProgressStatus(job.status);
+    if (!canReapRunning && !canReapStopTransition) return;
+
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
       if (active.attempt.jobId !== job.id) continue;
@@ -908,8 +912,8 @@ export class JobScheduler {
         Boolean(errorArtifact?.error?.trim()) ||
         Boolean(typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim());
 
-      if (job.status === "running" && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
-      if (isStopInProgressStatus(job.status) && !exited && !forceStopTimedOut) continue;
+      if (canReapRunning && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
+      if (canReapStopTransition && !exited && !forceStopTimedOut) continue;
       if (runningStaleTimedOut && !hasTerminalArtifact && !exited) {
         this.failAttempt(job.id, active.attempt.id, active.account.id, {
           errorCode: "process_exit",
@@ -919,7 +923,7 @@ export class JobScheduler {
         continue;
       }
 
-      if (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut) {
+      if (canReapStopTransition && (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut)) {
         const signal = child.signalCode ?? null;
         const { job: stoppedJob, attempt } = this.db.completeAttemptStopped(
           job.id,
@@ -940,7 +944,7 @@ export class JobScheduler {
         continue;
       }
 
-      if (isStopInProgressStatus(job.status)) {
+      if (canReapStopTransition) {
         if (active.finalize) {
           active.finalize(() =>
             this.handleAttemptExit(

@@ -629,6 +629,49 @@ test("running job force-reaps stalled Tavily attempts after the stale timeout", 
   appDb.close();
 });
 
+test("reaper ignores paused and completing jobs with live Tavily attempts", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "paused-live-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(path.dirname(dbPath), "paused-live-attempt"),
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39097, mixedPort: 49097 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+  } as any);
+
+  appDb.updateJobState(job.id, { status: "paused" });
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  appDb.updateJobState(job.id, { status: "completing" });
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("graceful stop reaps exited Tavily attempts through normal success finalizer", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);

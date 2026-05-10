@@ -72,6 +72,7 @@
 - 优雅停止下已退出 worker 必须复用正常 result finalizer；成功工件继续写入 `succeeded`，失败退出继续写入 `failed`，不得为了收束 stop 状态而改写成 `stopped`。
 - 当 job 处于普通 `running` 时，scheduler 也必须周期性收束 stale active attempts；一旦 attempt 目录已经写出 `result.json` / `error.json`，或者长时间没有新的进展，就应当清理 active entry 并继续推进 current job，而不是让 `activeAttempts` 永久占位。
 - 普通 `running` 下被 reaper 收束的成功 attempt 必须沿用正常 result finalizer；成功工件仍写入 `succeeded`，失败工件仍写入 `failed`，不得为了清理僵尸 attempt 而统一改成手动停止语义。
+- reaper 仅能处理 `running` 与 stop 过渡态的 active attempts；`paused`、`completing`、`stopped` 等状态下的 live worker 不能被当成 stale attempt 提前结算。
 - 当 job 处于 stop 过渡态时，不允许再执行 `update_limits` 或启动新 job。
 
 ## 验收标准（Acceptance Criteria）
