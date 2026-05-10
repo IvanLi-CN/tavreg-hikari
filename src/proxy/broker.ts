@@ -52,7 +52,7 @@ export interface ProxyBrokerCatalogGroup {
 
 export interface ProxyBrokerCatalog {
   view: string;
-  profile_id?: string | null;
+  project_id?: string | null;
   groups: ProxyBrokerCatalogGroup[];
 }
 
@@ -129,7 +129,8 @@ export class ProxyBrokerClient {
 
   async listCatalog(): Promise<ProxyBrokerCatalog> {
     return (await this.request("/api/v1/proxy-catalog", "GET", undefined, {
-      profile_id: this.cfg.profileId,
+      view: "project",
+      project_id: this.cfg.profileId,
     })) as ProxyBrokerCatalog;
   }
 
