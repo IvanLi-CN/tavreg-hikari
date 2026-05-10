@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.19.2",
+  "base_stable_version": "0.19.1",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-10T07:50:33Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.19.2",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "fbcf020bb80cea99e683a9214f2c840f2ff84de0",
+  "pr_number": 76,
+  "pr_title": "fix: reap stale tavily running attempts",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.19.2",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.19.2",
+  "target_sha": "0ce003c636c9b02a8375bbde54ef4bb5179ee247",
+  "type_label": "type:patch"
+}
