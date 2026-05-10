@@ -24,7 +24,7 @@ import { reserveMihomoPortLeases } from "./port-lease.js";
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
-  openProxyBrokerRuntimeSession,
+  openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -183,6 +183,14 @@ function getRetainStateMessage(site: AccountBusinessFlowSite): string {
   if (site === "chatgpt") return "ChatGPT 已完成登录，浏览器保持可接管状态。";
   if (site === "grok") return "Grok 已完成登录，浏览器保持可接管状态。";
   return "Tavily 已完成登录，浏览器保持可接管状态。";
+}
+
+function getFlowSetupErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code || "launch_setup_failed";
+  }
+  if (error instanceof Error && error.name && error.name !== "Error") return error.name;
+  return "launch_setup_failed";
 }
 
 function summarizeBusinessFlowError(message: string): string {
@@ -427,8 +435,9 @@ export class AccountBusinessFlowManager {
       );
       brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
-      brokerSession = await openProxyBrokerRuntimeSession({
+      brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
+        businessSite: "tavily",
         preferredIp: account.browserSession?.proxyIp || null,
       });
       this.db.updateAttempt(attemptId, {
@@ -624,8 +633,9 @@ export class AccountBusinessFlowManager {
         ? { command: process.execPath || "bun", bootstrapArgs: ["run", "src/server/microsoft-account-worker.ts"] }
         : resolveWorkerRuntime();
       const workerArgs = buildWorkerScriptArgs(runtime, "src/server/microsoft-account-worker.ts");
-      brokerSession = await openProxyBrokerRuntimeSession({
+      brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
+        businessSite: "microsoft",
         preferredIp: account.browserSession?.proxyIp || null,
       });
       const selectedProxyNode = brokerSession.session.proxy_name;
@@ -823,7 +833,15 @@ export class AccountBusinessFlowManager {
   }): void {
     const message = input.error instanceof Error ? input.error.message : String(input.error || "single-account flow setup failed");
     if (input.attemptId != null) {
-      this.db.rollbackAttemptBeforeLaunch(input.hiddenJobId, input.attemptId, input.accountId);
+      const errorCode = getFlowSetupErrorCode(input.error);
+      if (errorCode === "proxy_domain_unreachable") {
+        this.db.completeAttemptFailure(input.hiddenJobId, input.attemptId, input.accountId, {
+          errorCode,
+          errorMessage: message,
+        }, null);
+      } else {
+        this.db.rollbackAttemptBeforeLaunch(input.hiddenJobId, input.attemptId, input.accountId);
+      }
     } else {
       this.db.releaseAccountLease(input.accountId, input.hiddenJobId);
     }
@@ -877,8 +895,9 @@ export class AccountBusinessFlowManager {
       brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
-      brokerSession = await openProxyBrokerRuntimeSession({
+      brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
+        businessSite: "chatgpt",
         preferredIp: account.browserSession?.proxyIp || null,
       });
       const selectedProxyNode = brokerSession.session.proxy_name;
@@ -1091,8 +1110,9 @@ export class AccountBusinessFlowManager {
       brokerSettings = this.getSettings();
       portLeases = await reserveMihomoPortLeases();
       const runtime = resolveWorkerRuntime();
-      brokerSession = await openProxyBrokerRuntimeSession({
+      brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
+        businessSite: "grok",
         preferredIp: account.browserSession?.proxyIp || null,
       });
       const selectedProxyNode = brokerSession.session.proxy_name;

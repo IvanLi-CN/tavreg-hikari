@@ -1,3 +1,4 @@
+import { Impit } from "impit";
 import type { AppSettings } from "../storage/app-db.js";
 import {
   ProxyBrokerClient,
@@ -12,6 +13,8 @@ import {
 import type { ProxyController, ProxyNode } from "../proxy/adapter.js";
 import type { GeoInfo } from "../proxy/geo.js";
 
+export type ProxyBrokerBusinessSite = "tavily" | "microsoft" | "chatgpt" | "grok";
+
 export interface ProxyBrokerRuntimeSession {
   session: ProxyBrokerSession;
   proxyUrl: string;
@@ -20,6 +23,51 @@ export interface ProxyBrokerRuntimeSession {
 const PROXY_BROKER_PROBE_MAX_AGE_MS = 30 * 60 * 1000;
 
 type ProxyBrokerRuntimeSettings = Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs" | "maxLatencyMs">;
+
+export interface ProxyBrokerDomainProbeResult {
+  site: ProxyBrokerBusinessSite;
+  url: string;
+  status: number;
+  ok: boolean;
+}
+
+export class ProxyBrokerDomainProbeError extends Error {
+  code = "proxy_domain_unreachable";
+  site: ProxyBrokerBusinessSite;
+  url: string;
+  sessionId: string;
+  nodeName: string;
+  selectedIp: string | null;
+  attempts: number;
+
+  constructor(input: {
+    site: ProxyBrokerBusinessSite;
+    url: string;
+    sessionId: string;
+    nodeName: string;
+    selectedIp?: string | null;
+    attempts: number;
+    causeMessage: string;
+  }) {
+    super(
+      `proxy_domain_unreachable: site=${input.site} url=${input.url} node=${input.nodeName || "unknown"} session=${input.sessionId || "unknown"} ip=${input.selectedIp || "unknown"} cause=${input.causeMessage}`,
+    );
+    this.name = "proxy_domain_unreachable";
+    this.site = input.site;
+    this.url = input.url;
+    this.sessionId = input.sessionId;
+    this.nodeName = input.nodeName;
+    this.selectedIp = input.selectedIp || null;
+    this.attempts = input.attempts;
+  }
+}
+
+export const PROXY_BROKER_BUSINESS_PROBE_URLS: Record<ProxyBrokerBusinessSite, string[]> = {
+  microsoft: ["https://login.microsoftonline.com/"],
+  tavily: ["https://app.tavily.com/home", "https://auth.tavily.com/"],
+  chatgpt: ["https://chatgpt.com/", "https://auth.openai.com/"],
+  grok: ["https://grok.com/", "https://accounts.x.ai/", "https://console.x.ai/home"],
+};
 
 export function buildProxyBrokerConfig(settings: Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs">): ProxyBrokerConfig {
   return {
@@ -110,6 +158,10 @@ function noHealthyBrokerNodeError(maxLatencyMs: number): ProxyBrokerError {
   );
 }
 
+function isNoHealthyBrokerNodeError(error: unknown): boolean {
+  return error instanceof ProxyBrokerError && error.code === "proxy_broker_no_healthy_node";
+}
+
 export async function openProxyBrokerRuntimeSession(input: {
   settings: ProxyBrokerRuntimeSettings;
   preferredIp?: string | null;
@@ -158,6 +210,127 @@ export async function openProxyBrokerRuntimeSession(input: {
     session,
     proxyUrl: client.proxyUrl(session),
   };
+}
+
+function isDomainProbeReachableStatus(status: number): boolean {
+  return (status >= 200 && status < 400) || status === 401 || status === 403 || status === 404;
+}
+
+async function defaultProxyDomainProbeFetch(input: {
+  proxyUrl: string;
+  url: string;
+  timeoutMs: number;
+}): Promise<{ status: number }> {
+  const impit = new Impit({ proxyUrl: input.proxyUrl, timeout: input.timeoutMs, followRedirects: false });
+  const resp = await impit.fetch(input.url, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    },
+  });
+  return { status: resp.status };
+}
+
+async function probeProxyBrokerBusinessDomains(input: {
+  site: ProxyBrokerBusinessSite;
+  session: ProxyBrokerRuntimeSession;
+  timeoutMs: number;
+  probeUrls?: string[];
+  probeFetch?: (input: { proxyUrl: string; url: string; timeoutMs: number }) => Promise<{ status: number }>;
+}): Promise<ProxyBrokerDomainProbeResult[]> {
+  const urls = (input.probeUrls?.length ? input.probeUrls : PROXY_BROKER_BUSINESS_PROBE_URLS[input.site])
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const probeFetch = input.probeFetch || defaultProxyDomainProbeFetch;
+  const results: ProxyBrokerDomainProbeResult[] = [];
+  for (const url of urls) {
+    try {
+      const resp = await probeFetch({ proxyUrl: input.session.proxyUrl, url, timeoutMs: input.timeoutMs });
+      const ok = isDomainProbeReachableStatus(resp.status);
+      results.push({ site: input.site, url, status: resp.status, ok });
+      if (!ok) {
+        throw new Error(`http_status_${resp.status}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new ProxyBrokerDomainProbeError({
+        site: input.site,
+        url,
+        sessionId: input.session.session.session_id,
+        nodeName: input.session.session.proxy_name,
+        selectedIp: input.session.session.selected_ip,
+        attempts: 1,
+        causeMessage: message || "domain probe failed",
+      });
+    }
+  }
+  return results;
+}
+
+export async function openDomainProbedProxyBrokerRuntimeSession(input: {
+  settings: ProxyBrokerRuntimeSettings;
+  businessSite: ProxyBrokerBusinessSite;
+  preferredIp?: string | null;
+  excludedIps?: string[];
+  excludedNodeNamePattern?: RegExp;
+  fallbackOnPreferredIpFailure?: boolean;
+  maxProbeRotations?: number;
+  probeUrls?: string[];
+  probeFetch?: (input: { proxyUrl: string; url: string; timeoutMs: number }) => Promise<{ status: number }>;
+}): Promise<ProxyBrokerRuntimeSession> {
+  const maxProbeRotations = Math.max(0, Math.trunc(input.maxProbeRotations ?? 3));
+  const maxAttempts = maxProbeRotations + 1;
+  const excludedIps = new Set((input.excludedIps || []).map((item) => item.trim()).filter(Boolean));
+  let lastError: ProxyBrokerDomainProbeError | null = null;
+  const preferredIp = input.preferredIp?.trim() || null;
+  const requiresPreferredIp = Boolean(preferredIp && input.fallbackOnPreferredIpFailure === false);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let session: ProxyBrokerRuntimeSession;
+    try {
+      session = await openProxyBrokerRuntimeSession({
+        settings: input.settings,
+        preferredIp: preferredIp && (requiresPreferredIp || !excludedIps.has(preferredIp)) ? preferredIp : null,
+        excludedIps: Array.from(excludedIps),
+        excludedNodeNamePattern: input.excludedNodeNamePattern,
+        fallbackOnPreferredIpFailure: input.fallbackOnPreferredIpFailure,
+      });
+    } catch (error) {
+      if (lastError && isNoHealthyBrokerNodeError(error)) {
+        throw lastError;
+      }
+      throw error;
+    }
+    try {
+      await probeProxyBrokerBusinessDomains({
+        site: input.businessSite,
+        session,
+        timeoutMs: buildProxyBrokerConfig(input.settings).timeoutMs,
+        probeUrls: input.probeUrls,
+        probeFetch: input.probeFetch,
+      });
+      return session;
+    } catch (error) {
+      const probeError =
+        error instanceof ProxyBrokerDomainProbeError
+          ? error
+          : new ProxyBrokerDomainProbeError({
+              site: input.businessSite,
+              url: input.probeUrls?.[0] || PROXY_BROKER_BUSINESS_PROBE_URLS[input.businessSite][0] || "unknown",
+              sessionId: session.session.session_id,
+              nodeName: session.session.proxy_name,
+              selectedIp: session.session.selected_ip,
+              attempts: attempt,
+              causeMessage: error instanceof Error ? error.message : String(error),
+            });
+      probeError.attempts = attempt;
+      lastError = probeError;
+      if (session.session.selected_ip) excludedIps.add(session.session.selected_ip);
+      await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch(() => {});
+      if (requiresPreferredIp || attempt >= maxAttempts) {
+        throw probeError;
+      }
+    }
+  }
+  throw lastError || new Error("proxy_domain_unreachable");
 }
 
 export async function closeProxyBrokerRuntimeSession(

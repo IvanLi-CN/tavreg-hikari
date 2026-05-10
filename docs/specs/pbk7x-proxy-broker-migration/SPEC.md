@@ -12,6 +12,7 @@
 ## 目标
 
 - 任务运行、账号 bootstrap、ChatGPT / Grok / Tavily worker 通过 Proxy Broker 创建 mixed listener session。
+- 业务 worker 启动前，必须使用即将注入给 worker 的 Broker listener session 探测对应业务域名；不可达时关闭该 session、排除该出口 IP 并轮换。
 - 浏览器、邮箱与 geo 检查统一消费 `http://{display_address}` 形式的 session proxy URL。
 - attempt 记录保留 Broker session、节点、出口 IP 与 display address，便于失败诊断与账号 session 复用。
 - 代理页展示 Broker 配置、profile catalog、活动 sessions 与历史诊断快照。
@@ -42,12 +43,21 @@
   - 任务运行时只使用 `last_probe_ok=true` 且 `median_latency_ms` 或 `last_latency_ms` 不超过 `maxLatencyMs` 的 IP。
   - 探测结果超过 30 分钟或没有健康候选时，任务启动前必须触发一次 project refresh 后重新读取 catalog。
   - refresh 后仍没有健康低延迟候选时，任务必须明确失败，不得降级到任意 session。
+- 业务域名探测：
+  - Microsoft OAuth / 账号：`https://login.microsoftonline.com/`
+  - Tavily：`https://app.tavily.com/home`、`https://auth.tavily.com/`
+  - ChatGPT：`https://chatgpt.com/`、`https://auth.openai.com/`
+  - Grok：`https://grok.com/`、`https://accounts.x.ai/`、`https://console.x.ai/home`
+  - 探测必须通过同一个 listener session 的 proxy URL 发起；HTTP 2xx、3xx、401、403、404 代表网络可达，网络错误、超时、代理连接失败或其他 HTTP 状态代表不可达。
+  - 域名不可达时最多轮换 3 次；每次失败都 best-effort `DELETE` 关闭 session，并将 `selected_ip` 加入本次启动排除列表。
+  - 当调用方显式要求固定 preferred IP 且禁止 fallback 时，域名不可达必须直接以该 session 的 `proxy_domain_unreachable` 失败，不得轮换到其它出口。
 
 ## 验收
 
 - 未配置 `PROXY_BROKER_API_KEY` 时，Web 任务启动必须明确失败，不再提示配置 Mihomo subscription。
-- 启动 attempt 前必须创建 Broker session，并向 worker 注入 `PROXY_BROKER_PROXY_URL`。
 - 创建 Broker session 前必须先通过 Broker 探测元数据筛选健康低延迟候选 IP。
+- 启动 attempt 前必须创建并通过业务域名探测的 Broker session，再向 worker 注入 `PROXY_BROKER_PROXY_URL`。
+- 业务域名探测最终失败时，现有 attempt/session/mailbox 错误字段必须写入 `proxy_domain_unreachable`，错误信息包含 site、URL、node、session id 与底层错误摘要。
 - worker 检测到 Broker proxy env 后不得启动 Mihomo。
 - attempt 完成、失败或停止后必须 best-effort 关闭 Broker session。
 - 代理页不再暴露 Mihomo subscription / group / apiPort / mixedPort 编辑入口，并且必须展示 Broker 探测状态、延迟、探测时间与 session 可开性。

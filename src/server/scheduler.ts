@@ -31,7 +31,7 @@ import { buildUpstreamSyncConfig, writeBackUpstreamTavilySuccess } from "./upstr
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
-  openProxyBrokerRuntimeSession,
+  openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 
@@ -465,6 +465,14 @@ function isAbortError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const name = error instanceof Error ? error.name : "";
   return name === "AbortError" || /abort/i.test(message);
+}
+
+function getLaunchSetupErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code || "launch_setup_failed";
+  }
+  if (error instanceof Error && error.name && error.name !== "Error") return error.name;
+  return "launch_setup_failed";
 }
 
 function parseMillis(value: unknown): number | null {
@@ -1141,7 +1149,7 @@ export class JobScheduler {
           this.emit("job.updated", { job: this.db.getJob(dispatchJob.id) });
         } catch (error) {
           this.failAttempt(dispatchJob.id, attempt.id, account.id, {
-            errorCode: "launch_setup_failed",
+            errorCode: getLaunchSetupErrorCode(error),
             errorMessage: error instanceof Error ? error.message : String(error),
           });
         } finally {
@@ -1277,8 +1285,9 @@ export class JobScheduler {
         mixedPort: portLeases.mixedPort.port,
       };
       const selectedProxyNode = resolveReusableAttemptProxyNode(this.db, account.id);
-      brokerSession = await openProxyBrokerRuntimeSession({
+      brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
+        businessSite: "tavily",
         preferredIp: account.browserSession?.proxyIp || null,
         excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
       });

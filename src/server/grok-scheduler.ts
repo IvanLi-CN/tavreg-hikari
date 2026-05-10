@@ -19,7 +19,7 @@ import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpst
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
-  openProxyBrokerRuntimeSession,
+  openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -73,6 +73,16 @@ export interface GrokStartCooldownState {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function getLaunchSetupErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code || "launch_setup_failed";
+  }
+  if (error instanceof Error && error.name && error.name !== "Error") {
+    return error.name;
+  }
+  return "launch_setup_failed";
 }
 
 function parseIsoToMs(value: string | null | undefined): number | null {
@@ -517,7 +527,7 @@ export class GrokJobScheduler {
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.failAttempt(job.id, attempt.id, {
-              errorCode: isMailboxProviderCooldownErrorCode(errorMessage) ? errorMessage : "launch_setup_failed",
+              errorCode: isMailboxProviderCooldownErrorCode(errorMessage) ? errorMessage : getLaunchSetupErrorCode(error),
               errorMessage,
             });
             if (isMailboxProviderCooldownErrorCode(errorMessage)) {
@@ -566,8 +576,9 @@ export class GrokJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const brokerSession = await openProxyBrokerRuntimeSession({
+    const brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
       settings,
+      businessSite: "grok",
       excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
     }).catch(async (error) => {
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
