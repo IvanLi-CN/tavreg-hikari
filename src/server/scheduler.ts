@@ -1451,6 +1451,17 @@ export class JobScheduler {
       return current;
     }
 
+    const latestUpdatedAt = parseIsoToMs(
+      typeof latest.updated_at === "string"
+        ? latest.updated_at
+        : typeof latest.updatedAt === "string"
+          ? latest.updatedAt
+          : null,
+    );
+    if (latestUpdatedAt != null) {
+      active.lastProgressAtMs = Math.max(active.lastProgressAtMs ?? 0, latestUpdatedAt);
+    }
+
     const patch: Partial<
       Pick<JobAttemptRecord, "runId" | "stage" | "proxyNode" | "proxyIp" | "errorCode" | "errorMessage" | "status">
     > = {};
@@ -1478,6 +1489,7 @@ export class JobScheduler {
 
     const updated = this.db.updateAttempt(active.attempt.id, patch);
     active.attempt = updated;
+    active.lastProgressAtMs = Date.now();
     this.emit("attempt.updated", { attempt: updated });
     return updated;
   }
