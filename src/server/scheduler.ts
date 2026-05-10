@@ -64,6 +64,7 @@ interface ActiveAttempt {
   tail: string[];
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
+  lastProgressAtMs?: number | null;
   releaseResources?: () => Promise<void>;
   finalize?: (runner: () => Promise<void> | void) => void;
 }
@@ -433,6 +434,12 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+function parseIsoToMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -536,6 +543,7 @@ function readJsonFileSync<T>(filePath: string): T | null {
 
 const FORCE_STOP_SIGKILL_AFTER_MS = 5_000;
 const FORCE_STOP_REAP_AFTER_MS = 30_000;
+const RUNNING_STALE_ATTEMPT_REAP_AFTER_MS = 10 * 60_000;
 
 export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
@@ -661,7 +669,7 @@ export class JobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current job");
     if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
-      this.reapStoppedActiveAttempts(job);
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused"].includes(job.status)) {
@@ -694,7 +702,7 @@ export class JobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current job");
     if (job.status === "stopped" || job.status === "force_stopping") {
-      this.reapStoppedActiveAttempts(job);
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused", "stopping"].includes(job.status)) {
@@ -706,7 +714,7 @@ export class JobScheduler {
     });
     this.abortAutoExtractRequests(job.id, "force stop requested by user");
     this.terminateActiveAttempts(job.id);
-    this.reapStoppedActiveAttempts(next);
+    this.reapActiveAttempts(next);
     const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
     this.emit("job.updated", { job: finalized, autoExtractState: this.getAutoExtractSnapshot(next.id) });
     this.emit("toast", {
@@ -858,8 +866,7 @@ export class JobScheduler {
     return stopped;
   }
 
-  private reapStoppedActiveAttempts(job: JobRecord): void {
-    if (!isStopInProgressStatus(job.status)) return;
+  private reapActiveAttempts(job: JobRecord): void {
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
       if (active.attempt.jobId !== job.id) continue;
@@ -874,15 +881,43 @@ export class JobScheduler {
         signalCode?: NodeJS.Signals | null;
       };
       const errorArtifact = readJsonFileSync<{ error?: string }>(path.join(active.outputDir, "error.json"));
-      const resultArtifact = readJsonFileSync<{ apiKey?: string | null }>(path.join(active.outputDir, "result.json"));
+      const resultArtifact = readJsonFileSync<{
+        apiKey?: string | null;
+        serviceAccess?: {
+          tavily?: {
+            cookiesSnapshot?: unknown[];
+            browserFingerprintSnapshot?: unknown;
+            extractedIp?: string | null;
+            lastSuccessAt?: string;
+            apiKeyPrefix?: string | null;
+          };
+        };
+      }>(path.join(active.outputDir, "result.json"));
       const exited = child.exitCode != null || child.signalCode != null;
       const stopRequestedAtMs = active.stopRequestedAtMs ?? null;
       const forceStopTimedOut =
         (job.status === "force_stopping" || active.stopRequested === "force_stop")
         && stopRequestedAtMs != null
         && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
+      const lastProgressAtMs = active.lastProgressAtMs ?? parseIsoToMs(latestAttempt.startedAt) ?? null;
+      const runningStaleTimedOut =
+        job.status === "running"
+        && lastProgressAtMs != null
+        && nowMs - lastProgressAtMs >= RUNNING_STALE_ATTEMPT_REAP_AFTER_MS;
+      const hasTerminalArtifact =
+        Boolean(errorArtifact?.error?.trim()) ||
+        Boolean(typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim());
 
-      if (!exited && !forceStopTimedOut) continue;
+      if (job.status === "running" && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
+      if (isStopInProgressStatus(job.status) && !exited && !forceStopTimedOut) continue;
+      if (runningStaleTimedOut && !hasTerminalArtifact && !exited) {
+        this.failAttempt(job.id, active.attempt.id, active.account.id, {
+          errorCode: "process_exit",
+          errorMessage: "stale running attempt exceeded reap timeout",
+        });
+        this.cleanupActiveAttempt(active);
+        continue;
+      }
 
       if (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut) {
         const signal = child.signalCode ?? null;
@@ -905,7 +940,7 @@ export class JobScheduler {
         continue;
       }
 
-      if (exited) {
+      if (isStopInProgressStatus(job.status)) {
         if (active.finalize) {
           active.finalize(() =>
             this.handleAttemptExit(
@@ -920,16 +955,56 @@ export class JobScheduler {
           );
           continue;
         }
-        const apiKey = typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim() ? resultArtifact.apiKey.trim() : null;
-        if (child.exitCode === 0 && child.signalCode == null && apiKey) {
+
+        const signal = child.signalCode ?? null;
+        if (signal == null && child.exitCode === 0 && typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim() && !errorArtifact?.error) {
           continue;
         }
-        const signal = child.signalCode ?? null;
+
         this.failAttempt(job.id, active.attempt.id, active.account.id, {
           errorCode: signal ? `signal_${String(signal).toLowerCase()}` : child.exitCode == null ? "process_exit" : `exit_${child.exitCode}`,
           errorMessage:
             errorArtifact?.error
             || (signal ? `terminated by ${signal}` : child.exitCode == null ? "process exited without code" : `process exited with code ${child.exitCode}`),
+        });
+        this.cleanupActiveAttempt(active);
+        continue;
+      }
+
+      if (active.finalize) {
+        active.finalize(() =>
+          this.handleAttemptExit(
+            job.id,
+            active.attempt.id,
+            active.account.id,
+            active.outputDir,
+            child.exitCode ?? null,
+            child.signalCode ?? null,
+            active,
+          ),
+        );
+        continue;
+      }
+
+      if (hasTerminalArtifact || exited) {
+        void this.handleAttemptExit(
+          job.id,
+          active.attempt.id,
+          active.account.id,
+          active.outputDir,
+          child.exitCode ?? null,
+          child.signalCode ?? null,
+          active,
+        ).finally(() => {
+          this.cleanupActiveAttempt(active);
+        });
+        continue;
+      }
+
+      if (runningStaleTimedOut) {
+        this.failAttempt(job.id, active.attempt.id, active.account.id, {
+          errorCode: "process_exit",
+          errorMessage: "stale running attempt exceeded reap timeout",
         });
         this.cleanupActiveAttempt(active);
       }
@@ -994,15 +1069,8 @@ export class JobScheduler {
         this.emit("job.updated", { job: this.db.getJob(jobId), autoExtractState: this.getAutoExtractSnapshot(jobId) });
       }
 
-      const activeCount = this.activeAttempts.size;
-
-      if (job.status === "paused") {
-        await delay(100);
-        continue;
-      }
-
+      this.reapActiveAttempts(job);
       if (isStopInProgressStatus(job.status)) {
-        this.reapStoppedActiveAttempts(job);
         const stopped = this.maybeFinalizeStoppedJob(jobId);
         if (stopped) {
           this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(jobId) });
@@ -1012,6 +1080,13 @@ export class JobScheduler {
           });
           return;
         }
+        await delay(100);
+        continue;
+      }
+
+      const activeCount = this.activeAttempts.size;
+
+      if (job.status === "paused") {
         await delay(100);
         continue;
       }
@@ -1077,21 +1152,23 @@ export class JobScheduler {
         await delay(100);
         continue;
       }
-      if (isStopInProgressStatus(refreshed.status)) {
-        this.reapStoppedActiveAttempts(refreshed);
+      this.reapActiveAttempts(refreshed);
+      const postReap = this.db.getJob(jobId);
+      if (!postReap) return;
+      if (isStopInProgressStatus(postReap.status)) {
         const stopped = this.maybeFinalizeStoppedJob(jobId);
         if (stopped) {
           this.emit("job.updated", { job: stopped, autoExtractState: this.getAutoExtractSnapshot(jobId) });
           this.emit("toast", {
             level: "info",
-            message: refreshed.status === "force_stopping" ? `job #${refreshed.id} force stopped` : `job #${refreshed.id} stopped`,
+            message: postReap.status === "force_stopping" ? `job #${postReap.id} force stopped` : `job #${postReap.id} stopped`,
           });
           return;
         }
         await delay(100);
         continue;
       }
-      if (isTerminalJobStatus(refreshed.status)) {
+      if (isTerminalJobStatus(postReap.status)) {
         return;
       }
       const eligible = this.db.countEligibleAccounts(jobId);
@@ -1111,8 +1188,8 @@ export class JobScheduler {
         await delay(100);
         continue;
       }
-      if (eligible === 0 && refreshed.successCount < refreshed.need && refreshed.launchedCount < refreshed.maxAttempts) {
-        const extraction = await this.maybeAutoExtract(refreshed);
+      if (eligible === 0 && postReap.successCount < postReap.need && postReap.launchedCount < postReap.maxAttempts) {
+        const extraction = await this.maybeAutoExtract(postReap);
         if (extraction.status === "ready" || extraction.status === "waiting") {
           await delay(100);
           continue;
@@ -1126,14 +1203,14 @@ export class JobScheduler {
         }
       }
       if (this.activeAttempts.size === 0) {
-        if (refreshed.successCount >= refreshed.need) {
+        if (postReap.successCount >= postReap.need) {
           const completed = this.db.completeJob(jobId, true);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: completed });
           this.emit("toast", { level: "success", message: `job #${job.id} completed` });
           return;
         }
-        if ((eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) || refreshed.launchedCount >= refreshed.maxAttempts) {
+        if ((eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) || postReap.launchedCount >= postReap.maxAttempts) {
           const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
@@ -1268,6 +1345,7 @@ export class JobScheduler {
         brokerSession,
         tail: [],
         stopRequested: null,
+        lastProgressAtMs: Date.now(),
       };
       if (pendingLaunch.stopRequested === "force_stop") {
         active.stopRequested = "force_stop";
@@ -1294,6 +1372,7 @@ export class JobScheduler {
       this.emit("toast", { level: "info", message: `attempt #${attempt.id} started for ${account.microsoftEmail}` });
 
       const pushTail = (chunk: Buffer): void => {
+        active.lastProgressAtMs = Date.now();
         const lines = chunk
           .toString("utf8")
           .split(/\r?\n/)
@@ -1466,7 +1545,8 @@ export class JobScheduler {
       this.emit("toast", { level: "warning", message: `attempt #${attempt.id} stopped for account #${accountId}` });
       return;
     }
-    if (code === 0 && signal == null && apiKey) {
+    const hasResultArtifact = Boolean(typeof result?.apiKey === "string" && result.apiKey.trim());
+    if (signal == null && apiKey && !error?.error && (code === 0 || (code == null && hasResultArtifact))) {
       const { job, attempt, apiKeyRecord } = this.db.completeAttemptSuccess(jobId, attemptId, accountId, apiKey, signupTask);
       const tavilyAccess = result?.serviceAccess?.tavily;
       if (tavilyAccess) {
