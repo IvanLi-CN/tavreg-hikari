@@ -868,8 +868,7 @@ export class JobScheduler {
 
   private reapActiveAttempts(job: JobRecord): void {
     const canReapRunning = job.status === "running";
-    const canReapStopTransition = isStopInProgressStatus(job.status);
-    if (!canReapRunning && !canReapStopTransition) return;
+    if (!canReapRunning && !isStopInProgressStatus(job.status)) return;
 
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
@@ -911,15 +910,12 @@ export class JobScheduler {
       const hasTerminalArtifact =
         Boolean(errorArtifact?.error?.trim()) ||
         Boolean(typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim());
+      const canReapStopTransition = isStopInProgressStatus(job.status) || active.stopRequested === "force_stop";
 
       if (canReapRunning && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
       if (canReapStopTransition && !exited && !forceStopTimedOut) continue;
-      if (runningStaleTimedOut && !hasTerminalArtifact && !exited) {
-        this.failAttempt(job.id, active.attempt.id, active.account.id, {
-          errorCode: "process_exit",
-          errorMessage: "stale running attempt exceeded reap timeout",
-        });
-        this.cleanupActiveAttempt(active);
+      if (runningStaleTimedOut && !hasTerminalArtifact && !exited && active.stopRequested !== "force_stop") {
+        this.requestForceStop(active);
         continue;
       }
 

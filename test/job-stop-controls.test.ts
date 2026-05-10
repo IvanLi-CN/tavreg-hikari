@@ -585,7 +585,7 @@ test("running job reaps Tavily attempts that already wrote a successful result",
   appDb.close();
 });
 
-test("running job force-reaps stalled Tavily attempts after the stale timeout", async () => {
+test("running job escalates stalled Tavily attempts to force stop and reaps them after the timeout", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
   (scheduler as any).ensureLoop = () => undefined;
@@ -593,6 +593,7 @@ test("running job force-reaps stalled Tavily attempts after the stale timeout", 
   const accountId = imported.affectedIds[0]!;
   const account = appDb.getAccount(accountId)!;
   const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  let killCount = 0;
   const attempt = appDb.createAttempt(job.id, {
     accountId,
     accountEmail: account.microsoftEmail,
@@ -604,7 +605,10 @@ test("running job force-reaps stalled Tavily attempts after the stale timeout", 
       pid: undefined,
       exitCode: null,
       signalCode: null,
-      kill: () => true,
+      kill: () => {
+        killCount += 1;
+        return true;
+      },
     },
     attempt,
     account,
@@ -617,12 +621,15 @@ test("running job force-reaps stalled Tavily attempts after the stale timeout", 
 
   scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
 
-  expect(appDb.getAttempt(attempt.id)).toMatchObject({
-    status: "failed",
-    stage: "failed",
-    errorCode: "process_exit",
-    errorMessage: "stale running attempt exceeded reap timeout",
-  });
+  expect(killCount).toBe(1);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  const active = scheduler["activeAttempts"].get(attempt.id)!;
+  active.stopRequestedAtMs = Date.now() - 30_000 - 1;
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("stopped");
   expect(scheduler["activeAttempts"].size).toBe(0);
 
   await scheduler.shutdown();
