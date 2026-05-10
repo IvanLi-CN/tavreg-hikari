@@ -39,16 +39,26 @@ function normalizeMaxLatencyMs(settings: Pick<AppSettings, "maxLatencyMs">): num
   return Number.isFinite(value) ? Math.max(100, Math.trunc(value)) : 3000;
 }
 
-function catalogHasFreshProbeMetadata(catalog: ProxyBrokerCatalog, nowMs = Date.now()): boolean {
+function catalogNeedsProbeRefresh(
+  catalog: ProxyBrokerCatalog,
+  excludedNodeNamePattern?: RegExp,
+  nowMs = Date.now(),
+): boolean {
+  let sawRefreshableNode = false;
   for (const group of catalog.groups || []) {
     for (const node of group.nodes || []) {
-      for (const metadata of node.ip_metadata || []) {
+      if (!node.can_open_session) continue;
+      if (excludedNodeNamePattern?.test(node.proxy_name)) continue;
+      sawRefreshableNode = true;
+      const metadataRows = node.ip_metadata || [];
+      if (metadataRows.length === 0) return true;
+      for (const metadata of metadataRows) {
         const updatedAtMs = proxyBrokerProbeUpdatedAtMs(metadata);
-        if (updatedAtMs != null && nowMs - updatedAtMs <= PROXY_BROKER_PROBE_MAX_AGE_MS) return true;
+        if (updatedAtMs == null || nowMs - updatedAtMs > PROXY_BROKER_PROBE_MAX_AGE_MS) return true;
       }
     }
   }
-  return false;
+  return !sawRefreshableNode;
 }
 
 function collectHealthyCandidateIps(input: {
@@ -84,7 +94,7 @@ async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number,
 }> {
   let catalog = await client.listCatalog();
   let candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
-  if (candidateIps.length === 0 || !catalogHasFreshProbeMetadata(catalog)) {
+  if (candidateIps.length === 0 || catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
     await client.refreshProject();
     catalog = await client.listCatalog();
     candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });

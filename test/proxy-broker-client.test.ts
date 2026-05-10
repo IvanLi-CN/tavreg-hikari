@@ -504,6 +504,74 @@ test("proxy broker runtime refreshes stale probes before opening a healthy sessi
   }
 });
 
+test("proxy broker runtime refreshes mixed fresh and stale catalogs before opening", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  let catalogCalls = 0;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      catalogCalls += 1;
+      return Response.json(brokerCatalog([
+        healthyNode({
+          nodeId: "fresh_1",
+          name: "Fresh-01",
+          ip: "203.0.113.20",
+          probeUpdatedAt: freshProbeTime(),
+        }),
+        healthyNode({
+          nodeId: "stale_1",
+          name: "Stale-01",
+          ip: "203.0.113.21",
+          probeUpdatedAt: catalogCalls === 1 ? staleProbeTime() : freshProbeTime(),
+        }),
+      ]));
+    }
+    if (String(url).endsWith("/refresh")) {
+      return Response.json({ probed_ips: 2, geo_updated: 0, skipped_cached: 0 });
+    }
+    return Response.json({
+      session_id: "sess_mixed_refreshed",
+      display_address: "127.0.0.1:43128",
+      selected_ip: "203.0.113.21",
+      proxy_name: "Stale-01",
+      node_id: "stale_1",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+    });
+
+    expect(runtime.session.session_id).toBe("sess_mixed_refreshed");
+    expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/refresh",
+      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
+    ]);
+    expect(requests.at(-1)?.body).toMatchObject({
+      selection_mode: "ip",
+      specified_ips: ["203.0.113.20", "203.0.113.21"],
+    });
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
 test("proxy broker runtime rejects when no probed node passes latency gate", async () => {
   globalThis.fetch = (async (url: RequestInfo | URL) => {
     if (String(url).includes("/proxy-catalog")) {
