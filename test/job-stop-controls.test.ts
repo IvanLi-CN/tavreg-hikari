@@ -515,6 +515,253 @@ test("force stop keeps Tavily error artifacts owned until child exit or reap tim
   appDb.close();
 });
 
+test("running job reaps Tavily attempts that already wrote a successful result", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "running-success-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "running-success-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(
+    path.join(outputDir, "result.json"),
+    JSON.stringify({
+      apiKey: "tvly-running-reap-001",
+      serviceAccess: {
+        tavily: {
+          extractedIp: "103.197.71.113",
+          apiKeyPrefix: "tvly-running",
+        },
+      },
+    }),
+    "utf8",
+  );
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "running" });
+  let released = false;
+  let resolveFinalizer!: () => void;
+  const finalizerDone = new Promise<void>((resolve) => {
+    resolveFinalizer = resolve;
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39095, mixedPort: 49095 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now(),
+    finalize: (runner: () => Promise<void> | void) => {
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        released = true;
+        resolveFinalizer();
+      })();
+    },
+  } as any);
+
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(released).toBe(false);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  const active = scheduler["activeAttempts"].get(attempt.id)!;
+  Object.defineProperty(active.child, "exitCode", { value: 0, configurable: true });
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  await finalizerDone;
+
+  expect(released).toBe(true);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("succeeded");
+  expect(appDb.getAccount(accountId)?.hasApiKey).toBe(true);
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("running job escalates stalled Tavily attempts to force stop and reaps them after the timeout", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "running-stale-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  let killCount = 0;
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(path.dirname(dbPath), "running-stale-attempt"),
+  });
+  appDb.updateJobState(job.id, { status: "running" });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        killCount += 1;
+        return true;
+      },
+    },
+    attempt,
+    account,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39096, mixedPort: 49096 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+  } as any);
+
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(killCount).toBe(1);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  const active = scheduler["activeAttempts"].get(attempt.id)!;
+  active.stopRequestedAtMs = Date.now() - 30_000 - 1;
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("stopped");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("reaper ignores paused and completing jobs with live Tavily attempts", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "paused-live-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(path.dirname(dbPath), "paused-live-attempt"),
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39097, mixedPort: 49097 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+  } as any);
+
+  appDb.updateJobState(job.id, { status: "paused" });
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  appDb.updateJobState(job.id, { status: "completing" });
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("ledger updates refresh quiet Tavily attempt progress time", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const rawDb = (appDb as any).db;
+  rawDb.exec(`
+    CREATE TABLE signup_tasks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id TEXT,
+      job_id INTEGER,
+      account_id INTEGER,
+      status TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      updated_at TEXT,
+      failure_stage TEXT,
+      error_code TEXT,
+      error_message TEXT,
+      proxy_node TEXT,
+      proxy_ip TEXT
+    )
+  `);
+  const imported = appDb.importAccounts([{ email: "ledger-progress-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir: path.join(path.dirname(dbPath), "ledger-progress-attempt"),
+  });
+  appDb.updateJobState(job.id, { status: "running" });
+  let killCount = 0;
+  const active = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        killCount += 1;
+        return true;
+      },
+    },
+    attempt: {
+      ...attempt,
+      startedAt: new Date(Date.now() - 5 * 60_000).toISOString(),
+    },
+    account,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39098, mixedPort: 49098 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+  } as any;
+  scheduler["activeAttempts"].set(attempt.id, active);
+  rawDb
+    .query(
+      `
+      INSERT INTO signup_tasks (run_id, job_id, account_id, status, started_at, completed_at, updated_at, failure_stage, error_code, error_message, proxy_node, proxy_ip)
+      VALUES (?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, NULL, NULL)
+    `,
+    )
+    .run("run-ledger-progress", job.id, accountId, "running", new Date(Date.now() - 5 * 60_000).toISOString(), new Date().toISOString());
+
+  scheduler["syncActiveAttemptFromLedger"](active);
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(killCount).toBe(0);
+  expect(scheduler["activeAttempts"].size).toBe(1);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("graceful stop reaps exited Tavily attempts through normal success finalizer", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
