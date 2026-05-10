@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.20.0",
+  "base_stable_version": "0.19.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-10T13:15:15Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.20.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "7f5d319dd5c4ce69a3b4421e3e45dfb4413ab094",
+  "pr_number": 77,
+  "pr_title": "feat(accounts): redesign session proxy switcher",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.20.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.20.0",
+  "target_sha": "8f2eeaa45aaea6f66f8326f968aaba5ea04d4978",
+  "type_label": "type:minor"
+}
