@@ -712,7 +712,7 @@ export type ProxyCheckStatus = "idle" | "running" | "completed" | "failed";
 export type ProxyCheckState = {
   runId: string | null;
   status: ProxyCheckStatus;
-  scope: "all" | "node" | null;
+  scope: ProxyCheckScope | null;
   concurrency: number;
   total: number;
   completed: number;
@@ -921,4 +921,8 @@ export type GrokApiKeyQuery = {
   pageSize: number;
 };
 
-export type ProxyCheckScope = "all";
+export type ProxyCheckScope = "all" | "node" | "group";
+export type ProxyCheckRequest =
+  | { scope: "all" }
+  | { scope: "node"; nodeName: string }
+  | { scope: "group"; nodeNames: string[] };

@@ -1674,9 +1674,12 @@ async function main(): Promise<void> {
   const proxyCheckCoordinator = createProxyCheckCoordinator({
     defaultConcurrency: resolveProxyCheckConcurrency(process.env.PROXY_CHECK_CONCURRENCY, 5),
     readSettings,
-    resolveNodeNames: async ({ settings, scope, nodeName }) => {
+    resolveNodeNames: async ({ settings, scope, nodeName, nodeNames }) => {
       if (scope === "node") {
         return [String(nodeName || "").trim()].filter(Boolean);
+      }
+      if (scope === "group") {
+        return Array.from(new Set((nodeNames || []).map((name) => String(name || "").trim()).filter(Boolean)));
       }
       const inventory = await runExclusiveProxyOp(() => fetchProxyInventory(settings));
       db.upsertProxyInventory(inventory.nodeNames);
@@ -3362,13 +3365,31 @@ async function main(): Promise<void> {
       if (pathname === "/api/proxies/check" && req.method === "POST") {
         const settings = readSettings();
         try {
-          const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
-          latestProxySyncError = payload.syncError;
-          latestBrokerSnapshot = {
-            catalogGroups: payload.broker.catalogGroups,
-            sessions: payload.broker.sessions,
+          const body = parseBody(await req.text()) as {
+            scope?: ProxyCheckScope;
+            nodeName?: string | null;
+            nodeNames?: string[] | null;
           };
-          return json({ ok: true, accepted: true, checkState: proxyCheckCoordinator.getState() });
+          const scope = body.scope || "all";
+          if (!["all", "node", "group"].includes(scope)) {
+            return badRequest("invalid proxy check scope");
+          }
+          const result = await proxyCheckCoordinator.startCheck({
+            scope,
+            nodeName: body.nodeName,
+            nodeNames: body.nodeNames,
+          });
+          try {
+            const payload = await fetchBrokerProxyPayload(db, settings, proxyCheckCoordinator.getState(), latestBrokerSnapshot);
+            latestProxySyncError = payload.syncError;
+            latestBrokerSnapshot = {
+              catalogGroups: payload.broker.catalogGroups,
+              sessions: payload.broker.sessions,
+            };
+          } catch (error) {
+            latestProxySyncError = proxyBrokerErrorMessage(error);
+          }
+          return json({ ok: true, accepted: result.accepted, checkState: proxyCheckCoordinator.getState() });
         } catch (error) {
           latestProxySyncError = proxyBrokerErrorMessage(error);
           return badRequest(latestProxySyncError, 502);

@@ -36,11 +36,24 @@
 
 - `Session Proxy` 单元格在当前值后面显示行内“编辑”按钮。
 - 桌面表格与移动卡片都使用同一套代理选择对话框。
-- 对话框列表固定显示四列：`名称 / IP / 延迟 / 操作`。
+- 对话框采用三块结构：顶部固定显示当前账号与当前节点；左下显示分组；右侧显示组内节点。
+- 分组固定包含 `全部` 和按 `country / region / city` 归并出的地区分组；缺失地区归入 `未知地区`。
+- 右侧节点列表固定显示：`名称 / 上次使用 / 延迟 / 操作`，节点 IP 与地区展示在名称副信息中。
+- 右侧排序是明确三选一：默认 `上次使用` 倒序；点击 `名称` 切到自然语言正序；点击 `延迟` 切到延迟正序，空值排最后；不提供升降序循环和排序偏好记忆。
 - 当前已绑定节点需要有清晰标识。
 - 操作列至少包含：
   - `测速`：复用 `POST /api/proxies/check { scope: "node", nodeName }`
   - `选择`：立即触发带 `proxyNode` 的 rebootstrap
+- 顶部当前节点提供 `测速当前节点`，左侧当前分组提供 `测速本组`；当 `全部` 分组被选中时，`测速本组` 覆盖全部节点。
+
+### 代理测速接口
+
+- `POST /api/proxies/check` 启动 proxy-check coordinator，并快速返回 `{ ok, accepted, checkState }`。
+- 请求体支持：
+  - `{ scope: "all" }`：兼容既有全量检查。
+  - `{ scope: "node", nodeName }`：检查单个节点。
+  - `{ scope: "group", nodeNames }`：检查当前分组内多个节点。
+- 已有检查运行中时返回 `accepted=false` 与当前 `checkState`，不得启动第二个并发 run。
 
 ### 服务端 rebootstrap
 
@@ -60,8 +73,10 @@
 ## 验收标准
 
 - Given 微软账号页存在账号记录，When 查看 `Session Proxy` 单元格，Then 当前值右侧可见行内“编辑”按钮。
-- Given 打开代理选择对话框，When 查看列表，Then 至少能看到 `名称 / IP / 延迟 / 操作` 四列，且当前节点有明显标识。
-- Given 在对话框里点击 `测速`，When 节点检查完成，Then 对应行的延迟/IP 会刷新，而不会跳转到代理页。
+- Given 打开代理选择对话框，When 查看布局，Then 能看到顶部当前节点、左侧分组和右侧组内节点列表，且当前节点有明显标识。
+- Given 打开代理选择对话框，When 未点击排序列，Then 右侧节点默认按上次使用时间倒序排列。
+- Given 点击 `名称 / 上次使用 / 延迟` 任一列标题，When 查看右侧节点，Then 排序直接切换到对应固定规则，延迟空值排在最后。
+- Given 在对话框里点击 `测速当前节点 / 测速本组 / 单行测速`，When 节点检查完成，Then 对应范围的延迟/IP 会刷新，而不会跳转到代理页。
 - Given 在对话框里点击 `选择`，When 请求成功，Then 当前账号立即进入 rebootstrap，最终账号页 `Session Proxy` 快照更新为新节点/IP。
 - Given 提供了不存在的 `proxyNode`，When 调用 rebootstrap 接口，Then 服务端返回 4xx，而不是静默回退到自动节点。
 - Given 账号已锁定、禁用或 bootstrapping，When 尝试切换 Session Proxy，Then 切换入口保持禁用或被阻断，文案与现有 Bootstrap 阻断语义一致。
@@ -71,6 +86,17 @@
 - 本 spec 收敛并覆盖 `bqa97` 中“无手动切换代理节点”的旧边界，但仅限**账号级 Session Proxy 切换**；代理页与全局调度仍保持无全局手动选节点能力。
 
 ## Visual Evidence
+
+- source_type: `storybook_canvas`
+- target_program: `mock-only`
+- capture_scope: `element`
+- requested_viewport: `none`
+- viewport_strategy: `storybook-viewport`
+- sensitive_exclusion: `N/A`
+- submission_gate: `pending-owner-approval`
+- story_id_or_title: `Views/AccountsView/SessionProxySwitchDialogPlay`
+- state: 当前弹窗采用顶部当前节点、左侧地区分组、右侧组内节点列表；默认按上次使用倒序，并暴露当前节点、当前分组与单节点测速入口。
+![Session Proxy 品字结构对话框](./assets/session-proxy-bento-dialog.png)
 
 - source_type: `storybook_canvas`
 - target_program: `mock-only`

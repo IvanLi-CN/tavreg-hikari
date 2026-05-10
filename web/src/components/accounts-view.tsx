@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, CloudDownload, Inbox, KeyRound, LoaderCircle, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, ArrowUpDown, ChevronLeft, ChevronRight, CloudDownload, Globe2, Inbox, KeyRound, Layers3, LoaderCircle, Mail, PencilLine, RefreshCw, RotateCcw, Settings2, ShieldOff, SlidersHorizontal } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,6 +45,7 @@ import type {
   ProxyNode,
   UpstreamAccountSyncPayload,
   AccountImportPreviewItem,
+  ProxyCheckRequest,
 } from "@/lib/app-types";
 import { DEFAULT_ACCOUNT_QUERY_SORT, isDefaultAccountQuerySort } from "@/lib/account-query";
 import { formatDate } from "@/lib/format";
@@ -78,6 +79,10 @@ const MAILBOX_STATUS_OPTIONS = [
 const DESKTOP_TOOLS_STORAGE_KEY = "tavreg-hikari.accounts.desktopToolsCollapsed";
 const ACCOUNT_BUSINESS_FLOW_MODE_STORAGE_KEY = "tavreg-hikari.accounts.businessFlowMode";
 const UNKNOWN_UPSTREAM_IMPORTED_AT = "1970-01-01T00:00:00.000Z";
+const SESSION_PROXY_ALL_GROUP_KEY = "__all__";
+const SESSION_PROXY_UNKNOWN_GROUP_KEY = "__unknown__";
+const sessionProxyNameCollator = new Intl.Collator("zh-Hans-CN", { numeric: true, sensitivity: "base" });
+type SessionProxySortKey = "lastUsed" | "name" | "latency";
 
 function hasMeaningfulImportPreviewNote(item: AccountImportPreviewItem): boolean {
   const note = item.note.trim();
@@ -210,6 +215,41 @@ function formatBrowserSessionPath(account: Pick<AccountRecord, "browserSession">
 
 function formatProxyLatency(latencyMs: number | null | undefined): string {
   return latencyMs == null ? "—" : `${Math.max(0, Math.trunc(latencyMs))} ms`;
+}
+
+function formatProxyLastUsed(lastLeasedAt: string | null | undefined): string {
+  return lastLeasedAt ? formatDate(lastLeasedAt) : "从未使用";
+}
+
+function getProxyLocationParts(node: Pick<ProxyNode, "lastCountry" | "lastRegion" | "lastCity">): string[] {
+  return [node.lastCountry, node.lastRegion, node.lastCity].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function formatProxyLocation(node: Pick<ProxyNode, "lastCountry" | "lastRegion" | "lastCity">): string {
+  const parts = getProxyLocationParts(node);
+  return parts.length > 0 ? parts.join(" / ") : "未知地区";
+}
+
+function getProxyGroupKey(node: Pick<ProxyNode, "lastCountry" | "lastRegion" | "lastCity">): string {
+  const parts = getProxyLocationParts(node);
+  return parts.length > 0 ? parts.join("\u0001") : SESSION_PROXY_UNKNOWN_GROUP_KEY;
+}
+
+function compareProxyLastUsed(left: ProxyNode, right: ProxyNode): number {
+  const leftTime = left.lastLeasedAt ? Date.parse(left.lastLeasedAt) : Number.NEGATIVE_INFINITY;
+  const rightTime = right.lastLeasedAt ? Date.parse(right.lastLeasedAt) : Number.NEGATIVE_INFINITY;
+  if (leftTime !== rightTime) return rightTime - leftTime;
+  return sessionProxyNameCollator.compare(left.nodeName, right.nodeName);
+}
+
+function compareProxyLatency(left: ProxyNode, right: ProxyNode): number {
+  const leftMissing = left.lastLatencyMs == null;
+  const rightMissing = right.lastLatencyMs == null;
+  if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+  if (!leftMissing && !rightMissing && left.lastLatencyMs !== right.lastLatencyMs) {
+    return Number(left.lastLatencyMs) - Number(right.lastLatencyMs);
+  }
+  return sessionProxyNameCollator.compare(left.nodeName, right.nodeName);
 }
 
 function clampBusinessFlowMode(mode: AccountBusinessFlowMode, account: Pick<AccountRecord, "businessFlowAvailability"> | null | undefined): AccountBusinessFlowMode {
@@ -678,6 +718,7 @@ export function AccountsView({
   onConnectAccount,
   onConnectSelectedAccounts,
   onSwitchSessionProxy,
+  onCheckSessionProxy,
   onSaveProofMailbox,
   onSaveAvailability,
   onSaveExtractorSettings,
@@ -741,6 +782,7 @@ export function AccountsView({
   onConnectAccount: (accountId: number) => Promise<void>;
   onConnectSelectedAccounts: (mode?: AccountBatchBootstrapMode) => Promise<void>;
   onSwitchSessionProxy: (accountId: number, proxyNode: string) => Promise<void>;
+  onCheckSessionProxy: (request: ProxyCheckRequest) => Promise<void>;
   onSaveProofMailbox: (accountId: number, proofMailboxAddress: string | null, proofMailboxId?: string | null) => Promise<void>;
   onSaveAvailability: (accountId: number, disabled: boolean, disabledReason: string | null) => Promise<void>;
   onSaveExtractorSettings: (patch: Partial<AccountExtractorSettings>) => Promise<void>;
@@ -769,6 +811,9 @@ export function AccountsView({
   const [sessionProxyAccountId, setSessionProxyAccountId] = useState<number | null>(null);
   const [sessionProxyActionError, setSessionProxyActionError] = useState<string | null>(null);
   const [selectingProxyNodeName, setSelectingProxyNodeName] = useState<string | null>(null);
+  const [checkingProxyKey, setCheckingProxyKey] = useState<string | null>(null);
+  const [selectedSessionProxyGroupKey, setSelectedSessionProxyGroupKey] = useState(SESSION_PROXY_ALL_GROUP_KEY);
+  const [sessionProxySortKey, setSessionProxySortKey] = useState<SessionProxySortKey>("lastUsed");
   const [extractorDialogOpen, setExtractorDialogOpen] = useState(false);
   const [extractorKeyDrafts, setExtractorKeyDrafts] = useState<Record<AccountExtractorProvider, string>>({
     zhanghaoya: "",
@@ -989,6 +1034,40 @@ export function AccountsView({
     ? null
     : accounts.rows.find((row) => row.id === sessionProxyAccountId) || null;
   const currentSessionProxyNode = sessionProxyAccount?.browserSession?.proxyNode?.trim() || null;
+  const currentSessionProxyInventoryNode = currentSessionProxyNode
+    ? proxyNodes.find((node) => node.nodeName === currentSessionProxyNode) || null
+    : null;
+  const sessionProxyGroups = useMemo(() => {
+    const grouped = new Map<string, { key: string; label: string; nodes: ProxyNode[] }>();
+    for (const node of proxyNodes) {
+      const key = getProxyGroupKey(node);
+      const label = key === SESSION_PROXY_UNKNOWN_GROUP_KEY ? "未知地区" : formatProxyLocation(node);
+      const group = grouped.get(key) || { key, label, nodes: [] };
+      group.nodes.push(node);
+      grouped.set(key, group);
+    }
+    const groups = Array.from(grouped.values()).sort((left, right) => sessionProxyNameCollator.compare(left.label, right.label));
+    return [
+      { key: SESSION_PROXY_ALL_GROUP_KEY, label: "全部", nodes: proxyNodes },
+      ...groups,
+    ];
+  }, [proxyNodes]);
+  const selectedSessionProxyGroup = sessionProxyGroups.find((group) => group.key === selectedSessionProxyGroupKey) || sessionProxyGroups[0];
+  const visibleSessionProxyNodes = useMemo(() => {
+    const nodes = [...(selectedSessionProxyGroup?.nodes || [])];
+    if (sessionProxySortKey === "name") {
+      return nodes.sort((left, right) => sessionProxyNameCollator.compare(left.nodeName, right.nodeName));
+    }
+    if (sessionProxySortKey === "latency") {
+      return nodes.sort(compareProxyLatency);
+    }
+    return nodes.sort(compareProxyLastUsed);
+  }, [selectedSessionProxyGroup, sessionProxySortKey]);
+
+  useEffect(() => {
+    if (sessionProxyGroups.some((group) => group.key === selectedSessionProxyGroupKey)) return;
+    setSelectedSessionProxyGroupKey(SESSION_PROXY_ALL_GROUP_KEY);
+  }, [selectedSessionProxyGroupKey, sessionProxyGroups]);
 
   const openProofDialog = (account: AccountRecord) => {
     setEditingAccount(account);
@@ -1107,6 +1186,9 @@ export function AccountsView({
     setSessionProxyAccountId(account.id);
     setSessionProxyActionError(null);
     setSelectingProxyNodeName(null);
+    setCheckingProxyKey(null);
+    setSelectedSessionProxyGroupKey(SESSION_PROXY_ALL_GROUP_KEY);
+    setSessionProxySortKey("lastUsed");
     setSessionProxyDialogOpen(true);
   };
 
@@ -1116,6 +1198,9 @@ export function AccountsView({
     setSessionProxyAccountId(null);
     setSessionProxyActionError(null);
     setSelectingProxyNodeName(null);
+    setCheckingProxyKey(null);
+    setSelectedSessionProxyGroupKey(SESSION_PROXY_ALL_GROUP_KEY);
+    setSessionProxySortKey("lastUsed");
   };
 
   const handleSwitchSessionProxy = async (nodeName: string) => {
@@ -1129,6 +1214,18 @@ export function AccountsView({
       setSessionProxyActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setSelectingProxyNodeName((current) => (current === nodeName ? null : current));
+    }
+  };
+
+  const handleCheckSessionProxy = async (request: ProxyCheckRequest, key: string) => {
+    try {
+      setCheckingProxyKey(key);
+      setSessionProxyActionError(null);
+      await onCheckSessionProxy(request);
+    } catch (error) {
+      setSessionProxyActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCheckingProxyKey((current) => (current === key ? null : current));
     }
   };
 
@@ -2574,37 +2671,49 @@ export function AccountsView({
       </Dialog>
 
       <Dialog open={sessionProxyDialogOpen} onOpenChange={closeSessionProxyDialog}>
-        <DialogContent className="!flex w-[min(96vw,72rem)] max-h-[88vh] max-w-[96vw] !flex-col">
+        <DialogContent className="!flex w-[min(96vw,82rem)] max-h-[90vh] max-w-[96vw] !flex-col">
           <DialogHeader className="shrink-0">
             <DialogTitle>更换 Session Proxy</DialogTitle>
             <DialogDescription>
-              为当前微软账号指定新的代理节点，并立即重新 Bootstrap 会话。列表展示名称、IP、延迟与可执行操作。
+              为当前微软账号指定新的代理节点，并立即重新 Bootstrap 会话。可按地区分组筛选，并对当前节点、当前分组或单个节点测速。
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overflow-x-hidden px-6 py-2 xl:grid xl:overflow-hidden xl:grid-cols-[minmax(16rem,17.5rem)_minmax(0,1fr)]">
-            <div className="shrink-0 space-y-4 xl:min-h-0 xl:overflow-auto xl:pr-1">
-              <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
-                <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">当前账号</div>
-                <div className="mt-2 break-all text-base font-medium text-white">{sessionProxyAccount?.microsoftEmail || "—"}</div>
-              </div>
-
-              <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4 text-sm text-slate-300">
-                <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">当前节点信息</div>
-                <dl className="mt-3 space-y-3">
-                  <div>
-                    <dt className="text-slate-500">当前节点</dt>
-                    <dd className="mt-1 font-medium text-white">{currentSessionProxyNode || "未绑定"}</dd>
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-6 py-2">
+            <div className="rounded-[24px] border border-white/8 bg-[#0d1728]/80 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium text-slate-500">当前账号</div>
+                  <div className="mt-1 break-all text-base font-semibold text-white">{sessionProxyAccount?.microsoftEmail || "—"}</div>
+                  <div className="mt-3 flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-300">
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                      <Layers3 className="h-4 w-4 shrink-0 text-cyan-200" />
+                      <span className="truncate font-medium text-white">{currentSessionProxyNode || "未绑定节点"}</span>
+                    </span>
+                    <span className="font-mono text-xs">{sessionProxyAccount?.browserSession?.proxyIp || currentSessionProxyInventoryNode?.lastEgressIp || "—"}</span>
+                    <span className="truncate">{currentSessionProxyInventoryNode ? formatProxyLocation(currentSessionProxyInventoryNode) : sessionProxyAccount ? formatBrowserSessionProxy(sessionProxyAccount) : "—"}</span>
                   </div>
-                  <div>
-                    <dt className="text-slate-500">当前代理</dt>
-                    <dd className="mt-1 break-all text-slate-300">{sessionProxyAccount ? formatBrowserSessionProxy(sessionProxyAccount) : "—"}</dd>
+                </div>
+                <div className="flex shrink-0 items-center gap-3">
+                  <div className="text-right">
+                    <div className="text-xs text-slate-500">最近延迟</div>
+                    <div className="mt-1 text-sm font-semibold text-emerald-200">{formatProxyLatency(currentSessionProxyInventoryNode?.lastLatencyMs ?? null)}</div>
                   </div>
-                </dl>
-              </div>
-
-              <div className="rounded-[24px] border border-cyan-300/14 bg-cyan-300/[0.05] px-4 py-3 text-sm text-cyan-100">
-                选择后会立即重新 Bootstrap；如果节点临时异常，会保留失败态供后续重试。
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-10 gap-2"
+                    disabled={!currentSessionProxyNode || checkingProxyKey != null}
+                    onClick={() => {
+                      if (!currentSessionProxyNode) return;
+                      void handleCheckSessionProxy({ scope: "node", nodeName: currentSessionProxyNode }, "current");
+                    }}
+                  >
+                    {checkingProxyKey === "current" ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
+                    测速当前节点
+                  </Button>
+                </div>
               </div>
             </div>
 
@@ -2613,68 +2722,153 @@ export function AccountsView({
                 当前没有可选代理节点，请先去代理节点页同步库存。
               </div>
             ) : (
-              <div className="min-h-0 min-w-0 xl:flex xl:flex-col">
-                <div className="mb-3 flex items-center justify-between gap-3 px-1">
-                  <div>
-                    <div className="text-sm font-medium text-white">候选代理节点</div>
-                    <div className="text-xs text-slate-500">桌面端列表保持独立滚动，当前节点信息固定在侧栏。</div>
+              <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)]">
+                <div className="min-h-0 rounded-[24px] border border-white/8 bg-white/[0.03] p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                    <div>
+                      <div className="text-sm font-semibold text-white">分组</div>
+                      <div className="text-xs text-slate-500">全部 + 地区分组</div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5 px-2 text-xs"
+                      disabled={!selectedSessionProxyGroup?.nodes.length || checkingProxyKey != null}
+                      onClick={() => {
+                        const nodeNames = (selectedSessionProxyGroup?.nodes || []).map((node) => node.nodeName);
+                        void handleCheckSessionProxy({ scope: "group", nodeNames }, `group:${selectedSessionProxyGroup?.key || SESSION_PROXY_ALL_GROUP_KEY}`);
+                      }}
+                    >
+                      {checkingProxyKey === `group:${selectedSessionProxyGroup?.key || SESSION_PROXY_ALL_GROUP_KEY}` ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
+                      测速本组
+                    </Button>
                   </div>
-                  <div className="text-xs text-slate-500">共 {proxyNodes.length} 个节点</div>
+                  <ScrollArea className="h-[min(44vh,28rem)] lg:h-full">
+                    <div className="space-y-2 pr-2">
+                      {sessionProxyGroups.map((group) => {
+                        const selected = group.key === selectedSessionProxyGroup?.key;
+                        return (
+                          <button
+                            key={group.key}
+                            type="button"
+                            className={cn(
+                              "flex w-full items-center justify-between gap-3 rounded-2xl border px-3 py-3 text-left transition",
+                              selected
+                                ? "border-emerald-300/40 bg-emerald-400/12 text-white shadow-[0_0_0_1px_rgba(52,211,153,0.08)]"
+                                : "border-transparent bg-transparent text-slate-300 hover:border-white/10 hover:bg-white/[0.04]",
+                            )}
+                            onClick={() => setSelectedSessionProxyGroupKey(group.key)}
+                          >
+                            <span className="min-w-0">
+                              <span className="flex items-center gap-2 text-sm font-medium">
+                                {group.key === SESSION_PROXY_ALL_GROUP_KEY ? <Globe2 className="h-4 w-4 shrink-0" /> : <Layers3 className="h-4 w-4 shrink-0" />}
+                                <span className="truncate">{group.label}</span>
+                              </span>
+                              <span className="mt-1 block text-xs text-slate-500">{group.nodes.length} / {proxyNodes.length} available</span>
+                            </span>
+                            <Badge variant={selected ? "success" : "neutral"}>{group.nodes.length}</Badge>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </ScrollArea>
                 </div>
-                <ScrollArea
-                  className="h-[min(52vh,36rem)] min-w-0 rounded-3xl border border-white/8 bg-[#0d1728]/70 xl:min-h-0 xl:h-full"
-                  data-testid="session-proxy-scroll-area"
-                >
-                  <div className="w-full rounded-[24px] bg-[rgba(15,23,42,0.62)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                    <table className="w-full min-w-0 table-fixed text-sm">
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="sticky top-0 z-10 w-[40%] min-w-[10rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">名称</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[28%] min-w-[8.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">IP</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[17%] min-w-[6.5rem] bg-[#132033]/95 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">延迟</TableHead>
-                          <TableHead className="sticky top-0 z-10 w-[15%] min-w-[6.5rem] bg-[#132033]/95 text-right backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">操作</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {proxyNodes.map((node) => {
+
+                <div className="flex min-h-0 min-w-0 flex-col">
+                  <div className="mb-3 flex items-center justify-between gap-3 px-1">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold text-white">{selectedSessionProxyGroup?.label || "全部"}</div>
+                      <div className="text-xs text-slate-500">默认按上次使用时间倒序，列标题切换固定排序。</div>
+                    </div>
+                    <div className="shrink-0 text-xs text-slate-500">共 {visibleSessionProxyNodes.length} 个节点</div>
+                  </div>
+                  <ScrollArea
+                    className="h-[min(52vh,36rem)] min-w-0 rounded-[24px] border border-white/8 bg-[#0d1728]/70 lg:min-h-0 lg:h-full"
+                    data-testid="session-proxy-scroll-area"
+                  >
+                    <div className="w-full min-w-[44rem] text-sm">
+                      <div className="sticky top-0 z-10 grid grid-cols-[minmax(14rem,1.4fr)_minmax(9rem,0.9fr)_minmax(7rem,0.65fr)_minmax(10rem,0.75fr)] border-b border-white/8 bg-[#132033]/95 text-xs font-medium text-slate-400 backdrop-blur supports-[backdrop-filter]:bg-[#132033]/80">
+                        {[
+                          { key: "name" as const, label: "名称" },
+                          { key: "lastUsed" as const, label: "上次使用" },
+                          { key: "latency" as const, label: "延迟" },
+                        ].map((item) => (
+                          <button
+                            key={item.key}
+                            type="button"
+                            className={cn(
+                              "flex h-11 items-center gap-1 px-4 text-left hover:text-white",
+                              sessionProxySortKey === item.key && "text-emerald-200",
+                            )}
+                            onClick={() => setSessionProxySortKey(item.key)}
+                          >
+                            {item.label}
+                            {sessionProxySortKey === item.key
+                              ? item.key === "lastUsed"
+                                ? <ArrowDown className="h-3.5 w-3.5" />
+                                : <ArrowUp className="h-3.5 w-3.5" />
+                              : <ArrowUpDown className="h-3.5 w-3.5 opacity-60" />}
+                          </button>
+                        ))}
+                        <div className="flex h-11 items-center justify-end px-4 text-right">操作</div>
+                      </div>
+                      <div className="divide-y divide-white/8">
+                        {visibleSessionProxyNodes.map((node) => {
                           const selecting = selectingProxyNodeName === node.nodeName;
+                          const checking = checkingProxyKey === `node:${node.nodeName}`;
                           const current = currentSessionProxyNode === node.nodeName;
                           const blocked = !sessionProxyAccount || isSessionProxySwitchBlocked(sessionProxyAccount) || connectBusy || batchBusy;
                           return (
-                            <TableRow key={node.id}>
-                              <TableCell className="min-w-0">
+                            <div
+                              key={node.id}
+                              className={cn(
+                                "grid grid-cols-[minmax(14rem,1.4fr)_minmax(9rem,0.9fr)_minmax(7rem,0.65fr)_minmax(10rem,0.75fr)] items-center bg-transparent",
+                                current && "bg-emerald-400/[0.06]",
+                              )}
+                            >
+                              <div className="min-w-0 px-4 py-3">
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <span className="truncate font-medium text-white">{node.nodeName}</span>
+                                  <span className="truncate font-semibold text-white">{node.nodeName}</span>
                                   {current ? <Badge variant="info">当前</Badge> : null}
                                 </div>
-                              </TableCell>
-                              <TableCell className="font-mono text-xs text-slate-300">
-                                <span className="block truncate">{node.lastEgressIp || "—"}</span>
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap text-slate-200">
-                                {formatProxyLatency(node.lastLatencyMs)}
-                              </TableCell>
-                              <TableCell className="text-right">
-                                <div className="ml-auto flex max-w-full items-center justify-end gap-2">
-                                  <Button
-                                    type="button"
-                                    variant={current ? "secondary" : "default"}
-                                    size="sm"
-                                    className="h-8 shrink-0 px-2.5 text-xs"
-                                    onClick={() => void handleSwitchSessionProxy(node.nodeName)}
-                                    disabled={blocked || selecting || current}
-                                  >
-                                    {selecting ? "切换中…" : current ? "已选中" : "选择"}
-                                  </Button>
+                                <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-slate-500">
+                                  <span className="truncate font-mono text-slate-400">{node.lastEgressIp || "—"}</span>
+                                  <span className="truncate">{formatProxyLocation(node)}</span>
                                 </div>
-                              </TableCell>
-                            </TableRow>
+                              </div>
+                              <div className="px-4 py-3 text-xs text-slate-300">{formatProxyLastUsed(node.lastLeasedAt)}</div>
+                              <div className="px-4 py-3 font-medium text-slate-200">{formatProxyLatency(node.lastLatencyMs)}</div>
+                              <div className="flex items-center justify-end gap-2 px-4 py-3">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-8 gap-1.5 px-2.5 text-xs"
+                                  onClick={() => void handleCheckSessionProxy({ scope: "node", nodeName: node.nodeName }, `node:${node.nodeName}`)}
+                                  disabled={checkingProxyKey != null}
+                                >
+                                  {checking ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Activity className="h-3.5 w-3.5" />}
+                                  测速
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant={current ? "secondary" : "default"}
+                                  size="sm"
+                                  className="h-8 shrink-0 px-2.5 text-xs"
+                                  onClick={() => void handleSwitchSessionProxy(node.nodeName)}
+                                  disabled={blocked || selecting || current}
+                                >
+                                  {selecting ? "切换中…" : current ? "已选中" : "选择"}
+                                </Button>
+                              </div>
+                            </div>
                           );
                         })}
-                      </TableBody>
-                    </table>
-                  </div>
-                </ScrollArea>
+                      </div>
+                    </div>
+                  </ScrollArea>
+                </div>
               </div>
             )}
 
