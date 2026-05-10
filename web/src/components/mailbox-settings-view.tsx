@@ -11,6 +11,9 @@ export type MicrosoftGraphSettingsDraft = {
   microsoftGraphClientSecret: string;
   microsoftGraphRedirectUri: string;
   microsoftGraphAuthority: string;
+  microsoftAccountBootstrapConcurrency: number;
+  microsoftAccountBootstrapWorkerTimeoutMs: number;
+  microsoftAccountBootstrapKillGraceMs: number;
 };
 
 function Field(props: { label: string; children: ReactNode; className?: string }) {
@@ -20,6 +23,15 @@ function Field(props: { label: string; children: ReactNode; className?: string }
       {props.children}
     </label>
   );
+}
+
+function msToSeconds(value: number): number {
+  return Math.max(1, Math.round(Number(value || 0) / 1000));
+}
+
+function secondsToMs(value: string): number {
+  const parsed = Number(value);
+  return Math.max(1, Number.isFinite(parsed) ? Math.trunc(parsed) : 1) * 1000;
 }
 
 function InfoRow(props: { label: string; value: string; emphasize?: boolean }) {
@@ -103,6 +115,36 @@ export function MailboxSettingsView(props: {
               </Field>
             </div>
 
+            <div className="grid gap-4 border-t border-white/8 pt-5 md:grid-cols-3">
+              <Field label="Bootstrap 并发" className="min-w-0">
+                <Input
+                  type="number"
+                  min={1}
+                  max={10}
+                  value={props.settingsDraft.microsoftAccountBootstrapConcurrency}
+                  onChange={(event) => props.onSettingsDraftChange({ microsoftAccountBootstrapConcurrency: Number(event.target.value) })}
+                />
+              </Field>
+              <Field label="Worker 超时 秒" className="min-w-0">
+                <Input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={msToSeconds(props.settingsDraft.microsoftAccountBootstrapWorkerTimeoutMs)}
+                  onChange={(event) => props.onSettingsDraftChange({ microsoftAccountBootstrapWorkerTimeoutMs: secondsToMs(event.target.value) })}
+                />
+              </Field>
+              <Field label="强杀宽限 秒" className="min-w-0">
+                <Input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={msToSeconds(props.settingsDraft.microsoftAccountBootstrapKillGraceMs)}
+                  onChange={(event) => props.onSettingsDraftChange({ microsoftAccountBootstrapKillGraceMs: secondsToMs(event.target.value) })}
+                />
+              </Field>
+            </div>
+
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/8 pt-4">
               <div className="flex flex-wrap gap-2">
                 <Badge variant={configured ? "success" : "warning"}>{configured ? "可为账号授权" : "保存后才能授权"}</Badge>
@@ -133,6 +175,9 @@ export function MailboxSettingsView(props: {
                 label="Redirect URI"
                 value={props.settingsDraft.microsoftGraphRedirectUri || "请填写完整 callback URL"}
               />
+              <InfoRow label="Bootstrap 并发" value={String(props.settingsDraft.microsoftAccountBootstrapConcurrency)} />
+              <InfoRow label="Worker 超时" value={`${msToSeconds(props.settingsDraft.microsoftAccountBootstrapWorkerTimeoutMs)} 秒`} />
+              <InfoRow label="强杀宽限" value={`${msToSeconds(props.settingsDraft.microsoftAccountBootstrapKillGraceMs)} 秒`} />
             </CardContent>
           </Card>
 

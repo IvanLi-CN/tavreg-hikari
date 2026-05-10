@@ -16,3 +16,16 @@
 
 - accepts `{ ids: number[]; mode: "pending_only" | "force" }`
 - returns normalized `queueIds`, per-account `decision/reason`, and summary counts for cross-page batch Bootstrap preview
+
+## `GET /api/microsoft-mail/settings`
+
+- returns Microsoft Graph OAuth settings summary plus `microsoftAccountBootstrapConcurrency`, `microsoftAccountBootstrapWorkerTimeoutMs`, and `microsoftAccountBootstrapKillGraceMs`
+- `microsoftGraphClientSecret` remains masked and is never returned in plaintext
+
+## `POST /api/microsoft-mail/settings`
+
+- accepts Graph OAuth fields plus optional bootstrap tuning fields:
+  - `microsoftAccountBootstrapConcurrency`: clamped to `1..10`
+  - `microsoftAccountBootstrapWorkerTimeoutMs`: minimum `1000`
+  - `microsoftAccountBootstrapKillGraceMs`: minimum `1000`
+- returns the same serialized settings shape as `GET`

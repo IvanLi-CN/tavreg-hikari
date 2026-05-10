@@ -137,6 +137,9 @@ export type MicrosoftGraphSettings = {
   microsoftGraphClientSecretMasked: string;
   microsoftGraphRedirectUri: string;
   microsoftGraphAuthority: string;
+  microsoftAccountBootstrapConcurrency: number;
+  microsoftAccountBootstrapWorkerTimeoutMs: number;
+  microsoftAccountBootstrapKillGraceMs: number;
   configured: boolean;
 };
 

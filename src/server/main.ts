@@ -50,9 +50,16 @@ import {
   resolveClientIp,
 } from "./auth-gate.js";
 import {
+  AccountSessionBootstrapDispatcher,
+  DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY,
+  DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS,
+  DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS,
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
   isLockedAccountRecord,
+  normalizeMicrosoftAccountBootstrapConcurrency,
+  normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
   normalizeAccountBatchBootstrapMode,
   normalizeAccountSessionRebootstrapRequest,
   resolveAccountBatchBootstrapDecision,
@@ -344,6 +351,9 @@ function serializeMicrosoftGraphSettings(settings: AppSettings) {
     microsoftGraphClientSecretMasked: settings.microsoftGraphClientSecret ? maskSecret(settings.microsoftGraphClientSecret) : "",
     microsoftGraphRedirectUri: settings.microsoftGraphRedirectUri,
     microsoftGraphAuthority: settings.microsoftGraphAuthority || "common",
+    microsoftAccountBootstrapConcurrency: settings.microsoftAccountBootstrapConcurrency,
+    microsoftAccountBootstrapWorkerTimeoutMs: settings.microsoftAccountBootstrapWorkerTimeoutMs,
+    microsoftAccountBootstrapKillGraceMs: settings.microsoftAccountBootstrapKillGraceMs,
     configured: Boolean(
       settings.microsoftGraphClientId.trim() &&
         settings.microsoftGraphClientSecret.trim() &&
@@ -396,6 +406,9 @@ function buildSettingsCodeDefaults(): AppSettings {
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    microsoftAccountBootstrapConcurrency: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY,
+    microsoftAccountBootstrapWorkerTimeoutMs: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS,
+    microsoftAccountBootstrapKillGraceMs: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS,
     upstreamTavregSyncEnabled: false,
     upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
     upstreamTavregApiKey: "",
@@ -441,6 +454,15 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     microsoftGraphClientSecret: (process.env.MICROSOFT_GRAPH_CLIENT_SECRET || "").trim(),
     microsoftGraphRedirectUri: (process.env.MICROSOFT_GRAPH_REDIRECT_URI || "").trim(),
     microsoftGraphAuthority: (process.env.MICROSOFT_GRAPH_AUTHORITY || baseDefaults.microsoftGraphAuthority).trim() || "common",
+    microsoftAccountBootstrapConcurrency: normalizeMicrosoftAccountBootstrapConcurrency(
+      process.env.MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY ?? baseDefaults.microsoftAccountBootstrapConcurrency,
+    ),
+    microsoftAccountBootstrapWorkerTimeoutMs: normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(
+      process.env.MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS ?? baseDefaults.microsoftAccountBootstrapWorkerTimeoutMs,
+    ),
+    microsoftAccountBootstrapKillGraceMs: normalizeMicrosoftAccountBootstrapKillGraceMs(
+      process.env.MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS ?? baseDefaults.microsoftAccountBootstrapKillGraceMs,
+    ),
     upstreamTavregSyncEnabled: baseDefaults.upstreamTavregSyncEnabled,
     upstreamTavregBaseUrl: baseDefaults.upstreamTavregBaseUrl,
     upstreamTavregApiKey: baseDefaults.upstreamTavregApiKey,
@@ -1238,6 +1260,8 @@ async function runMailboxOauthWorker(input: {
   profilePath: string;
   redirectUri: string;
   authUrl: string;
+  workerTimeoutMs: number;
+  killGraceMs: number;
 }): Promise<MailboxOauthWorkerResult> {
   const runId = `mailbox-${input.account.id}-${Date.now()}`;
   const outputDir = path.join(OUTPUT_ROOT, "mailbox-oauth", runId);
@@ -1282,7 +1306,8 @@ async function runMailboxOauthWorker(input: {
       const keepBrowserOpenOnFailure = /^(1|true|yes|on)$/i.test(
         String(env.KEEP_BROWSER_OPEN_ON_FAILURE || "").trim(),
       );
-      const workerTimeoutMs = keepBrowserOpenOnFailure ? 30 * 60_000 : 5 * 60_000;
+      const workerTimeoutMs = keepBrowserOpenOnFailure ? 30 * 60_000 : input.workerTimeoutMs;
+      const killGraceMs = input.killGraceMs;
       let listenersReleased = false;
       const releasePortListeners = async () => {
         if (listenersReleased) return;
@@ -1307,6 +1332,7 @@ async function runMailboxOauthWorker(input: {
           cwd: REPO_ROOT,
           env,
           stdio: ["ignore", "pipe", "pipe"],
+          detached: true,
         },
       );
       child.once("spawn", () => {
@@ -1315,8 +1341,29 @@ async function runMailboxOauthWorker(input: {
       let stderr = "";
       let stdout = "";
       const workerLogPath = path.join(outputDir, "worker.log");
+      let timedOut = false;
+      const signalWorker = (signal: NodeJS.Signals) => {
+        if (child.pid) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+            // Fall through to direct child signalling when no process group exists.
+          }
+        }
+        try {
+          child.kill(signal);
+        } catch {
+          // Ignore races during timeout cleanup.
+        }
+      };
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
       const timeout = setTimeout(() => {
-        child.kill("SIGTERM");
+        timedOut = true;
+        signalWorker("SIGTERM");
+        killTimer = setTimeout(() => {
+          signalWorker("SIGKILL");
+        }, killGraceMs);
       }, workerTimeoutMs);
       child.stdout?.on("data", (chunk) => {
         const text = chunk.toString();
@@ -1330,10 +1377,12 @@ async function runMailboxOauthWorker(input: {
       });
       child.once("error", (error) => {
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         reject(error);
       });
       child.once("close", async (code) => {
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         const combinedLog = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
         if (combinedLog) {
           await writeFile(workerLogPath, combinedLog, "utf8").catch(() => {});
@@ -1344,6 +1393,10 @@ async function runMailboxOauthWorker(input: {
           resolve(parsed);
         } catch (error) {
           const tail = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").slice(-4000);
+          if (timedOut) {
+            reject(new Error(`oauth worker timeout after ${workerTimeoutMs}ms (code=${code ?? "unknown"}): ${tail || "no worker output"}`));
+            return;
+          }
           reject(new Error(`oauth worker failed (code=${code ?? "unknown"}): ${tail || (error instanceof Error ? error.message : String(error))}`));
         }
       });
@@ -1473,6 +1526,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       profilePath: session.profilePath,
       redirectUri: graphSettings.redirectUri,
       authUrl,
+      workerTimeoutMs: normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(runtimeSettings.microsoftAccountBootstrapWorkerTimeoutMs),
+      killGraceMs: normalizeMicrosoftAccountBootstrapKillGraceMs(runtimeSettings.microsoftAccountBootstrapKillGraceMs),
     });
     let refreshedMailbox = input.db.getMailbox(nextMailbox.id) || nextMailbox;
     let oauthOutcome = String(workerResult.oauthOutcome || "").trim().toLowerCase();
@@ -1611,7 +1666,6 @@ async function main(): Promise<void> {
   const proxyEventSubscribers = new Set<(event: ServerEvent) => void>();
   const sseEncoder = new TextEncoder();
   const runExclusiveProxyOp = createExclusiveRunner();
-  const runExclusiveMailboxOauth = createExclusiveRunner();
   const sessionBootstrapQueuedIds = new Set<number>();
   const sessionBootstrapPendingForceIds = new Set<number>();
   const sessionBootstrapRequestedProxyNodes = new Map<number, string | null>();
@@ -1656,7 +1710,70 @@ async function main(): Promise<void> {
       }
     }
   };
-  const queueAccountSessionBootstrap = (accountId: number, options?: { force?: boolean; reason?: "auto" | "manual"; proxyNode?: string | null }): boolean => {
+  const sessionBootstrapDispatcher = new AccountSessionBootstrapDispatcher(
+    () => readSettings().microsoftAccountBootstrapConcurrency,
+    async (accountId) => {
+      try {
+        const latest = db.getAccount(accountId);
+        if (!latest || getAccountConnectBlockMessage(latest)) {
+          return;
+        }
+        const maxAttempts = 2;
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          try {
+            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
+            await authorizeMailboxWithBrowserAutomation({
+              db,
+              accountId,
+              readSettings,
+              broadcast,
+              requestedProxyNode,
+            });
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
+            if (
+              attempt >= maxAttempts
+              || requestedProxyNode
+              || !shouldRetryAccountBootstrapWithFreshProxy(error)
+            ) {
+              break;
+            }
+            console.warn(
+              `[mailbox-bootstrap] account ${accountId} retrying with fresh proxy after attempt ${attempt}/${maxAttempts}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+        if (lastError) {
+          throw lastError;
+        }
+      } catch {
+        // mailbox/session state is updated inside the bootstrap flow
+      } finally {
+        sessionBootstrapQueuedIds.delete(accountId);
+        if (!sessionBootstrapPendingForceIds.has(accountId)) {
+          sessionBootstrapRequestedProxyNodes.delete(accountId);
+        }
+      }
+    },
+    (accountId) => {
+      if (!sessionBootstrapPendingForceIds.delete(accountId)) {
+        return;
+      }
+      queueAccountSessionBootstrap(accountId, {
+        force: true,
+        reason: "manual",
+        proxyNode: sessionBootstrapRequestedProxyNodes.get(accountId) ?? null,
+      });
+    },
+  );
+
+  function queueAccountSessionBootstrap(accountId: number, options?: { force?: boolean; reason?: "auto" | "manual"; proxyNode?: string | null }): boolean {
     const account = db.getAccount(accountId);
     if (!account || getAccountConnectBlockMessage(account)) {
       return false;
@@ -1705,63 +1822,12 @@ async function main(): Promise<void> {
       clearProxySnapshot: requestedProxyNode !== undefined,
     });
     sessionBootstrapQueuedIds.add(accountId);
-    void runExclusiveMailboxOauth(async () => {
-      try {
-        const latest = db.getAccount(accountId);
-        if (!latest || getAccountConnectBlockMessage(latest)) {
-          return;
-        }
-        const maxAttempts = 2;
-        let lastError: unknown = null;
-        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-          try {
-            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
-            await authorizeMailboxWithBrowserAutomation({
-              db,
-              accountId,
-              readSettings,
-              broadcast,
-              requestedProxyNode,
-            });
-            lastError = null;
-            break;
-          } catch (error) {
-            lastError = error;
-            const requestedProxyNode = sessionBootstrapRequestedProxyNodes.get(accountId) ?? null;
-            if (
-              attempt >= maxAttempts
-              || requestedProxyNode
-              || !shouldRetryAccountBootstrapWithFreshProxy(error)
-            ) {
-              break;
-            }
-            console.warn(
-              `[mailbox-bootstrap] account ${accountId} retrying with fresh proxy after attempt ${attempt}/${maxAttempts}: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          }
-        }
-        if (lastError) {
-          throw lastError;
-        }
-      } catch {
-        // mailbox/session state is updated inside the bootstrap flow
-      } finally {
-        sessionBootstrapQueuedIds.delete(accountId);
-        if (sessionBootstrapPendingForceIds.delete(accountId)) {
-          queueAccountSessionBootstrap(accountId, {
-            force: true,
-            reason: "manual",
-            proxyNode: sessionBootstrapRequestedProxyNodes.get(accountId) ?? null,
-          });
-        } else {
-          sessionBootstrapRequestedProxyNodes.delete(accountId);
-        }
-      }
-    });
+    if (!sessionBootstrapDispatcher.enqueue(accountId)) {
+      sessionBootstrapQueuedIds.delete(accountId);
+      return false;
+    }
     return true;
-  };
+  }
   const accountExtractorRuntime = new AccountExtractorRuntime(db, readSettings, broadcast, queueAccountSessionBootstrap);
   const tavilyScheduler = new JobScheduler(db, "tavily", REPO_ROOT, DEFAULT_DB_PATH, readSettings, broadcast, {
     onImportedAccounts: (accountIds) => {
@@ -2825,6 +2891,18 @@ async function main(): Promise<void> {
               ? typeof body.microsoftGraphAuthority === "string"
                 ? body.microsoftGraphAuthority
                 : "common"
+              : undefined,
+          microsoftAccountBootstrapConcurrency:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftAccountBootstrapConcurrency")
+              ? body.microsoftAccountBootstrapConcurrency
+              : undefined,
+          microsoftAccountBootstrapWorkerTimeoutMs:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftAccountBootstrapWorkerTimeoutMs")
+              ? body.microsoftAccountBootstrapWorkerTimeoutMs
+              : undefined,
+          microsoftAccountBootstrapKillGraceMs:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftAccountBootstrapKillGraceMs")
+              ? body.microsoftAccountBootstrapKillGraceMs
               : undefined,
         });
         db.setSettings(next);

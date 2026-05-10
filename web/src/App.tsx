@@ -356,6 +356,9 @@ export function App() {
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
     microsoftGraphAuthority: "common",
+    microsoftAccountBootstrapConcurrency: 3,
+    microsoftAccountBootstrapWorkerTimeoutMs: 300000,
+    microsoftAccountBootstrapKillGraceMs: 10000,
   });
   const [mailboxes, setMailboxes] = useState<MailboxRecord[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
@@ -718,6 +721,9 @@ export function App() {
       microsoftGraphClientSecret: "",
       microsoftGraphRedirectUri: payload.settings.microsoftGraphRedirectUri,
       microsoftGraphAuthority: payload.settings.microsoftGraphAuthority || "common",
+      microsoftAccountBootstrapConcurrency: payload.settings.microsoftAccountBootstrapConcurrency,
+      microsoftAccountBootstrapWorkerTimeoutMs: payload.settings.microsoftAccountBootstrapWorkerTimeoutMs,
+      microsoftAccountBootstrapKillGraceMs: payload.settings.microsoftAccountBootstrapKillGraceMs,
     });
   };
   const refreshMailboxes = async () => {
@@ -2042,6 +2048,9 @@ export function App() {
         microsoftGraphClientSecret: "",
         microsoftGraphRedirectUri: payload.settings.microsoftGraphRedirectUri,
         microsoftGraphAuthority: payload.settings.microsoftGraphAuthority || "common",
+        microsoftAccountBootstrapConcurrency: payload.settings.microsoftAccountBootstrapConcurrency,
+        microsoftAccountBootstrapWorkerTimeoutMs: payload.settings.microsoftAccountBootstrapWorkerTimeoutMs,
+        microsoftAccountBootstrapKillGraceMs: payload.settings.microsoftAccountBootstrapKillGraceMs,
       }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
