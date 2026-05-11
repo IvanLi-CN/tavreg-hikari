@@ -174,16 +174,37 @@ function extractOpaqueErrorCode(error: unknown): string | null {
     .split(/\r?\n/, 1)[0]
     ?.trim();
   if (!firstLine) return null;
+  if (/oauth worker timeout after \d+ms/i.test(firstLine)) {
+    return "microsoft_oauth_worker_timeout";
+  }
+  if (/microsoft login flow did not reach home/i.test(firstLine)) {
+    return "microsoft_oauth_did_not_reach_home";
+  }
+  if (/microsoft_oauth_incomplete/i.test(firstLine)) {
+    return "microsoft_oauth_incomplete";
+  }
   const match = firstLine.match(/^(?:[A-Za-z]*Error:\s*)?([a-z0-9_]+)(?::|$)/i);
   return match?.[1]?.trim() || null;
 }
 
+function redactDiagnosticUrls(message: string): string {
+  return message.replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+    try {
+      const parsed = new URL(rawUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return rawUrl.replace(/[?#].*$/, "");
+    }
+  });
+}
+
 function normalizeOpaqueErrorMessage(error: unknown): string {
-  if (!(error instanceof Error)) return String(error);
+  if (!(error instanceof Error)) return redactDiagnosticUrls(String(error));
   const firstLine = String(error.message || "")
     .split(/\r?\n/, 1)[0]
     ?.trim();
-  return firstLine?.replace(/^[A-Za-z]*Error:\s*/i, "") || error.message;
+  const normalized = firstLine?.replace(/^[A-Za-z]*Error:\s*/i, "") || error.message;
+  return redactDiagnosticUrls(normalized);
 }
 
 function normalizeTokenResult(payload: Record<string, unknown>): MicrosoftTokenResult {

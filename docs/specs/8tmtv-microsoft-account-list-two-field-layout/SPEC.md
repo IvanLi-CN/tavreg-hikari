@@ -4,7 +4,7 @@
 
 - 状态：已完成
 - 负责人：Codex
-- 更新时间：2026-04-19
+- 更新时间：2026-05-11
 
 ## 背景
 
@@ -18,6 +18,7 @@
 - 将 `Proof 邮箱` 全量 owner-facing 改名为 `辅助邮箱`。
 - 邮箱、辅助邮箱展示明文并提供复制图标；密码不展示文本，只保留复制图标与反馈。
 - 所有行内操作按钮改为图标按钮，并统一使用第三方 tooltip 延迟提示用途，不再依赖浏览器原生 `title`。
+- `Session` 与 `收信` 状态 badge 在失败、阻断、锁定或失效时也使用第三方 tooltip 展示错误详情。
 - 列表默认按 `导入时间 desc` 展示，且恢复默认排序时回到该默认态。
 
 ## 非目标
@@ -46,6 +47,8 @@
 - 复制成功或失败时，都必须在触发按钮附近显示气泡反馈，而不是弹窗；气泡内需要保留一块可点击全选的完整内容文本块，便于浏览器拦截剪贴板时手动复制。
 - 所有图标按钮必须接入第三方 tooltip；hover / focus 后延迟显示用途文案。
 - 账号列表相关图标按钮不得再使用原生 `title` 作为提示来源。
+- `Session failed/blocked` 与 `收信 failed/locked/invalidated` 状态 badge 必须复用现有 `StatusBadge` 视觉，hover / focus 后通过 Radix Tooltip 展示阶段、错误码与失败原因。
+- tooltip 中的 OAuth URL、token、secret 或密码必须脱敏；长诊断文本只能展示摘要，避免撑破桌面表格或移动卡片。
 
 ### 命名与默认排序
 
@@ -59,6 +62,7 @@
 - 桌面表格与移动卡片都只展示新的双字段分组，不再回退到旧的多独立列布局。
 - 邮箱与辅助邮箱显示明文；密码不显示明文或掩码字符串，只保留复制入口。
 - 所有行内操作入口为图标按钮，且 tooltip 来自第三方组件而非浏览器原生提示。
+- `Session` 与 `收信` 失败状态 badge 在桌面表格和移动卡片中都可通过 hover / focus 查看错误气泡。
 - 复制失败或浏览器拒绝自动复制时，按钮附近的气泡会展示失败原因与完整内容文本块，且文本块支持点击全选。
 - 既有批量选择、批量 Bootstrap、Session Proxy 更换、恢复可用/标记不可用、打开收件箱能力保持可用。
 - `bun run typecheck`、`bun test`、`bun run web:build`、`bun run build-storybook` 全部通过。
@@ -92,3 +96,17 @@
   evidence_note: 证明复制失败时会在按钮附近弹出气泡，展示失败原因与可点击全选的完整内容文本块，便于手动复制。
   image:
   ![复制失败反馈气泡](./assets/accounts-copy-failure-bubble.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-accountsview--session-and-mailbox-failure-tooltips-play`
+  state: `desktop session failure tooltip`
+  evidence_note: 证明桌面账号列表中悬浮 `Session BLOCKED` badge 会显示阶段、错误码和 Microsoft 账户锁定原因。
+  image:
+  ![桌面 Session 失败气泡](./assets/accounts-session-failure-tooltip-desktop.png)
+
+- source_type: `storybook_canvas`
+  story_id_or_title: `views-accountsview--session-and-mailbox-failure-tooltips-compact-play`
+  state: `mobile mailbox failure tooltip`
+  evidence_note: 证明 390px 卡片态下收信 `INVALIDATED` badge 也能显示收信失败详情、错误码和失败原因。
+  image:
+  ![移动收信失败气泡](./assets/accounts-mailbox-failure-tooltip-mobile.png)

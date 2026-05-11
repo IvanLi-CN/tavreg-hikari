@@ -20,7 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { GroupCombobox } from "@/components/group-combobox";
-import { formatFailureTooltip, StatusBadge } from "@/components/status-badge";
+import { formatFailureTooltip, formatStatusBadgeLabel, StatusBadge } from "@/components/status-badge";
 import { CopyIconButton } from "@/components/ui/copy-icon-button";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import type {
@@ -183,6 +183,90 @@ function formatAccountBlockReason(account: Pick<AccountRecord, "skipReason" | "l
     return "未知辅助邮箱";
   }
   return account.skipReason;
+}
+
+function redactDiagnosticUrls(message: string): string {
+  return message.replace(/https?:\/\/[^\s"'<>]+/gi, (rawUrl) => {
+    try {
+      const parsed = new URL(rawUrl);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return rawUrl.replace(/[?#].*$/, "");
+    }
+  });
+}
+
+function cleanFailureTooltipDetail(value: string | null | undefined): string | null {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return null;
+  return redactDiagnosticUrls(trimmed);
+}
+
+function isBrowserSessionFailureStatus(status: string | null | undefined): boolean {
+  return status === "failed" || status === "blocked";
+}
+
+function isMailboxFailureStatus(status: string | null | undefined): boolean {
+  return status === "failed" || status === "locked" || status === "invalidated";
+}
+
+function formatBrowserSessionFailureTooltip(
+  account: Pick<AccountRecord, "browserSession" | "lastErrorCode" | "lastErrorMessage" | "skipReason" | "disabledReason">,
+): string | null {
+  const session = account.browserSession;
+  if (!session) return null;
+  const errorCode = cleanFailureTooltipDetail(session.lastErrorCode || account.lastErrorCode) || null;
+  const errorMessage = cleanFailureTooltipDetail(session.lastErrorMessage || account.lastErrorMessage || account.disabledReason) || null;
+  if (!isBrowserSessionFailureStatus(session.status) && !errorCode && !errorMessage) {
+    return null;
+  }
+  return formatFailureTooltip({
+    heading: "Session 失败详情",
+    stage: isBrowserSessionFailureStatus(session.status) ? session.status : null,
+    errorCode,
+    errorMessage,
+    fallbackMessage: isBrowserSessionFailureStatus(session.status) ? formatAccountBlockReason(account) : null,
+  });
+}
+
+function formatMailboxFailureTooltip(
+  account: Pick<AccountRecord, "browserSession" | "mailboxStatus" | "mailboxLastErrorCode" | "mailboxLastErrorMessage" | "lastErrorCode" | "lastErrorMessage" | "skipReason" | "disabledReason">,
+): string | null {
+  const errorCode = account.mailboxLastErrorCode || account.browserSession?.lastErrorCode || account.lastErrorCode || null;
+  const errorMessage = cleanFailureTooltipDetail(
+    account.mailboxLastErrorMessage || account.browserSession?.lastErrorMessage || account.lastErrorMessage || account.disabledReason,
+  );
+  if (!isMailboxFailureStatus(account.mailboxStatus) && !errorCode && !errorMessage) {
+    return null;
+  }
+  return formatFailureTooltip({
+    heading: "收信失败详情",
+    stage: isMailboxFailureStatus(account.mailboxStatus) ? account.mailboxStatus : null,
+    errorCode,
+    errorMessage,
+    fallbackMessage: isMailboxFailureStatus(account.mailboxStatus) ? formatStatusBadgeLabel(account.mailboxStatus) : null,
+  });
+}
+
+function StatusBadgeWithTooltip(props: {
+  status: string | null | undefined;
+  tooltip: string | null;
+}) {
+  if (!props.tooltip) {
+    return <StatusBadge status={props.status} />;
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span tabIndex={0} aria-label={props.tooltip || undefined}>
+          <StatusBadge status={props.status} />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-[26rem] whitespace-pre-wrap text-left leading-5 normal-case tracking-normal">
+        {props.tooltip}
+      </TooltipContent>
+    </Tooltip>
+  );
 }
 
 function formatBrowserSessionProxy(account: Pick<AccountRecord, "browserSession">): string {
@@ -1566,7 +1650,7 @@ export function AccountsView({
     <TwoLineFieldCell
       primaryLabel="Session"
       secondaryLabel="Session Proxy"
-      primaryValue={<StatusBadge status={row.browserSession?.status || "pending"} />}
+      primaryValue={<StatusBadgeWithTooltip status={row.browserSession?.status || "pending"} tooltip={formatBrowserSessionFailureTooltip(row)} />}
       secondaryValue={
         <SessionProxyCell
           account={row}
@@ -1597,7 +1681,7 @@ export function AccountsView({
       secondaryLabel="Profile"
       primaryValue={
         <>
-          <StatusBadge status={row.mailboxStatus} />
+          <StatusBadgeWithTooltip status={row.mailboxStatus} tooltip={formatMailboxFailureTooltip(row)} />
           {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
         </>
       }
@@ -1660,7 +1744,7 @@ export function AccountsView({
 
   const renderDesktopSessionCell = (row: AccountRecord) => (
     <DesktopTwoLineValueCell
-      primaryValue={<StatusBadge status={row.browserSession?.status || "pending"} />}
+      primaryValue={<StatusBadgeWithTooltip status={row.browserSession?.status || "pending"} tooltip={formatBrowserSessionFailureTooltip(row)} />}
       secondaryValue={
         <SessionProxyCell
           account={row}
@@ -1682,7 +1766,7 @@ export function AccountsView({
     <DesktopTwoLineValueCell
       primaryValue={
         <>
-          <StatusBadge status={row.mailboxStatus} />
+          <StatusBadgeWithTooltip status={row.mailboxStatus} tooltip={formatMailboxFailureTooltip(row)} />
           {row.mailboxUnreadCount > 0 ? <Badge variant="info">{row.mailboxUnreadCount}</Badge> : null}
         </>
       }

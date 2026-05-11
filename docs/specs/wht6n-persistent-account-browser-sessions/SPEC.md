@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-31
-- Last: 2026-05-09
+- Last: 2026-05-11
 
 ## 背景 / 问题陈述
 
@@ -90,6 +90,8 @@
 - proxy inventory 不再包含历史 pinned/lease 节点时，必须自动清理陈旧引用。
 - bootstrap 任一步失败时保留账号与 session 行，状态写入 `failed` 或 `blocked`，允许后续重试。
 - bootstrap worker 卡住或超时：父进程必须终止 worker 进程组、释放端口租约、写入失败态并继续调度队列中的其他账号。
+- 启动后或读取账号列表前，如果发现 `bootstrapping` session 已超过 worker timeout + kill grace 收敛窗口，必须按数据库事实收敛为 `failed`，写入 `session_bootstrap_stale`，并同步 mailbox/account 的失败态。
+- Microsoft OAuth、代理会话 abort 与 worker timeout 失败必须写入明确错误码和可读错误文案；包含 URL 的诊断文本只允许保留 host/path，不能暴露 query、token 或 secret。
 - 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
 
 ## 接口契约（Interfaces & Contracts）
@@ -129,6 +131,8 @@
 - Given 在微软账号页勾选多个账号，When 触发默认“批量 Bootstrap”，Then 仅未成功 Bootstrap 的账号会进入队列；When 触发“强制 Bootstrap”，Then 已成功账号也可重新进入队列。
 - Given 多个账号同时排队 Bootstrap，When `microsoftAccountBootstrapConcurrency=3`，Then 任意时刻最多 3 个 worker 同时运行，且一个 worker 失败或超时不会阻塞后续账号。
 - Given worker 超过 `microsoftAccountBootstrapWorkerTimeoutMs`，When kill grace 也耗尽，Then 父进程必须对 worker 进程组执行 `SIGKILL` 兜底，并释放本次 mihomo 端口租约。
+- Given 账号的 browser session 长时间停留在 `bootstrapping`，When 服务启动或读取 `/api/accounts` 且该状态已超过收敛窗口，Then session、mailbox 与 account 状态必须收敛为 `failed`，错误码为 `session_bootstrap_stale`。
+- Given `Session` 为 `failed/blocked` 或 `收信` 为 `failed/locked/invalidated`，When 在账号页悬浮或聚焦对应 badge，Then 必须显示包含阶段、错误码和失败原因的第三方 tooltip。
 - Given 打开 Microsoft Graph 设置页，When 修改 Bootstrap 并发、Worker 超时秒数与强杀宽限秒数，Then `/api/microsoft-mail/settings` 能保存并返回规范化后的毫秒字段值。
 - Given mailbox OAuth 已写入 token 且相关验证测试需要读取 integration detail API，When 当前日期晚于旧固定样例过期时间，Then 测试必须使用相对未来的 access-token 过期时间，避免误走 refresh 分支掩盖实际 bootstrap 行为。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。

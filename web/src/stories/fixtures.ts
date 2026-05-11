@@ -119,7 +119,7 @@ const defaultBusinessFlowAvailability = {
 
 const defaultBusinessFlowState = null;
 
-const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage">>): AccountRecord => ({
+const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage" | "mailboxLastErrorMessage"> & Partial<Pick<AccountRecord, "businessFlowAvailability" | "businessFlowState" | "upstreamOrigin" | "upstreamAccountId" | "upstreamSyncedAt" | "lastErrorMessage" | "lastFailureStage" | "mailboxLastErrorMessage">>): AccountRecord => ({
   businessFlowAvailability: defaultBusinessFlowAvailability,
   businessFlowState: defaultBusinessFlowState,
   upstreamOrigin: null,
@@ -127,6 +127,7 @@ const makeAccountRow = (row: Omit<AccountRecord, "businessFlowAvailability" | "b
   upstreamSyncedAt: null,
   lastErrorMessage: null,
   lastFailureStage: null,
+  mailboxLastErrorMessage: null,
   ...row,
 });
 
@@ -292,6 +293,7 @@ export const sampleAccounts = {
       mailboxStatus: "locked",
       mailboxLastSyncedAt: "2026-03-18T06:58:00.000Z",
       mailboxLastErrorCode: "microsoft_account_locked",
+      mailboxLastErrorMessage: "Microsoft 账户已锁定",
       mailboxUnreadCount: 0,
       browserSession: {
         id: 103,
@@ -339,6 +341,7 @@ export const sampleAccounts = {
       mailboxStatus: "invalidated",
       mailboxLastSyncedAt: "2026-03-18T06:55:00.000Z",
       mailboxLastErrorCode: "oauth_timeout",
+      mailboxLastErrorMessage: "Microsoft OAuth redirect timed out",
       mailboxUnreadCount: 0,
       browserSession: {
         id: 104,
@@ -384,6 +387,7 @@ export const sampleAccounts = {
       mailboxStatus: "invalidated",
       mailboxLastSyncedAt: null,
       mailboxLastErrorCode: "microsoft_password_incorrect",
+      mailboxLastErrorMessage: "Microsoft password incorrect",
       mailboxUnreadCount: 0,
       browserSession: {
         id: 105,
