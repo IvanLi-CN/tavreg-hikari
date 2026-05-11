@@ -1,10 +1,47 @@
+import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, within } from "storybook/test";
-import { MailboxDrawer } from "@/components/mailbox-drawer";
+import { MailboxDrawer, type MailboxDrawerSyncFeedback } from "@/components/mailbox-drawer";
 import { sampleAccounts, sampleMailboxMessageDetail, sampleMailboxMessages, sampleMailboxes } from "@/stories/fixtures";
 
 function findAccount(accountId: number | null) {
   return accountId == null ? null : sampleAccounts.rows.find((row) => row.id === accountId) || null;
+}
+
+function MailboxDrawerSyncFeedbackHarness(props: { initialFeedback?: MailboxDrawerSyncFeedback | null; failOnRefresh?: boolean }) {
+  const [syncFeedback, setSyncFeedback] = useState<MailboxDrawerSyncFeedback | null>(props.initialFeedback || null);
+  const mailbox = sampleMailboxes.find((item) => item.accountId === 2) ?? null;
+
+  return (
+    <MailboxDrawer
+      open
+      onOpenChange={() => undefined}
+      settingsConfigured
+      account={findAccount(2)}
+      mailbox={mailbox}
+      messages={sampleMailboxMessages}
+      messagesTotal={sampleMailboxMessages.length}
+      messagesHasMore={false}
+      messagesBusy={false}
+      selectedMessageId={sampleMailboxMessages[0]?.id ?? null}
+      messageDetail={sampleMailboxMessageDetail}
+      messageBusy={false}
+      syncingMailboxId={syncFeedback?.status === "syncing" ? mailbox?.id ?? null : null}
+      syncFeedback={syncFeedback}
+      onDismissSyncFeedback={() => setSyncFeedback(null)}
+      onOpenSettings={() => undefined}
+      onSyncMailbox={async () => {
+        setSyncFeedback({ status: "syncing" });
+        if (props.failOnRefresh) {
+          setSyncFeedback({ status: "error", message: "Graph token expired" });
+          return;
+        }
+        setSyncFeedback({ status: "success", message: "已刷新" });
+      }}
+      onLoadMoreMessages={async () => undefined}
+      onSelectMessage={async () => undefined}
+    />
+  );
 }
 
 const meta = {
@@ -25,8 +62,10 @@ const meta = {
     messageDetail: sampleMailboxMessageDetail,
     messageBusy: false,
     syncingMailboxId: null,
+    syncFeedback: null,
     onOpenSettings: () => undefined,
     onSyncMailbox: async () => undefined,
+    onDismissSyncFeedback: () => undefined,
     copyFeedbackAutoDismissMs: 2200,
     onLoadMoreMessages: async () => undefined,
     onSelectMessage: async () => undefined,
@@ -102,6 +141,81 @@ export const NeedsGraphSetup: Story = {
     messagesTotal: 0,
     selectedMessageId: null,
     messageDetail: null,
+  },
+};
+
+export const RefreshingFeedback: Story = {
+  args: {
+    account: findAccount(2),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 2) ?? null,
+    messages: sampleMailboxMessages,
+    messagesTotal: sampleMailboxMessages.length,
+    selectedMessageId: sampleMailboxMessages[0]?.id ?? null,
+    messageDetail: sampleMailboxMessageDetail,
+    syncingMailboxId: sampleMailboxes.find((mailbox) => mailbox.accountId === 2)?.id ?? null,
+    syncFeedback: { status: "syncing" },
+  },
+  play: async () => {
+    await expect(within(document.body).getByRole("status")).toHaveTextContent("正在刷新邮箱");
+  },
+};
+
+export const RefreshSuccessFeedback: Story = {
+  args: {
+    account: findAccount(2),
+    mailbox: sampleMailboxes.find((mailbox) => mailbox.accountId === 2) ?? null,
+    messages: sampleMailboxMessages,
+    messagesTotal: sampleMailboxMessages.length,
+    selectedMessageId: sampleMailboxMessages[0]?.id ?? null,
+    messageDetail: sampleMailboxMessageDetail,
+    syncFeedback: { status: "success", message: "已刷新" },
+  },
+  play: async () => {
+    await expect(within(document.body).getByRole("status")).toHaveTextContent("已刷新");
+  },
+};
+
+export const RefreshFailureFeedback: Story = {
+  render: () => (
+    <div className="min-h-dvh bg-slate-950 p-8 text-white">
+      <div className="mx-auto max-w-[1480px] space-y-6">
+        <div className="rounded-[28px] border border-white/10 bg-slate-950/80 p-8">
+          <div className="h-8 w-56 rounded-full bg-white/10" />
+          <div className="mt-4 h-5 w-[32rem] rounded-full bg-white/5" />
+        </div>
+      </div>
+      <MailboxDrawerSyncFeedbackHarness initialFeedback={{ status: "error", message: "Graph token expired" }} />
+    </div>
+  ),
+  parameters: {
+    layout: "fullscreen",
+    docs: {
+      description: {
+        story: "验证抽屉刷新失败时错误只出现在抽屉内部，不在背后的主界面渲染全局错误条。",
+      },
+    },
+  },
+  play: async () => {
+    const body = within(document.body);
+    await expect(body.getByRole("alert")).toHaveTextContent("Graph token expired");
+    await expect(body.getAllByRole("alert")).toHaveLength(1);
+  },
+};
+
+export const RefreshFailurePlay: Story = {
+  render: () => <MailboxDrawerSyncFeedbackHarness failOnRefresh />,
+  parameters: {
+    docs: {
+      description: {
+        story: "点击抽屉刷新按钮后，在抽屉内显示失败反馈，避免把错误泄露到 overlay 背后的 AppShell。",
+      },
+    },
+  },
+  play: async () => {
+    const body = within(document.body);
+    await userEvent.click(body.getByRole("button", { name: "刷新" }));
+    await expect(body.getByRole("alert")).toHaveTextContent("Graph token expired");
+    await expect(body.getAllByRole("alert")).toHaveLength(1);
   },
 };
 
