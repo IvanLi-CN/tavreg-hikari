@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { ChevronLeft, Inbox, KeyRound, RefreshCw } from "lucide-react";
+import { AlertCircle, CheckCircle2, ChevronLeft, Inbox, KeyRound, RefreshCw } from "lucide-react";
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type SyntheticEvent } from "react";
 import { CopyIconButton, type CopyButtonStatus } from "@/components/ui/copy-icon-button";
 import { Badge } from "@/components/ui/badge";
@@ -104,6 +104,11 @@ function resolveMailboxStateDescription(account: AccountRecord | null, mailbox: 
   return "当前邮箱可用。";
 }
 
+export type MailboxDrawerSyncFeedback = {
+  status: "syncing" | "success" | "error";
+  message?: string | null;
+};
+
 export function MailboxDrawer(props: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -118,6 +123,8 @@ export function MailboxDrawer(props: {
   messageDetail: MailboxMessageDetail | null;
   messageBusy: boolean;
   syncingMailboxId: number | null;
+  syncFeedback?: MailboxDrawerSyncFeedback | null;
+  onDismissSyncFeedback?: () => void;
   onOpenSettings: () => void;
   onSyncMailbox: (mailboxId: number) => Promise<void>;
   copyFeedbackAutoDismissMs?: number | null;
@@ -138,6 +145,13 @@ export function MailboxDrawer(props: {
       ? DOMPurify.sanitize(props.messageDetail.bodyContent, { USE_PROFILES: { html: true } })
       : null;
   const canRefresh = Boolean(props.mailbox?.isAuthorized && props.mailbox.status !== "locked");
+  const syncFeedback =
+    props.syncFeedback ??
+    (props.mailbox && props.syncingMailboxId === props.mailbox.id
+      ? ({
+          status: "syncing",
+        } satisfies MailboxDrawerSyncFeedback)
+      : null);
   const showMailboxState = !props.mailbox || !props.mailbox.isAuthorized || props.mailbox.status !== "available" || !props.settingsConfigured;
   const stateDescription = resolveMailboxStateDescription(props.account, props.mailbox, props.settingsConfigured);
   const accountDisplayName = props.mailbox?.graphDisplayName || props.account?.microsoftEmail || "当前账号";
@@ -263,7 +277,8 @@ export function MailboxDrawer(props: {
             variant="outline"
             onClick={() => {
               if (props.mailbox) {
-                void props.onSyncMailbox(props.mailbox.id);
+                props.onDismissSyncFeedback?.();
+                void props.onSyncMailbox(props.mailbox.id).catch(() => undefined);
               }
             }}
             disabled={!props.mailbox || !canRefresh || props.syncingMailboxId === props.mailbox.id}
@@ -272,6 +287,34 @@ export function MailboxDrawer(props: {
             {props.mailbox && props.syncingMailboxId === props.mailbox.id ? "刷新中" : "刷新"}
           </Button>
         </div>
+        {syncFeedback ? (
+          <div
+            role={syncFeedback.status === "error" ? "alert" : "status"}
+            className={cn(
+              "mt-3 flex items-start gap-2 rounded-xl border px-3 py-2 text-xs leading-5",
+              syncFeedback.status === "error"
+                ? "border-rose-300/25 bg-rose-400/10 text-rose-100"
+                : syncFeedback.status === "success"
+                  ? "border-emerald-300/20 bg-emerald-400/8 text-emerald-100"
+                  : "border-sky-300/20 bg-sky-400/8 text-sky-100",
+            )}
+          >
+            {syncFeedback.status === "error" ? (
+              <AlertCircle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            ) : syncFeedback.status === "success" ? (
+              <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+            ) : (
+              <RefreshCw className="mt-0.5 size-3.5 shrink-0 animate-spin" aria-hidden="true" />
+            )}
+            <span>
+              {syncFeedback.status === "error"
+                ? syncFeedback.message || "刷新失败，请稍后重试。"
+                : syncFeedback.status === "success"
+                  ? syncFeedback.message || "已刷新"
+                  : syncFeedback.message || "正在刷新邮箱…"}
+            </span>
+          </div>
+        ) : null}
       </CardHeader>
       <CardContent className="min-h-0 flex-1 p-0">
         <ScrollArea className="h-full px-3 py-3">

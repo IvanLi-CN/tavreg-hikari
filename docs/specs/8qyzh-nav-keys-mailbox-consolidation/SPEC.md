@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-19
-- Last: 2026-04-19
+- Last: 2026-05-11
 
 ## 背景 / 问题陈述
 
@@ -58,6 +58,7 @@
 - ChatGPT 的“补号设置”必须继续保留在 ChatGPT keys 视图中。
 - Microsoft 账号列表点击“收件箱”后，必须留在 `accounts` 模块并打开右侧抽屉，不再切到独立顶栏页。
 - 抽屉每次打开时必须自动触发一次 mailbox `sync + messages refresh`，但同一次打开周期内不得重复抖动刷新。
+- 抽屉内触发的 mailbox refresh 必须在抽屉内部展示 `刷新中 / 已刷新 / 失败` 反馈，失败不得写入背后主界面的全局错误条。
 - Microsoft 工具列展开态必须在刷新后恢复，并支持 Storybook 通过显式初始 props 覆盖。
 
 ### SHOULD
@@ -90,6 +91,7 @@
 - Microsoft 账号页点击某个账号的“收件箱”后，直接在 `accounts` 模块内打开 drawer。
 - drawer 复用现有 mailbox 三栏工作区，并默认聚焦到当前账号对应的 mailbox。
 - 每次打开 drawer 时自动触发一次 refresh；若当前 mailbox 为 `preparing` 且从未同步成功，则保持现有首次授权后自动 sync 逻辑，不重复额外触发。
+- drawer refresh 使用局部 inline feedback：同步中使用 `role="status"`，成功短暂显示“已刷新”，失败使用 `role="alert"` 并保留在抽屉头部账号信息下方；独立 `/mailboxes` 工作台仍使用全局错误反馈。
 - 若账号没有可显示 mailbox，drawer 保持在 Microsoft 模块内显示空态；若 mailbox 为 `invalidated / locked / 未授权`，则继续展示状态与 Graph 设置入口。
 - Graph 设置改为 Microsoft 模块内的次级入口，通过 `accounts?view=graph-settings` 进入。
 
@@ -126,6 +128,10 @@
   When drawer 打开
   Then 页面停留在 `accounts` 模块，并自动刷新一次对应邮箱内容。
 
+- Given 用户在 drawer 内点击“刷新”且同步失败
+  When 错误返回
+  Then 错误只显示在 drawer 内部反馈区，背后的主界面不出现全局错误条。
+
 - Given 当前账号没有 mailbox，或 mailbox 处于 `invalidated / locked / 未授权`
   When drawer 渲染
   Then 页面仍留在 drawer 里显示稳定状态反馈，并保留 Graph 设置入口。
@@ -145,7 +151,7 @@
 ### Testing
 
 - Unit tests: 路由映射覆盖 `/keys`、`/api-keys`、`/mailboxes`、`/mailboxes/settings` 与 query 解析。
-- E2E / interaction: Storybook `play` 覆盖站点 Keys 返回、ChatGPT 补号设置入口、Microsoft 抽屉主要状态与工具列初始态。
+- E2E / interaction: Storybook `play` 覆盖站点 Keys 返回、ChatGPT 补号设置入口、Microsoft 抽屉主要状态、抽屉 refresh 局部反馈与工具列初始态。
 
 ### UI / Storybook (if applicable)
 
@@ -192,6 +198,12 @@
   ![Microsoft 邮箱抽屉](./assets/mailbox-drawer-available.png)
 
 - source_type: `storybook_canvas`
+  story_id_or_title: `Views/MailboxDrawer/Refresh Failure Feedback`
+  state: `drawer-local refresh failure`
+  evidence_note: 验证 drawer 内刷新失败时错误显示在抽屉头部局部反馈区，背后的主界面不再出现全局错误条。
+  ![Microsoft 邮箱抽屉刷新失败局部反馈](./assets/mailbox-drawer-refresh-failure.png)
+
+- source_type: `storybook_canvas`
   story_id_or_title: `Views/AccountsView/Desktop Tools Collapsed`
   state: `collapsed desktop tools`
   evidence_note: 验证 Microsoft 账号页在工具列收起后仍保留稳定的“展开工具列”与 Graph 设置入口，作为记忆态回放的稳定视觉基线。
@@ -221,6 +233,7 @@
 
 - 2026-04-19: 创建规格，冻结导航收敛、站点 Keys 视图、Microsoft mailbox drawer 与工具列持久化范围。
 - 2026-04-19: 完成 codex review 收敛、Storybook/验证链路与 PR #54 merge-ready 收口，同步兼容 `/keys?site=` tab 切换回归覆盖。
+- 2026-05-11: 收敛 drawer refresh 反馈归属，失败状态改为抽屉内 inline alert，避免错误透出到 overlay 背后的全局错误条。
 
 ## 参考（References）
 

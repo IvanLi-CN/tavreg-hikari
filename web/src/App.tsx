@@ -10,7 +10,7 @@ import { ChatGptView } from "@/components/chatgpt-view";
 import { DashboardView } from "@/components/dashboard-view";
 import { GrokView } from "@/components/grok-view";
 import { KeysView, ChatGptKeysPane, GrokKeysPane, TavilyKeysPane } from "@/components/keys-view";
-import { MailboxDrawer } from "@/components/mailbox-drawer";
+import { MailboxDrawer, type MailboxDrawerSyncFeedback } from "@/components/mailbox-drawer";
 import { MailboxesView } from "@/components/mailboxes-view";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
@@ -509,6 +509,10 @@ export function App() {
   const [activeBatchBootstrapMode, setActiveBatchBootstrapMode] = useState<AccountBatchBootstrapMode | null>(null);
   const [connectingAccountIds, setConnectingAccountIds] = useState<number[]>([]);
   const [syncingMailboxId, setSyncingMailboxId] = useState<number | null>(null);
+  const [mailboxDrawerSyncFeedback, setMailboxDrawerSyncFeedback] = useState<{
+    mailboxId: number;
+    feedback: MailboxDrawerSyncFeedback;
+  } | null>(null);
   const [accountsRefreshVersion, setAccountsRefreshVersion] = useState(0);
   const [grokJobBusy, setGrokJobBusy] = useState(false);
   const [chatGptJobBusy, setChatGptJobBusy] = useState(false);
@@ -530,6 +534,7 @@ export function App() {
   const mailboxSelectionRef = useRef<number | null>(null);
   const autoSyncedMailboxIdsRef = useRef<number[]>([]);
   const mailboxDrawerRefreshKeyRef = useRef<string | null>(null);
+  const mailboxDrawerSyncFeedbackTimeoutRef = useRef<number | null>(null);
 
   const selectedMailbox = useMemo(
     () => mailboxes.find((mailbox) => mailbox.id === selectedMailboxId) || null,
@@ -1518,21 +1523,29 @@ export function App() {
 
   useEffect(() => {
     if (!isMailboxWorkspacePage || !activeMailbox) return;
-    void refreshMailboxMessages(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, [activeMailbox, isMailboxWorkspacePage]);
+    void refreshMailboxMessages(activeMailbox.id).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      if (isMailboxDrawerOpen) {
+        updateMailboxDrawerSyncFeedback(activeMailbox.id, { status: "error", message });
+        return;
+      }
+      setError(message);
+    });
+  }, [activeMailbox, isMailboxDrawerOpen, isMailboxWorkspacePage]);
 
   useEffect(() => {
     if (!activeMailbox || !isMailboxWorkspacePage) return;
     if (activeMailbox.status === "preparing" && !activeMailbox.lastSyncedAt && activeMailbox.isAuthorized) {
       if (autoSyncedMailboxIdsRef.current.includes(activeMailbox.id)) return;
       autoSyncedMailboxIdsRef.current = mergeIds(autoSyncedMailboxIdsRef.current, [activeMailbox.id]);
-      void handleSyncMailbox(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+      void handleSyncMailbox(activeMailbox.id, { errorTarget: isMailboxDrawerOpen ? "drawer" : "global" }).catch(() => undefined);
     }
-  }, [activeMailbox, isMailboxWorkspacePage]);
+  }, [activeMailbox, isMailboxDrawerOpen, isMailboxWorkspacePage]);
 
   useEffect(() => {
     if (!isMailboxDrawerOpen) {
       mailboxDrawerRefreshKeyRef.current = null;
+      clearMailboxDrawerSyncFeedback();
       return;
     }
     if (!activeMailbox || !activeMailbox.isAuthorized || activeMailbox.status === "locked") return;
@@ -1540,7 +1553,7 @@ export function App() {
     const refreshKey = `${activeMailbox.id}:${requestedMailboxAccountId ?? "none"}`;
     if (mailboxDrawerRefreshKeyRef.current === refreshKey) return;
     mailboxDrawerRefreshKeyRef.current = refreshKey;
-    void handleSyncMailbox(activeMailbox.id).catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    void handleSyncMailbox(activeMailbox.id, { errorTarget: "drawer" }).catch(() => undefined);
   }, [activeMailbox, isMailboxDrawerOpen, requestedMailboxAccountId]);
 
   useEffect(() => {
@@ -2281,17 +2294,58 @@ export function App() {
     navigate(buildAccountsPath());
   };
 
-  const handleSyncMailbox = async (mailboxId: number) => {
+  const clearMailboxDrawerSyncFeedback = () => {
+    if (mailboxDrawerSyncFeedbackTimeoutRef.current != null && typeof window !== "undefined") {
+      window.clearTimeout(mailboxDrawerSyncFeedbackTimeoutRef.current);
+      mailboxDrawerSyncFeedbackTimeoutRef.current = null;
+    }
+    setMailboxDrawerSyncFeedback(null);
+  };
+
+  const updateMailboxDrawerSyncFeedback = (
+    mailboxId: number,
+    feedback: MailboxDrawerSyncFeedback,
+    options?: { autoDismissMs?: number },
+  ) => {
+    if (mailboxDrawerSyncFeedbackTimeoutRef.current != null && typeof window !== "undefined") {
+      window.clearTimeout(mailboxDrawerSyncFeedbackTimeoutRef.current);
+      mailboxDrawerSyncFeedbackTimeoutRef.current = null;
+    }
+    setMailboxDrawerSyncFeedback({ mailboxId, feedback });
+    if (options?.autoDismissMs && typeof window !== "undefined") {
+      mailboxDrawerSyncFeedbackTimeoutRef.current = window.setTimeout(() => {
+        setMailboxDrawerSyncFeedback((current) =>
+          current?.mailboxId === mailboxId && current.feedback.status === feedback.status ? null : current,
+        );
+        mailboxDrawerSyncFeedbackTimeoutRef.current = null;
+      }, options.autoDismissMs);
+    }
+  };
+
+  const handleSyncMailbox = async (mailboxId: number, options?: { errorTarget?: "global" | "drawer" }) => {
+    const errorTarget = options?.errorTarget || "global";
     try {
       setSyncingMailboxId(mailboxId);
-      setError(null);
+      if (errorTarget === "drawer") {
+        updateMailboxDrawerSyncFeedback(mailboxId, { status: "syncing" });
+      } else {
+        setError(null);
+      }
       await api<MailboxSyncPayload>(`/api/microsoft-mail/mailboxes/${mailboxId}/sync`, {
         method: "POST",
       });
       await refreshMailboxes();
       await refreshMailboxMessages(mailboxId);
+      if (errorTarget === "drawer") {
+        updateMailboxDrawerSyncFeedback(mailboxId, { status: "success", message: "已刷新" }, { autoDismissMs: 2200 });
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (errorTarget === "drawer") {
+        updateMailboxDrawerSyncFeedback(mailboxId, { status: "error", message });
+      } else {
+        setError(message);
+      }
       throw err;
     } finally {
       setSyncingMailboxId(null);
@@ -2643,8 +2697,14 @@ export function App() {
               messageDetail={selectedMessageDetail}
               messageBusy={messageBusy}
               syncingMailboxId={syncingMailboxId}
+              syncFeedback={
+                activeMailbox && mailboxDrawerSyncFeedback?.mailboxId === activeMailbox.id
+                  ? mailboxDrawerSyncFeedback.feedback
+                  : null
+              }
+              onDismissSyncFeedback={clearMailboxDrawerSyncFeedback}
               onOpenSettings={() => handleOpenMailboxSettings("accounts")}
-              onSyncMailbox={handleSyncMailbox}
+              onSyncMailbox={(mailboxId) => handleSyncMailbox(mailboxId, { errorTarget: "drawer" })}
               onLoadMoreMessages={handleLoadMoreMailboxMessages}
               onSelectMessage={handleSelectMailboxMessage}
             />
