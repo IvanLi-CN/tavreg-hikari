@@ -228,6 +228,26 @@ test("proxy broker client maps auth and server failures", async () => {
   }
 });
 
+test("proxy broker client classifies aborted requests as timeouts", async () => {
+  globalThis.fetch = (async () => {
+    throw new DOMException("The operation was aborted.", "AbortError");
+  }) as unknown as typeof fetch;
+
+  try {
+    await createClient().listCatalog();
+    throw new Error("expected listCatalog to time out");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ProxyBrokerError);
+    expect((error as ProxyBrokerError).code).toBe("proxy_broker_request_timeout");
+    expect((error as ProxyBrokerError).message).toContain("timed out after 1000ms");
+    expect((error as ProxyBrokerError).details).toMatchObject({
+      method: "GET",
+      path: "/api/v1/proxy-catalog",
+      timeoutMs: 1000,
+    });
+  }
+});
+
 test("proxy broker client requires base url and api key", async () => {
   const client = new ProxyBrokerClient({
     baseUrl: "",
@@ -295,13 +315,67 @@ test("proxy broker runtime falls back when preferred ip cannot open", async () =
       },
       {
         selection_mode: "ip",
-        specified_ips: ["203.0.113.10", "203.0.113.20"],
-        excluded_ips: [],
+        specified_ips: ["203.0.113.20"],
+        excluded_ips: ["203.0.113.10"],
         country_codes: [],
         cities: [],
         sort_mode: "lru",
         desired_port: null,
       },
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime retries another healthy ip after broker open timeout", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "first", name: "First", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "second", name: "Second", ip: "203.0.113.20" }),
+      ]));
+    }
+    if (requests.filter((request) => request.url.endsWith("/sessions/open")).length === 1) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    return Response.json({
+      session_id: "sess_second",
+      listen: "127.0.0.1:43124",
+      bind_host: "127.0.0.1",
+      display_host: "127.0.0.1",
+      display_address: "127.0.0.1:43124",
+      port: 43124,
+      selected_ip: "203.0.113.20",
+      proxy_name: "Second",
+      node_id: "second",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+    });
+
+    expect(runtime.session.session_id).toBe("sess_second");
+    expect(requests.filter((request) => request.method === "POST").map((request) => request.body)).toEqual([
+      expect.objectContaining({ specified_ips: ["203.0.113.10"], excluded_ips: [] }),
+      expect.objectContaining({ specified_ips: ["203.0.113.20"], excluded_ips: ["203.0.113.10"] }),
     ]);
   } finally {
     if (previousApiKey == null) {
@@ -384,7 +458,7 @@ test("proxy broker runtime closes and rotates sessions when business domain prob
         url: "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
         body: {
           selection_mode: "ip",
-          specified_ips: ["203.0.113.10", "203.0.113.20"],
+          specified_ips: ["203.0.113.10"],
           excluded_ips: [],
           country_codes: [],
           cities: [],
@@ -856,9 +930,9 @@ test("proxy broker runtime refreshes mixed fresh and stale catalogs before openi
     return Response.json({
       session_id: "sess_mixed_refreshed",
       display_address: "127.0.0.1:43128",
-      selected_ip: "203.0.113.21",
-      proxy_name: "Stale-01",
-      node_id: "stale_1",
+      selected_ip: "203.0.113.20",
+      proxy_name: "Fresh-01",
+      node_id: "fresh_1",
     });
   }) as unknown as typeof fetch;
 
@@ -883,7 +957,7 @@ test("proxy broker runtime refreshes mixed fresh and stale catalogs before openi
     ]);
     expect(requests.at(-1)?.body).toMatchObject({
       selection_mode: "ip",
-      specified_ips: ["203.0.113.20", "203.0.113.21"],
+      specified_ips: ["203.0.113.20"],
     });
   } finally {
     if (previousApiKey == null) {
@@ -917,7 +991,7 @@ test("proxy broker runtime rejects when no probed node passes latency gate", asy
         timeoutMs: 1000,
         maxLatencyMs: 500,
       },
-    })).rejects.toMatchObject({ code: "proxy_broker_no_healthy_node" });
+    })).rejects.toMatchObject({ code: "proxy_broker_no_healthy_nodes" });
   } finally {
     if (previousApiKey == null) {
       delete process.env.PROXY_BROKER_API_KEY;

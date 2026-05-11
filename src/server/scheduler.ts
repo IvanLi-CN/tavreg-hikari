@@ -469,7 +469,9 @@ function isAbortError(error: unknown): boolean {
 
 function getLaunchSetupErrorCode(error: unknown): string {
   if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
-    return (error as { code: string }).code || "launch_setup_failed";
+    const code = (error as { code: string }).code.trim();
+    if (code && !/^[A-Z][A-Z0-9_]*$/.test(code)) return code;
+    return "launch_setup_failed";
   }
   if (error instanceof Error && error.name && error.name !== "Error") return error.name;
   return "launch_setup_failed";

@@ -153,13 +153,34 @@ async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number,
 function noHealthyBrokerNodeError(maxLatencyMs: number): ProxyBrokerError {
   return new ProxyBrokerError(
     0,
-    "proxy_broker_no_healthy_node",
+    "proxy_broker_no_healthy_nodes",
     `no Proxy Broker node passed probe health and latency gate (last_probe_ok=true, latency <= ${maxLatencyMs}ms)`,
   );
 }
 
 function isNoHealthyBrokerNodeError(error: unknown): boolean {
-  return error instanceof ProxyBrokerError && error.code === "proxy_broker_no_healthy_node";
+  return error instanceof ProxyBrokerError
+    && (error.code === "proxy_broker_no_healthy_nodes" || error.code === "proxy_broker_no_healthy_node");
+}
+
+function isRetryableBrokerOpenError(error: unknown): boolean {
+  if (!(error instanceof ProxyBrokerError)) return false;
+  return new Set([
+    "not_found",
+    "ip_not_found",
+    "no_healthy_proxy_nodes",
+    "proxy_runtime_apply_failed",
+    "proxy_broker_request_failed",
+    "proxy_broker_request_timeout",
+  ]).has(error.code);
+}
+
+function brokerAttemptSummary(ip: string, error: unknown): Record<string, unknown> {
+  return {
+    ip,
+    code: error instanceof ProxyBrokerError ? error.code : "unknown",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 export async function openProxyBrokerRuntimeSession(input: {
@@ -168,6 +189,7 @@ export async function openProxyBrokerRuntimeSession(input: {
   excludedIps?: string[];
   excludedNodeNamePattern?: RegExp;
   fallbackOnPreferredIpFailure?: boolean;
+  maxOpenAttempts?: number;
 }): Promise<ProxyBrokerRuntimeSession> {
   const client = createProxyBrokerClient(input.settings);
   const maxLatencyMs = normalizeMaxLatencyMs(input.settings);
@@ -185,31 +207,47 @@ export async function openProxyBrokerRuntimeSession(input: {
   }
   const healthyIps = candidateIps.filter((ip) => !excludedIps.has(ip));
   if (healthyIps.length === 0) throw noHealthyBrokerNodeError(maxLatencyMs);
-  const fallbackRequest = {
-    selection_mode: "ip" as const,
-    specified_ips: healthyIps,
-    excluded_ips: Array.from(excludedIps),
-    sort_mode: "lru" as const,
-  };
   const preferredHealthy = preferredIp ? healthyIps.includes(preferredIp) : false;
   if (preferredIp && !preferredHealthy && input.fallbackOnPreferredIpFailure === false) {
     throw noHealthyBrokerNodeError(maxLatencyMs);
   }
-  const session = preferredIp && preferredHealthy
-    ? await client.openSession({
+  const maxOpenAttempts = Math.max(1, Math.trunc(input.maxOpenAttempts ?? 3));
+  const queue = [
+    ...(preferredIp && preferredHealthy ? [preferredIp] : []),
+    ...healthyIps.filter((ip) => ip !== preferredIp),
+  ].slice(0, maxOpenAttempts);
+  const attempts: Array<Record<string, unknown>> = [];
+  let lastError: unknown = null;
+  for (const ip of queue) {
+    if (excludedIps.has(ip)) continue;
+    try {
+      const session = await client.openSession({
         selection_mode: "ip",
-        specified_ips: [preferredIp],
+        specified_ips: [ip],
         excluded_ips: Array.from(excludedIps),
         sort_mode: "lru",
-      }).catch((error) => {
-        if (input.fallbackOnPreferredIpFailure === false) throw error;
-        return client.openSession(fallbackRequest);
-      })
-    : await client.openSession(fallbackRequest);
-  return {
-    session,
-    proxyUrl: client.proxyUrl(session),
-  };
+      });
+      return {
+        session,
+        proxyUrl: client.proxyUrl(session),
+      };
+    } catch (error) {
+      attempts.push(brokerAttemptSummary(ip, error));
+      lastError = error;
+      excludedIps.add(ip);
+      if (input.fallbackOnPreferredIpFailure === false || !isRetryableBrokerOpenError(error)) {
+        throw error;
+      }
+    }
+  }
+  if (lastError instanceof ProxyBrokerError) {
+    throw new ProxyBrokerError(lastError.status, lastError.code, `${lastError.message}; broker open attempts exhausted`, {
+      attempts,
+      cause: lastError.details,
+    });
+  }
+  if (lastError) throw lastError;
+  throw noHealthyBrokerNodeError(maxLatencyMs);
 }
 
 function isDomainProbeReachableStatus(status: number): boolean {

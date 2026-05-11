@@ -249,7 +249,11 @@ export class ProxyBrokerClient {
     if (!this.cfg.baseUrl) throw new ProxyBrokerError(0, "proxy_broker_not_configured", "PROXY_BROKER_BASE_URL is not configured");
     if (!this.cfg.apiKey) throw new ProxyBrokerError(0, "proxy_broker_not_configured", "PROXY_BROKER_API_KEY is not configured");
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.cfg.timeoutMs);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.cfg.timeoutMs);
     try {
       const resp = await fetch(buildUrl(this.cfg, path, query), {
         method,
@@ -271,8 +275,18 @@ export class ProxyBrokerClient {
       return payload;
     } catch (error) {
       if (error instanceof ProxyBrokerError) throw error;
+      if (timedOut || controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new ProxyBrokerError(0, "proxy_broker_request_timeout", `Proxy Broker request timed out after ${this.cfg.timeoutMs}ms`, {
+          method,
+          path,
+          timeoutMs: this.cfg.timeoutMs,
+        });
+      }
       const message = error instanceof Error ? error.message : String(error);
-      throw new ProxyBrokerError(0, "proxy_broker_request_failed", message);
+      throw new ProxyBrokerError(0, "proxy_broker_request_failed", message, {
+        method,
+        path,
+      });
     } finally {
       clearTimeout(timeout);
     }
