@@ -22,7 +22,7 @@ import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
   createProxyBrokerClient,
-  openProxyBrokerRuntimeSession,
+  openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -1473,8 +1473,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
     throw new Error(message);
   }
-  const brokerSession = await openProxyBrokerRuntimeSession({
+  const brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
     settings: runtimeSettings,
+    businessSite: "microsoft",
     preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? account.browserSession?.proxyIp : null) || null,
     fallbackOnPreferredIpFailure: !requestedProxyNode,
   }).catch((error) => {
@@ -1484,7 +1485,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       browserEngine: "chrome",
       proxyNode: selectedProxyNode?.nodeName || requestedProxyNode || account.browserSession?.proxyNode || null,
       proxyIp: selectedProxyNode?.lastEgressIp || account.browserSession?.proxyIp || null,
-      errorCode: "proxy_broker_session_open_failed",
+      errorCode: getMailboxErrorCode(error) || "proxy_broker_session_open_failed",
       errorMessage: message || "Proxy Broker session 创建失败",
     });
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");

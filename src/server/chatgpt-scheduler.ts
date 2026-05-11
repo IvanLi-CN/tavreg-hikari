@@ -20,7 +20,7 @@ import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpst
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
-  openProxyBrokerRuntimeSession,
+  openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -83,6 +83,14 @@ const CHATGPT_START_COOLDOWN_ERROR_CODES = new Set([
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function getLaunchSetupErrorCode(error: unknown): string {
+  if (error && typeof error === "object" && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code || "launch_setup_failed";
+  }
+  if (error instanceof Error && error.name && error.name !== "Error") return error.name;
+  return "launch_setup_failed";
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | null> {
@@ -583,7 +591,7 @@ export class ChatGptJobScheduler {
       this.emit("job.updated", { site: this.site, job: this.db.getJob(job.id) });
     } catch (error) {
       this.failAttempt(job.id, attempt.id, {
-        errorCode: "launch_setup_failed",
+        errorCode: getLaunchSetupErrorCode(error),
         errorMessage: error instanceof Error ? error.message : String(error),
       });
     }
@@ -680,8 +688,9 @@ export class ChatGptJobScheduler {
       mixedPort: portLeases.mixedPort.port,
     };
     const runtime = resolveWorkerRuntime();
-    const brokerSession = await openProxyBrokerRuntimeSession({
+    const brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
       settings,
+      businessSite: "chatgpt",
       excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
       excludedNodeNamePattern: /(?:hong\s*kong|\bhk\b|香港)/i,
     }).catch(async (error) => {

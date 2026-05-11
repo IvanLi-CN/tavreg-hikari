@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
 
 import { ProxyBrokerClient, ProxyBrokerError } from "../src/proxy/broker";
-import { buildProxyBrokerConfig, openProxyBrokerRuntimeSession } from "../src/server/proxy-broker-runtime";
+import {
+  buildProxyBrokerConfig,
+  openDomainProbedProxyBrokerRuntimeSession,
+  openProxyBrokerRuntimeSession,
+  ProxyBrokerDomainProbeError,
+} from "../src/server/proxy-broker-runtime";
 
 const originalFetch = globalThis.fetch;
 
@@ -297,6 +302,323 @@ test("proxy broker runtime falls back when preferred ip cannot open", async () =
         sort_mode: "lru",
         desired_port: null,
       },
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime closes and rotates sessions when business domain probing fails", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  const sessions = [
+    {
+      session_id: "sess_bad",
+      display_address: "127.0.0.1:43123",
+      selected_ip: "203.0.113.10",
+      proxy_name: "Singapore-04",
+      node_id: "node_sg_04",
+    },
+    {
+      session_id: "sess_good",
+      display_address: "127.0.0.1:43124",
+      selected_ip: "203.0.113.20",
+      proxy_name: "Singapore-05",
+      node_id: "node_sg_05",
+    },
+  ];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "sg_04", name: "Singapore-04", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "sg_05", name: "Singapore-05", ip: "203.0.113.20" }),
+      ]));
+    }
+    if (method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json(sessions.shift());
+  }) as unknown as typeof fetch;
+
+  const probeCalls: Array<{ proxyUrl: string; url: string }> = [];
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openDomainProbedProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+      businessSite: "chatgpt",
+      probeFetch: async ({ proxyUrl, url }) => {
+        probeCalls.push({ proxyUrl, url });
+        if (proxyUrl === "http://127.0.0.1:43123") {
+          throw new Error("ERR_PROXY_CONNECTION_FAILED");
+        }
+        return { status: 403 };
+      },
+    });
+
+    expect(runtime.session.session_id).toBe("sess_good");
+    expect(probeCalls).toEqual([
+      { proxyUrl: "http://127.0.0.1:43123", url: "https://chatgpt.com/" },
+      { proxyUrl: "http://127.0.0.1:43124", url: "https://chatgpt.com/" },
+      { proxyUrl: "http://127.0.0.1:43124", url: "https://auth.openai.com/" },
+    ]);
+    expect(requests).toEqual([
+      {
+        method: "GET",
+        url: "https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+        body: null,
+      },
+      {
+        method: "POST",
+        url: "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
+        body: {
+          selection_mode: "ip",
+          specified_ips: ["203.0.113.10", "203.0.113.20"],
+          excluded_ips: [],
+          country_codes: [],
+          cities: [],
+          sort_mode: "lru",
+          desired_port: null,
+        },
+      },
+      {
+        method: "DELETE",
+        url: "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/sess_bad",
+        body: null,
+      },
+      {
+        method: "GET",
+        url: "https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
+        body: null,
+      },
+      {
+        method: "POST",
+        url: "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
+        body: {
+          selection_mode: "ip",
+          specified_ips: ["203.0.113.20"],
+          excluded_ips: ["203.0.113.10"],
+          country_codes: [],
+          cities: [],
+          sort_mode: "lru",
+          desired_port: null,
+        },
+      },
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime reports proxy_domain_unreachable after probe rotations are exhausted", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  const sessions = [
+    {
+      session_id: "sess_fail_1",
+      display_address: "127.0.0.1:43123",
+      selected_ip: "203.0.113.10",
+      proxy_name: "Singapore-04",
+      node_id: "node_sg_04",
+    },
+    {
+      session_id: "sess_fail_2",
+      display_address: "127.0.0.1:43124",
+      selected_ip: "203.0.113.20",
+      proxy_name: "Singapore-05",
+      node_id: "node_sg_05",
+    },
+  ];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "sg_04", name: "Singapore-04", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "sg_05", name: "Singapore-05", ip: "203.0.113.20" }),
+      ]));
+    }
+    if (method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json(sessions.shift());
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    await expect(
+      openDomainProbedProxyBrokerRuntimeSession({
+        settings: {
+          proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+          proxyBrokerProfileId: "Tavily",
+          timeoutMs: 1000,
+          maxLatencyMs: 500,
+        },
+        businessSite: "tavily",
+        maxProbeRotations: 1,
+        probeFetch: async () => {
+          throw new Error("network timeout");
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "proxy_domain_unreachable",
+      name: "proxy_domain_unreachable",
+      attempts: 2,
+      site: "tavily",
+      url: "https://app.tavily.com/home",
+    } satisfies Partial<ProxyBrokerDomainProbeError>);
+    expect(requests.filter((request) => request.method === "DELETE").map((request) => request.url)).toEqual([
+      "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/sess_fail_1",
+      "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/sess_fail_2",
+    ]);
+    expect(requests.filter((request) => request.method === "POST").map((request) => request.body)).toEqual([
+      expect.objectContaining({ excluded_ips: [] }),
+      expect.objectContaining({ excluded_ips: ["203.0.113.10"] }),
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime does not rotate exact preferred ip after domain probe failure", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "sg_04", name: "Singapore-04", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "sg_05", name: "Singapore-05", ip: "203.0.113.20" }),
+      ]));
+    }
+    if (method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({
+      session_id: "sess_requested",
+      display_address: "127.0.0.1:43123",
+      selected_ip: "203.0.113.10",
+      proxy_name: "Singapore-04",
+      node_id: "node_sg_04",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    await expect(
+      openDomainProbedProxyBrokerRuntimeSession({
+        settings: {
+          proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+          proxyBrokerProfileId: "Tavily",
+          timeoutMs: 1000,
+          maxLatencyMs: 500,
+        },
+        businessSite: "microsoft",
+        preferredIp: "203.0.113.10",
+        fallbackOnPreferredIpFailure: false,
+        maxProbeRotations: 3,
+        probeFetch: async () => {
+          throw new Error("ERR_PROXY_CONNECTION_FAILED");
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "proxy_domain_unreachable",
+      attempts: 1,
+      sessionId: "sess_requested",
+      selectedIp: "203.0.113.10",
+    } satisfies Partial<ProxyBrokerDomainProbeError>);
+    expect(requests.filter((request) => request.method === "DELETE").map((request) => request.url)).toEqual([
+      "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/sess_requested",
+    ]);
+    expect(requests.filter((request) => request.method === "POST").map((request) => request.body)).toEqual([
+      expect.objectContaining({ specified_ips: ["203.0.113.10"], excluded_ips: [] }),
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime preserves proxy_domain_unreachable when failed probes exhaust healthy candidates", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "sg_04", name: "Singapore-04", ip: "203.0.113.10" }),
+      ]));
+    }
+    if (method === "DELETE") {
+      return Response.json({ ok: true });
+    }
+    return Response.json({
+      session_id: "sess_only_candidate",
+      display_address: "127.0.0.1:43123",
+      selected_ip: "203.0.113.10",
+      proxy_name: "Singapore-04",
+      node_id: "node_sg_04",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    await expect(
+      openDomainProbedProxyBrokerRuntimeSession({
+        settings: {
+          proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+          proxyBrokerProfileId: "Tavily",
+          timeoutMs: 1000,
+          maxLatencyMs: 500,
+        },
+        businessSite: "grok",
+        maxProbeRotations: 3,
+        probeFetch: async () => {
+          throw new Error("ERR_PROXY_CONNECTION_FAILED");
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "proxy_domain_unreachable",
+      name: "proxy_domain_unreachable",
+      attempts: 1,
+      site: "grok",
+      url: "https://grok.com/",
+      sessionId: "sess_only_candidate",
+      nodeName: "Singapore-04",
+      selectedIp: "203.0.113.10",
+    } satisfies Partial<ProxyBrokerDomainProbeError>);
+    expect(requests.filter((request) => request.method === "DELETE").map((request) => request.url)).toEqual([
+      "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/sess_only_candidate",
+    ]);
+    expect(requests.filter((request) => request.url.endsWith("/sessions/open")).map((request) => request.body)).toEqual([
+      expect.objectContaining({ specified_ips: ["203.0.113.10"], excluded_ips: [] }),
     ]);
   } finally {
     if (previousApiKey == null) {
