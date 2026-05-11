@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.21.0",
+  "base_stable_version": "0.20.1",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-11T00:48:23Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.21.0",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "e79440e33eace0711cc47b3b52f5ab761e276ffe",
+  "pr_number": 79,
+  "pr_title": "feat(proxy): gate business sessions by domain reachability",
+  "registry": "ghcr.io",
+  "release_bump": "minor",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.21.0",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.21.0",
+  "target_sha": "87fe8023f7ef1fde7169b3108e930ad8c3548f7c",
+  "type_label": "type:minor"
+}
