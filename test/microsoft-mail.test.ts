@@ -38,6 +38,24 @@ describe("Microsoft mail failure helpers", () => {
     expect(getMailboxErrorMessage(error)).toBe("interaction required");
   });
 
+  test("classifies Microsoft OAuth home failures and redacts diagnostic URLs", () => {
+    const error = new Error(
+      "Error: microsoft login flow did not reach home, last_url=https://login.live.com/oauth20_authorize.srf?client_id=secret-client&state=secret-state#",
+    );
+
+    expect(getMailboxErrorCode(error)).toBe("microsoft_oauth_did_not_reach_home");
+    expect(getMailboxErrorMessage(error)).toBe(
+      "microsoft login flow did not reach home, last_url=https://login.live.com/oauth20_authorize.srf",
+    );
+  });
+
+  test("classifies Microsoft OAuth worker timeout as a stable bootstrap error code", () => {
+    const error = new Error("oauth worker timeout after 300000ms (code=unknown): no worker output");
+
+    expect(getMailboxErrorCode(error)).toBe("microsoft_oauth_worker_timeout");
+    expect(getMailboxErrorMessage(error)).toBe("oauth worker timeout after 300000ms (code=unknown): no worker output");
+  });
+
   test("recognizes callback and workspace URLs as valid OAuth completion targets", () => {
     expect(
       isMicrosoftOauthCompletionUrl(

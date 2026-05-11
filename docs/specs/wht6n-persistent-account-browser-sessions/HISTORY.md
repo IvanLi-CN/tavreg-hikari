@@ -1,5 +1,10 @@
 # 历史记录
 
+## 2026-05-11
+
+- 补充 stale `bootstrapping` session 自动失败收敛，避免 worker 已结束但账号页仍显示运行中的残留状态。
+- 将 Microsoft OAuth 未回到 Tavily Home、worker timeout 与代理 session abort 统一落成可诊断错误码，并在账号页 `Session` / `收信` badge 上暴露失败 tooltip。
+
 ## 2026-05-09
 
 - 将 Microsoft account session bootstrap 从串行 exclusive runner 改为账号级有界并发池，默认并发 `3`，上限 `10`。

@@ -245,6 +245,7 @@ export interface MicrosoftAccountRecord {
   mailboxStatus: MailboxStatus;
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
+  mailboxLastErrorMessage: string | null;
   mailboxUnreadCount: number;
   browserSession: AccountBrowserSessionRecord | null;
 }
@@ -756,6 +757,7 @@ function accountSelectSql(whereClause = "", orderClause = ""): string {
       COALESCE(m.status, 'preparing') AS mailbox_status,
       m.last_synced_at AS mailbox_last_synced_at,
       m.last_error_code AS mailbox_last_error_code,
+      m.last_error_message AS mailbox_last_error_message,
       COALESCE(m.unread_count, 0) AS mailbox_unread_count,
       s.id AS browser_session_id,
       s.status AS browser_session_status,
@@ -896,6 +898,7 @@ function mapAccountRow(row: Record<string, unknown>): MicrosoftAccountRecord {
     mailboxStatus: String(row.mailbox_status || "preparing") as MailboxStatus,
     mailboxLastSyncedAt: row.mailbox_last_synced_at == null ? null : String(row.mailbox_last_synced_at),
     mailboxLastErrorCode: row.mailbox_last_error_code == null ? null : String(row.mailbox_last_error_code),
+    mailboxLastErrorMessage: row.mailbox_last_error_message == null ? null : String(row.mailbox_last_error_message),
     mailboxUnreadCount: Number(row.mailbox_unread_count || 0),
     browserSession: mapAccountBrowserSessionRow(row),
   };
@@ -3599,8 +3602,78 @@ export class AppDatabase {
         input.errorMessage ?? null,
         now,
         accountId,
-      );
+    );
     return this.getBrowserSessionByAccountId(accountId)!;
+  }
+
+  markStaleBrowserSessionBootstrapsAsFailed(
+    staleAfterMs: number,
+    input?: {
+      errorCode?: string | null;
+      errorMessage?: string | null;
+    },
+  ): number {
+    const cutoffIso = new Date(Date.now() - Math.max(1_000, Math.trunc(staleAfterMs))).toISOString();
+    const now = nowIso();
+    const errorCode = input?.errorCode?.trim() || "session_bootstrap_stale";
+    const errorMessage = input?.errorMessage?.trim() || "账号 bootstrap 超时未收敛";
+    const staleRows = this.db
+      .query(`
+        SELECT a.id
+        FROM microsoft_accounts a
+        JOIN account_browser_sessions s ON s.account_id = a.id
+        WHERE s.status = 'bootstrapping'
+          AND s.updated_at < ?
+      `)
+      .all(cutoffIso) as Array<Record<string, unknown>>;
+    if (staleRows.length === 0) {
+      return 0;
+    }
+    const ids = staleRows.map((row) => Number(row.id)).filter((id) => Number.isInteger(id) && id > 0);
+    if (ids.length === 0) {
+      return 0;
+    }
+    const placeholders = ids.map(() => "?").join(", ");
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      this.db
+        .query(
+          `UPDATE account_browser_sessions
+           SET status = 'failed',
+               last_error_code = ?,
+               last_error_message = ?,
+               updated_at = ?
+           WHERE account_id IN (${placeholders})`,
+        )
+        .run(errorCode, errorMessage, now, ...ids);
+      this.db
+        .query(
+          `UPDATE microsoft_mailboxes
+           SET status = 'failed',
+               last_error_code = ?,
+               last_error_message = ?,
+               updated_at = ?
+           WHERE account_id IN (${placeholders})
+             AND status = 'preparing'`,
+        )
+        .run(errorCode, errorMessage, now, ...ids);
+      this.db
+        .query(
+          `UPDATE microsoft_accounts
+           SET last_result_status = 'failed',
+               last_result_at = COALESCE(last_result_at, ?),
+               last_error_code = ?,
+               updated_at = ?
+           WHERE id IN (${placeholders})
+             AND disabled_at IS NULL`,
+        )
+        .run(now, errorCode, now, ...ids);
+      this.db.exec("COMMIT;");
+      return ids.length;
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   touchBrowserSessionUsage(

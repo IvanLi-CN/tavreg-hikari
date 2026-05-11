@@ -1312,6 +1312,83 @@ export const FailureReuseCompactCards: Story = {
   },
 };
 
+export const SessionAndMailboxFailureTooltipsPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={failureReuseAccounts} initialSelectedIds={[]} frameClassName="mx-auto max-w-[1400px]" />,
+  parameters: {
+    docs: {
+      description: {
+        story: "悬浮 Session / 收信失败状态徽标时，展示同源错误码、阶段和失败原因气泡，而不是只显示静态 badge。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    const gammaRow = canvas.getByText("gamma@example.test").closest("tr");
+    expect(gammaRow).toBeTruthy();
+    const gamma = within(gammaRow!);
+    await userEvent.hover(gamma.getByText("blocked"));
+    await waitFor(() => {
+      expect(within(document.body).getByText("Session 失败详情")).toBeInTheDocument();
+    });
+    expect(within(document.body).getByText("错误代码：microsoft_account_locked")).toBeInTheDocument();
+    expect(within(document.body).getByText("失败原因：Microsoft 账户已锁定")).toBeInTheDocument();
+
+    const deltaRow = canvas.getByText("delta@example.test").closest("tr");
+    expect(deltaRow).toBeTruthy();
+    const delta = within(deltaRow!);
+    await userEvent.hover(delta.getByText("invalidated"));
+    await waitFor(() => {
+      expect(within(document.body).getByText("收信失败详情")).toBeInTheDocument();
+    });
+    expect(within(document.body).getByText("错误代码：oauth_timeout")).toBeInTheDocument();
+    expect(within(document.body).getByText("失败原因：Microsoft OAuth redirect timed out")).toBeInTheDocument();
+  },
+};
+
+export const SessionAndMailboxFailureTooltipsCompactPlay: Story = {
+  args: baseArgs,
+  render: () => <AccountsStorySurface accounts={failureReuseAccounts} initialSelectedIds={[]} />,
+  globals: {
+    viewport: { value: "extractorCompact375", isRotated: false },
+  },
+  parameters: {
+    docs: {
+      description: {
+        story: "窄视口卡片态下，Session / 收信失败状态徽标获得焦点时同样展示错误详情气泡。",
+      },
+    },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const gammaCard = canvas.getAllByText("gamma@example.test").find((node) => node.closest("article"))?.closest("article");
+    expect(gammaCard).toBeTruthy();
+    const gamma = within(gammaCard!);
+    const sessionTrigger = gamma.getByText("blocked").closest("[tabindex='0']") as HTMLElement | null;
+    expect(sessionTrigger).toBeTruthy();
+    sessionTrigger!.focus();
+    await waitFor(() => {
+      expect(within(document.body).getByText("Session 失败详情")).toBeInTheDocument();
+    });
+    expect(within(document.body).getByText("错误代码：microsoft_account_locked")).toBeInTheDocument();
+    expect(within(document.body).getByText("失败原因：Microsoft 账户已锁定")).toBeInTheDocument();
+
+    sessionTrigger!.blur();
+    const deltaCard = canvas.getAllByText("delta@example.test").find((node) => node.closest("article"))?.closest("article");
+    expect(deltaCard).toBeTruthy();
+    const delta = within(deltaCard!);
+    const mailboxTrigger = delta.getByText("invalidated").closest("[tabindex='0']") as HTMLElement | null;
+    expect(mailboxTrigger).toBeTruthy();
+    mailboxTrigger!.focus();
+    await waitFor(() => {
+      expect(within(document.body).getByText("收信失败详情")).toBeInTheDocument();
+    });
+    expect(within(document.body).getByText("错误代码：oauth_timeout")).toBeInTheDocument();
+    expect(within(document.body).getByText("失败原因：Microsoft OAuth redirect timed out")).toBeInTheDocument();
+  },
+};
+
 export const RestoreBlockedAccountPlay: Story = {
   args: baseArgs,
   render: () => <AccountsStorySurface onSaveAvailability={restoreAvailabilitySpy} />,

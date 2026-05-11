@@ -92,6 +92,7 @@ export type AccountRecord = {
   mailboxStatus: MailboxStatus | null;
   mailboxLastSyncedAt: string | null;
   mailboxLastErrorCode: string | null;
+  mailboxLastErrorMessage: string | null;
   mailboxUnreadCount: number;
   browserSession: AccountBrowserSession | null;
   businessFlowAvailability: AccountBusinessFlowAvailability;

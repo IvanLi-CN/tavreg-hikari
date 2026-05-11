@@ -521,6 +521,7 @@ function serializeAccount(row: MicrosoftAccountRecord): Record<string, unknown> 
     mailboxStatus: row.mailboxStatus,
     mailboxLastSyncedAt: row.mailboxLastSyncedAt,
     mailboxLastErrorCode: row.mailboxLastErrorCode,
+    mailboxLastErrorMessage: row.mailboxLastErrorMessage,
     mailboxUnreadCount: row.mailboxUnreadCount,
     browserSession: serializeBrowserSession(row),
     businessFlowAvailability: businessFlow.businessFlowAvailability,
@@ -1479,13 +1480,13 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? account.browserSession?.proxyIp : null) || null,
     fallbackOnPreferredIpFailure: !requestedProxyNode,
   }).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = proxyBrokerErrorMessage(error);
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
       proxyNode: selectedProxyNode?.nodeName || requestedProxyNode || account.browserSession?.proxyNode || null,
       proxyIp: selectedProxyNode?.lastEgressIp || account.browserSession?.proxyIp || null,
-      errorCode: getMailboxErrorCode(error) || "proxy_broker_session_open_failed",
+      errorCode: error instanceof ProxyBrokerError ? error.code : getMailboxErrorCode(error) || "proxy_broker_session_open_failed",
       errorMessage: message || "Proxy Broker session 创建失败",
     });
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
@@ -1686,6 +1687,19 @@ async function main(): Promise<void> {
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);
+  const markStaleSessionBootstraps = () => {
+    const settings = readSettings();
+    return db.markStaleBrowserSessionBootstrapsAsFailed(
+      normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(settings.microsoftAccountBootstrapWorkerTimeoutMs)
+        + normalizeMicrosoftAccountBootstrapKillGraceMs(settings.microsoftAccountBootstrapKillGraceMs)
+        + 30_000,
+      {
+        errorCode: "session_bootstrap_stale",
+        errorMessage: "账号 bootstrap worker 已超过超时窗口但状态未收敛",
+      },
+    );
+  };
+  markStaleSessionBootstraps();
   const runtimeBinding = getRuntimeServerBinding(defaults);
   const authConfig = buildServerAuthConfig(process.env);
   const clients = new Set<any>();
@@ -2191,6 +2205,7 @@ async function main(): Promise<void> {
       }
 
       if (pathname === "/api/accounts" && req.method === "GET") {
+        markStaleSessionBootstraps();
         const page = toInt(url.searchParams.get("page") || undefined, 1);
         const pageSize = toInt(url.searchParams.get("pageSize") || undefined, 20);
         const data = db.listAccounts({
