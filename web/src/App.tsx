@@ -22,6 +22,7 @@ import { createDefaultAccountQuery } from "@/lib/account-query";
 import { pickProxySettingsUpdate } from "@/lib/app-types";
 import { buildCodexVibeMonitorCredentialJson } from "@/lib/chatgpt-credential-format";
 import { DEFAULT_KEYS_PAGE_SIZE } from "@/lib/keys-page";
+import { createLatestRequestGate } from "@/lib/latest-request";
 import type {
   AccountBatchBootstrapMode,
   AccountBusinessFlowMode,
@@ -550,6 +551,7 @@ export function App() {
     [accounts.rows, requestedMailboxAccountId],
   );
   const accountQueryRef = useRef(accountQuery);
+  const accountRefreshGateRef = useRef(createLatestRequestGate());
   const apiKeyQueryRef = useRef(apiKeyQuery);
   const grokApiKeyQueryRef = useRef(grokApiKeyQuery);
   const chatGptCredentialQueryRef = useRef(chatGptCredentialQuery);
@@ -613,7 +615,8 @@ export function App() {
       current.apiKey ? current : createUpstreamSyncSettingsDraft(payload.settings),
     );
   };
-  const refreshAccounts = async (nextQuery = accountQuery) => {
+  const refreshAccounts = async (nextQuery = accountQueryRef.current) => {
+    const requestTicket = accountRefreshGateRef.current.begin();
     const params = new URLSearchParams();
     if (nextQuery.q) params.set("q", nextQuery.q);
     if (nextQuery.status) params.set("status", nextQuery.status);
@@ -627,6 +630,9 @@ export function App() {
     params.set("pageSize", String(nextQuery.pageSize));
 
     const payload = await api<AccountsPayload>(`/api/accounts?${params.toString()}`);
+    if (!requestTicket.isCurrent()) {
+      return;
+    }
     if (payload.rows.length === 0 && payload.total > 0 && nextQuery.page > 1) {
       setAccountQuery((current) => ({ ...current, page: current.page - 1 }));
       return;
