@@ -19,3 +19,4 @@
 - `/api/microsoft-mail/settings` GET/POST 返回并保存 Graph OAuth 设置和 bootstrap 性能参数。
 - `MailboxSettingsView` 在 Graph 设置页展示并发、worker timeout 与 kill grace 输入项，时间类输入以秒展示和编辑，保存时转换为 API 兼容的毫秒字段。
 - 账号页 `Session` 与 `收信` badge 复用 `StatusBadge` 和 Radix Tooltip；失败、阻断、锁定和失效状态可通过 hover/focus 查看阶段、错误码与失败原因。
+- 账号池列表刷新使用 latest-only request gate；SSE/WebSocket 触发的自动刷新如果晚于用户翻页请求返回，不会覆盖当前页数据或触发旧页的空页回退。
