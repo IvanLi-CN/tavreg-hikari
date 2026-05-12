@@ -1,5 +1,5 @@
 import { Impit } from "impit";
-import type { AppSettings } from "../storage/app-db.js";
+import type { AccountBrowserSessionRecord, AppSettings } from "../storage/app-db.js";
 import {
   ProxyBrokerClient,
   ProxyBrokerError,
@@ -74,12 +74,19 @@ export function buildProxyBrokerConfig(settings: Pick<AppSettings, "proxyBrokerB
     baseUrl: String(process.env.PROXY_BROKER_BASE_URL || settings.proxyBrokerBaseUrl || "https://proxy-broker.ivanli.cc").trim(),
     profileId: String(process.env.PROXY_BROKER_PROFILE_ID || settings.proxyBrokerProfileId || "Tavily").trim() || "Tavily",
     apiKey: String(process.env.PROXY_BROKER_API_KEY || "").trim(),
-    timeoutMs: Number(process.env.PROXY_BROKER_TIMEOUT_MS || settings.timeoutMs || 8000),
+    timeoutMs: Number(process.env.PROXY_BROKER_TIMEOUT_MS || 30000),
   };
 }
 
 export function createProxyBrokerClient(settings: Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs">): ProxyBrokerClient {
   return new ProxyBrokerClient(buildProxyBrokerConfig(settings));
+}
+
+export function reusableBrowserSessionProxyIp(
+  session: Pick<AccountBrowserSessionRecord, "status" | "proxyIp"> | null | undefined,
+): string | null {
+  if (session?.status !== "ready") return null;
+  return session.proxyIp?.trim() || null;
 }
 
 function normalizeMaxLatencyMs(settings: Pick<AppSettings, "maxLatencyMs">): number {

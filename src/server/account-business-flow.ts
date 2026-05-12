@@ -25,6 +25,7 @@ import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
   openDomainProbedProxyBrokerRuntimeSession,
+  reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -438,7 +439,7 @@ export class AccountBusinessFlowManager {
       brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
         businessSite: "tavily",
-        preferredIp: account.browserSession?.proxyIp || null,
+        preferredIp: reusableBrowserSessionProxyIp(account.browserSession),
       });
       this.db.updateAttempt(attemptId, {
         proxyNode: brokerSession.session.proxy_name,
@@ -636,7 +637,7 @@ export class AccountBusinessFlowManager {
       brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
         businessSite: "microsoft",
-        preferredIp: account.browserSession?.proxyIp || null,
+        preferredIp: reusableBrowserSessionProxyIp(account.browserSession),
       });
       const selectedProxyNode = brokerSession.session.proxy_name;
       this.db.updateAttempt(attemptId, {
@@ -898,7 +899,7 @@ export class AccountBusinessFlowManager {
       brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
         businessSite: "chatgpt",
-        preferredIp: account.browserSession?.proxyIp || null,
+        preferredIp: reusableBrowserSessionProxyIp(account.browserSession),
       });
       const selectedProxyNode = brokerSession.session.proxy_name;
       const args = buildWorkerScriptArgs(runtime, "src/server/chatgpt-worker.ts");
@@ -1113,7 +1114,7 @@ export class AccountBusinessFlowManager {
       brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
         businessSite: "grok",
-        preferredIp: account.browserSession?.proxyIp || null,
+        preferredIp: reusableBrowserSessionProxyIp(account.browserSession),
       });
       const selectedProxyNode = brokerSession.session.proxy_name;
       const args = buildWorkerScriptArgs(runtime, "src/server/grok-worker.ts");

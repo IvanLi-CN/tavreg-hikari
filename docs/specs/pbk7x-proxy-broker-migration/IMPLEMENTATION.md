@@ -4,6 +4,8 @@
 
 - `src/proxy/broker.ts` 封装 Broker API client，统一 base URL、Bearer API key、超时、JSON 读取与 HTTP 错误映射。
 - `src/server/proxy-broker-runtime.ts` 负责把 app settings 与环境变量归一化为 Broker 配置，并把 opened session 转为 worker 可消费的 `PROXY_BROKER_*` env。
+- `src/server/proxy-broker-runtime.ts` 默认使用 30 秒 Broker API 超时，环境变量 `PROXY_BROKER_TIMEOUT_MS` 可覆盖；AbortError 被保留为 `proxy_broker_request_timeout`。
+- `src/server/proxy-broker-runtime.ts` 提供 ready-session-only 的 proxy IP 复用 helper，调度器和单账号业务流不会从 failed / blocked / pending / bootstrapping 账号 session 继承旧 IP。
 - `src/server/proxy-broker-runtime.ts` 在 open session 前读取 catalog，必要时触发 project refresh，并只把近期探测成功且延迟达标的 IP 作为 Broker session 候选。
 - `src/server/proxy-broker-runtime.ts` 提供 `openDomainProbedProxyBrokerRuntimeSession`，先打开 Broker session，再用 `Impit({ proxyUrl: session.proxyUrl })` 经由同一个 listener 探测业务域名。
 - 域名探测按业务站点绑定目标 URL，且不跟随重定向以便直接判定首个响应；HTTP 2xx、3xx、401、403、404 视为可达，其余 HTTP 状态、网络错误、超时与代理连接错误统一视为不可达。
@@ -12,6 +14,7 @@
 - Tavily、ChatGPT、Grok scheduler，单账号 Tavily / Microsoft / ChatGPT / Grok flow，以及 Microsoft mailbox OAuth bootstrap 均通过业务域名探测 helper 启动 Broker session。
 - Worker 进程检测 `PROXY_BROKER_PROXY_URL` 后直接使用注入代理控制器，不再启动 Mihomo。
 - 代理页 API 从本地 Mihomo sync/check 改为读取 Broker catalog 与 active sessions；手动检查触发 Broker project refresh，并把 catalog 探测结果写入现有 proxy diagnostics 表供历史查询。
+- 代理页 API 在 catalog 或 active sessions 读取失败时返回已有快照和 `syncError`，不让前端收到空 catalog 导致二次 TypeError。
 
 ## 数据
 
