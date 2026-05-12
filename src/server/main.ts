@@ -23,6 +23,7 @@ import {
   closeProxyBrokerRuntimeSession,
   createProxyBrokerClient,
   openDomainProbedProxyBrokerRuntimeSession,
+  ProxyBrokerDomainProbeError,
   reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
@@ -1492,8 +1493,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
-      proxyNode: null,
-      proxyIp: null,
+      proxyNode: error instanceof ProxyBrokerDomainProbeError ? error.nodeName : null,
+      proxyIp: error instanceof ProxyBrokerDomainProbeError ? error.selectedIp : null,
       errorCode: error instanceof ProxyBrokerError ? error.code : getMailboxErrorCode(error) || "proxy_broker_session_open_failed",
       errorMessage: message || "Proxy Broker session 创建失败",
     });

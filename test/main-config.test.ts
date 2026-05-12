@@ -186,6 +186,15 @@ test("broker proxy payload preserves fallback sessions when session listing fail
   expect(source).toContain("syncError = [syncError, proxyBrokerErrorMessage(error)].filter(Boolean).join(\"; \");");
 });
 
+test("mailbox broker failures keep probe diagnostics without enabling failed-session reuse", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const runtimeSource = await readFile(path.join(repoRoot, "src/server/proxy-broker-runtime.ts"), "utf8");
+  expect(source).toContain("ProxyBrokerDomainProbeError");
+  expect(source).toContain("proxyNode: error instanceof ProxyBrokerDomainProbeError ? error.nodeName : null,");
+  expect(source).toContain("proxyIp: error instanceof ProxyBrokerDomainProbeError ? error.selectedIp : null,");
+  expect(runtimeSource).toContain('if (session?.status !== "ready") return null;');
+});
+
 
 test("manual proxy switch queue writes a pending proxy snapshot before the async bootstrap starts", async () => {
   const mainSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
