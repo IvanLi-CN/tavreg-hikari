@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.21.4",
+  "base_stable_version": "0.21.3",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-12T13:53:07Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.21.4",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "c4c949c8d7570ce5a61f2e4ffe0b716632ee0473",
+  "pr_number": 83,
+  "pr_title": "fix(ui): ignore stale account page refreshes",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.21.4",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.21.4",
+  "target_sha": "d82845e3b2da84253c734577150a898f1044f854",
+  "type_label": "type:patch"
+}
