@@ -1162,7 +1162,9 @@ async function fetchBrokerProxyPayload(
   } catch (error) {
     syncError = proxyBrokerErrorMessage(error);
   }
-  let sessions: Awaited<ReturnType<typeof client.listSessions>> = { sessions: [] };
+  let sessions: Awaited<ReturnType<typeof client.listSessions>> = {
+    sessions: Array.isArray(fallbackBroker?.sessions) ? fallbackBroker.sessions as any[] : [],
+  };
   try {
     sessions = await client.listSessions();
   } catch (error) {
