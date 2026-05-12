@@ -26,9 +26,10 @@
 ## 接口契约
 
 - 默认配置：
-  - `PROXY_BROKER_BASE_URL=https://proxy-broker.ivanli.cc`
+  - `PROXY_BROKER_BASE_URL=https://proxy-broker.ivanli.cc`；与 Broker 同 Docker network 部署时，生产环境应覆盖为内网入口 `http://proxy-broker:18080`。
   - `PROXY_BROKER_PROFILE_ID=Tavily`
   - `PROXY_BROKER_API_KEY` 必须由运行环境提供
+  - `PROXY_BROKER_TIMEOUT_MS` 未显式配置时默认为 `30000`，用于 Broker API 请求超时；AbortError 必须映射为 `proxy_broker_request_timeout`。
 - Broker 认证：
   - `Authorization: Bearer pbk_<key_id>_<secret>`
 - Broker API：
@@ -43,6 +44,10 @@
   - 任务运行时只使用 `last_probe_ok=true` 且 `median_latency_ms` 或 `last_latency_ms` 不超过 `maxLatencyMs` 的 IP。
   - 探测结果超过 30 分钟或没有健康候选时，任务启动前必须触发一次 project refresh 后重新读取 catalog。
   - refresh 后仍没有健康低延迟候选时，任务必须明确失败，不得降级到任意 session。
+- 账号级代理复用：
+  - 只有 `account_browser_sessions.status=ready` 的 session proxy IP / region 可作为下一次 Broker preferred IP。
+  - `failed` / `blocked` / `pending` / `bootstrapping` session 的旧 proxy IP 只作为历史诊断显示，不得驱动新的 Broker open-session。
+  - Broker open-session 失败时，不得把旧 proxy IP 重新写入本次失败快照；错误记录应保留 Broker code/message，让 UI 展示真实的 `proxy_broker_request_timeout`、`proxy_broker_no_healthy_nodes` 或其它结构化错误。
 - 业务域名探测：
   - Microsoft OAuth / 账号：`https://login.microsoftonline.com/`
   - Tavily：`https://app.tavily.com/home`、`https://auth.tavily.com/`

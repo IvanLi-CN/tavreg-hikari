@@ -6,6 +6,7 @@ import {
   openDomainProbedProxyBrokerRuntimeSession,
   openProxyBrokerRuntimeSession,
   ProxyBrokerDomainProbeError,
+  reusableBrowserSessionProxyIp,
 } from "../src/server/proxy-broker-runtime";
 
 const originalFetch = globalThis.fetch;
@@ -257,6 +258,29 @@ test("proxy broker client requires base url and api key", async () => {
   });
 
   await expect(client.authMe()).rejects.toBeInstanceOf(ProxyBrokerError);
+});
+
+test("proxy broker runtime defaults API timeout to 30 seconds and only reuses ready session IPs", () => {
+  const previousTimeout = process.env.PROXY_BROKER_TIMEOUT_MS;
+  delete process.env.PROXY_BROKER_TIMEOUT_MS;
+  try {
+    const cfg = buildProxyBrokerConfig({
+      proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+      proxyBrokerProfileId: "Tavily",
+      timeoutMs: 8000,
+    });
+
+    expect(cfg.timeoutMs).toBe(30000);
+    expect(reusableBrowserSessionProxyIp({ status: "ready", proxyIp: " 203.0.113.10 " } as never)).toBe("203.0.113.10");
+    expect(reusableBrowserSessionProxyIp({ status: "failed", proxyIp: "203.0.113.11" } as never)).toBeNull();
+    expect(reusableBrowserSessionProxyIp({ status: "blocked", proxyIp: "203.0.113.12" } as never)).toBeNull();
+  } finally {
+    if (previousTimeout == null) {
+      delete process.env.PROXY_BROKER_TIMEOUT_MS;
+    } else {
+      process.env.PROXY_BROKER_TIMEOUT_MS = previousTimeout;
+    }
+  }
 });
 
 test("proxy broker runtime falls back when preferred ip cannot open", async () => {

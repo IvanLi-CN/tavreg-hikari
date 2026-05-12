@@ -3768,6 +3768,7 @@ export class AppDatabase {
 
   selectReusableProxyNodeForAccount(accountId: number): ProxyNodeRecord | null {
     const session = this.getBrowserSessionByAccountId(accountId);
+    const canReuseSessionProxy = isReadyBrowserSession(session);
     const selectByWhere = (healthWhere: string, whereClause: string, ...params: string[]): ProxyNodeRecord | null => {
       const row = this.db
         .query(`
@@ -3782,11 +3783,11 @@ export class AppDatabase {
       return row ? mapProxyNodeRow(row) : null;
     };
     const selectByHealth = (healthWhere: string): ProxyNodeRecord | null => {
-      if (session?.proxyIp?.trim()) {
+      if (canReuseSessionProxy && session?.proxyIp?.trim()) {
         const exactIp = selectByWhere(healthWhere, "p.last_egress_ip = ?", session.proxyIp.trim());
         if (exactIp) return exactIp;
       }
-      if (session?.proxyRegion?.trim()) {
+      if (canReuseSessionProxy && session?.proxyRegion?.trim()) {
         const sameRegion = selectByWhere(healthWhere, "p.last_region = ?", session.proxyRegion.trim());
         if (sameRegion) return sameRegion;
       }

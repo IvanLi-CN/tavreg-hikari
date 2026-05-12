@@ -32,6 +32,7 @@ import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
   openDomainProbedProxyBrokerRuntimeSession,
+  reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 
@@ -1290,7 +1291,7 @@ export class JobScheduler {
       brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
         settings: brokerSettings,
         businessSite: "tavily",
-        preferredIp: account.browserSession?.proxyIp || null,
+        preferredIp: reusableBrowserSessionProxyIp(account.browserSession),
         excludedIps: this.activeAttemptRows().map((item) => item.proxyIp).filter((item): item is string => Boolean(item)),
       });
       this.db.updateAttempt(attempt.id, {

@@ -3123,6 +3123,38 @@ describe("proxy aggregation", () => {
     appDb.close();
   });
 
+  test("does not reuse proxy ip or region from failed account browser sessions", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proxy-failed-reuse@example.test", password: "proxy-pass" }]);
+    const accountId = imported.affectedIds[0];
+    appDb.upsertProxyInventory(["Seoul-01", "Tokyo-01"]);
+    appDb.touchProxyLease("Seoul-01", {
+      status: "ok",
+      egressIp: "2.2.2.2",
+      region: "Seoul",
+      leasedAt: "2026-03-02T00:00:00.000Z",
+    });
+    appDb.touchProxyLease("Tokyo-01", {
+      status: "ok",
+      egressIp: "3.3.3.3",
+      region: "Tokyo",
+      leasedAt: "2026-03-01T00:00:00.000Z",
+    });
+    appDb.markBrowserSessionFailure(accountId, {
+      status: "failed",
+      browserEngine: "chrome",
+      proxyNode: "Old-Seoul",
+      proxyIp: "2.2.2.2",
+      proxyRegion: "Tokyo",
+      errorCode: "proxy_broker_request_timeout",
+      errorMessage: "Proxy Broker request timed out",
+    });
+
+    expect(appDb.selectReusableProxyNodeForAccount(accountId)?.nodeName).toBe("Tokyo-01");
+
+    appDb.close();
+  });
+
   test("falls back to untested proxy nodes only when no verified healthy node exists", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "proxy-unverified@example.test", password: "proxy-pass" }]);

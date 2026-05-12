@@ -23,6 +23,7 @@ import {
   closeProxyBrokerRuntimeSession,
   createProxyBrokerClient,
   openDomainProbedProxyBrokerRuntimeSession,
+  reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
 import {
@@ -1161,7 +1162,12 @@ async function fetchBrokerProxyPayload(
   } catch (error) {
     syncError = proxyBrokerErrorMessage(error);
   }
-  const sessions = await client.listSessions();
+  let sessions: Awaited<ReturnType<typeof client.listSessions>> = { sessions: [] };
+  try {
+    sessions = await client.listSessions();
+  } catch (error) {
+    syncError = [syncError, proxyBrokerErrorMessage(error)].filter(Boolean).join("; ");
+  }
   return serializeProxyPayload({
     settings,
     nodes: db.listProxyNodes(),
@@ -1477,15 +1483,15 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   const brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
     settings: runtimeSettings,
     businessSite: "microsoft",
-    preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? account.browserSession?.proxyIp : null) || null,
+    preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? reusableBrowserSessionProxyIp(account.browserSession) : null) || null,
     fallbackOnPreferredIpFailure: !requestedProxyNode,
   }).catch((error) => {
     const message = proxyBrokerErrorMessage(error);
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
-      proxyNode: selectedProxyNode?.nodeName || requestedProxyNode || account.browserSession?.proxyNode || null,
-      proxyIp: selectedProxyNode?.lastEgressIp || account.browserSession?.proxyIp || null,
+      proxyNode: null,
+      proxyIp: null,
       errorCode: error instanceof ProxyBrokerError ? error.code : getMailboxErrorCode(error) || "proxy_broker_session_open_failed",
       errorMessage: message || "Proxy Broker session 创建失败",
     });
