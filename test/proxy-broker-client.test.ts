@@ -386,6 +386,65 @@ test("proxy broker runtime retries another healthy ip after broker open timeout"
   }
 });
 
+test("proxy broker runtime keeps retrying all healthy catalog candidates by default", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (String(url).includes("/proxy-catalog")) {
+      return Response.json(brokerCatalog([
+        healthyNode({ nodeId: "node-1", name: "Node 1", ip: "203.0.113.10" }),
+        healthyNode({ nodeId: "node-2", name: "Node 2", ip: "203.0.113.20" }),
+        healthyNode({ nodeId: "node-3", name: "Node 3", ip: "203.0.113.30" }),
+        healthyNode({ nodeId: "node-4", name: "Node 4", ip: "203.0.113.40" }),
+      ]));
+    }
+    const openCount = requests.filter((request) => request.url.endsWith("/sessions/open")).length;
+    if (openCount < 4) {
+      throw new DOMException("The operation was aborted.", "AbortError");
+    }
+    return Response.json({
+      session_id: "sess_fourth",
+      listen: "127.0.0.1:43124",
+      bind_host: "127.0.0.1",
+      display_host: "127.0.0.1",
+      display_address: "127.0.0.1:43124",
+      port: 43124,
+      selected_ip: "203.0.113.40",
+      proxy_name: "Node 4",
+      node_id: "node-4",
+    });
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://proxy-broker.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+    });
+
+    expect(runtime.session.session_id).toBe("sess_fourth");
+    expect(requests.filter((request) => request.method === "POST").map((request) => request.body)).toEqual([
+      expect.objectContaining({ specified_ips: ["203.0.113.10"], excluded_ips: [] }),
+      expect.objectContaining({ specified_ips: ["203.0.113.20"], excluded_ips: ["203.0.113.10"] }),
+      expect.objectContaining({ specified_ips: ["203.0.113.30"], excluded_ips: ["203.0.113.10", "203.0.113.20"] }),
+      expect.objectContaining({ specified_ips: ["203.0.113.40"], excluded_ips: ["203.0.113.10", "203.0.113.20", "203.0.113.30"] }),
+    ]);
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
 test("proxy broker runtime closes and rotates sessions when business domain probing fails", async () => {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
   const sessions = [

@@ -211,7 +211,9 @@ export async function openProxyBrokerRuntimeSession(input: {
   if (preferredIp && !preferredHealthy && input.fallbackOnPreferredIpFailure === false) {
     throw noHealthyBrokerNodeError(maxLatencyMs);
   }
-  const maxOpenAttempts = Math.max(1, Math.trunc(input.maxOpenAttempts ?? 3));
+  const maxOpenAttempts = input.maxOpenAttempts == null
+    ? healthyIps.length
+    : Math.max(1, Math.trunc(input.maxOpenAttempts));
   const queue = [
     ...(preferredIp && preferredHealthy ? [preferredIp] : []),
     ...healthyIps.filter((ip) => ip !== preferredIp),
