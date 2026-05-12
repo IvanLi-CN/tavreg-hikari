@@ -447,7 +447,7 @@ install_macos_release() {
   mkdir -p "$install_root"
   local attach_output
   attach_output=$(hdiutil attach -nobrowse -readonly "$archive_path")
-  mount_point=$(printf '%s\n' "$attach_output" | awk 'END {print $NF}')
+  mount_point=$(printf '%s\n' "$attach_output" | awk '/\/Volumes\// {sub(/^.*\/Volumes\//, "/Volumes/"); print; found=1} END {if (!found) exit 1}' | tail -n 1)
   [ -n "$mount_point" ] || fail "unable to determine macOS mount point"
   [ -d "$mount_point/$bundle_name" ] || fail "bundle missing from dmg: $bundle_name"
   ditto "$mount_point/$bundle_name" "$bundle_path"
