@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.21.3",
+  "base_stable_version": "0.21.2",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-12T10:48:52Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.21.3",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "ed4f3d3eb8a084b650a9acfb1aad77f357996b51",
+  "pr_number": 82,
+  "pr_title": "fix: retry proxy broker sessions by healthy candidate",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.21.3",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.21.3",
+  "target_sha": "6f92ad5c595ccf132080d0607ba931c05ac30abd",
+  "type_label": "type:patch"
+}
