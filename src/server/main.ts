@@ -1105,6 +1105,10 @@ function brokerCatalogNodeName(node: any): string {
   return String(node?.proxy_name || node?.node_id || "").trim();
 }
 
+function brokerCatalogNodeId(node: any): string | null {
+  return String(node?.node_id || "").trim() || null;
+}
+
 function brokerCatalogPrimaryMetadata(node: ProxyBrokerCatalogNode): ProxyBrokerIpMetadata | null {
   const rows = Array.isArray(node.ip_metadata) ? node.ip_metadata : [];
   const primaryIp = String(node.primary_ip || node.resolved_ips?.[0] || "").trim();
@@ -1122,15 +1126,15 @@ function brokerCatalogProbeStatus(node: ProxyBrokerCatalogNode, metadata: ProxyB
 }
 
 function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): void {
-  const nodeNames: string[] = [];
+  const nodes: Array<{ nodeName: string; nodeId: string | null }> = [];
   for (const group of catalogGroups) {
     for (const node of Array.isArray(group?.nodes) ? group.nodes : []) {
       const nodeName = brokerCatalogNodeName(node);
       if (!nodeName) continue;
-      nodeNames.push(nodeName);
+      nodes.push({ nodeName, nodeId: brokerCatalogNodeId(node) });
     }
   }
-  db.upsertProxyInventory(nodeNames);
+  db.upsertProxyInventory(nodes);
   for (const group of catalogGroups) {
     for (const node of Array.isArray(group?.nodes) ? group.nodes : []) {
       const nodeName = brokerCatalogNodeName(node);
@@ -1138,6 +1142,7 @@ function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): 
       const primaryMetadata = brokerCatalogPrimaryMetadata(node);
       db.recordProxyCheck({
         nodeName,
+        nodeId: brokerCatalogNodeId(node),
         status: brokerCatalogProbeStatus(node, primaryMetadata),
         latencyMs: proxyBrokerMetadataLatencyMs(primaryMetadata),
         egressIp: proxyBrokerMetadataIp(node, primaryMetadata),
@@ -1149,6 +1154,12 @@ function syncBrokerCatalogSnapshot(db: AppDatabase, catalogGroups: Array<any>): 
       });
     }
   }
+}
+
+async function refreshBrokerCatalogSnapshot(db: AppDatabase, settings: AppSettings): Promise<void> {
+  const client = createProxyBrokerClient(settings);
+  const catalog = await client.listCatalog();
+  syncBrokerCatalogSnapshot(db, catalog.groups || []);
 }
 
 async function fetchBrokerProxyPayload(
@@ -1478,16 +1489,20 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   }
   assertMicrosoftGraphSettings(graphSettings);
   const requestedProxyNode = String(input.requestedProxyNode || "").trim() || null;
-  const selectedProxyNode = requestedProxyNode
+  let selectedProxyNode = requestedProxyNode
     ? input.db.getProxyNode(requestedProxyNode)
     : input.db.selectReusableProxyNodeForAccount(input.accountId);
-  if (requestedProxyNode && !selectedProxyNode?.lastEgressIp) {
-    const message = `指定代理节点缺少 Broker 出口 IP 快照，无法保证选择生效：${requestedProxyNode}`;
+  if (requestedProxyNode && !selectedProxyNode?.nodeId) {
+    await refreshBrokerCatalogSnapshot(input.db, runtimeSettings).catch(() => {});
+    selectedProxyNode = input.db.getProxyNode(requestedProxyNode);
+  }
+  if (requestedProxyNode && !selectedProxyNode?.nodeId) {
+    const message = `指定代理节点缺少 Broker node_id，无法保证选择生效：${requestedProxyNode}`;
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
       browserEngine: "chrome",
       proxyNode: requestedProxyNode,
-      proxyIp: null,
+      proxyIp: selectedProxyNode?.lastEgressIp || null,
       errorCode: "proxy_broker_requested_node_unavailable",
       errorMessage: message,
     });
@@ -1500,7 +1515,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       const session = await openDomainProbedProxyBrokerRuntimeSession({
         settings: runtimeSettings,
         businessSite: "microsoft",
-        preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? reusableBrowserSessionProxyIp(account.browserSession) : null) || null,
+        preferredNodeId: requestedProxyNode ? selectedProxyNode?.nodeId || null : null,
+        preferredIp: !requestedProxyNode ? reusableBrowserSessionProxyIp(account.browserSession) : null,
         excludedIps: requestedProxyNode ? [] : activeBootstrapIps,
         fallbackOnPreferredIpFailure: !requestedProxyNode,
       });
@@ -1529,8 +1545,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   let nextMailbox: MicrosoftMailboxRecord;
   let authUrl: string;
   try {
-    if (requestedProxyNode && proxyNode !== requestedProxyNode) {
-      const message = `Proxy Broker 返回节点与显式选择不一致：expected=${requestedProxyNode} actual=${proxyNode || "unknown"}`;
+    if (requestedProxyNode && selectedProxyNode?.nodeId && brokerSession.session.node_id !== selectedProxyNode.nodeId) {
+      const message = `Proxy Broker 返回节点与显式选择不一致：expected=${requestedProxyNode} (${selectedProxyNode.nodeId}) actual=${proxyNode || "unknown"} (${brokerSession.session.node_id || "unknown"})`;
       input.db.markBrowserSessionFailure(input.accountId, {
         status: "failed",
         browserEngine: "chrome",
