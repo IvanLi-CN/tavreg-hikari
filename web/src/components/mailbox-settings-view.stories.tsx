@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { expect, fn, screen, userEvent, within } from "storybook/test";
 import { MailboxSettingsView } from "@/components/mailbox-settings-view";
 import { sampleMicrosoftGraphSettings } from "@/stories/fixtures";
 
@@ -30,6 +30,7 @@ export const Configured: Story = {
       microsoftAccountBootstrapConcurrency: sampleMicrosoftGraphSettings.microsoftAccountBootstrapConcurrency,
       microsoftAccountBootstrapWorkerTimeoutMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapWorkerTimeoutMs,
       microsoftAccountBootstrapKillGraceMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapKillGraceMs,
+      microsoftAccountBootstrapLoginMode: sampleMicrosoftGraphSettings.microsoftAccountBootstrapLoginMode,
     },
     settingsBusy: false,
     onSettingsDraftChange: fn(),
@@ -53,6 +54,30 @@ export const PendingSetup: Story = {
       microsoftAccountBootstrapConcurrency: 3,
       microsoftAccountBootstrapWorkerTimeoutMs: 300000,
       microsoftAccountBootstrapKillGraceMs: 10000,
+      microsoftAccountBootstrapLoginMode: "microsoft_graph",
+    },
+    settingsBusy: false,
+    onSettingsDraftChange: fn(),
+    onSaveSettings: fn(async () => undefined),
+    onBack: fn(),
+  },
+};
+
+export const TavilyHomeMode: Story = {
+  args: {
+    settings: {
+      ...sampleMicrosoftGraphSettings,
+      microsoftAccountBootstrapLoginMode: "tavily_home",
+    },
+    settingsDraft: {
+      microsoftGraphClientId: sampleMicrosoftGraphSettings.microsoftGraphClientId,
+      microsoftGraphClientSecret: "",
+      microsoftGraphRedirectUri: sampleMicrosoftGraphSettings.microsoftGraphRedirectUri,
+      microsoftGraphAuthority: sampleMicrosoftGraphSettings.microsoftGraphAuthority,
+      microsoftAccountBootstrapConcurrency: sampleMicrosoftGraphSettings.microsoftAccountBootstrapConcurrency,
+      microsoftAccountBootstrapWorkerTimeoutMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapWorkerTimeoutMs,
+      microsoftAccountBootstrapKillGraceMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapKillGraceMs,
+      microsoftAccountBootstrapLoginMode: "tavily_home",
     },
     settingsBusy: false,
     onSettingsDraftChange: fn(),
@@ -72,6 +97,7 @@ export const SavePlay: Story = {
       microsoftAccountBootstrapConcurrency: sampleMicrosoftGraphSettings.microsoftAccountBootstrapConcurrency,
       microsoftAccountBootstrapWorkerTimeoutMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapWorkerTimeoutMs,
       microsoftAccountBootstrapKillGraceMs: sampleMicrosoftGraphSettings.microsoftAccountBootstrapKillGraceMs,
+      microsoftAccountBootstrapLoginMode: "tavily_home",
     },
     settingsBusy: false,
     onSettingsDraftChange: fn(),
@@ -81,6 +107,8 @@ export const SavePlay: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(canvas.getByText("Microsoft Graph 设置")).toBeInTheDocument();
+    await userEvent.click(canvas.getByRole("combobox"));
+    await userEvent.click(await screen.findByText("Microsoft Graph"));
     await userEvent.click(canvas.getByRole("button", { name: "保存设置" }));
   },
 };

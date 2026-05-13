@@ -58,7 +58,9 @@ import {
   resolveClientIp,
 } from "./auth-gate.js";
 import {
+  AccountBootstrapProxyTracker,
   AccountSessionBootstrapDispatcher,
+  DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_LOGIN_MODE,
   DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY,
   DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS,
   DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS,
@@ -67,6 +69,7 @@ import {
   isLockedAccountRecord,
   normalizeMicrosoftAccountBootstrapConcurrency,
   normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapLoginMode,
   normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
   normalizeAccountBatchBootstrapMode,
   normalizeAccountSessionRebootstrapRequest,
@@ -362,6 +365,7 @@ function serializeMicrosoftGraphSettings(settings: AppSettings) {
     microsoftAccountBootstrapConcurrency: settings.microsoftAccountBootstrapConcurrency,
     microsoftAccountBootstrapWorkerTimeoutMs: settings.microsoftAccountBootstrapWorkerTimeoutMs,
     microsoftAccountBootstrapKillGraceMs: settings.microsoftAccountBootstrapKillGraceMs,
+    microsoftAccountBootstrapLoginMode: normalizeMicrosoftAccountBootstrapLoginMode(settings.microsoftAccountBootstrapLoginMode),
     configured: Boolean(
       settings.microsoftGraphClientId.trim() &&
         settings.microsoftGraphClientSecret.trim() &&
@@ -417,6 +421,7 @@ function buildSettingsCodeDefaults(): AppSettings {
     microsoftAccountBootstrapConcurrency: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY,
     microsoftAccountBootstrapWorkerTimeoutMs: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS,
     microsoftAccountBootstrapKillGraceMs: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS,
+    microsoftAccountBootstrapLoginMode: DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_LOGIN_MODE,
     upstreamTavregSyncEnabled: false,
     upstreamTavregBaseUrl: DEFAULT_UPSTREAM_TAVREG_BASE_URL,
     upstreamTavregApiKey: "",
@@ -470,6 +475,9 @@ function buildInitialSettingsFromEnv(baseDefaults: AppSettings): AppSettings {
     ),
     microsoftAccountBootstrapKillGraceMs: normalizeMicrosoftAccountBootstrapKillGraceMs(
       process.env.MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS ?? baseDefaults.microsoftAccountBootstrapKillGraceMs,
+    ),
+    microsoftAccountBootstrapLoginMode: normalizeMicrosoftAccountBootstrapLoginMode(
+      process.env.MICROSOFT_ACCOUNT_BOOTSTRAP_LOGIN_MODE ?? baseDefaults.microsoftAccountBootstrapLoginMode,
     ),
     upstreamTavregSyncEnabled: baseDefaults.upstreamTavregSyncEnabled,
     upstreamTavregBaseUrl: baseDefaults.upstreamTavregBaseUrl,
@@ -1296,6 +1304,7 @@ async function runMailboxOauthWorker(input: {
   profilePath: string;
   redirectUri: string;
   authUrl: string;
+  loginMode: string;
   workerTimeoutMs: number;
   killGraceMs: number;
 }): Promise<MailboxOauthWorkerResult> {
@@ -1362,6 +1371,7 @@ async function runMailboxOauthWorker(input: {
           `--redirect-uri=${input.redirectUri}`,
           `--local-server-origin=${localServerOrigin}`,
           `--proxy-node=${input.proxyNode}`,
+          `--login-mode=${input.loginMode}`,
           `--result-path=${resultPath}`,
         ],
         {
@@ -1447,6 +1457,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
   accountId: number;
   readSettings: () => AppSettings;
   broadcast: (event: ServerEvent) => void;
+  proxyTracker: AccountBootstrapProxyTracker;
   requestedProxyNode?: string | null;
 }): Promise<{ mailbox: MicrosoftMailboxRecord; workerResult: MailboxOauthWorkerResult }> {
   const account = input.db.getAccount(input.accountId);
@@ -1483,12 +1494,23 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
     throw new Error(message);
   }
-  const brokerSession = await openDomainProbedProxyBrokerRuntimeSession({
-    settings: runtimeSettings,
-    businessSite: "microsoft",
-    preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? reusableBrowserSessionProxyIp(account.browserSession) : null) || null,
-    fallbackOnPreferredIpFailure: !requestedProxyNode,
-  }).catch((error) => {
+  let trackedBrokerSession: { value: ProxyBrokerRuntimeSession; release: () => void } | null = null;
+  try {
+    trackedBrokerSession = await input.proxyTracker.reserve(async (activeBootstrapIps) => {
+      const session = await openDomainProbedProxyBrokerRuntimeSession({
+        settings: runtimeSettings,
+        businessSite: "microsoft",
+        preferredIp: selectedProxyNode?.lastEgressIp || (!requestedProxyNode ? reusableBrowserSessionProxyIp(account.browserSession) : null) || null,
+        excludedIps: requestedProxyNode ? [] : activeBootstrapIps,
+        fallbackOnPreferredIpFailure: !requestedProxyNode,
+      });
+      return {
+        ...session,
+        proxyNode: session.session.proxy_name,
+        proxyIp: session.session.selected_ip,
+      };
+    });
+  } catch (error) {
     const message = proxyBrokerErrorMessage(error);
     input.db.markBrowserSessionFailure(input.accountId, {
       status: "failed",
@@ -1500,7 +1522,8 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     });
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
     throw error;
-  });
+  }
+  const brokerSession = trackedBrokerSession.value;
   let proxyNode = brokerSession.session.proxy_name;
   let session: AccountBrowserSessionRecord;
   let nextMailbox: MicrosoftMailboxRecord;
@@ -1548,6 +1571,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     });
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
   } catch (error) {
+    trackedBrokerSession.release();
     await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
     throw error;
   }
@@ -1563,6 +1587,7 @@ async function authorizeMailboxWithBrowserAutomation(input: {
       profilePath: session.profilePath,
       redirectUri: graphSettings.redirectUri,
       authUrl,
+      loginMode: normalizeMicrosoftAccountBootstrapLoginMode(runtimeSettings.microsoftAccountBootstrapLoginMode),
       workerTimeoutMs: normalizeMicrosoftAccountBootstrapWorkerTimeoutMs(runtimeSettings.microsoftAccountBootstrapWorkerTimeoutMs),
       killGraceMs: normalizeMicrosoftAccountBootstrapKillGraceMs(runtimeSettings.microsoftAccountBootstrapKillGraceMs),
     });
@@ -1684,6 +1709,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, sessionStatus === "blocked" ? "session_blocked" : "session_failed");
     throw error;
   } finally {
+    if (trackedBrokerSession) {
+      trackedBrokerSession.release();
+    }
     await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
   }
 }
@@ -1763,6 +1791,7 @@ async function main(): Promise<void> {
       }
     }
   };
+  const accountBootstrapProxyTracker = new AccountBootstrapProxyTracker();
   const sessionBootstrapDispatcher = new AccountSessionBootstrapDispatcher(
     () => readSettings().microsoftAccountBootstrapConcurrency,
     async (accountId) => {
@@ -1781,6 +1810,7 @@ async function main(): Promise<void> {
               accountId,
               readSettings,
               broadcast,
+              proxyTracker: accountBootstrapProxyTracker,
               requestedProxyNode,
             });
             lastError = null;
@@ -2957,6 +2987,10 @@ async function main(): Promise<void> {
           microsoftAccountBootstrapKillGraceMs:
             body && Object.prototype.hasOwnProperty.call(body, "microsoftAccountBootstrapKillGraceMs")
               ? body.microsoftAccountBootstrapKillGraceMs
+              : undefined,
+          microsoftAccountBootstrapLoginMode:
+            body && Object.prototype.hasOwnProperty.call(body, "microsoftAccountBootstrapLoginMode")
+              ? body.microsoftAccountBootstrapLoginMode
               : undefined,
         });
         db.setSettings(next);

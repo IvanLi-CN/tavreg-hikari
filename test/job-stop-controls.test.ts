@@ -43,6 +43,7 @@ function createSchedulerSettings(overrides: Partial<AppSettings> = {}): AppSetti
     microsoftAccountBootstrapConcurrency: 3,
     microsoftAccountBootstrapWorkerTimeoutMs: 300000,
     microsoftAccountBootstrapKillGraceMs: 10000,
+    microsoftAccountBootstrapLoginMode: "microsoft_graph",
     upstreamTavregBaseUrl: "https://tavreg-hikari.ivanli.cc",
     upstreamTavregSyncEnabled: false,
     upstreamTavregApiKey: "",

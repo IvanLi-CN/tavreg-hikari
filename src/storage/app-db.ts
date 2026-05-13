@@ -99,6 +99,7 @@ export type AccountExtractItemParseStatus = "parsed" | "invalid";
 export type AccountExtractItemAcceptStatus = "accepted" | "rejected";
 export type MailboxStatus = "preparing" | "available" | "failed" | "invalidated" | "locked";
 export type AccountBrowserSessionStatus = "pending" | "bootstrapping" | "ready" | "failed" | "blocked";
+export type MicrosoftAccountBootstrapLoginMode = "microsoft_graph" | "tavily_home";
 const MAX_KEYS_PAGE_SIZE = 5000;
 export type IntegrationApiKeyStatus = "active" | "revoked";
 export type AccountServiceAccessService = "tavily";
@@ -207,6 +208,7 @@ export interface AppSettings extends Record<string, unknown> {
   microsoftAccountBootstrapConcurrency: number;
   microsoftAccountBootstrapWorkerTimeoutMs: number;
   microsoftAccountBootstrapKillGraceMs: number;
+  microsoftAccountBootstrapLoginMode: MicrosoftAccountBootstrapLoginMode;
   upstreamTavregSyncEnabled: boolean;
   upstreamTavregBaseUrl: string;
   upstreamTavregApiKey: string;

@@ -12,7 +12,7 @@ import { GrokView } from "@/components/grok-view";
 import { KeysView, ChatGptKeysPane, GrokKeysPane, TavilyKeysPane } from "@/components/keys-view";
 import { MailboxDrawer, type MailboxDrawerSyncFeedback } from "@/components/mailbox-drawer";
 import { MailboxesView } from "@/components/mailboxes-view";
-import { MailboxSettingsView } from "@/components/mailbox-settings-view";
+import { MailboxSettingsView, type MicrosoftGraphSettingsDraft } from "@/components/mailbox-settings-view";
 import { ProxiesView } from "@/components/proxies-view";
 import { SiteKeysView } from "@/components/site-keys-view";
 import { buildImportCommitEntries, parseImportContent } from "@/lib/account-import";
@@ -353,7 +353,7 @@ export function App() {
     groups: [],
   });
   const [microsoftGraphSettings, setMicrosoftGraphSettings] = useState<MicrosoftGraphSettings | null>(null);
-  const [microsoftGraphSettingsDraft, setMicrosoftGraphSettingsDraft] = useState({
+  const [microsoftGraphSettingsDraft, setMicrosoftGraphSettingsDraft] = useState<MicrosoftGraphSettingsDraft>({
     microsoftGraphClientId: "",
     microsoftGraphClientSecret: "",
     microsoftGraphRedirectUri: "",
@@ -361,6 +361,7 @@ export function App() {
     microsoftAccountBootstrapConcurrency: 3,
     microsoftAccountBootstrapWorkerTimeoutMs: 300000,
     microsoftAccountBootstrapKillGraceMs: 10000,
+    microsoftAccountBootstrapLoginMode: "microsoft_graph" as const,
   });
   const [mailboxes, setMailboxes] = useState<MailboxRecord[]>([]);
   const [selectedMailboxId, setSelectedMailboxId] = useState<number | null>(null);
@@ -736,6 +737,7 @@ export function App() {
       microsoftAccountBootstrapConcurrency: payload.settings.microsoftAccountBootstrapConcurrency,
       microsoftAccountBootstrapWorkerTimeoutMs: payload.settings.microsoftAccountBootstrapWorkerTimeoutMs,
       microsoftAccountBootstrapKillGraceMs: payload.settings.microsoftAccountBootstrapKillGraceMs,
+      microsoftAccountBootstrapLoginMode: payload.settings.microsoftAccountBootstrapLoginMode,
     });
   };
   const refreshMailboxes = async () => {
@@ -2072,6 +2074,7 @@ export function App() {
         microsoftAccountBootstrapConcurrency: payload.settings.microsoftAccountBootstrapConcurrency,
         microsoftAccountBootstrapWorkerTimeoutMs: payload.settings.microsoftAccountBootstrapWorkerTimeoutMs,
         microsoftAccountBootstrapKillGraceMs: payload.settings.microsoftAccountBootstrapKillGraceMs,
+        microsoftAccountBootstrapLoginMode: payload.settings.microsoftAccountBootstrapLoginMode,
       }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
