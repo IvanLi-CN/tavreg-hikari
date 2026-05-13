@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.1",
+  "base_stable_version": "0.22.0",
+  "channel_label": "channel:stable",
+  "created_at": "2026-05-13T15:38:27Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.1",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "44712bdd635aa5e1515e700e08d771ef7fe6fdb8",
+  "pr_number": 86,
+  "pr_title": "fix: skip broker refresh when healthy candidates exist",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.1",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.1",
+  "target_sha": "118a33cd25559c53d5ffcf5d659dd9c1a6e8d582",
+  "type_label": "type:patch"
+}
