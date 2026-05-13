@@ -149,7 +149,7 @@ async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number,
 }> {
   let catalog = await client.listCatalog();
   let candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
-  if (candidateIps.length === 0 || catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
+  if (candidateIps.length === 0 && catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
     await client.refreshProject();
     for (let attempt = 0; attempt < 4; attempt += 1) {
       if (attempt > 0) {
@@ -157,7 +157,7 @@ async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number,
       }
       catalog = await client.listCatalog();
       candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
-      if (candidateIps.length > 0 && !catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
+      if (candidateIps.length > 0) {
         break;
       }
     }

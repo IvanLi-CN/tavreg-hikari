@@ -42,7 +42,8 @@
 - 节点可用性：
   - `can_open_session` 只表示 Broker 可以尝试打开 listener，不等同于代理节点健康。
   - 任务运行时只使用 `last_probe_ok=true` 且 `median_latency_ms` 或 `last_latency_ms` 不超过 `maxLatencyMs` 的 IP。
-  - 探测结果超过 30 分钟或没有健康候选时，任务启动前必须触发一次 project refresh 后重新读取 catalog。
+  - 没有健康候选且 catalog 缺少近期可用探测数据时，任务启动前必须触发一次 project refresh 后重新读取 catalog。
+  - 当 catalog 已经包含健康低延迟候选时，不得因为其它可开节点存在少量过期探测数据而阻塞任务启动或同步触发 project refresh。
   - refresh 后仍没有健康低延迟候选时，任务必须明确失败，不得降级到任意 session。
 - 账号级代理复用：
   - 只有 `account_browser_sessions.status=ready` 的 session proxy IP / region 可作为下一次 Broker preferred IP。
