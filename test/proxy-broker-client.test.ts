@@ -10,9 +10,15 @@ import {
 } from "../src/server/proxy-broker-runtime";
 
 const originalFetch = globalThis.fetch;
+const originalDisplayHostOverride = process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalDisplayHostOverride == null) {
+    delete process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE;
+  } else {
+    process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE = originalDisplayHostOverride;
+  }
 });
 
 function createClient() {
@@ -104,6 +110,13 @@ test("proxy broker client opens lists and closes project sessions", async () => 
       body: null,
     },
   ]);
+});
+
+test("proxy broker client can override session display host for external local runs", async () => {
+  process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE = "192.168.31.11";
+  const client = createClient();
+
+  expect(client.proxyUrl({ display_address: "proxy-broker:20000" })).toBe("http://192.168.31.11:20000");
 });
 
 test("proxy broker client refreshes project probe metadata", async () => {
@@ -787,36 +800,48 @@ test("proxy broker runtime preserves proxy_domain_unreachable when failed probes
 });
 
 test("proxy broker runtime can require an exact preferred ip", async () => {
-  let calls = 0;
-  globalThis.fetch = (async (url: RequestInfo | URL) => {
-    calls += 1;
-    if (String(url).includes("/proxy-catalog")) {
-      return Response.json(brokerCatalog([
-        healthyNode({ nodeId: "other", name: "Other", ip: "203.0.113.20" }),
-      ]));
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (method === "POST" && String(url).endsWith("/sessions/open")) {
+      return Response.json({
+        session_id: "sess_exact",
+        listen: "127.0.0.1:43124",
+        bind_host: "127.0.0.1",
+        display_host: "127.0.0.1",
+        display_address: "127.0.0.1:43124",
+        port: 43124,
+        selected_ip: "203.0.113.10",
+        proxy_name: "Preferred",
+        node_id: "preferred",
+      });
     }
-    return new Response(JSON.stringify({ code: "not_found", message: "preferred ip unavailable" }), {
-      status: 404,
-      headers: { "content-type": "application/json" },
-    });
+    throw new Error(`unexpected request: ${method} ${String(url)}`);
   }) as unknown as typeof fetch;
 
   const previousApiKey = process.env.PROXY_BROKER_API_KEY;
   process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
   try {
-    await expect(
-      openProxyBrokerRuntimeSession({
-        settings: {
-          proxyBrokerBaseUrl: "https://ignored.example.test",
-          proxyBrokerProfileId: "Tavily",
-          timeoutMs: 1000,
-          maxLatencyMs: 500,
-        },
-        preferredIp: "203.0.113.10",
-        fallbackOnPreferredIpFailure: false,
-      }),
-    ).rejects.toBeInstanceOf(ProxyBrokerError);
-    expect(calls).toBe(1);
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://ignored.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+      preferredIp: "203.0.113.10",
+      fallbackOnPreferredIpFailure: false,
+    });
+    expect(runtime.session.session_id).toBe("sess_exact");
+    expect(requests.map((request) => request.method)).toEqual(["POST"]);
+    expect(requests[0]?.body).toEqual(expect.objectContaining({
+      selection_mode: "ip",
+      specified_ips: ["203.0.113.10"],
+      excluded_ips: [],
+      sort_mode: "lru",
+    }));
   } finally {
     if (previousApiKey == null) {
       delete process.env.PROXY_BROKER_API_KEY;

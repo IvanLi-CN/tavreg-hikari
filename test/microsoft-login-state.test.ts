@@ -496,6 +496,17 @@ describe("Microsoft login state", () => {
     ).toBe(true);
   });
 
+  test("detects Japanese keep-signed-in prompt", () => {
+    expect(
+      isMicrosoftKeepSignedInPrompt({
+        url: "https://login.live.com/ppsecure/post.srf?client_id=123",
+        title: "サインインの状態を維持しますか?",
+        bodyText:
+          "sample@example.test サインインの状態を維持しますか? 毎回サインインする必要がないようにします。詳細情報 はい いいえ ヘルプ",
+      }),
+    ).toBe(true);
+  });
+
   test("does not confuse password prompt with keep-signed-in prompt", () => {
     expect(
       isMicrosoftKeepSignedInPrompt({

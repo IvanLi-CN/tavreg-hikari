@@ -151,8 +151,16 @@ async function listFreshCatalog(client: ProxyBrokerClient, maxLatencyMs: number,
   let candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
   if (candidateIps.length === 0 || catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
     await client.refreshProject();
-    catalog = await client.listCatalog();
-    candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 750));
+      }
+      catalog = await client.listCatalog();
+      candidateIps = collectHealthyCandidateIps({ catalog, maxLatencyMs, excludedIps, excludedNodeNamePattern });
+      if (candidateIps.length > 0 && !catalogNeedsProbeRefresh(catalog, excludedNodeNamePattern)) {
+        break;
+      }
+    }
   }
   return { catalog, candidateIps };
 }
@@ -202,6 +210,18 @@ export async function openProxyBrokerRuntimeSession(input: {
   const maxLatencyMs = normalizeMaxLatencyMs(input.settings);
   const preferredIp = input.preferredIp?.trim();
   const excludedIps = new Set((input.excludedIps || []).map((item) => item.trim()).filter(Boolean));
+  if (preferredIp && input.fallbackOnPreferredIpFailure === false && !input.excludedNodeNamePattern) {
+    const session = await client.openSession({
+      selection_mode: "ip",
+      specified_ips: [preferredIp],
+      excluded_ips: Array.from(excludedIps),
+      sort_mode: "lru",
+    });
+    return {
+      session,
+      proxyUrl: client.proxyUrl(session),
+    };
+  }
   const { catalog, candidateIps } = await listFreshCatalog(client, maxLatencyMs, excludedIps, input.excludedNodeNamePattern);
   if (input.excludedNodeNamePattern) {
     for (const group of catalog.groups || []) {
