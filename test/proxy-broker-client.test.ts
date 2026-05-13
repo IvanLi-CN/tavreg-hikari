@@ -1008,7 +1008,7 @@ test("proxy broker runtime refreshes stale probes before opening a healthy sessi
   }
 });
 
-test("proxy broker runtime refreshes mixed fresh and stale catalogs before opening", async () => {
+test("proxy broker runtime uses fresh candidates without refreshing mixed stale catalogs", async () => {
   const requests: Array<{ method: string; url: string; body: unknown }> = [];
   let catalogCalls = 0;
   globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -1058,8 +1058,6 @@ test("proxy broker runtime refreshes mixed fresh and stale catalogs before openi
 
     expect(runtime.session.session_id).toBe("sess_mixed_refreshed");
     expect(requests.map((request) => `${request.method} ${request.url}`)).toEqual([
-      "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
-      "POST https://proxy-broker.example.test/api/v1/projects/Tavily/refresh",
       "GET https://proxy-broker.example.test/api/v1/proxy-catalog?view=project&project_id=Tavily",
       "POST https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open",
     ]);
