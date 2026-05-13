@@ -6,9 +6,11 @@ import { buildAcceptLanguage, deriveLocale, parseIpInfoPayload, type GeoInfo } f
 import { startMihomo } from "../proxy/mihomo.js";
 import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import {
+  CaptchaSolver,
   cleanupManagedChromeProcessesUnder,
   completeMicrosoftLogin,
   launchChromePersistent,
+  loginAndReachHome,
   loadConfig,
 } from "../main.js";
 import { isMicrosoftPasskeyInterruptUrl } from "../microsoft-passkey.js";
@@ -25,6 +27,7 @@ interface WorkerArgs {
   redirectUri: string;
   localServerOrigin: string;
   proxyNode: string;
+  loginMode: "microsoft_graph" | "tavily_home";
   resultPath: string;
 }
 
@@ -83,6 +86,7 @@ function parseArgs(argv: string[]): WorkerArgs {
   const redirectUri = (args.get("redirect-uri") || "").trim();
   const localServerOrigin = (args.get("local-server-origin") || "").trim();
   const proxyNode = (args.get("proxy-node") || "").trim();
+  const loginMode = (args.get("login-mode") || "").trim() === "tavily_home" ? "tavily_home" : "microsoft_graph";
   const resultPath = (args.get("result-path") || "").trim();
   if (!authUrl) {
     throw new Error("missing --auth-url");
@@ -109,6 +113,7 @@ function parseArgs(argv: string[]): WorkerArgs {
     redirectUri,
     localServerOrigin,
     proxyNode,
+    loginMode,
     resultPath: path.resolve(resultPath),
   };
 }
@@ -207,6 +212,20 @@ function buildLocalServerAuthHeaders(): HeadersInit {
     user: "mailbox-oauth-worker",
     email: "mailbox-oauth-worker@localhost",
   });
+}
+
+function normalizeMicrosoftLoginErrorForMode(error: unknown, loginMode: WorkerArgs["loginMode"], finalUrl: string): Error {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (loginMode === "tavily_home") {
+    if (/login flow did not reach home/i.test(message) && !/microsoft login flow did not reach home/i.test(message)) {
+      return new Error(`microsoft login flow did not reach home, last_url=${finalUrl || "unknown"}`);
+    }
+    return error instanceof Error ? error : new Error(message);
+  }
+  if (/microsoft login flow did not reach home/i.test(message)) {
+    return new Error(`microsoft_oauth_incomplete:${finalUrl || "unknown"}`);
+  }
+  return error instanceof Error ? error : new Error(message);
 }
 
 async function fetchLocalMailboxCompletion(
@@ -379,6 +398,25 @@ async function main(): Promise<void> {
     );
 
     page = context.pages()[0] || (await context.newPage());
+    if (args.loginMode === "tavily_home") {
+      if (!cfg.microsoftAccountEmail || !cfg.microsoftAccountPassword) {
+        throw new Error("microsoft_account_credentials_missing");
+      }
+      try {
+        const solver = new CaptchaSolver();
+        page = await loginAndReachHome(
+          page,
+          solver,
+          cfg.microsoftAccountEmail,
+          cfg.microsoftAccountPassword,
+          cfg,
+          null,
+          mihomoController.proxyServer,
+        );
+      } catch (error) {
+        throw normalizeMicrosoftLoginErrorForMode(error, args.loginMode, String(page?.url?.() || ""));
+      }
+    }
     await page.goto(args.authUrl, {
       waitUntil: "domcontentloaded",
       timeout: 120_000,
@@ -429,7 +467,7 @@ async function main(): Promise<void> {
           passkeyRecoveryUrl: args.authUrl,
         });
       } catch (error) {
-        loginError = error;
+        loginError = normalizeMicrosoftLoginErrorForMode(error, args.loginMode, String(page?.url?.() || ""));
       }
       const completion = await waitForMicrosoftOauthBrowserCompletion(page, args.redirectUri, relayState);
       const mailboxCompletion = completion.oauthOutcome

@@ -196,7 +196,12 @@ export class ProxyBrokerClient {
   }
 
   proxyUrl(session: Pick<ProxyBrokerSession, "display_address">): string {
-    return `http://${session.display_address}`;
+    const displayAddress = String(session.display_address || "").trim();
+    const hostOverride = String(process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE || "").trim();
+    if (!hostOverride) return `http://${displayAddress}`;
+    const url = new URL(`http://${displayAddress}`);
+    url.hostname = hostOverride;
+    return url.toString().replace(/\/$/, "");
   }
 
   async authMe(): Promise<unknown> {

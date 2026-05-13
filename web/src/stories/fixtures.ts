@@ -464,6 +464,7 @@ export const sampleMicrosoftGraphSettings: MicrosoftGraphSettings = {
   microsoftAccountBootstrapConcurrency: 3,
   microsoftAccountBootstrapWorkerTimeoutMs: 300000,
   microsoftAccountBootstrapKillGraceMs: 10000,
+  microsoftAccountBootstrapLoginMode: "microsoft_graph",
   configured: true,
 };
 

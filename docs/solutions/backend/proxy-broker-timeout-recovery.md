@@ -11,6 +11,7 @@ Tavreg Hikari can show widespread account session failures when Proxy Broker sti
 - Prefer the Docker network Broker API URL when both services share a network. Avoid sending same-host service-to-service traffic through the public HTTPS route.
 - Close stale Broker sessions through `DELETE /api/v1/projects/{project}/sessions/{session_id}` before triggering a full probe. Stale persisted sessions can keep runtime restore noisy and make probe failures harder to interpret.
 - Treat failed account session proxy IPs as diagnostics only. Do not reuse them as preferred IPs for later open-session calls.
+- During concurrent account bootstrap, pass currently active bootstrap egress IPs into Broker `excludedIps` so new sessions do not immediately collide with another in-flight account.
 
 ## Implementation Guardrails
 
@@ -18,4 +19,4 @@ Tavreg Hikari can show widespread account session failures when Proxy Broker sti
 - Proxy payload endpoints should preserve the last catalog snapshot and expose `syncError` if sessions or catalog reads fail.
 - Only `ready` account browser sessions may seed a preferred proxy IP or region.
 - Broker-open failures must not write an old proxy IP back into the latest failure snapshot, because that makes many unrelated accounts look pinned to the same failed IP.
-- Regression tests should cover ready-only proxy reuse, failed-session proxy reuse suppression, and Broker client timeout defaults.
+- Regression tests should cover ready-only proxy reuse, failed-session proxy reuse suppression, active bootstrap IP exclusion, and Broker client timeout defaults.

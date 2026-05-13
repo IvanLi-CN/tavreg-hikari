@@ -470,7 +470,7 @@ export function isMicrosoftKeepSignedInPrompt(input: MicrosoftKeepSignedInPrompt
   if (!combined) {
     return false;
   }
-  return /stay signed in|keep me signed in|keep signed in|skip having to sign in every time|保持登录状态|保持登入状态|要保持登录吗|要保持登入嗎|不要每次都要重新登录|不要每次都要重新登入|サインインしたままにする/i.test(
+  return /stay signed in|keep me signed in|keep signed in|skip having to sign in every time|保持登录状态|保持登入状态|要保持登录吗|要保持登入嗎|不要每次都要重新登录|不要每次都要重新登入|サインインしたままにする|サインインの状態を維持しますか/i.test(
     combined,
   );
 }

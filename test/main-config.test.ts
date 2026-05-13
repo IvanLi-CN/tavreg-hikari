@@ -274,6 +274,7 @@ test("mailbox bootstrap workers reserve dedicated Mihomo ports instead of reusin
   expect(source).toContain('workerArgs[workerArgs.length - 1] = "src/server/microsoft-oauth-worker.ts";');
   expect(source).toContain('MIHOMO_API_PORT: String(portLeases.apiPort.port)');
   expect(source).toContain('MIHOMO_MIXED_PORT: String(portLeases.mixedPort.port)');
+  expect(source).toContain("`--login-mode=${input.loginMode}`");
   expect(source).toContain('await Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]).catch(() => {});');
   expect(source).toContain('child.once("spawn", () => {');
   expect(source).toContain('await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]).catch(() => {});');
@@ -286,11 +287,13 @@ test("mailbox bootstrap keeps proxy geo lookup best-effort", async () => {
   expect(source).toContain("const locale = deriveLocale(proxyGeo.country);");
 });
 
-test("mailbox oauth worker opens the Microsoft authorize URL directly", async () => {
+test("mailbox oauth worker defaults to Graph authorize URL and keeps Tavily Home mode gated", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
   expect(source).toContain("await page.goto(args.authUrl, {");
-  expect(source).not.toContain("loginAndReachHome(");
-  expect(source).not.toContain("new CaptchaSolver()");
+  expect(source).toContain('if (args.loginMode === "tavily_home")');
+  expect(source).toContain("page = await loginAndReachHome(");
+  expect(source).toContain("throw normalizeMicrosoftLoginErrorForMode(error, args.loginMode");
+  expect(source).toContain("normalizeMicrosoftLoginErrorForMode(error, args.loginMode");
 });
 
 test("chrome native CDP automation stays enabled on macOS when configured", async () => {

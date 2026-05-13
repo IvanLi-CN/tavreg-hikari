@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-31
-- Last: 2026-05-11
+- Last: 2026-05-13
 
 ## 背景 / 问题陈述
 
@@ -76,9 +76,10 @@
 
 ### Core flows
 
-- 手工导入账号：账号落库 -> ensure session row -> 进入 bootstrap 队列 -> 选代理 -> 用持久 profile 登录 Tavily Home -> 自动完成 Graph 邮箱 Bootstrap -> 成功后 `browserSession.status=ready`。
+- 手工导入账号：账号落库 -> ensure session row -> 进入 bootstrap 队列 -> 选代理 -> 用持久 profile 完成配置的 Bootstrap 登录方案 -> 自动完成 Graph 邮箱 Bootstrap -> 成功后 `browserSession.status=ready`。
 - 自动提取账号：候选账号先导入本地 -> 进入 bootstrap 队列 -> 只有 bootstrap 成功后才计入当前 job 的可调度账号池。
 - 并发控制：不同账号可按 `microsoftAccountBootstrapConcurrency` 并行 bootstrap；同一账号在 pending/active 期间只能存在一个 bootstrap，重复 force 请求沿用 defer 语义在当前账号结束后重新排队。
+- 登录方案：默认 `microsoft_graph` 以本地 callback/Graph token 写入和 profile 登录态为成功事实源，不要求访问或回到 Tavily Home；`tavily_home` 作为兼容模式保留旧语义，仍要求 Microsoft social login 完成后到达 Tavily Home。
 - 主流程调度：选到 ready session 的账号时，复用其持久 profile；若原 IP 不再可用，则按同 region / 全池 LRU 选择代理并继续复用同一 profile。
 - 手动重试：账号页点击重试入口后重新排队 bootstrap，并刷新会话状态。
 - 批量工具栏：默认“批量 Bootstrap”只处理未成功 Bootstrap 的账号；“强制 Bootstrap”允许忽略成功判定，但两者都继续跳过锁定、禁用、已被占用或当前正在 bootstrapping 的账号。
@@ -93,6 +94,8 @@
 - 启动后或读取账号列表前，如果发现 `bootstrapping` session 已超过 worker timeout + kill grace 收敛窗口，必须按数据库事实收敛为 `failed`，写入 `session_bootstrap_stale`，并同步 mailbox/account 的失败态。
 - Microsoft OAuth、代理会话 abort 与 worker timeout 失败必须写入明确错误码和可读错误文案；包含 URL 的诊断文本只允许保留 host/path，不能暴露 query、token 或 secret。
 - 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
+- 默认 Graph 登录方案下，worker 不得把“未回到 Tavily Home”归类为 `microsoft_oauth_did_not_reach_home`；该错误码只属于 `tavily_home` 兼容方案。
+- 并发 bootstrap 打开 Broker session 时，必须把当前活跃 bootstrap 的出口 IP 快照传入 `excludedIps`，避免多个账号同时踩同一个出口；失败 session 的 IP 只作为诊断，不得成为非 ready session 的优先复用依据。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -107,7 +110,7 @@
 | `GET /api/accounts?sessionStatus=&mailboxStatus=` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React accounts view | 服务端真相源筛选 |
 | `POST /api/accounts/session-bootstrap/preview` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 跨分页批量 Bootstrap preview |
 | `POST /api/accounts/:id/session/rebootstrap` | http-apis | internal | New | ./contracts/http-apis.md | server/web | React accounts view | 手动重试 bootstrap |
-| `GET/POST /api/microsoft-mail/settings` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React settings view | Graph 设置与 bootstrap 性能参数 |
+| `GET/POST /api/microsoft-mail/settings` | http-apis | internal | Modify | ./contracts/http-apis.md | server/web | React settings view | Graph 设置、bootstrap 登录方案与性能参数 |
 | `account.updated session_*` | events | internal | Modify | ./contracts/events.md | server/scheduler | web SSE client | 会话状态推送 |
 
 ### 契约文档（按 Kind 拆分）
@@ -134,6 +137,10 @@
 - Given 账号的 browser session 长时间停留在 `bootstrapping`，When 服务启动或读取 `/api/accounts` 且该状态已超过收敛窗口，Then session、mailbox 与 account 状态必须收敛为 `failed`，错误码为 `session_bootstrap_stale`。
 - Given `Session` 为 `failed/blocked` 或 `收信` 为 `failed/locked/invalidated`，When 在账号页悬浮或聚焦对应 badge，Then 必须显示包含阶段、错误码和失败原因的第三方 tooltip。
 - Given 打开 Microsoft Graph 设置页，When 修改 Bootstrap 并发、Worker 超时秒数与强杀宽限秒数，Then `/api/microsoft-mail/settings` 能保存并返回规范化后的毫秒字段值。
+- Given 打开 Microsoft Graph 设置页，When 未显式修改 Bootstrap 登录方案，Then 默认值为 `Microsoft Graph`；When 切换并保存为 `Tavily Home`，Then 刷新设置后仍返回 `tavily_home`。
+- Given Bootstrap 登录方案为 `Microsoft Graph`，When Graph OAuth callback/token 已写入 DB，Then session bootstrap 不要求回到 Tavily Home，且失败码不得是 `microsoft_oauth_did_not_reach_home`。
+- Given Bootstrap 登录方案为 `Tavily Home`，When Microsoft social login 未回到 Tavily Home，Then 失败码稳定落为 `microsoft_oauth_did_not_reach_home`。
+- Given 多个账号并发 bootstrap，When 一个 Broker session 已拿到出口 IP，Then 后续 in-flight session open 必须收到包含该 IP 的 `excludedIps`。
 - Given mailbox OAuth 已写入 token 且相关验证测试需要读取 integration detail API，When 当前日期晚于旧固定样例过期时间，Then 测试必须使用相对未来的 access-token 过期时间，避免误走 refresh 分支掩盖实际 bootstrap 行为。
 - Given UI 改动完成，When 执行 `bun run typecheck`、`bun test`、`bun run web:build` 与 `bun run build-storybook`，Then 全部通过。
 
@@ -167,8 +174,8 @@
 ## 文档更新（Docs to Update）
 
 - `docs/specs/README.md`: 新增 spec 索引并更新状态
-- `README.md`: 补充持久 session/profile/代理复用说明
-- `.env.example`: 补充 Microsoft account bootstrap 并发与超时参数
+- `README.md`: 补充持久 session/profile/代理复用与 Bootstrap 登录方案说明
+- `.env.example`: 补充 Microsoft account bootstrap 登录方案、并发与超时参数
 
 ## 计划资产（Plan assets）
 
@@ -217,6 +224,16 @@
   - 证明 Microsoft Graph 设置页已暴露 Bootstrap 并发、Worker 超时与强杀宽限三个运行时调优项，时间项以秒展示，并在当前状态摘要中回显生效值。
 
 ![Microsoft Graph 设置页 Bootstrap 性能参数](./assets/mailbox-settings-bootstrap-performance.png)
+
+- Storybook canvas：`Views/MailboxSettingsView / Configured`
+  - 证明 Bootstrap 登录方案默认显示为 `Microsoft Graph`，并与并发、Worker 超时、强杀宽限一起进入设置页表单与当前状态摘要。
+
+![Microsoft Graph 设置页默认 Bootstrap 登录方案](./assets/mailbox-settings-bootstrap-mode-graph.png)
+
+- Storybook canvas：`Views/MailboxSettingsView / Tavily Home Mode`
+  - 证明兼容模式可切换为 `Tavily Home`，设置页能明确回显旧方案语义，不影响其它 Graph 与性能参数布局。
+
+![Microsoft Graph 设置页 Tavily Home 兼容方案](./assets/mailbox-settings-bootstrap-mode-tavily.png)
 
 ## 资产晋升（Asset promotion）
 

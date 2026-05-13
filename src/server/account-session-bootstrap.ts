@@ -4,8 +4,10 @@ export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY = 3;
 export const MAX_MICROSOFT_ACCOUNT_BOOTSTRAP_CONCURRENCY = 10;
 export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_WORKER_TIMEOUT_MS = 5 * 60_000;
 export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS = 10_000;
+export const DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_LOGIN_MODE = "microsoft_graph";
 
 export type AccountBatchBootstrapMode = "pending_only" | "force";
+export type MicrosoftAccountBootstrapLoginMode = "microsoft_graph" | "tavily_home";
 export type AccountSessionRebootstrapRequest = {
   force: boolean;
   proxyNode?: string | null;
@@ -204,6 +206,58 @@ export function normalizeMicrosoftAccountBootstrapKillGraceMs(value: unknown): n
       : DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS;
   if (!Number.isFinite(parsed)) return DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_KILL_GRACE_MS;
   return Math.max(1_000, Math.trunc(parsed));
+}
+
+export function normalizeMicrosoftAccountBootstrapLoginMode(value: unknown): MicrosoftAccountBootstrapLoginMode {
+  return value === "tavily_home" ? "tavily_home" : DEFAULT_MICROSOFT_ACCOUNT_BOOTSTRAP_LOGIN_MODE;
+}
+
+export type AccountBootstrapProxySnapshot = {
+  proxyNode?: string | null;
+  proxyIp?: string | null;
+};
+
+function normalizeBootstrapProxyIp(value: string | null | undefined): string {
+  return String(value || "").trim();
+}
+
+export class AccountBootstrapProxyTracker {
+  private readonly activeIps = new Set<string>();
+  private allocationQueue: Promise<void> = Promise.resolve();
+
+  excludedIps(): string[] {
+    return Array.from(this.activeIps);
+  }
+
+  async reserve<T extends AccountBootstrapProxySnapshot>(
+    open: (excludedIps: string[]) => Promise<T>,
+  ): Promise<{ value: T; release: () => void }> {
+    const previous = this.allocationQueue.catch(() => {});
+    let unlock!: () => void;
+    this.allocationQueue = previous.then(
+      () =>
+        new Promise<void>((resolve) => {
+          unlock = resolve;
+        }),
+    );
+    await previous;
+    try {
+      const value = await open(this.excludedIps());
+      const ip = normalizeBootstrapProxyIp(value.proxyIp);
+      if (ip) this.activeIps.add(ip);
+      let released = false;
+      return {
+        value,
+        release: () => {
+          if (released) return;
+          released = true;
+          if (ip) this.activeIps.delete(ip);
+        },
+      };
+    } finally {
+      unlock();
+    }
+  }
 }
 
 export class AccountSessionBootstrapDispatcher {

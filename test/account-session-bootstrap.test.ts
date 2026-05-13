@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccountBootstrapProxyTracker,
   AccountSessionBootstrapDispatcher,
   getAccountSessionBootstrapBlockMessage,
   hasConfiguredMicrosoftGraphBootstrap,
@@ -7,6 +8,7 @@ import {
   isLockedAccountRecord,
   normalizeMicrosoftAccountBootstrapConcurrency,
   normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapLoginMode,
   normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
   normalizeAccountSessionRebootstrapRequest,
   resolveAccountBatchBootstrapDecision,
@@ -106,6 +108,33 @@ describe("account session bootstrap helpers", () => {
     expect(normalizeMicrosoftAccountBootstrapWorkerTimeoutMs("90000")).toBe(90000);
     expect(normalizeMicrosoftAccountBootstrapKillGraceMs(500)).toBe(1000);
     expect(normalizeMicrosoftAccountBootstrapKillGraceMs("12000")).toBe(12000);
+    expect(normalizeMicrosoftAccountBootstrapLoginMode("tavily_home")).toBe("tavily_home");
+    expect(normalizeMicrosoftAccountBootstrapLoginMode("unknown")).toBe("microsoft_graph");
+  });
+
+  test("bootstrap proxy tracker serializes session opens and excludes active IPs", async () => {
+    const tracker = new AccountBootstrapProxyTracker();
+    const observedExcludedIps: string[][] = [];
+    const releases: Array<() => void> = [];
+    const first = await tracker.reserve(async (excludedIps) => {
+      observedExcludedIps.push(excludedIps);
+      return { proxyNode: "Paris-01", proxyIp: "203.0.113.10" };
+    });
+    releases.push(first.release);
+
+    const second = await tracker.reserve(async (excludedIps) => {
+      observedExcludedIps.push(excludedIps);
+      return { proxyNode: "Paris-02", proxyIp: "203.0.113.11" };
+    });
+    releases.push(second.release);
+
+    expect(observedExcludedIps).toEqual([[], ["203.0.113.10"]]);
+    expect(tracker.excludedIps().sort()).toEqual(["203.0.113.10", "203.0.113.11"]);
+
+    releases[0]?.();
+    expect(tracker.excludedIps()).toEqual(["203.0.113.11"]);
+    releases[1]?.();
+    expect(tracker.excludedIps()).toEqual([]);
   });
 
   test("bootstrap dispatcher runs different accounts in parallel while deduping the same account", async () => {

@@ -83,7 +83,7 @@
 - 若 Microsoft 账号配置只填了一半，程序应在加载配置时直接失败。
 - 若 proof 页面出现但账号未配置备用邮箱映射，程序应明确失败为 `microsoft_proof_mailbox_missing`。
 - 若 CF Mail API key 缺失、邮箱不存在或安全码超时，程序应分别报出 `cfmail_api_key_missing`、`cfmail_mailbox_not_found`、`microsoft_proof_code_timeout`。
-- 若 Microsoft OAuth 长时间未回到 Tavily Home，程序应报出明确的 `microsoft_oauth_did_not_reach_home` 错误码和 `microsoft login flow did not reach home` 失败文案。
+- 若 Tavily Home 兼容模式下 Microsoft OAuth 长时间未回到 Tavily Home，程序应报出明确的 `microsoft_oauth_did_not_reach_home` 错误码和 `microsoft login flow did not reach home` 失败文案。Microsoft Graph bootstrap 模式不依赖 Tavily Home，不能把该情况暴露为 Tavily Home 专属错误码。
 - 若 OAuth worker 超时或代理会话中断，程序应分别报出稳定错误码；任何包含 OAuth URL 的诊断文案必须脱敏 query/hash 后再落库或展示。
 
 ## 验收标准（Acceptance Criteria）
@@ -92,7 +92,8 @@
 - Given 首次登录出现 `保持登录状态?`，When 自动化继续，Then 默认点击 `是`。
 - Given Microsoft 登录中出现 proof 页面且账号已配置备用邮箱映射，When 自动化继续，Then 程序自动提交备用邮箱并用统一 live mailbox waiter 完成安全码验证。
 - Given 用户从微软账号页启动 ChatGPT / Grok 的单账号业务流，When 该站点选择 `Continue with Microsoft`，Then 系统复用同一套 Microsoft 登录状态机完成账号密码、proof 与保持登录分支。
-- Given Microsoft OAuth 停在密码页或未回到 Tavily Home，When bootstrap worker 返回失败，Then `browserSession.lastErrorCode` 必须为 `microsoft_oauth_did_not_reach_home`，且错误文案可被账号页 tooltip 直接消费。
+- Given Bootstrap 登录方案为 `tavily_home` 且 Microsoft OAuth 停在密码页或未回到 Tavily Home，When bootstrap worker 返回失败，Then `browserSession.lastErrorCode` 必须为 `microsoft_oauth_did_not_reach_home`，且错误文案可被账号页 tooltip 直接消费。
+- Given Bootstrap 登录方案为默认 `microsoft_graph`，When Graph OAuth callback/token 已写入，Then bootstrap 以 Graph 授权事实源收敛，不要求访问或回到 Tavily Home。
 - Given 本次实现完成，When 执行 `bun run typecheck`，Then 类型检查通过。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）

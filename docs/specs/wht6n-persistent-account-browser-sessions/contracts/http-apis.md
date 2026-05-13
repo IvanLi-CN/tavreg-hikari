@@ -19,12 +19,14 @@
 
 ## `GET /api/microsoft-mail/settings`
 
-- returns Microsoft Graph OAuth settings summary plus `microsoftAccountBootstrapConcurrency`, `microsoftAccountBootstrapWorkerTimeoutMs`, and `microsoftAccountBootstrapKillGraceMs`
+- returns Microsoft Graph OAuth settings summary plus `microsoftAccountBootstrapLoginMode`, `microsoftAccountBootstrapConcurrency`, `microsoftAccountBootstrapWorkerTimeoutMs`, and `microsoftAccountBootstrapKillGraceMs`
+- `microsoftAccountBootstrapLoginMode` is `"microsoft_graph"` by default; `"tavily_home"` keeps the legacy Tavily Home completion requirement
 - `microsoftGraphClientSecret` remains masked and is never returned in plaintext
 
 ## `POST /api/microsoft-mail/settings`
 
 - accepts Graph OAuth fields plus optional bootstrap tuning fields:
+  - `microsoftAccountBootstrapLoginMode`: `"microsoft_graph" | "tavily_home"`, unknown values normalize to `"microsoft_graph"`
   - `microsoftAccountBootstrapConcurrency`: clamped to `1..10`
   - `microsoftAccountBootstrapWorkerTimeoutMs`: minimum `1000`
   - `microsoftAccountBootstrapKillGraceMs`: minimum `1000`

@@ -1,6 +1,7 @@
 import {
   normalizeMicrosoftAccountBootstrapConcurrency,
   normalizeMicrosoftAccountBootstrapKillGraceMs,
+  normalizeMicrosoftAccountBootstrapLoginMode,
   normalizeMicrosoftAccountBootstrapWorkerTimeoutMs,
 } from "./account-session-bootstrap.js";
 import { normalizeAccountExtractorAccountType, type AppSettings } from "../storage/app-db.js";
@@ -72,6 +73,9 @@ export function normalizeSettings(input: Partial<AppSettings>): Partial<AppSetti
   }
   if (input.microsoftAccountBootstrapKillGraceMs !== undefined) {
     next.microsoftAccountBootstrapKillGraceMs = normalizeMicrosoftAccountBootstrapKillGraceMs(input.microsoftAccountBootstrapKillGraceMs);
+  }
+  if (input.microsoftAccountBootstrapLoginMode !== undefined) {
+    next.microsoftAccountBootstrapLoginMode = normalizeMicrosoftAccountBootstrapLoginMode(input.microsoftAccountBootstrapLoginMode);
   }
   if (typeof input.upstreamTavregSyncEnabled === "boolean") {
     next.upstreamTavregSyncEnabled = input.upstreamTavregSyncEnabled;

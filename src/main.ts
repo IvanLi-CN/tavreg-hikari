@@ -5596,7 +5596,9 @@ async function handleMicrosoftKeepSignedInPrompt(page: any, keepSignedIn: boolea
   if (!(await pageLooksLikeMicrosoftKeepSignedInPrompt(page))) {
     return false;
   }
-  const patterns = keepSignedIn ? [/^yes$/i, /^是$/i] : [/^no$/i, /^否$/i];
+  const patterns = keepSignedIn
+    ? [/^yes$/i, /^是$/i, /^はい$/i]
+    : [/^no$/i, /^否$/i, /^いいえ$/i];
   const clicked = await clickMatchingAction(page, patterns, 'input[type="submit"], button[type="submit"], button');
   if (!clicked) {
     throw new Error(`microsoft_keep_signed_in_action_missing:${keepSignedIn ? "yes" : "no"}`);

@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import type { MicrosoftGraphSettings } from "@/lib/app-types";
 
 export type MicrosoftGraphSettingsDraft = {
@@ -14,6 +15,7 @@ export type MicrosoftGraphSettingsDraft = {
   microsoftAccountBootstrapConcurrency: number;
   microsoftAccountBootstrapWorkerTimeoutMs: number;
   microsoftAccountBootstrapKillGraceMs: number;
+  microsoftAccountBootstrapLoginMode: "microsoft_graph" | "tavily_home";
 };
 
 function Field(props: { label: string; children: ReactNode; className?: string }) {
@@ -115,7 +117,25 @@ export function MailboxSettingsView(props: {
               </Field>
             </div>
 
-            <div className="grid gap-4 border-t border-white/8 pt-5 md:grid-cols-3">
+            <div className="grid gap-4 border-t border-white/8 pt-5 md:grid-cols-4">
+              <Field label="Bootstrap 方案" className="min-w-0">
+                <Select
+                  value={props.settingsDraft.microsoftAccountBootstrapLoginMode}
+                  onValueChange={(value) =>
+                    props.onSettingsDraftChange({
+                      microsoftAccountBootstrapLoginMode: value === "tavily_home" ? "tavily_home" : "microsoft_graph",
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="microsoft_graph">Microsoft Graph</SelectItem>
+                    <SelectItem value="tavily_home">Tavily Home</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
               <Field label="Bootstrap 并发" className="min-w-0">
                 <Input
                   type="number"
@@ -174,6 +194,10 @@ export function MailboxSettingsView(props: {
               <InfoRow
                 label="Redirect URI"
                 value={props.settingsDraft.microsoftGraphRedirectUri || "请填写完整 callback URL"}
+              />
+              <InfoRow
+                label="Bootstrap 方案"
+                value={props.settingsDraft.microsoftAccountBootstrapLoginMode === "tavily_home" ? "Tavily Home" : "Microsoft Graph"}
               />
               <InfoRow label="Bootstrap 并发" value={String(props.settingsDraft.microsoftAccountBootstrapConcurrency)} />
               <InfoRow label="Worker 超时" value={`${msToSeconds(props.settingsDraft.microsoftAccountBootstrapWorkerTimeoutMs)} 秒`} />

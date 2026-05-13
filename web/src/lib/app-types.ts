@@ -141,6 +141,7 @@ export type MicrosoftGraphSettings = {
   microsoftAccountBootstrapConcurrency: number;
   microsoftAccountBootstrapWorkerTimeoutMs: number;
   microsoftAccountBootstrapKillGraceMs: number;
+  microsoftAccountBootstrapLoginMode: "microsoft_graph" | "tavily_home";
   configured: boolean;
 };
 

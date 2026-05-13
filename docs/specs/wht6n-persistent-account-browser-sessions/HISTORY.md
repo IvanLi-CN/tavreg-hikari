@@ -1,5 +1,12 @@
 # 历史记录
 
+## 2026-05-13
+
+- Bootstrap 登录方案新增 `microsoft_graph | tavily_home` 设置；默认 `microsoft_graph` 以 Graph callback/token 写入为成功事实源，不再依赖 Tavily Home。
+- `microsoft_oauth_did_not_reach_home` 收敛为 `tavily_home` 兼容方案专属错误码，避免 Graph 授权已成功时被误判为 Tavily Home 失败。
+- 并发账号 bootstrap 打开 Broker session 时会排除当前活跃 bootstrap 出口 IP；失败 session 的 IP 继续只作为诊断快照，不参与非 ready session 的优先复用。
+- 显式代理节点 bootstrap 改为直达 preferred IP，避免全量 Broker catalog 刷新/筛选超时掩盖真实的指定节点状态；同时补齐本地 Broker display host override 与日语 keep-signed-in prompt 处理。
+
 ## 2026-05-11
 
 - 修复账号池分页与实时刷新竞态：`/api/accounts` 旧请求晚返回时不再覆盖用户已切换到的新页。
