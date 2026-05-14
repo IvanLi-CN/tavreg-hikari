@@ -22,6 +22,7 @@ import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
   createProxyBrokerClient,
+  logProxyBrokerSessionCloseError,
   openDomainProbedProxyBrokerRuntimeSession,
   ProxyBrokerDomainProbeError,
   reusableBrowserSessionProxyIp,
@@ -1589,7 +1590,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
   } catch (error) {
     trackedBrokerSession.release();
-    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch((closeError) => {
+      logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "mailbox-bootstrap-setup-failure");
+    });
     throw error;
   }
 
@@ -1729,7 +1732,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     if (trackedBrokerSession) {
       trackedBrokerSession.release();
     }
-    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch((closeError) => {
+      logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "mailbox-bootstrap-finalize");
+    });
   }
 }
 

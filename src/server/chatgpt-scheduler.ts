@@ -854,7 +854,9 @@ export class ChatGptJobScheduler {
     });
     const refreshedJob = this.db.getJob(job.id);
     if (refreshedJob && (isStopInProgressStatus(refreshedJob.status) || refreshedJob.status === "stopped")) {
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "chatgpt-stopped-before-launch");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(job.id, attempt.id, null, {
         errorCode: refreshedJob.status === "force_stopping" ? "force_stopped" : "stopped_before_launch",
@@ -901,7 +903,9 @@ export class ChatGptJobScheduler {
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "chatgpt-spawn-failure");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       throw error;
     }

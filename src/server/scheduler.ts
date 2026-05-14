@@ -1320,7 +1320,9 @@ export class JobScheduler {
         pendingLaunch.stopRequested === "force_stop"
         || Boolean(refreshedJob && (refreshedJob.status === "stopped" || isStopInProgressStatus(refreshedJob.status)));
       if (launchBlockedAfterSetup) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession?.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession?.session.session_id).catch((closeError) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, closeError, "tavily-stopped-before-launch");
+        });
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
         if (pendingLaunch.stopRequested === "force_stop") {
           const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(
@@ -1455,7 +1457,9 @@ export class JobScheduler {
         await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       }
       if (brokerSession?.session.session_id) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((closeError) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, closeError, "tavily-attempt-launch-failure");
+        });
       }
       throw error;
     }

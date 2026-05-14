@@ -406,7 +406,9 @@ export async function openDomainProbedProxyBrokerRuntimeSession(input: {
       probeError.attempts = attempt;
       lastError = probeError;
       if (session.session.selected_ip) excludedIps.add(session.session.selected_ip);
-      await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(session.session.session_id, closeError, `${input.businessSite}-domain-probe-rotation`);
+      });
       if (requiresPreferredNode || requiresPreferredIp || attempt >= maxAttempts) {
         throw probeError;
       }
