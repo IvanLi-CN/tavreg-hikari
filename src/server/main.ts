@@ -1511,6 +1511,10 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
     throw new Error(message);
   }
+  input.db.markBrowserSessionBootstrapping(input.accountId, {
+    browserEngine: "chrome",
+    proxyNode: requestedProxyNode ? selectedProxyNode?.nodeName || requestedProxyNode : null,
+  });
   let trackedBrokerSession: { value: ProxyBrokerRuntimeSession; release: () => void } | null = null;
   try {
     trackedBrokerSession = await input.proxyTracker.reserve(async (activeBootstrapIps) => {

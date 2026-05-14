@@ -4513,6 +4513,28 @@ export class AppDatabase {
     }));
   }
 
+  listBrowserSessionBootstrapGuards(): Array<{
+    accountId: number;
+    status: Extract<AccountBrowserSessionStatus, "pending" | "bootstrapping">;
+    proxyNode: string | null;
+    updatedAt: string;
+  }> {
+    const rows = this.db
+      .query(`
+        SELECT account_id, status, proxy_node, updated_at
+        FROM account_browser_sessions
+        WHERE status = 'bootstrapping'
+        ORDER BY updated_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      accountId: Number(row.account_id),
+      status: String(row.status || "pending") as Extract<AccountBrowserSessionStatus, "pending" | "bootstrapping">,
+      proxyNode: row.proxy_node == null ? null : String(row.proxy_node),
+      updatedAt: String(row.updated_at || ""),
+    }));
+  }
+
   createAccountExtractBatch(input: {
     jobId?: number | null;
     provider: AccountExtractorProvider;

@@ -48,6 +48,17 @@ async function main(): Promise<void> {
   const db = await AppDatabase.open(dbPath);
   try {
     const settings = db.getSettings(brokerSettingsDefaults());
+    const bootstrapGuards = db.listBrowserSessionBootstrapGuards();
+    if (apply && bootstrapGuards.length > 0) {
+      console.error(JSON.stringify({
+        apply,
+        blocked: true,
+        reason: "active_browser_session_bootstraps",
+        message: "refusing to apply while browser session bootstraps may own live Proxy Broker sessions",
+        browserSessionBootstraps: bootstrapGuards,
+      }, null, 2));
+      process.exit(2);
+    }
     const result = await reconcileProxyBrokerSessions({
       settings,
       references: db.listActiveBrokerSessionReferences(),
@@ -60,6 +71,7 @@ async function main(): Promise<void> {
       orphanBrokerSessions: result.orphanSessions.length,
       closedSessions: result.closedSessionIds.length,
       closeErrors: result.closeErrors,
+      browserSessionBootstraps: bootstrapGuards,
       orphanSessions: result.orphanSessions.map((session) => ({
         sessionId: session.session_id,
         selectedIp: session.selected_ip,

@@ -148,6 +148,17 @@ test("manual imports force rebootstrap when the stored password changes", async 
   expect(serverSource).toContain('reason: "auto",');
 });
 
+test("mailbox bootstrap records bootstrapping before opening broker sessions", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const functionStart = source.indexOf("async function authorizeMailboxWithBrowserAutomation");
+  const reserveStart = source.indexOf("trackedBrokerSession = await input.proxyTracker.reserve", functionStart);
+  expect(functionStart).toBeGreaterThanOrEqual(0);
+  expect(reserveStart).toBeGreaterThan(functionStart);
+  const preReserveSource = source.slice(functionStart, reserveStart);
+  expect(preReserveSource).toContain("input.db.markBrowserSessionBootstrapping(input.accountId");
+  expect(preReserveSource).toContain("proxyNode: requestedProxyNode ? selectedProxyNode?.nodeName || requestedProxyNode : null");
+});
+
 test("manual force bootstrap routes keep in-flight retries queueable instead of returning 409 early", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
   expect(source).toContain("const rebootstrapRequest = normalizeAccountSessionRebootstrapRequest(body);");

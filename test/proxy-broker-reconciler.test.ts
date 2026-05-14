@@ -99,3 +99,41 @@ test("database active broker references include only running attempts on active 
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("database browser session bootstrap guards include active bootstrapping sessions only", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
+  const db = await AppDatabase.open(path.join(tempDir, "app.sqlite"));
+  try {
+    const imported = db.importAccounts([
+      { email: "pending-bootstrap@example.test", password: "pass-a" },
+      { email: "active-bootstrap@example.test", password: "pass-b" },
+      { email: "ready-bootstrap@example.test", password: "pass-c" },
+      { email: "failed-bootstrap@example.test", password: "pass-d" },
+    ]);
+    const [pendingId, bootstrappingId, readyId, failedId] = imported.affectedIds;
+    expect(pendingId).toBeDefined();
+    expect(bootstrappingId).toBeDefined();
+    expect(readyId).toBeDefined();
+    expect(failedId).toBeDefined();
+
+    db.markBrowserSessionBootstrapping(bootstrappingId!, { proxyNode: "Tokyo-01" });
+    db.markBrowserSessionReady(readyId!, { browserEngine: "chrome", proxyNode: "Osaka-01" });
+    db.markBrowserSessionFailure(failedId!, {
+      status: "failed",
+      errorCode: "bootstrap_failed",
+      errorMessage: "failed before broker cleanup",
+    });
+
+    const guards = db
+      .listBrowserSessionBootstrapGuards()
+      .map((guard) => ({ accountId: guard.accountId, status: guard.status, proxyNode: guard.proxyNode }))
+      .sort((a, b) => a.accountId - b.accountId);
+
+    expect(guards).toEqual([
+      { accountId: bootstrappingId!, status: "bootstrapping", proxyNode: "Tokyo-01" },
+    ]);
+  } finally {
+    db.close();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
