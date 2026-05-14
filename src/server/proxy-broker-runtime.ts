@@ -406,7 +406,9 @@ export async function openDomainProbedProxyBrokerRuntimeSession(input: {
       probeError.attempts = attempt;
       lastError = probeError;
       if (session.session.selected_ip) excludedIps.add(session.session.selected_ip);
-      await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(session.session.session_id, closeError, `${input.businessSite}-domain-probe-rotation`);
+      });
       if (requiresPreferredNode || requiresPreferredIp || attempt >= maxAttempts) {
         throw probeError;
       }
@@ -422,6 +424,12 @@ export async function closeProxyBrokerRuntimeSession(
   const normalized = String(sessionId || "").trim();
   if (!normalized) return;
   await createProxyBrokerClient(settings).closeSession(normalized);
+}
+
+export function logProxyBrokerSessionCloseError(sessionId: string | null | undefined, error: unknown, context: string): void {
+  const normalized = String(sessionId || "").trim() || "unknown";
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[proxy-broker] failed to close session ${normalized} during ${context}: ${message}`);
 }
 
 export function buildProxyBrokerEnv(session: ProxyBrokerRuntimeSession): NodeJS.ProcessEnv {

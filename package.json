@@ -16,6 +16,7 @@
     "test": "bun test",
     "test:worktree-bootstrap": "bash ./scripts/test-worktree-bootstrap.sh",
     "ledger:query": "bun run src/ledger-cli.ts query",
+    "broker:sessions:reconcile": "bun run src/proxy-broker-reconcile-cli.ts",
     "proxy:check-all": "bun run src/proxy-cli.ts check-all",
     "proxy:check": "bun run src/proxy-cli.ts check",
     "proxy:set": "bun run src/proxy-cli.ts set"

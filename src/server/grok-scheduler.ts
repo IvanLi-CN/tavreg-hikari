@@ -19,6 +19,7 @@ import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpst
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
+  logProxyBrokerSessionCloseError,
   openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
@@ -37,6 +38,7 @@ interface ActiveAttempt {
   brokerSession?: ProxyBrokerRuntimeSession | null;
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
+  lastProgressAtMs?: number | null;
   releaseResources?: () => Promise<void>;
   finalize?: (runner: () => Promise<void> | void) => void;
 }
@@ -110,6 +112,18 @@ function readJsonFileSync<T>(filePath: string): T | null {
   }
 }
 
+function readProgressMarkerMs(outputDir: string): number | null {
+  let latest: number | null = null;
+  for (const fileName of ["heartbeat.json", "stage.json"]) {
+    const marker = readJsonFileSync<{ updatedAt?: string | null }>(path.join(outputDir, fileName));
+    const updatedAtMs = parseIsoToMs(marker?.updatedAt);
+    if (updatedAtMs != null) {
+      latest = latest == null ? updatedAtMs : Math.max(latest, updatedAtMs);
+    }
+  }
+  return latest;
+}
+
 function isTerminalJobStatus(status: JobRecord["status"]): boolean {
   return status === "completed" || status === "failed" || status === "stopped";
 }
@@ -143,6 +157,7 @@ function stageMarkerStage(outputDir: string): string | null {
 
 const FORCE_STOP_SIGKILL_AFTER_MS = 5_000;
 const FORCE_STOP_REAP_AFTER_MS = 30_000;
+const RUNNING_STALE_ATTEMPT_REAP_AFTER_MS = 10 * 60_000;
 
 function randomSuffix(): string {
   return Math.random().toString(16).slice(2, 8);
@@ -457,10 +472,22 @@ export class GrokJobScheduler {
         (job.status === "force_stopping" || active.stopRequested === "force_stop")
         && stopRequestedAtMs != null
         && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
+      const markerProgressAtMs = readProgressMarkerMs(active.outputDir);
+      const explicitProgressAtMs = Math.max(active.lastProgressAtMs ?? 0, markerProgressAtMs ?? 0) || null;
+      const lastProgressAtMs = explicitProgressAtMs ?? parseIsoToMs(latestAttempt.startedAt) ?? null;
+      const runningStaleTimedOut =
+        (job.status === "running" || job.status === "completing")
+        && lastProgressAtMs != null
+        && nowMs - lastProgressAtMs >= RUNNING_STALE_ATTEMPT_REAP_AFTER_MS;
+      if (runningStaleTimedOut && !exited && active.stopRequested !== "force_stop") {
+        this.requestForceStop(active);
+        changed = true;
+        continue;
+      }
 
       if (!exited && !forceStopTimedOut) continue;
 
-      if (active.finalize) {
+      if (active.finalize && exited) {
         active.finalize(() =>
           this.handleAttemptExit(job.id, attemptId, active.outputDir, child.exitCode ?? null, child.signalCode ?? null, active),
         );
@@ -509,11 +536,6 @@ export class GrokJobScheduler {
       }
     }
     return changed;
-  }
-
-  private reapStoppedActiveAttempts(job: JobRecord): void {
-    if (!isStopInProgressStatus(job.status)) return;
-    this.reapActiveAttempts(job);
   }
 
   private async runLoop(jobId: number): Promise<void> {
@@ -653,7 +675,9 @@ export class GrokJobScheduler {
     });
     const refreshedJob = this.db.getJob(job.id);
     if (refreshedJob && (isStopInProgressStatus(refreshedJob.status) || refreshedJob.status === "stopped")) {
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "grok-stopped-before-launch");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       const { job: stoppedJob, attempt: stoppedAttempt } = this.db.completeAttemptStopped(job.id, attempt.id, null, {
         errorCode: refreshedJob.status === "force_stopping" ? "force_stopped" : "stopped_before_launch",
@@ -699,7 +723,9 @@ export class GrokJobScheduler {
         stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error) {
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((closeError) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "grok-spawn-failure");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
       throw error;
     }
@@ -708,7 +734,9 @@ export class GrokJobScheduler {
     const releaseResources = async () => {
       if (resourcesReleased) return;
       resourcesReleased = true;
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((error) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, error, "grok-attempt-finalize");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
     };
     const active: ActiveAttempt = {
@@ -719,6 +747,7 @@ export class GrokJobScheduler {
       brokerSession,
       stopRequested: null,
       stopRequestedAtMs: null,
+      lastProgressAtMs: Date.now(),
       releaseResources,
     };
     this.activeAttempts.set(attempt.id, active);
@@ -763,10 +792,12 @@ export class GrokJobScheduler {
       void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
     });
     child.stdout.on("data", (chunk) => {
+      active.lastProgressAtMs = Date.now();
       stdout += chunk.toString();
       void flushWorkerLog();
     });
     child.stderr.on("data", (chunk) => {
+      active.lastProgressAtMs = Date.now();
       stderr += chunk.toString();
       void flushWorkerLog();
     });

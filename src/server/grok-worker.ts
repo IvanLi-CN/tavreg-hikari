@@ -176,6 +176,18 @@ async function writeStageMarker(outputDir: string, stage: string, extra?: Record
   }).catch(() => {});
 }
 
+function startHeartbeat(outputDir: string): ReturnType<typeof setInterval> {
+  const writeHeartbeat = () => {
+    void writeJson(path.join(outputDir, "heartbeat.json"), {
+      updatedAt: nowIso(),
+    }).catch(() => {});
+  };
+  writeHeartbeat();
+  const timer = setInterval(writeHeartbeat, 30_000);
+  timer.unref?.();
+  return timer;
+}
+
 async function pageText(page: any): Promise<string> {
   try {
     const [title, text] = await Promise.all([
@@ -2524,6 +2536,7 @@ async function cleanupWithTimeout(task: Promise<unknown>, timeoutMs = 5_000): Pr
 
 async function run(): Promise<void> {
   const outputDir = requireEnv("GROK_JOB_OUTPUT_DIR");
+  const heartbeatTimer = startHeartbeat(outputDir);
   await writeStageMarker(outputDir, "bootstrap:start");
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
@@ -3075,6 +3088,7 @@ async function run(): Promise<void> {
     await keepBrowserOpenOnFailure(page, browser, failureStage);
     throw error;
   } finally {
+    clearInterval(heartbeatTimer);
     await cleanupWithTimeout(captureCookies(context, outputDir), 2_000);
     await cleanupWithTimeout(context?.close?.() ?? Promise.resolve(), 5_000);
     await cleanupWithTimeout(browser?.close?.() ?? Promise.resolve(), 5_000);

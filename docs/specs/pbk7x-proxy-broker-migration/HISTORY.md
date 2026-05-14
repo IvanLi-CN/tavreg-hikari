@@ -16,3 +16,4 @@
 - 旧 Mihomo 源码暂时保留，降低 CLI 与历史调试路径迁移风险。
 - 前端只展示 Broker profile、catalog、active sessions 与历史诊断快照，不展示或编辑 Broker API key。
 - 既有 `proxy_nodes` / `proxy_checks` 作为历史诊断表继续存在，不再作为生产调度池的真相源。
+- Broker active session 不再只依赖 worker close 事件清理；scheduler stale reaper、启动 dry-run reconciliation 与显式 `broker:sessions:reconcile -- --apply` 共同构成泄漏兜底。

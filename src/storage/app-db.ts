@@ -1230,6 +1230,13 @@ export class AppDatabase {
     return appDb;
   }
 
+  static async openExistingWithoutRecovery(dbPath: string): Promise<AppDatabase> {
+    if (!existsSync(dbPath)) {
+      throw new Error(`database_not_found:${dbPath}`);
+    }
+    return new AppDatabase(dbPath);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -4472,6 +4479,105 @@ export class AppDatabase {
       .query(`SELECT * FROM job_attempts WHERE job_id = ? ${where} ORDER BY started_at DESC`)
       .all(jobId) as Record<string, unknown>[];
     return rows.map(mapAttemptRow);
+  }
+
+  listActiveBrokerSessionReferences(): Array<{
+    sessionId: string;
+    attemptId: number;
+    jobId: number;
+    jobStatus: JobStatus;
+    attemptStatus: AttemptStatus;
+    site: JobSite;
+    startedAt: string;
+  }> {
+    const rows = this.db
+      .query(`
+        SELECT
+          attempts.broker_session_id AS session_id,
+          attempts.id AS attempt_id,
+          attempts.job_id AS job_id,
+          attempts.status AS attempt_status,
+          attempts.started_at AS started_at,
+          jobs.status AS job_status,
+          jobs.site AS site
+        FROM job_attempts attempts
+        JOIN jobs ON jobs.id = attempts.job_id
+        WHERE attempts.status = 'running'
+          AND attempts.broker_session_id IS NOT NULL
+          AND attempts.broker_session_id <> ''
+          AND jobs.status IN ('running', 'paused', 'stopping', 'force_stopping', 'completing')
+        ORDER BY attempts.started_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      sessionId: String(row.session_id || ""),
+      attemptId: Number(row.attempt_id),
+      jobId: Number(row.job_id),
+      jobStatus: String(row.job_status || "running") as JobStatus,
+      attemptStatus: String(row.attempt_status || "running") as AttemptStatus,
+      site: String(row.site || "tavily") as JobSite,
+      startedAt: String(row.started_at || ""),
+    }));
+  }
+
+  listBrokerSessionLaunchGuards(): Array<{
+    attemptId: number;
+    jobId: number;
+    jobStatus: JobStatus;
+    attemptStatus: AttemptStatus;
+    site: JobSite;
+    stage: string;
+    startedAt: string;
+  }> {
+    const rows = this.db
+      .query(`
+        SELECT
+          attempts.id AS attempt_id,
+          attempts.job_id AS job_id,
+          attempts.status AS attempt_status,
+          attempts.stage AS stage,
+          attempts.started_at AS started_at,
+          jobs.status AS job_status,
+          jobs.site AS site
+        FROM job_attempts attempts
+        JOIN jobs ON jobs.id = attempts.job_id
+        WHERE attempts.status = 'running'
+          AND (attempts.broker_session_id IS NULL OR attempts.broker_session_id = '')
+          AND jobs.status IN ('running', 'paused', 'stopping', 'force_stopping', 'completing')
+        ORDER BY attempts.started_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      attemptId: Number(row.attempt_id),
+      jobId: Number(row.job_id),
+      jobStatus: String(row.job_status || "running") as JobStatus,
+      attemptStatus: String(row.attempt_status || "running") as AttemptStatus,
+      site: String(row.site || "tavily") as JobSite,
+      stage: String(row.stage || ""),
+      startedAt: String(row.started_at || ""),
+    }));
+  }
+
+  listBrowserSessionBootstrapGuards(): Array<{
+    accountId: number;
+    status: Extract<AccountBrowserSessionStatus, "pending" | "bootstrapping">;
+    proxyNode: string | null;
+    updatedAt: string;
+  }> {
+    const rows = this.db
+      .query(`
+        SELECT account_id, status, proxy_node, updated_at
+        FROM account_browser_sessions
+        WHERE status = 'bootstrapping'
+        ORDER BY updated_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      accountId: Number(row.account_id),
+      status: String(row.status || "pending") as Extract<AccountBrowserSessionStatus, "pending" | "bootstrapping">,
+      proxyNode: row.proxy_node == null ? null : String(row.proxy_node),
+      updatedAt: String(row.updated_at || ""),
+    }));
   }
 
   createAccountExtractBatch(input: {

@@ -22,11 +22,13 @@ import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
   createProxyBrokerClient,
+  logProxyBrokerSessionCloseError,
   openDomainProbedProxyBrokerRuntimeSession,
   ProxyBrokerDomainProbeError,
   reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
+import { reconcileProxyBrokerSessions } from "./proxy-broker-reconciler.js";
 import {
   createMihomoNodeCheckRunner,
   createProxyCheckCoordinator,
@@ -1509,6 +1511,10 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "session_failed");
     throw new Error(message);
   }
+  input.db.markBrowserSessionBootstrapping(input.accountId, {
+    browserEngine: "chrome",
+    proxyNode: requestedProxyNode ? selectedProxyNode?.nodeName || requestedProxyNode : null,
+  });
   let trackedBrokerSession: { value: ProxyBrokerRuntimeSession; release: () => void } | null = null;
   try {
     trackedBrokerSession = await input.proxyTracker.reserve(async (activeBootstrapIps) => {
@@ -1588,7 +1594,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     broadcastAccountAction(input.broadcast, input.accountId, "mailbox_status");
   } catch (error) {
     trackedBrokerSession.release();
-    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch((closeError) => {
+      logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "mailbox-bootstrap-setup-failure");
+    });
     throw error;
   }
 
@@ -1728,7 +1736,9 @@ async function authorizeMailboxWithBrowserAutomation(input: {
     if (trackedBrokerSession) {
       trackedBrokerSession.release();
     }
-    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch(() => {});
+    await closeProxyBrokerRuntimeSession(runtimeSettings, brokerSession.session.session_id).catch((closeError) => {
+      logProxyBrokerSessionCloseError(brokerSession.session.session_id, closeError, "mailbox-bootstrap-finalize");
+    });
   }
 }
 
@@ -1740,6 +1750,23 @@ async function main(): Promise<void> {
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);
+  void reconcileProxyBrokerSessions({
+    settings: readSettings(),
+    references: db.listActiveBrokerSessionReferences(),
+    apply: false,
+  })
+    .then((result) => {
+      if (result.orphanSessions.length > 0) {
+        console.warn(
+          `[proxy-broker-reconciler] dry-run found ${result.orphanSessions.length} orphan sessions; run \`bun run broker:sessions:reconcile -- --apply\` after reviewing the list`,
+        );
+      }
+    })
+    .catch((error) => {
+      console.warn(
+        `[proxy-broker-reconciler] startup dry-run failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   const markStaleSessionBootstraps = () => {
     const settings = readSettings();
     return db.markStaleBrowserSessionBootstrapsAsFailed(
