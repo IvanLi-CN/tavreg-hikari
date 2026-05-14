@@ -528,6 +528,45 @@ test("grok running reaper force stops stale attempts and releases broker resourc
   appDb.close();
 });
 
+test("grok running reaper keeps silent attempts with fresh heartbeat alive", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "heartbeat-grok@example.test", outputDir: tempDir });
+  await writeFile(path.join(tempDir, "heartbeat.json"), JSON.stringify({ updatedAt: new Date().toISOString() }), "utf8");
+  let killCount = 0;
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        killCount += 1;
+        return true;
+      },
+    },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39095, mixedPort: 49095 },
+    brokerSession: { session: { session_id: "sess-heartbeat-grok" } },
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+    releaseResources: async () => {},
+  };
+  scheduler["activeAttempts"].set(attempt.id, activeAttempt as any);
+
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  expect(killCount).toBe(0);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  scheduler["activeAttempts"].clear();
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("grok graceful stop reaps exited attempts even without an error artifact", async () => {
   const { appDb, tempDir } = await createTempDb();
   const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);

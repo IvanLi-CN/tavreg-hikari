@@ -65,6 +65,24 @@ test("proxy broker reconciler apply closes only orphan sessions", async () => {
   expect(closed).toEqual(["sess-orphan-a", "sess-orphan-b"]);
 });
 
+test("proxy broker reconciler rechecks references before closing orphan sessions", async () => {
+  const closed: string[] = [];
+  const result = await reconcileProxyBrokerSessions({
+    settings: { proxyBrokerBaseUrl: "https://proxy.example.test", proxyBrokerProfileId: "Tavily", timeoutMs: 1000 },
+    references: [],
+    apply: true,
+    listSessions: async () => ({ sessions: [session("sess-race")] }),
+    refreshReferences: async () => [{ sessionId: "sess-race", attemptId: 1, jobId: 1, jobStatus: "running" }],
+    closeSession: async (sessionId) => {
+      closed.push(sessionId);
+    },
+  });
+
+  expect(result.closedSessionIds).toEqual([]);
+  expect(result.skippedReferencedSessionIds).toEqual(["sess-race"]);
+  expect(closed).toEqual([]);
+});
+
 test("proxy broker reconciler records close failures for later compensation", async () => {
   const result = await reconcileProxyBrokerSessions({
     settings: { proxyBrokerBaseUrl: "https://proxy.example.test", proxyBrokerProfileId: "Tavily", timeoutMs: 1000 },

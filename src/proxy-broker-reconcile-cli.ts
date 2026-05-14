@@ -63,6 +63,7 @@ async function main(): Promise<void> {
       settings,
       references: db.listActiveBrokerSessionReferences(),
       apply,
+      refreshReferences: () => db.listActiveBrokerSessionReferences(),
     });
     console.log(JSON.stringify({
       apply,
@@ -70,6 +71,7 @@ async function main(): Promise<void> {
       referencedBrokerSessions: result.referencedSessionIds.length,
       orphanBrokerSessions: result.orphanSessions.length,
       closedSessions: result.closedSessionIds.length,
+      skippedReferencedSessions: result.skippedReferencedSessionIds,
       closeErrors: result.closeErrors,
       browserSessionBootstraps: bootstrapGuards,
       orphanSessions: result.orphanSessions.map((session) => ({

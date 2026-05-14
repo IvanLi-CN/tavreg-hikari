@@ -26,6 +26,7 @@ export interface BrokerSessionReconcilePlan {
 export interface BrokerSessionReconcileResult extends BrokerSessionReconcilePlan {
   apply: boolean;
   closedSessionIds: string[];
+  skippedReferencedSessionIds: string[];
   closeErrors: Array<{ sessionId: string; message: string }>;
 }
 
@@ -55,6 +56,7 @@ export async function reconcileProxyBrokerSessions(input: {
   apply?: boolean;
   listSessions?: () => Promise<{ sessions: ProxyBrokerSession[] }>;
   closeSession?: (sessionId: string) => Promise<void>;
+  refreshReferences?: () => BrokerSessionReference[] | Promise<BrokerSessionReference[]>;
 }): Promise<BrokerSessionReconcileResult> {
   const client = input.listSessions && input.closeSession ? null : createProxyBrokerClient(input.settings);
   const listed = input.listSessions ? await input.listSessions() : await client!.listSessions();
@@ -64,11 +66,24 @@ export async function reconcileProxyBrokerSessions(input: {
   });
   const apply = Boolean(input.apply);
   const closedSessionIds: string[] = [];
+  const skippedReferencedSessionIds: string[] = [];
   const closeErrors: Array<{ sessionId: string; message: string }> = [];
   if (apply) {
     for (const session of plan.orphanSessions) {
       const sessionId = String(session.session_id || "").trim();
       if (!sessionId) continue;
+      if (input.refreshReferences) {
+        const refreshedReferences = await input.refreshReferences();
+        const refreshedReferenced = new Set(
+          refreshedReferences
+            .map((item) => String(item.sessionId || "").trim())
+            .filter(Boolean),
+        );
+        if (refreshedReferenced.has(sessionId)) {
+          skippedReferencedSessionIds.push(sessionId);
+          continue;
+        }
+      }
       try {
         if (input.closeSession) {
           await input.closeSession(sessionId);
@@ -88,6 +103,7 @@ export async function reconcileProxyBrokerSessions(input: {
     ...plan,
     apply,
     closedSessionIds,
+    skippedReferencedSessionIds,
     closeErrors,
   };
 }

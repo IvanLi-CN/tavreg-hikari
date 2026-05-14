@@ -10,7 +10,7 @@ Tavreg Hikari can show widespread account session failures when Proxy Broker sti
 - Compare Broker catalog counts, active sessions, and fresh healthy metadata from inside the `tavreg-hikari` container using the same Broker base URL and API key as production.
 - Prefer the Docker network Broker API URL when both services share a network. Avoid sending same-host service-to-service traffic through the public HTTPS route.
 - Use `bun run broker:sessions:reconcile -- --dry-run --db <sqlite>` before manual cleanup. It compares Broker active sessions with active `job_attempts.broker_session_id` references and prints the exact orphan session list.
-- Only run `bun run broker:sessions:reconcile -- --apply --db <sqlite>` after reviewing the dry-run list. It must close only sessions that are not referenced by active attempts.
+- Only run `bun run broker:sessions:reconcile -- --apply --db <sqlite>` after reviewing the dry-run list. It must close only sessions that are not referenced by active attempts, and it should re-read DB references immediately before each close to avoid the scheduler launch window.
 - If direct `sessions/open` succeeds quickly but `projects/{project}/refresh` hangs, check whether the app is refreshing only because a minority of catalog metadata is stale. Existing healthy candidates should be used immediately; refresh should be reserved for no-candidate recovery.
 - Close stale Broker sessions through `DELETE /api/v1/projects/{project}/sessions/{session_id}` before triggering a full probe. Stale persisted sessions can keep runtime restore noisy and make probe failures harder to interpret.
 - Treat failed account session proxy IPs as diagnostics only. Do not reuse them as preferred IPs for later open-session calls.
@@ -27,5 +27,5 @@ Tavreg Hikari can show widespread account session failures when Proxy Broker sti
 - Broker-open and domain-probe failures should complete the attempt as failed with the original `proxy_broker_*` or `proxy_domain_unreachable` code. Do not leave the attempt running as `spawned` with null proxy fields.
 - If Broker session succeeds but worker spawn fails, close the session and release local port leases in the same setup-failure path; resource release must remain idempotent because child close handlers and reapers can both observe terminal state.
 - Scheduler release paths must log Broker session close failures and leave enough DB state for reconciliation to close missed sessions later.
-- Stale running or completing attempts must be reaped to terminal state and release their Broker session; paused jobs may retain live attempts until the job resumes or is stopped.
+- Stale running or completing attempts must be reaped to terminal state and release their Broker session; paused jobs may retain live attempts until the job resumes or is stopped. For flows with sparse stdout, use a heartbeat or stage marker rather than stdout silence alone.
 - Regression tests should cover ready-only proxy reuse, failed-session proxy reuse suppression, active bootstrap IP exclusion, and Broker client timeout defaults.
