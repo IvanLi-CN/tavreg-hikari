@@ -287,6 +287,63 @@ test("chatgpt running reaper syncs worker stage markers into the attempt ledger"
   appDb.close();
 });
 
+test("chatgpt running reaper force stops stale attempts and releases broker resources", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const job = appDb.createJob({
+    site: "chatgpt",
+    runMode: "headless",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+    payloadJson: {},
+  });
+  const attempt = appDb.createAttempt(job.id, {
+    accountEmail: "stale-chatgpt@example.test",
+    outputDir: path.join(tempDir, "stale-chatgpt-attempt"),
+  });
+  let killCount = 0;
+  let released = false;
+  const activeAttempt = {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        killCount += 1;
+        return true;
+      },
+    },
+    attempt,
+    outputDir: attempt.outputDir,
+    reservedPorts: { apiPort: 39095, mixedPort: 49095 },
+    brokerSession: { session: { session_id: "sess-stale-chatgpt" } },
+    stopRequested: null,
+    lastProgressAtMs: Date.now() - 10 * 60_000 - 1,
+    releaseResources: async () => {
+      released = true;
+    },
+  };
+  (scheduler as any).activeAttempts.set(attempt.id, activeAttempt);
+
+  (scheduler as any).reapActiveAttempts(appDb.getJob(job.id)!);
+  expect(killCount).toBe(1);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("running");
+  expect(released).toBe(false);
+
+  (activeAttempt as any).stopRequested = "force_stop";
+  (activeAttempt as any).stopRequestedAtMs = Date.now() - 30_000 - 1;
+  (scheduler as any).reapActiveAttempts(appDb.getJob(job.id)!);
+
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("stopped");
+  expect((scheduler as any).activeAttempts.size).toBe(0);
+  expect(released).toBe(true);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("chatgpt scheduler persists and updates upstream group selection in job payload", async () => {
   const { appDb } = await createTempDb();
   const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {

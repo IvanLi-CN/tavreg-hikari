@@ -20,6 +20,7 @@ import { buildLocalWritebackSourceOrigin, buildUpstreamSyncConfig, writeBackUpst
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
+  logProxyBrokerSessionCloseError,
   openDomainProbedProxyBrokerRuntimeSession,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
@@ -38,6 +39,7 @@ interface ActiveAttempt {
   brokerSession: ProxyBrokerRuntimeSession;
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
+  lastProgressAtMs?: number | null;
   releaseResources?: () => Promise<void>;
   finalize?: (runner: () => Promise<void> | void) => void;
 }
@@ -84,6 +86,7 @@ const CHATGPT_START_COOLDOWN_ERROR_CODES = new Set([
   "chatgpt_auth_challenge_detected",
   "chatgpt_captcha_manual_required",
 ]);
+const RUNNING_STALE_ATTEMPT_REAP_AFTER_MS = 10 * 60_000;
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -448,7 +451,7 @@ export class ChatGptJobScheduler {
       this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
-    if (!["running", "paused", "stopping"].includes(job.status)) {
+    if (!["running", "paused", "stopping", "completing"].includes(job.status)) {
       throw new Error(`current ChatGPT job cannot be force stopped from ${job.status}`);
     }
     const next = this.db.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
@@ -583,6 +586,7 @@ export class ChatGptJobScheduler {
   }
 
   private reapActiveAttempts(job: JobRecord): boolean {
+    if (!["running", "completing", "stopping", "force_stopping"].includes(job.status)) return false;
     let changed = false;
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
@@ -608,9 +612,19 @@ export class ChatGptJobScheduler {
         (job.status === "force_stopping" || active.stopRequested === "force_stop")
         && stopRequestedAtMs != null
         && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
+      const lastProgressAtMs = active.lastProgressAtMs ?? parseIsoToMs(latestAttempt.startedAt) ?? null;
+      const runningStaleTimedOut =
+        (job.status === "running" || job.status === "completing")
+        && lastProgressAtMs != null
+        && nowMs - lastProgressAtMs >= RUNNING_STALE_ATTEMPT_REAP_AFTER_MS;
+      if (runningStaleTimedOut && !exited && active.stopRequested !== "force_stop") {
+        this.requestForceStop(active);
+        changed = true;
+        continue;
+      }
       if (!exited && !forceStopTimedOut) continue;
 
-      if (active.finalize) {
+      if (active.finalize && exited) {
         active.finalize(() =>
           this.handleAttemptExit(job.id, attemptId, active.outputDir, child.exitCode ?? null, child.signalCode ?? null, active),
         );
@@ -618,11 +632,13 @@ export class ChatGptJobScheduler {
         continue;
       }
       if (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut) {
+        const errorArtifact = readJsonFileSync<{ error?: string }>(path.join(active.outputDir, "error.json"));
         const signal = child.signalCode ?? null;
         this.db.completeAttemptStopped(job.id, attemptId, null, {
           errorCode: signal ? `force_stop_${String(signal).toLowerCase()}` : "force_stopped",
           errorMessage:
-            signal ? `terminated by ${signal}` : child.exitCode != null ? `process exited with code ${child.exitCode}` : "stopped by user",
+            errorArtifact?.error
+            || (signal ? `terminated by ${signal}` : child.exitCode != null ? `process exited with code ${child.exitCode}` : "stopped by user"),
         });
         this.cleanupActiveAttempt(active);
         changed = true;
@@ -894,7 +910,9 @@ export class ChatGptJobScheduler {
     const releaseResources = async () => {
       if (resourcesReleased) return;
       resourcesReleased = true;
-      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch(() => {});
+      await closeProxyBrokerRuntimeSession(settings, brokerSession.session.session_id).catch((error) => {
+        logProxyBrokerSessionCloseError(brokerSession.session.session_id, error, "chatgpt-attempt-finalize");
+      });
       await Promise.all([portLeases.apiPort.release(), portLeases.mixedPort.release()]);
     };
     const active: ActiveAttempt = {
@@ -946,11 +964,13 @@ export class ChatGptJobScheduler {
     });
 
     child.stdout.on("data", (chunk) => {
+      active.lastProgressAtMs = Date.now();
       stdout += chunk.toString();
       void flushWorkerLog();
     });
 
     child.stderr.on("data", (chunk) => {
+      active.lastProgressAtMs = Date.now();
       stderr += chunk.toString();
       void flushWorkerLog();
     });
@@ -967,6 +987,9 @@ export class ChatGptJobScheduler {
     child.once("close", (code, signal) => {
       void finalize(() => this.handleAttemptExit(job.id, attempt.id, outputDir, code, signal, active));
     });
+    active.finalize = (runner) => {
+      void finalize(runner);
+    };
   }
 
   private async handleAttemptExit(

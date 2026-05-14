@@ -27,6 +27,7 @@ import {
   reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
 } from "./proxy-broker-runtime.js";
+import { reconcileProxyBrokerSessions } from "./proxy-broker-reconciler.js";
 import {
   createMihomoNodeCheckRunner,
   createProxyCheckCoordinator,
@@ -1740,6 +1741,23 @@ async function main(): Promise<void> {
   const bootstrapSettings = buildInitialSettingsFromEnv(settingsDefaults);
   const defaults = db.ensureSettings(bootstrapSettings);
   const readSettings = () => db.getSettings(settingsDefaults);
+  void reconcileProxyBrokerSessions({
+    settings: readSettings(),
+    references: db.listActiveBrokerSessionReferences(),
+    apply: false,
+  })
+    .then((result) => {
+      if (result.orphanSessions.length > 0) {
+        console.warn(
+          `[proxy-broker-reconciler] dry-run found ${result.orphanSessions.length} orphan sessions; run \`bun run broker:sessions:reconcile -- --apply\` after reviewing the list`,
+        );
+      }
+    })
+    .catch((error) => {
+      console.warn(
+        `[proxy-broker-reconciler] startup dry-run failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   const markStaleSessionBootstraps = () => {
     const settings = readSettings();
     return db.markStaleBrowserSessionBootstrapsAsFailed(

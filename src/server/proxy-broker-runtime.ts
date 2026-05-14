@@ -424,6 +424,12 @@ export async function closeProxyBrokerRuntimeSession(
   await createProxyBrokerClient(settings).closeSession(normalized);
 }
 
+export function logProxyBrokerSessionCloseError(sessionId: string | null | undefined, error: unknown, context: string): void {
+  const normalized = String(sessionId || "").trim() || "unknown";
+  const message = error instanceof Error ? error.message : String(error);
+  console.warn(`[proxy-broker] failed to close session ${normalized} during ${context}: ${message}`);
+}
+
 export function buildProxyBrokerEnv(session: ProxyBrokerRuntimeSession): NodeJS.ProcessEnv {
   return {
     PROXY_BROKER_SESSION_ID: session.session.session_id,

@@ -24,6 +24,7 @@ import { reserveMihomoPortLeases } from "./port-lease.js";
 import {
   buildProxyBrokerEnv,
   closeProxyBrokerRuntimeSession,
+  logProxyBrokerSessionCloseError,
   openDomainProbedProxyBrokerRuntimeSession,
   reusableBrowserSessionProxyIp,
   type ProxyBrokerRuntimeSession,
@@ -484,7 +485,9 @@ export class AccountBusinessFlowManager {
         attemptId,
         onClose: async (code, signal, lifecycle) => {
           if (brokerSession) {
-            await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+            await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((error) => {
+              logProxyBrokerSessionCloseError(brokerSession?.session.session_id, error, "account-business-tavily-retained-close");
+            });
           }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
@@ -597,7 +600,9 @@ export class AccountBusinessFlowManager {
       });
     } catch (error) {
       if (brokerSession) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((error) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, error, "account-business-tavily-launch-failure");
+        });
       }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
@@ -696,7 +701,9 @@ export class AccountBusinessFlowManager {
         onClose: async (code, signal, lifecycle) => {
           const sessionId = brokerSession?.session.session_id;
           if (sessionId) {
-            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch((error) => {
+              logProxyBrokerSessionCloseError(sessionId, error, "account-business-microsoft-close");
+            });
           }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{ ok?: boolean; finalUrl?: string | null }>(path.join(outputDir, "result.json"));
@@ -761,7 +768,9 @@ export class AccountBusinessFlowManager {
       });
     } catch (error) {
       if (brokerSession) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((error) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, error, "account-business-microsoft-launch-failure");
+        });
       }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
@@ -966,7 +975,9 @@ export class AccountBusinessFlowManager {
         onClose: async (code, signal, lifecycle) => {
           const sessionId = brokerSession?.session.session_id;
           if (sessionId) {
-            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch((error) => {
+              logProxyBrokerSessionCloseError(sessionId, error, "account-business-chatgpt-close");
+            });
           }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
@@ -1076,7 +1087,9 @@ export class AccountBusinessFlowManager {
       });
     } catch (error) {
       if (brokerSession) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((error) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, error, "account-business-chatgpt-launch-failure");
+        });
       }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
@@ -1178,7 +1191,9 @@ export class AccountBusinessFlowManager {
         onClose: async (code, signal, lifecycle) => {
           const sessionId = brokerSession?.session.session_id;
           if (sessionId) {
-            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch(() => {});
+            await closeProxyBrokerRuntimeSession(brokerSettings, sessionId).catch((error) => {
+              logProxyBrokerSessionCloseError(sessionId, error, "account-business-grok-close");
+            });
           }
           await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
           const result = await readJsonFile<{
@@ -1282,7 +1297,9 @@ export class AccountBusinessFlowManager {
       });
     } catch (error) {
       if (brokerSession) {
-        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch(() => {});
+        await closeProxyBrokerRuntimeSession(brokerSettings, brokerSession.session.session_id).catch((error) => {
+          logProxyBrokerSessionCloseError(brokerSession?.session.session_id, error, "account-business-grok-launch-failure");
+        });
       }
       await Promise.all([portLeases?.apiPort.release(), portLeases?.mixedPort.release()]);
       this.rollbackHiddenLaunchSetup({
