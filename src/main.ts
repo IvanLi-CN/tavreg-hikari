@@ -36,6 +36,8 @@ import {
   isMicrosoftKeepSignedInPrompt,
   type MicrosoftProofSurfaceClassification,
   shouldBlockMicrosoftPasswordSubmission,
+  shouldPreserveMicrosoftPasswordSubmissionState,
+  shouldResetMicrosoftPasswordSubmissionState,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
@@ -5190,13 +5192,17 @@ async function handleMicrosoftPasswordPrompt(
     throw new Error(`${classifiedError.code}:${classifiedError.message}`);
   }
   const currentPasswordValue = await page.locator(activeSelector).first().inputValue().catch(() => "");
-  if (state.submissionKey !== surfaceKey) {
+  const preserveRecentPasswordSubmission = shouldPreserveMicrosoftPasswordSubmissionState({
+    url: page.url(),
+    submittedAt: state.submittedAt,
+  });
+  if (state.submissionKey !== surfaceKey && !preserveRecentPasswordSubmission) {
     state.submissionKey = surfaceKey;
     state.submittedAt = null;
     state.submittedCount = 0;
   }
-  if (state.submissionKey === surfaceKey && state.submittedAt && state.submittedCount > 0) {
-    if (Date.now() - state.submittedAt >= 8_000) {
+  if ((state.submissionKey === surfaceKey || preserveRecentPasswordSubmission) && state.submittedAt && state.submittedCount > 0) {
+    if (!preserveRecentPasswordSubmission && Date.now() - state.submittedAt >= 8_000) {
       throw new Error(`microsoft_password_submit_stalled:${surfaceKey}`);
     }
     if (!currentPasswordValue) {
@@ -6878,7 +6884,13 @@ export async function completeMicrosoftLogin(
           passkeyState.homeReturnAttempted = false;
         }
       }
-      if (!/login\.live\.com\/ppsecure\/post\.srf/i.test(currentUrl) && !(await isMicrosoftLikelyPasswordSurface(page))) {
+      if (
+        shouldResetMicrosoftPasswordSubmissionState({
+          url: currentUrl,
+          submittedAt: passwordState.submittedAt,
+          isLikelyPasswordSurface: await isMicrosoftLikelyPasswordSurface(page),
+        })
+      ) {
         passwordState.submissionKey = null;
         passwordState.submittedAt = null;
         passwordState.submittedCount = 0;

@@ -78,6 +78,7 @@ export interface MicrosoftProofSurfaceClassification {
 }
 
 export const MICROSOFT_PASSWORD_SUBMIT_LIMIT = 3;
+export const MICROSOFT_PASSWORD_SUBMIT_SETTLE_MS = 15_000;
 
 function normalizeText(value: string | undefined | null): string {
   return String(value || "")
@@ -210,6 +211,44 @@ export function classifyMicrosoftPasswordError(errors: string[]): MicrosoftPassw
 
 export function shouldBlockMicrosoftPasswordSubmission(totalSubmittedCount: number): boolean {
   return totalSubmittedCount >= MICROSOFT_PASSWORD_SUBMIT_LIMIT;
+}
+
+export function shouldPreserveMicrosoftPasswordSubmissionState(input: {
+  url?: string | null;
+  submittedAt?: number | null;
+  now?: number;
+  settleMs?: number;
+}): boolean {
+  const submittedAt = typeof input.submittedAt === "number" && Number.isFinite(input.submittedAt)
+    ? input.submittedAt
+    : null;
+  if (!submittedAt) return false;
+  const now = typeof input.now === "number" && Number.isFinite(input.now) ? input.now : Date.now();
+  const settleMs = Math.max(1_000, Math.trunc(input.settleMs ?? MICROSOFT_PASSWORD_SUBMIT_SETTLE_MS));
+  const elapsedMs = now - submittedAt;
+  if (elapsedMs < 0 || elapsedMs > settleMs) return false;
+  return /login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(String(input.url || ""));
+}
+
+export function shouldResetMicrosoftPasswordSubmissionState(input: {
+  url?: string | null;
+  submittedAt?: number | null;
+  isLikelyPasswordSurface: boolean;
+  now?: number;
+}): boolean {
+  if (
+    shouldPreserveMicrosoftPasswordSubmissionState({
+      url: input.url,
+      submittedAt: input.submittedAt,
+      now: input.now,
+    })
+  ) {
+    return false;
+  }
+  if (/login\.live\.com\/ppsecure\/post\.srf/i.test(String(input.url || ""))) {
+    return false;
+  }
+  return !input.isLikelyPasswordSurface;
 }
 
 export function classifyMicrosoftFlowInterrupt(input: {

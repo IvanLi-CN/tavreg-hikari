@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-05-11
+- Last: 2026-05-14
 
 ## 背景 / 问题陈述
 
@@ -58,6 +58,7 @@
   - Tavily Login 授权确认
 - 当 Microsoft 实际出现 proof / 备用邮箱验证分支时，若账号已配置备用邮箱映射，程序必须自动填写备用邮箱并通过统一 mailbox waiter/verification-code extractor 获取安全码。
 - 当 Tavily OAuth 回跳在 `login.live.com/oauth20_authorize.srf` 上出现 “Verify your email / We'll send a code to ...” proof confirmation 页面时，必须优先使用账号绑定的 proof mailbox 完成确认与收码，不得先点击 `Use your password` shortcut。
+- Microsoft 密码提交后，在 Microsoft 登录域名内的短暂 OAuth authorize / post-submit 过渡窗口不得重置密码提交状态；即使页面短暂回现密码输入面，也不得重复提交同一密码并退化为 `microsoft_password_submission_limit`。
 - 成功后必须回到 `https://app.tavily.com/home` 并继续后续 API key 获取。
 
 ### SHOULD
@@ -94,6 +95,7 @@
 - Given 用户从微软账号页启动 ChatGPT / Grok 的单账号业务流，When 该站点选择 `Continue with Microsoft`，Then 系统复用同一套 Microsoft 登录状态机完成账号密码、proof 与保持登录分支。
 - Given Bootstrap 登录方案为 `tavily_home` 且 Microsoft OAuth 停在密码页或未回到 Tavily Home，When bootstrap worker 返回失败，Then `browserSession.lastErrorCode` 必须为 `microsoft_oauth_did_not_reach_home`，且错误文案可被账号页 tooltip 直接消费。
 - Given Bootstrap 登录方案为默认 `microsoft_graph`，When Graph OAuth callback/token 已写入，Then bootstrap 以 Graph 授权事实源收敛，不要求访问或回到 Tavily Home。
+- Given Microsoft 密码提交后页面短暂留在 `login.live.com/oauth20_authorize.srf` 并再次出现密码输入面，When 登录状态机继续轮询，Then 同一密码最多提交一次，并继续等待过渡到 callback / proof / 具体错误面。
 - Given 本次实现完成，When 执行 `bun run typecheck`，Then 类型检查通过。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MICROSOFT_PASSWORD_SUBMIT_LIMIT,
+  MICROSOFT_PASSWORD_SUBMIT_SETTLE_MS,
   buildMicrosoftPasswordSurfaceKey,
   classifyMicrosoftFlowInterrupt,
   classifyMicrosoftProofSurface,
@@ -11,6 +12,8 @@ import {
   isMicrosoftKeepSignedInPrompt,
   shouldBlockMicrosoftPasswordSubmission,
   shouldClassifyMicrosoftUnknownRecoveryEmail,
+  shouldPreserveMicrosoftPasswordSubmissionState,
+  shouldResetMicrosoftPasswordSubmissionState,
   shouldAttemptMicrosoftProofPasswordFallback,
   shouldRecoverMicrosoftPasskeyToProofCode,
 } from "../src/microsoft-login-state.ts";
@@ -51,6 +54,62 @@ describe("Microsoft login state", () => {
     expect(shouldBlockMicrosoftPasswordSubmission(2)).toBe(false);
     expect(shouldBlockMicrosoftPasswordSubmission(3)).toBe(true);
     expect(shouldBlockMicrosoftPasswordSubmission(4)).toBe(true);
+  });
+
+  test("preserves recent Microsoft password submission state during page transition", () => {
+    const submittedAt = 10_000;
+    expect(
+      shouldPreserveMicrosoftPasswordSubmissionState({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=123",
+        submittedAt,
+        now: submittedAt + MICROSOFT_PASSWORD_SUBMIT_SETTLE_MS - 1,
+      }),
+    ).toBe(true);
+    expect(
+      shouldPreserveMicrosoftPasswordSubmissionState({
+        url: "https://account.live.com/identity/confirm",
+        submittedAt,
+        now: submittedAt + 1_000,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not preserve password submission state after settle window or outside Microsoft", () => {
+    const submittedAt = 10_000;
+    expect(
+      shouldPreserveMicrosoftPasswordSubmissionState({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=123",
+        submittedAt,
+        now: submittedAt + MICROSOFT_PASSWORD_SUBMIT_SETTLE_MS + 1,
+      }),
+    ).toBe(false);
+    expect(
+      shouldPreserveMicrosoftPasswordSubmissionState({
+        url: "https://example.test/oauth20_authorize.srf",
+        submittedAt,
+        now: submittedAt + 1_000,
+      }),
+    ).toBe(false);
+  });
+
+  test("regression: OAuth authorize transition after password submit does not permit duplicate password submit", () => {
+    const submittedAt = 10_000;
+    const url = "https://login.live.com/oauth20_authorize.srf?client_id=123&scope=openid";
+
+    const oldResetDecision =
+      !/login\.live\.com\/ppsecure\/post\.srf/i.test(url) &&
+      !false;
+
+    expect(oldResetDecision).toBe(true);
+    expect(
+      shouldResetMicrosoftPasswordSubmissionState({
+        url,
+        submittedAt,
+        now: submittedAt + 4_000,
+        isLikelyPasswordSurface: false,
+      }),
+    ).toBe(false);
+    expect(shouldBlockMicrosoftPasswordSubmission(1)).toBe(false);
   });
 
   test("classifies microsoft try-again-later interrupt page", () => {
