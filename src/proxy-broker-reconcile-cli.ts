@@ -1,12 +1,15 @@
+import { config as loadDotenv } from "dotenv";
 import { AppDatabase, type AppSettings } from "./storage/app-db.js";
 import { reconcileProxyBrokerSessions } from "./server/proxy-broker-reconciler.js";
+
+loadDotenv({ path: ".env.local", quiet: true });
 
 function toInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : fallback;
 }
 
-function minimalSettings(): Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs"> {
+function brokerSettingsDefaults(): Pick<AppSettings, "proxyBrokerBaseUrl" | "proxyBrokerProfileId" | "timeoutMs"> {
   return {
     proxyBrokerBaseUrl: (process.env.PROXY_BROKER_BASE_URL || "https://proxy-broker.ivanli.cc").trim().replace(/\/+$/g, ""),
     proxyBrokerProfileId: (process.env.PROXY_BROKER_PROFILE_ID || "Tavily").trim() || "Tavily",
@@ -44,8 +47,9 @@ async function main(): Promise<void> {
   const { apply, dbPath } = parseArgs(process.argv.slice(2));
   const db = await AppDatabase.open(dbPath);
   try {
+    const settings = db.getSettings(brokerSettingsDefaults());
     const result = await reconcileProxyBrokerSessions({
-      settings: minimalSettings(),
+      settings,
       references: db.listActiveBrokerSessionReferences(),
       apply,
     });
