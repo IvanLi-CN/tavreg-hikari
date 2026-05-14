@@ -4,7 +4,7 @@ export interface MicrosoftPasswordErrorClassification {
 }
 
 export interface MicrosoftFlowInterruptClassification {
-  code: "microsoft_auth_try_again_later" | "microsoft_account_locked";
+  code: "microsoft_auth_try_again_later" | "microsoft_account_locked" | "microsoft_password_rate_limited";
   message: string;
 }
 
@@ -264,6 +264,16 @@ export function classifyMicrosoftFlowInterrupt(input: {
   const bodyText = normalizeText(input.bodyText);
   const combined = [title, bodyText].filter((part) => part.length > 0).join(" | ");
   if (!combined) return null;
+  if (
+    /too many requests|too many times|too many attempts|you['’]?ve tried to sign in too many times|لقد حاولت تسجيل الدخول عدة مرات كثيرة/i.test(
+      combined,
+    )
+  ) {
+    return {
+      code: "microsoft_password_rate_limited",
+      message: combined,
+    };
+  }
   if (
     /try again later|too many repeated authentication attempts|please wait a moment and try again|serrorcode.?80041002|80041002|请稍后重试/i.test(
       combined,

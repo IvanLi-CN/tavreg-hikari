@@ -127,6 +127,32 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("classifies Microsoft Too Many Requests page as password rate limited", () => {
+    const classification = classifyMicrosoftFlowInterrupt({
+      url: "https://login.live.com/oauth20_authorize.srf?client_id=123",
+      title: "Too Many Requests",
+      bodyText: "Too Many Requests",
+    });
+
+    expect(classification).toEqual({
+      code: "microsoft_password_rate_limited",
+      message: "too many requests | too many requests",
+    });
+  });
+
+  test("classifies Arabic repeated Microsoft password attempts as rate limited", () => {
+    const classification = classifyMicrosoftFlowInterrupt({
+      url: "https://login.live.com/oauth20_authorize.srf?client_id=123",
+      title: "تسجيل الدخول",
+      bodyText: "لقد حاولت تسجيل الدخول عدة مرات كثيرة باستخدام حساب أو كلمة مرور غير صحيحة.",
+    });
+
+    expect(classification).toEqual({
+      code: "microsoft_password_rate_limited",
+      message: "تسجيل الدخول | لقد حاولت تسجيل الدخول عدة مرات كثيرة باستخدام حساب أو كلمة مرور غير صحيحة.",
+    });
+  });
+
   test("classifies locked Microsoft account abuse page", () => {
     const classification = classifyMicrosoftFlowInterrupt({
       url: "https://account.live.com/Abuse?mkt=EN-US",

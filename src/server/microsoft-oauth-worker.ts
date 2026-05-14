@@ -2,7 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { Impit } from "impit";
-import { buildAcceptLanguage, deriveLocale, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
+import { buildAcceptLanguage, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import {
@@ -335,6 +335,7 @@ async function proxyRedirectOriginRequest(
 
 async function main(): Promise<void> {
   const MAX_PASSKEY_RESTARTS = 2;
+  const MICROSOFT_BROWSER_LOCALE = "en-US";
   const args = parseArgs(process.argv.slice(2));
   const cfg = loadConfig();
   const outputDir = path.dirname(args.resultPath);
@@ -374,7 +375,7 @@ async function main(): Promise<void> {
     proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({
       ip: "",
     }));
-    const locale = deriveLocale(proxyGeo.country);
+    const locale = MICROSOFT_BROWSER_LOCALE;
     const acceptLanguage = buildAcceptLanguage(locale);
     const launched = await launchChromePersistent(cfg, cfg.runMode, mihomoController.proxyServer, locale, {
       locale,

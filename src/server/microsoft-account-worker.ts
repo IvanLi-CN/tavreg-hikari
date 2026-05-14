@@ -2,7 +2,7 @@ import path from "node:path";
 import process from "node:process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { Impit } from "impit";
-import { buildAcceptLanguage, deriveLocale, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
+import { buildAcceptLanguage, parseIpInfoPayload, type GeoInfo } from "../proxy/geo.js";
 import { startMihomo } from "../proxy/mihomo.js";
 import { createInjectedProxyController } from "./proxy-broker-runtime.js";
 import {
@@ -40,6 +40,7 @@ interface WorkerResult {
 }
 
 const MICROSOFT_ACCOUNT_HOME_URL = "https://account.microsoft.com/";
+const MICROSOFT_BROWSER_LOCALE = "en-US";
 const MICROSOFT_ACCOUNT_COMPLETION_PATTERNS = [/^https:\/\/account\.microsoft\.com(?!\/auth\/)(?:\/|$)/i];
 const MICROSOFT_SIGN_IN_PATTERNS = [/sign in/i, /登录/, /登入/i, /继续登录/, /继续登入/];
 const MICROSOFT_LOGIN_ENTRY_URLS = ["https://login.live.com/", "https://login.live.com/login.srf", "https://account.live.com/"];
@@ -386,7 +387,7 @@ async function main(): Promise<void> {
       proxyServer = mihomoController.proxyServer;
       proxyGeo = await fetchProxyGeo(proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({ ip: "" }));
     }
-    const locale = deriveLocale(proxyGeo?.country);
+    const locale = MICROSOFT_BROWSER_LOCALE;
     const acceptLanguage = buildAcceptLanguage(locale);
     const launched = await launchChromePersistent(cfg, cfg.runMode, proxyServer, locale, {
       locale,

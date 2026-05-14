@@ -6,7 +6,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { spawn } from "node:child_process";
 import { sep as pathSep } from "node:path";
 import { existsSync, openSync } from "node:fs";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readlink, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, isIP } from "node:net";
 import { release as osRelease } from "node:os";
 import path from "node:path";
@@ -10412,7 +10412,9 @@ async function activateMacApp(appName: string): Promise<void> {
   });
 }
 
-async function readPsTable(): Promise<Array<{ pid: number; pgid: number; command: string }>> {
+type PsTableRow = { pid: number; pgid: number; command: string };
+
+async function readPsTable(): Promise<PsTableRow[]> {
   return await new Promise((resolve) => {
     const child = spawn("ps", ["-axo", "pid=,pgid=,command="], {
       stdio: ["ignore", "pipe", "ignore"],
@@ -10450,6 +10452,105 @@ function normalizeProfileDir(profileDir: string): string {
 function commandMatchesProfileDir(command: string, profileDir: string): boolean {
   if (!command || !profileDir) return false;
   return command.includes(`--user-data-dir=${profileDir}`);
+}
+
+function commandLooksLikeChromium(command: string): boolean {
+  return /chrom(e|ium)|playwright/i.test(command);
+}
+
+function extractPidsFromChromiumSingletonText(value: string): number[] {
+  const pids = new Set<number>();
+  for (const match of value.matchAll(/\d+/g)) {
+    const pid = Number.parseInt(match[0] || "", 10);
+    if (Number.isFinite(pid) && pid > 1) {
+      pids.add(pid);
+    }
+  }
+  return Array.from(pids);
+}
+
+async function readChromiumSingletonPidHints(lockPath: string): Promise<number[]> {
+  try {
+    const stat = await lstat(lockPath);
+    const text = stat.isSymbolicLink()
+      ? await readlink(lockPath)
+      : stat.isFile()
+        ? await readFile(lockPath, "utf8")
+        : "";
+    return extractPidsFromChromiumSingletonText(text);
+  } catch {
+    return [];
+  }
+}
+
+async function pathExistsEvenIfSymlinkTargetMissing(filePath: string): Promise<boolean> {
+  try {
+    await lstat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function removeChromiumSingletonArtifacts(profileDir: string): Promise<void> {
+  for (const name of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+    await rm(path.join(profileDir, name), { force: true, recursive: true }).catch(() => {});
+  }
+}
+
+function hasChromiumProcessForProfile(psRows: PsTableRow[], profileDir: string): boolean {
+  return psRows.some((entry) =>
+    commandMatchesProfileDir(entry.command, profileDir) && commandLooksLikeChromium(entry.command)
+  );
+}
+
+function singletonPidBelongsToLiveChromium(psRows: PsTableRow[], pid: number): boolean {
+  const row = psRows.find((entry) => entry.pid === pid);
+  return Boolean(row && commandLooksLikeChromium(row.command));
+}
+
+export async function cleanupStaleChromiumSingletonLocks(
+  profileDir: string,
+  psRows?: PsTableRow[],
+): Promise<boolean> {
+  const normalizedProfileDir = normalizeProfileDir(profileDir);
+  const lockPaths = ["SingletonLock", "SingletonCookie", "SingletonSocket"].map((name) =>
+    path.join(normalizedProfileDir, name)
+  );
+  const existingLockPaths: string[] = [];
+  for (const lockPath of lockPaths) {
+    if (await pathExistsEvenIfSymlinkTargetMissing(lockPath)) {
+      existingLockPaths.push(lockPath);
+    }
+  }
+  if (existingLockPaths.length === 0) return false;
+
+  const rows = psRows ?? await readPsTable();
+  if (hasChromiumProcessForProfile(rows, normalizedProfileDir)) {
+    return false;
+  }
+
+  const pidHints = new Set<number>();
+  for (const lockPath of existingLockPaths) {
+    for (const pid of await readChromiumSingletonPidHints(lockPath)) {
+      pidHints.add(pid);
+    }
+  }
+  for (const pid of pidHints) {
+    if (isPidAlive(pid) && singletonPidBelongsToLiveChromium(rows, pid)) {
+      return false;
+    }
+  }
+
+  await removeChromiumSingletonArtifacts(normalizedProfileDir);
+  return true;
+}
+
+function isRecoverablePersistentProfileLockError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /singleton(lock|socket|cookie)|process singleton|profile.*(in use|locked)|user data directory.*already in use|browser profile.*locked|failed to create.*singleton/i.test(
+    message,
+  );
 }
 
 async function cleanupChromeProfileArtifacts(profileDir: string): Promise<void> {
@@ -10866,6 +10967,7 @@ export async function launchChromePersistent(
   for (const profileDir of profileCandidates) {
     try {
       await mkdir(profileDir, { recursive: true });
+      await cleanupStaleChromiumSingletonLocks(profileDir).catch(() => false);
       const launchOptions: any = {
         headless: mode === "headless",
         slowMo: Math.max(0, cfg.slowMoMs),
@@ -10895,7 +10997,18 @@ export async function launchChromePersistent(
       if (cfg.chromeExecutablePath) {
         launchOptions.executablePath = cfg.chromeExecutablePath;
       }
-      const context = await chromium.launchPersistentContext(profileDir, launchOptions);
+      let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>>;
+      try {
+        context = await chromium.launchPersistentContext(profileDir, launchOptions);
+      } catch (error) {
+        const cleaned = isRecoverablePersistentProfileLockError(error)
+          ? await cleanupStaleChromiumSingletonLocks(profileDir).catch(() => false)
+          : false;
+        if (!cleaned) {
+          throw error;
+        }
+        context = await chromium.launchPersistentContext(profileDir, launchOptions);
+      }
       const browser = context.browser();
       if (!browser) {
         await context.close().catch(() => {});
