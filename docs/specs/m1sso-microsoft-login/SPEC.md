@@ -59,6 +59,7 @@
 - 当 Microsoft 实际出现 proof / 备用邮箱验证分支时，若账号已配置备用邮箱映射，程序必须自动填写备用邮箱并通过统一 mailbox waiter/verification-code extractor 获取安全码。
 - 当 Tavily OAuth 回跳在 `login.live.com/oauth20_authorize.srf` 上出现 “Verify your email / We'll send a code to ...” proof confirmation 页面时，必须优先使用账号绑定的 proof mailbox 完成确认与收码，不得先点击 `Use your password` shortcut。
 - Microsoft 密码提交后，在 Microsoft 登录域名内的短暂 OAuth authorize / post-submit 过渡窗口不得重置密码提交状态；即使页面短暂回现密码输入面，也不得重复提交同一密码并退化为 `microsoft_password_submission_limit`。
+- Microsoft OAuth worker 与 Microsoft account worker 必须固定使用英语页面身份：`locale=en-US`，`Accept-Language=en-US,en;q=0.9,en;q=0.8`；不得用代理国家推导 Microsoft 页面语言。
 - 成功后必须回到 `https://app.tavily.com/home` 并继续后续 API key 获取。
 
 ### SHOULD
@@ -82,6 +83,7 @@
 ### Edge cases / errors
 
 - 若 Microsoft 账号配置只填了一半，程序应在加载配置时直接失败。
+- 若 Microsoft OAuth 页面返回 `Too Many Requests` 或等价重复尝试限流文案，必须归类为 `microsoft_password_rate_limited`，不能泛化为 `microsoft_oauth_incomplete`。
 - 若 proof 页面出现但账号未配置备用邮箱映射，程序应明确失败为 `microsoft_proof_mailbox_missing`。
 - 若 CF Mail API key 缺失、邮箱不存在或安全码超时，程序应分别报出 `cfmail_api_key_missing`、`cfmail_mailbox_not_found`、`microsoft_proof_code_timeout`。
 - 若 Tavily Home 兼容模式下 Microsoft OAuth 长时间未回到 Tavily Home，程序应报出明确的 `microsoft_oauth_did_not_reach_home` 错误码和 `microsoft login flow did not reach home` 失败文案。Microsoft Graph bootstrap 模式不依赖 Tavily Home，不能把该情况暴露为 Tavily Home 专属错误码。

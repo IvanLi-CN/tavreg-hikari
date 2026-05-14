@@ -6,4 +6,7 @@
 
 | Category | Title | Path |
 | --- | --- | --- |
+| Backend | Chromium profile lock recovery | `backend/chromium-profile-lock-recovery.md` |
+| Backend | Detached worker stop reaper | `backend/detached-worker-stop-reaper.md` |
+| Backend | Proxy Broker Timeout Recovery | `backend/proxy-broker-timeout-recovery.md` |
 | UI | 复制反馈气泡的正确实现 | `ui/copy-feedback-popover.md` |

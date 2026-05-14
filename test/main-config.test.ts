@@ -284,7 +284,18 @@ test("mailbox bootstrap keeps proxy geo lookup best-effort", async () => {
   const source = await readFile(path.join(repoRoot, "src/server/microsoft-oauth-worker.ts"), "utf8");
   expect(source).toContain('proxyGeo = await fetchProxyGeo(mihomoController.proxyServer, cfg.proxyCheckTimeoutMs, ipinfoToken).catch(() => ({');
   expect(source).toContain('ip: "",');
-  expect(source).toContain("const locale = deriveLocale(proxyGeo.country);");
+  expect(source).toContain('const MICROSOFT_BROWSER_LOCALE = "en-US";');
+  expect(source).toContain("const locale = MICROSOFT_BROWSER_LOCALE;");
+  expect(source).not.toContain("deriveLocale(proxyGeo.country)");
+});
+
+test("Microsoft account worker keeps English browser locale while preserving proxy timezone", async () => {
+  const source = await readFile(path.join(repoRoot, "src/server/microsoft-account-worker.ts"), "utf8");
+  expect(source).toContain('const MICROSOFT_BROWSER_LOCALE = "en-US";');
+  expect(source).toContain("const locale = MICROSOFT_BROWSER_LOCALE;");
+  expect(source).toContain("const acceptLanguage = buildAcceptLanguage(locale);");
+  expect(source).toContain("...(proxyGeo?.timezone ? { timezoneId: proxyGeo.timezone } : {})");
+  expect(source).not.toContain("deriveLocale(proxyGeo?.country)");
 });
 
 test("mailbox oauth worker defaults to Graph authorize URL and keeps Tavily Home mode gated", async () => {

@@ -96,6 +96,7 @@
 - 当 mailbox OAuth callback 已成功写入 token，session bootstrap 必须以 DB 授权事实为准完成 ready/available 收敛；即使 worker 留下非完成态中间 URL，也必须改写为 success outcome 后继续校验，且 worker 的本地状态确认请求必须通过应用 internal gate。
 - 默认 Graph 登录方案下，worker 不得把“未回到 Tavily Home”归类为 `microsoft_oauth_did_not_reach_home`；该错误码只属于 `tavily_home` 兼容方案。
 - 并发 bootstrap 打开 Broker session 时，必须把当前活跃 bootstrap 的出口 IP 快照传入 `excludedIps`，避免多个账号同时踩同一个出口；失败 session 的 IP 只作为诊断，不得成为非 ready session 的优先复用依据。
+- 启动持久 Chromium profile 前必须检查 `SingletonLock`、`SingletonSocket`、`SingletonCookie` 残留；仅当没有活跃 Chromium 进程持有该 profile，且锁内 PID 不存在或不属于可用 Chromium 进程时，才允许清理这些 singleton artifacts 并重试启动一次。
 
 ## 接口契约（Interfaces & Contracts）
 

@@ -17,6 +17,7 @@
 - `microsoft_graph` 方案复用现有 `microsoft-oauth-worker`，以本地 OAuth callback/Graph token 写入与 profile 登录态保留作为成功事实源，不再要求访问或回到 `app.tavily.com/home`。
 - `tavily_home` 方案保留旧兼容语义：Microsoft social login 必须回到 Tavily Home；未到达时继续归类为 `microsoft_oauth_did_not_reach_home`。
 - Microsoft keep-signed-in prompt 覆盖英文、中文与日语文案，避免 Graph/Tavily 登录链路停在日语 `サインインの状態を維持しますか?` 页面。
+- Microsoft OAuth worker 与 Microsoft account worker 固定使用 `en-US` 页面语言和 `en-US,en;q=0.9,en;q=0.8` 请求语言；代理 timezone 仍写入浏览器上下文与 session 诊断。
 
 ## Worker 超时与回收
 
@@ -25,6 +26,7 @@
 - `microsoftAccountBootstrapWorkerTimeoutMs` 默认 `300000`，`microsoftAccountBootstrapKillGraceMs` 默认 `10000`，两者最小值均为 `1000`。
 - 服务启动和 `/api/accounts` 读取路径都会收敛超过 `workerTimeoutMs + killGraceMs + 30000` 的 stale `bootstrapping` session，将 session、mailbox 与 account 同步标记为 `failed/session_bootstrap_stale`。
 - Microsoft OAuth 失败、worker timeout 与 Proxy Broker abort 会归一到稳定错误码，并在落库前脱敏诊断 URL 的 query/hash。
+- `launchChromePersistent` 在启动持久 profile 前会保守清理 stale Chromium singleton artifacts；如果首轮启动命中 profile lock/singleton 错误，会在确认没有活跃 Chromium 进程持有该 profile 后清理并重试一次。活跃进程仍持有 profile 时不清理，避免破坏正在使用的会话。
 
 ## 设置与 UI
 
