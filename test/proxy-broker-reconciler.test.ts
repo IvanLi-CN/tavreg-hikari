@@ -154,6 +154,41 @@ test("database active broker references include only running attempts on active 
   }
 });
 
+test("database broker session launch guards include active attempts before broker binding", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
+  const db = await AppDatabase.open(path.join(tempDir, "app.sqlite"));
+  try {
+    const runningJob = db.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 2 });
+    const unboundAttempt = db.createAttempt(runningJob.id, {
+      accountEmail: "unbound@example.test",
+      outputDir: tempDir,
+      stage: "allocating_proxy",
+    });
+    const boundAttempt = db.createAttempt(runningJob.id, {
+      accountEmail: "bound@example.test",
+      outputDir: tempDir,
+      stage: "proxy_bound",
+    });
+    db.updateAttempt(boundAttempt.id, { brokerSessionId: "sess-bound" });
+
+    const completedJob = db.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+    db.createAttempt(completedJob.id, { accountEmail: "inactive@example.test", outputDir: tempDir, stage: "allocating_proxy" });
+    db.completeJob(completedJob.id, false, "done");
+
+    expect(db.listBrokerSessionLaunchGuards().map((guard) => ({
+      attemptId: guard.attemptId,
+      jobId: guard.jobId,
+      stage: guard.stage,
+      site: guard.site,
+    }))).toEqual([
+      { attemptId: unboundAttempt.id, jobId: runningJob.id, stage: "allocating_proxy", site: "chatgpt" },
+    ]);
+  } finally {
+    db.close();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("database browser session bootstrap guards include active bootstrapping sessions only", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
   const db = await AppDatabase.open(path.join(tempDir, "app.sqlite"));

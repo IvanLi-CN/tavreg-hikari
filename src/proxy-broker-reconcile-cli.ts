@@ -25,6 +25,20 @@ export function resolveProxyBrokerReconcileDbPath(configuredPath = process.env.T
   return resolveTaskLedgerDbPath(outputRoot, configuredPath);
 }
 
+function readApplyGuards(db: AppDatabase): {
+  browserSessionBootstraps: ReturnType<AppDatabase["listBrowserSessionBootstrapGuards"]>;
+  brokerSessionLaunchGuards: ReturnType<AppDatabase["listBrokerSessionLaunchGuards"]>;
+} {
+  return {
+    browserSessionBootstraps: db.listBrowserSessionBootstrapGuards(),
+    brokerSessionLaunchGuards: db.listBrokerSessionLaunchGuards(),
+  };
+}
+
+function hasApplyGuards(guards: ReturnType<typeof readApplyGuards>): boolean {
+  return guards.browserSessionBootstraps.length > 0 || guards.brokerSessionLaunchGuards.length > 0;
+}
+
 function parseArgs(argv: string[]): { apply: boolean; dbPath: string } {
   let apply = false;
   let dbPath = resolveProxyBrokerReconcileDbPath();
@@ -56,14 +70,15 @@ async function main(): Promise<void> {
   const db = await AppDatabase.open(dbPath);
   try {
     const settings = db.getSettings(brokerSettingsDefaults());
-    const bootstrapGuards = db.listBrowserSessionBootstrapGuards();
-    if (apply && bootstrapGuards.length > 0) {
+    const applyGuards = readApplyGuards(db);
+    if (apply && hasApplyGuards(applyGuards)) {
       console.error(JSON.stringify({
         apply,
         blocked: true,
-        reason: "active_browser_session_bootstraps",
-        message: "refusing to apply while browser session bootstraps may own live Proxy Broker sessions",
-        browserSessionBootstraps: bootstrapGuards,
+        reason: "active_broker_session_apply_guards",
+        message: "refusing to apply while browser bootstraps or scheduler launches may own live Proxy Broker sessions",
+        browserSessionBootstraps: applyGuards.browserSessionBootstraps,
+        brokerSessionLaunchGuards: applyGuards.brokerSessionLaunchGuards,
       }, null, 2));
       process.exit(2);
     }
@@ -71,9 +86,10 @@ async function main(): Promise<void> {
       settings,
       references: db.listActiveBrokerSessionReferences(),
       apply,
-      shouldSkipClose: () => db.listBrowserSessionBootstrapGuards().length > 0,
+      shouldSkipClose: () => hasApplyGuards(readApplyGuards(db)),
       refreshReferences: () => db.listActiveBrokerSessionReferences(),
     });
+    const latestApplyGuards = readApplyGuards(db);
     console.log(JSON.stringify({
       apply,
       activeBrokerSessions: result.activeSessionIds.length,
@@ -82,7 +98,8 @@ async function main(): Promise<void> {
       closedSessions: result.closedSessionIds.length,
       skippedReferencedSessions: result.skippedReferencedSessionIds,
       closeErrors: result.closeErrors,
-      browserSessionBootstraps: bootstrapGuards,
+      browserSessionBootstraps: latestApplyGuards.browserSessionBootstraps,
+      brokerSessionLaunchGuards: latestApplyGuards.brokerSessionLaunchGuards,
       orphanSessions: result.orphanSessions.map((session) => ({
         sessionId: session.session_id,
         selectedIp: session.selected_ip,

@@ -4513,6 +4513,44 @@ export class AppDatabase {
     }));
   }
 
+  listBrokerSessionLaunchGuards(): Array<{
+    attemptId: number;
+    jobId: number;
+    jobStatus: JobStatus;
+    attemptStatus: AttemptStatus;
+    site: JobSite;
+    stage: string;
+    startedAt: string;
+  }> {
+    const rows = this.db
+      .query(`
+        SELECT
+          attempts.id AS attempt_id,
+          attempts.job_id AS job_id,
+          attempts.status AS attempt_status,
+          attempts.stage AS stage,
+          attempts.started_at AS started_at,
+          jobs.status AS job_status,
+          jobs.site AS site
+        FROM job_attempts attempts
+        JOIN jobs ON jobs.id = attempts.job_id
+        WHERE attempts.status = 'running'
+          AND (attempts.broker_session_id IS NULL OR attempts.broker_session_id = '')
+          AND jobs.status IN ('running', 'paused', 'stopping', 'force_stopping', 'completing')
+        ORDER BY attempts.started_at ASC
+      `)
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      attemptId: Number(row.attempt_id),
+      jobId: Number(row.job_id),
+      jobStatus: String(row.job_status || "running") as JobStatus,
+      attemptStatus: String(row.attempt_status || "running") as AttemptStatus,
+      site: String(row.site || "tavily") as JobSite,
+      stage: String(row.stage || ""),
+      startedAt: String(row.started_at || ""),
+    }));
+  }
+
   listBrowserSessionBootstrapGuards(): Array<{
     accountId: number;
     status: Extract<AccountBrowserSessionStatus, "pending" | "bootstrapping">;
