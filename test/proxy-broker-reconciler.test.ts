@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { planProxyBrokerSessionReconciliation, reconcileProxyBrokerSessions } from "../src/server/proxy-broker-reconciler";
+import { resolveProxyBrokerReconcileDbPath } from "../src/proxy-broker-reconcile-cli";
 import { AppDatabase } from "../src/storage/app-db";
 import type { ProxyBrokerSession } from "../src/proxy/broker";
 
@@ -83,6 +85,24 @@ test("proxy broker reconciler rechecks references before closing orphan sessions
   expect(closed).toEqual([]);
 });
 
+test("proxy broker reconciler skips closing when per-session close guard blocks apply", async () => {
+  const closed: string[] = [];
+  const result = await reconcileProxyBrokerSessions({
+    settings: { proxyBrokerBaseUrl: "https://proxy.example.test", proxyBrokerProfileId: "Tavily", timeoutMs: 1000 },
+    references: [],
+    apply: true,
+    listSessions: async () => ({ sessions: [session("sess-bootstrap-race")] }),
+    shouldSkipClose: async (sessionId) => sessionId === "sess-bootstrap-race",
+    closeSession: async (sessionId) => {
+      closed.push(sessionId);
+    },
+  });
+
+  expect(result.closedSessionIds).toEqual([]);
+  expect(result.skippedReferencedSessionIds).toEqual(["sess-bootstrap-race"]);
+  expect(closed).toEqual([]);
+});
+
 test("proxy broker reconciler records close failures for later compensation", async () => {
   const result = await reconcileProxyBrokerSessions({
     settings: { proxyBrokerBaseUrl: "https://proxy.example.test", proxyBrokerProfileId: "Tavily", timeoutMs: 1000 },
@@ -96,6 +116,22 @@ test("proxy broker reconciler records close failures for later compensation", as
 
   expect(result.closedSessionIds).toEqual([]);
   expect(result.closeErrors).toEqual([{ sessionId: "sess-orphan", message: "broker close timed out" }]);
+});
+
+test("proxy broker reconcile CLI resolves default database path through legacy compatibility helper", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
+  const legacyPath = path.join(tempDir, "registry", "signup-tasks.sqlite");
+  const expectedPath = path.join(tempDir, "registry", "tavreg-hikari.sqlite");
+  const db = await AppDatabase.open(legacyPath);
+  db.close();
+  try {
+    const resolvedPath = resolveProxyBrokerReconcileDbPath("", tempDir);
+
+    expect(resolvedPath).toBe(expectedPath);
+    expect(existsSync(expectedPath)).toBe(true);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("database active broker references include only running attempts on active jobs", async () => {

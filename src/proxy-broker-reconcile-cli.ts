@@ -1,8 +1,12 @@
 import { config as loadDotenv } from "dotenv";
+import { fileURLToPath } from "node:url";
 import { AppDatabase, type AppSettings } from "./storage/app-db.js";
+import { resolveTaskLedgerDbPath } from "./storage/db-paths.js";
 import { reconcileProxyBrokerSessions } from "./server/proxy-broker-reconciler.js";
 
 loadDotenv({ path: ".env.local", quiet: true });
+
+const OUTPUT_PATH = fileURLToPath(new URL("../output/", import.meta.url));
 
 function toInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
@@ -17,9 +21,13 @@ function brokerSettingsDefaults(): Pick<AppSettings, "proxyBrokerBaseUrl" | "pro
   };
 }
 
+export function resolveProxyBrokerReconcileDbPath(configuredPath = process.env.TASK_LEDGER_DB_PATH, outputRoot = OUTPUT_PATH): string {
+  return resolveTaskLedgerDbPath(outputRoot, configuredPath);
+}
+
 function parseArgs(argv: string[]): { apply: boolean; dbPath: string } {
   let apply = false;
-  let dbPath = process.env.TASK_LEDGER_DB_PATH || "output/registry/tavreg-hikari.sqlite";
+  let dbPath = resolveProxyBrokerReconcileDbPath();
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (!arg) continue;
@@ -63,6 +71,7 @@ async function main(): Promise<void> {
       settings,
       references: db.listActiveBrokerSessionReferences(),
       apply,
+      shouldSkipClose: () => db.listBrowserSessionBootstrapGuards().length > 0,
       refreshReferences: () => db.listActiveBrokerSessionReferences(),
     });
     console.log(JSON.stringify({
@@ -87,7 +96,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack || error.message : String(error));
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.stack || error.message : String(error));
+    process.exit(1);
+  });
+}

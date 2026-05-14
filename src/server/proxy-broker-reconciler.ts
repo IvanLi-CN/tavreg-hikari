@@ -57,6 +57,7 @@ export async function reconcileProxyBrokerSessions(input: {
   listSessions?: () => Promise<{ sessions: ProxyBrokerSession[] }>;
   closeSession?: (sessionId: string) => Promise<void>;
   refreshReferences?: () => BrokerSessionReference[] | Promise<BrokerSessionReference[]>;
+  shouldSkipClose?: (sessionId: string) => boolean | Promise<boolean>;
 }): Promise<BrokerSessionReconcileResult> {
   const client = input.listSessions && input.closeSession ? null : createProxyBrokerClient(input.settings);
   const listed = input.listSessions ? await input.listSessions() : await client!.listSessions();
@@ -83,6 +84,10 @@ export async function reconcileProxyBrokerSessions(input: {
           skippedReferencedSessionIds.push(sessionId);
           continue;
         }
+      }
+      if (input.shouldSkipClose && await input.shouldSkipClose(sessionId)) {
+        skippedReferencedSessionIds.push(sessionId);
+        continue;
       }
       try {
         if (input.closeSession) {
