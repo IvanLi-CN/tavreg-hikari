@@ -1230,6 +1230,13 @@ export class AppDatabase {
     return appDb;
   }
 
+  static async openExistingWithoutRecovery(dbPath: string): Promise<AppDatabase> {
+    if (!existsSync(dbPath)) {
+      throw new Error(`database_not_found:${dbPath}`);
+    }
+    return new AppDatabase(dbPath);
+  }
+
   close(): void {
     this.db.close();
   }

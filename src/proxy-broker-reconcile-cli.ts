@@ -67,7 +67,7 @@ function parseArgs(argv: string[]): { apply: boolean; dbPath: string } {
 
 async function main(): Promise<void> {
   const { apply, dbPath } = parseArgs(process.argv.slice(2));
-  const db = await AppDatabase.open(dbPath);
+  const db = await AppDatabase.openExistingWithoutRecovery(dbPath);
   try {
     const settings = db.getSettings(brokerSettingsDefaults());
     const applyGuards = readApplyGuards(db);

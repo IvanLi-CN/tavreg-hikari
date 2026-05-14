@@ -154,6 +154,26 @@ test("database active broker references include only running attempts on active 
   }
 });
 
+test("database non-recovering open preserves running broker references", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
+  const dbPath = path.join(tempDir, "app.sqlite");
+  const db = await AppDatabase.open(dbPath);
+  const runningJob = db.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const activeAttempt = db.createAttempt(runningJob.id, { accountEmail: "active@example.test", outputDir: tempDir });
+  db.updateAttempt(activeAttempt.id, { brokerSessionId: "sess-active" });
+  db.close();
+
+  const reopened = await AppDatabase.openExistingWithoutRecovery(dbPath);
+  try {
+    expect(reopened.getJob(runningJob.id)?.status).toBe("running");
+    expect(reopened.getAttempt(activeAttempt.id)?.status).toBe("running");
+    expect(reopened.listActiveBrokerSessionReferences().map((item) => item.sessionId)).toEqual(["sess-active"]);
+  } finally {
+    reopened.close();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("database broker session launch guards include active attempts before broker binding", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "tavreg-broker-reconciler-"));
   const db = await AppDatabase.open(path.join(tempDir, "app.sqlite"));

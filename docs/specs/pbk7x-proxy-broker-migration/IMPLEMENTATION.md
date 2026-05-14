@@ -16,7 +16,7 @@
 - Web 调度器在 attempt 完成、失败、停止或 spawn 失败时 best-effort close Broker session。
 - Tavily、Grok、ChatGPT 调度器都会对 stale running / completing attempt 执行两阶段收敛：先 `SIGTERM`，超过 reap 窗口后终态化 attempt 并释放 Broker session 与端口 lease。ChatGPT/Grok 在 worker 注册为 active 时重置 progress timer，避免把慢 launch/probe 时间误算成 worker stale 时间。Broker close 失败不再静默吞掉，会写入 warning，后续 reconciliation 可补偿。
 - 服务启动会执行一次 Broker session reconciliation dry-run：读取 Broker active sessions，与 DB 中仍属于活跃 job/attempt 的 `broker_session_id` 对比，只报告 orphan 数量，不自动关闭。
-- `bun run broker:sessions:reconcile -- --db <sqlite> --dry-run|--apply` 提供受控清理入口；默认 dry-run，只有显式 `--apply` 才关闭 DB 未引用的 Broker sessions；apply 会在开始时和关闭每个 session 前检查浏览器 bootstrap guard 与尚未写入 `broker_session_id` 的活跃 attempt launch guard，并在每次 close 前重新读取 DB 引用，避免 scheduler launch/probe 或 mailbox/browser bootstrap 窗口误关新 session。
+- `bun run broker:sessions:reconcile -- --db <sqlite> --dry-run|--apply` 提供受控清理入口；默认 dry-run，只有显式 `--apply` 才关闭 DB 未引用的 Broker sessions；CLI 以不触发 stale recovery 的 existing-DB opener 读取引用，apply 会在开始时和关闭每个 session 前检查浏览器 bootstrap guard 与尚未写入 `broker_session_id` 的活跃 attempt launch guard，并在每次 close 前重新读取 DB 引用，避免 scheduler launch/probe 或 mailbox/browser bootstrap 窗口误关新 session。
 - Tavily、ChatGPT、Grok scheduler，单账号 Tavily / Microsoft / ChatGPT / Grok flow，以及 Microsoft mailbox OAuth bootstrap 均通过业务域名探测 helper 启动 Broker session。
 - Worker 进程检测 `PROXY_BROKER_PROXY_URL` 后直接使用注入代理控制器，不再启动 Mihomo。
 - 代理页 API 从本地 Mihomo sync/check 改为读取 Broker catalog 与 active sessions；手动检查触发 Broker project refresh，并把 catalog 探测结果写入现有 proxy diagnostics 表供历史查询。
