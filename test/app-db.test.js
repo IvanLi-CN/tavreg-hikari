@@ -187,6 +187,28 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("createAttempt accepts an explicit initial stage while keeping spawned default", async () => {
+    const { appDb } = await createTempDb();
+    const job = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 2, payloadJson: {} });
+
+    const defaultAttempt = appDb.createAttempt(job.id, {
+      accountEmail: "default-stage@example.test",
+      outputDir: "/tmp/default-stage",
+    });
+    const allocatingAttempt = appDb.createAttempt(job.id, {
+      accountEmail: "allocating-stage@example.test",
+      outputDir: "/tmp/allocating-stage",
+      stage: "allocating_proxy",
+    });
+
+    expect(defaultAttempt.stage).toBe("spawned");
+    expect(allocatingAttempt.stage).toBe("allocating_proxy");
+    expect(appDb.getAttempt(defaultAttempt.id)?.stage).toBe("spawned");
+    expect(appDb.getAttempt(allocatingAttempt.id)?.stage).toBe("allocating_proxy");
+
+    appDb.close();
+  });
+
   test("stores groups and supports batch group updates and deletes", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts(

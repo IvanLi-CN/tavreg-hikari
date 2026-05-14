@@ -123,6 +123,30 @@ test("serializeAttemptForApi ignores stale signup task rows for a fresh retry at
   }
 });
 
+test("serializeAttemptForApi preserves scheduler allocation stages without proxy diagnostics", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "tavreg-attempt-view-allocating-"));
+  const dbPath = path.join(root, "ledger.sqlite");
+  const db = await AppDatabase.open(dbPath);
+
+  try {
+    const job = db.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = db.createAttempt(job.id, {
+      accountEmail: "allocating@example.test",
+      outputDir: path.join(root, "attempt-output"),
+      stage: "allocating_proxy",
+    });
+
+    const serialized = serializeAttemptForApi(db, attempt);
+
+    expect(serialized.status).toBe("running");
+    expect(serialized.stage).toBe("allocating_proxy");
+    expect(serialized.proxyNode).toBeNull();
+    expect(serialized.proxyIp).toBeNull();
+  } finally {
+    db.close();
+  }
+});
+
 test("serializeAttemptForApi keeps ledger diagnostics for failed attempts", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "tavreg-attempt-view-failed-"));
   const dbPath = path.join(root, "ledger.sqlite");

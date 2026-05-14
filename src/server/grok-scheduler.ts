@@ -135,6 +135,12 @@ function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | 
   }
 }
 
+function stageMarkerStage(outputDir: string): string | null {
+  const marker = readJsonFileSync<{ stage?: unknown }>(path.join(outputDir, "stage.json"));
+  const stage = String(marker?.stage || "").trim();
+  return stage || null;
+}
+
 const FORCE_STOP_SIGKILL_AFTER_MS = 5_000;
 const FORCE_STOP_REAP_AFTER_MS = 30_000;
 
@@ -266,13 +272,14 @@ export class GrokJobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current Grok job");
     if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
-      this.reapStoppedActiveAttempts(job);
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused", "completing"].includes(job.status)) {
       throw new Error(`current Grok job cannot be stopped from ${job.status}`);
     }
     const next = this.db.updateJobState(job.id, { status: "stopping", pausedAt: null });
+    this.reapActiveAttempts(next);
     const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
     this.emit("job.updated", { site: this.site, job: finalized });
     this.emit("toast", {
@@ -295,7 +302,7 @@ export class GrokJobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current Grok job");
     if (job.status === "stopped" || job.status === "force_stopping") {
-      this.reapStoppedActiveAttempts(job);
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused", "stopping", "completing"].includes(job.status)) {
@@ -307,7 +314,7 @@ export class GrokJobScheduler {
         this.requestForceStop(active);
       }
     }
-    this.reapStoppedActiveAttempts(next);
+    this.reapActiveAttempts(next);
     const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
     this.emit("job.updated", { site: this.site, job: finalized });
     this.emit("toast", {
@@ -374,18 +381,43 @@ export class GrokJobScheduler {
   private requestForceStop(active: ActiveAttempt): void {
     active.stopRequested = "force_stop";
     active.stopRequestedAtMs ??= Date.now();
-    signalChildProcess(active.child, "SIGTERM");
+    if (active.child) {
+      signalChildProcess(active.child, "SIGTERM");
+    }
+    const attemptId = this.activeAttemptId(active);
     setTimeout(() => {
-      const current = this.activeAttempts.get(active.attempt.id);
-      if (current?.stopRequested === "force_stop") {
+      const current = attemptId == null ? null : this.activeAttempts.get(attemptId);
+      if (current?.stopRequested === "force_stop" && current.child) {
         signalChildProcess(current.child, "SIGKILL");
       }
     }, FORCE_STOP_SIGKILL_AFTER_MS).unref?.();
   }
 
+  private activeAttemptId(active: ActiveAttempt): number | null {
+    const id = active.attempt?.id ?? (active as unknown as { attemptId?: unknown }).attemptId;
+    const numericId = Number(id);
+    return Number.isFinite(numericId) && numericId > 0 ? numericId : null;
+  }
+
   private cleanupActiveAttempt(active: ActiveAttempt): void {
-    this.activeAttempts.delete(active.attempt.id);
+    const attemptId = this.activeAttemptId(active);
+    if (attemptId != null) {
+      this.activeAttempts.delete(attemptId);
+    }
     void active.releaseResources?.().catch(() => {});
+  }
+
+  private syncActiveAttemptStage(active: ActiveAttempt): void {
+    const attemptId = this.activeAttemptId(active);
+    if (attemptId == null) return;
+    if (!active.outputDir) return;
+    const markerStage = stageMarkerStage(active.outputDir);
+    if (!markerStage) return;
+    const latest = this.db.getAttempt(attemptId);
+    if (!latest || latest.status !== "running" || latest.stage === markerStage) return;
+    const updated = this.db.updateAttempt(attemptId, { stage: markerStage });
+    active.attempt = updated;
+    this.emit("attempt.updated", { site: this.site, attempt: updated });
   }
 
   private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
@@ -397,21 +429,26 @@ export class GrokJobScheduler {
     return this.db.stopJob(jobId);
   }
 
-  private reapStoppedActiveAttempts(job: JobRecord): void {
-    if (!isStopInProgressStatus(job.status)) return;
+  private reapActiveAttempts(job: JobRecord): boolean {
+    let changed = false;
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
-      if (active.attempt.jobId !== job.id) continue;
-      const latestAttempt = this.db.getAttempt(active.attempt.id);
+      const attemptId = this.activeAttemptId(active);
+      if (attemptId == null) continue;
+      const latestAttempt = this.db.getAttempt(attemptId);
+      if ((latestAttempt?.jobId ?? active.attempt?.jobId) !== job.id) continue;
       if (!latestAttempt || latestAttempt.status !== "running") {
         this.cleanupActiveAttempt(active);
+        changed = true;
         continue;
       }
+      this.syncActiveAttemptStage(active);
 
       const child = active.child as ChildProcessWithoutNullStreams & {
         exitCode?: number | null;
         signalCode?: NodeJS.Signals | null;
       };
+      if (!child) continue;
       const errorArtifact = readJsonFileSync<{ error?: string; failureStage?: string }>(path.join(active.outputDir, "error.json"));
       const resultArtifact = readJsonFileSync<GrokWorkerResult>(path.join(active.outputDir, "result.json"));
       const exited = child.exitCode != null || child.signalCode != null;
@@ -423,34 +460,38 @@ export class GrokJobScheduler {
 
       if (!exited && !forceStopTimedOut) continue;
 
+      if (active.finalize) {
+        active.finalize(() =>
+          this.handleAttemptExit(job.id, attemptId, active.outputDir, child.exitCode ?? null, child.signalCode ?? null, active),
+        );
+        changed = true;
+        continue;
+      }
+
       if (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut) {
         const signal = child.signalCode ?? null;
-        this.db.completeAttemptStopped(job.id, active.attempt.id, null, {
+        this.db.completeAttemptStopped(job.id, attemptId, null, {
           errorCode: signal ? `force_stop_${String(signal).toLowerCase()}` : "force_stopped",
           errorMessage:
             errorArtifact?.error
             || (signal ? `terminated by ${signal}` : child.exitCode != null ? `process exited with code ${child.exitCode}` : "stopped by user"),
         });
         this.cleanupActiveAttempt(active);
+        changed = true;
         continue;
       }
 
       if (errorArtifact?.error) {
-        this.failAttempt(job.id, active.attempt.id, {
+        this.failAttempt(job.id, attemptId, {
           errorCode: child.exitCode == null ? "process_exit" : `exit_${child.exitCode}`,
           errorMessage: errorArtifact.error,
         });
         this.cleanupActiveAttempt(active);
+        changed = true;
         continue;
       }
 
       if (exited) {
-        if (active.finalize) {
-          active.finalize(() =>
-            this.handleAttemptExit(job.id, active.attempt.id, active.outputDir, child.exitCode ?? null, child.signalCode ?? null, active),
-          );
-          continue;
-        }
         const email = String(resultArtifact?.email || "").trim().toLowerCase();
         const password = String(resultArtifact?.password || "").trim();
         const sso = String(resultArtifact?.sso || "").trim();
@@ -458,14 +499,21 @@ export class GrokJobScheduler {
           continue;
         }
         const signal = child.signalCode ?? null;
-        this.failAttempt(job.id, active.attempt.id, {
+        this.failAttempt(job.id, attemptId, {
           errorCode: signal ? `signal_${String(signal).toLowerCase()}` : child.exitCode == null ? "process_exit" : `exit_${child.exitCode}`,
           errorMessage:
             signal ? `terminated by ${signal}` : child.exitCode == null ? "process exited without code" : `process exited with code ${child.exitCode}`,
         });
         this.cleanupActiveAttempt(active);
+        changed = true;
       }
     }
+    return changed;
+  }
+
+  private reapStoppedActiveAttempts(job: JobRecord): void {
+    if (!isStopInProgressStatus(job.status)) return;
+    this.reapActiveAttempts(job);
   }
 
   private async runLoop(jobId: number): Promise<void> {
@@ -473,9 +521,12 @@ export class GrokJobScheduler {
       const job = this.db.getJob(jobId);
       if (!job || job.site !== this.site) return;
       if (isTerminalJobStatus(job.status)) return;
+      if (this.reapActiveAttempts(job)) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        continue;
+      }
 
       if (isStopInProgressStatus(job.status)) {
-        this.reapStoppedActiveAttempts(job);
         const stopped = this.maybeFinalizeStoppedJob(job.id);
         if (stopped) {
           this.emit("job.updated", { site: this.site, job: stopped });
@@ -523,6 +574,7 @@ export class GrokJobScheduler {
           const attempt = this.db.createAttempt(job.id, {
             accountEmail: null,
             outputDir,
+            stage: "allocating_proxy",
           });
           try {
             await this.spawnAttempt(job, attempt, outputDir);
@@ -588,6 +640,7 @@ export class GrokJobScheduler {
     });
     this.db.updateAttempt(attempt.id, {
       accountEmail: mailbox.address.toLowerCase(),
+      stage: "proxy_bound",
       proxyNode: brokerSession.session.proxy_name,
       proxyIp: brokerSession.session.selected_ip,
       brokerSessionId: brokerSession.session.session_id,
@@ -706,6 +759,7 @@ export class GrokJobScheduler {
     };
 
     child.once("spawn", () => {
+      this.db.updateAttempt(attempt.id, { stage: "spawned" });
       void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
     });
     child.stdout.on("data", (chunk) => {

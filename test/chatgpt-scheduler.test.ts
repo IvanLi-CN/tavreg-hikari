@@ -212,6 +212,81 @@ test("chatgpt scheduler starts without pre-provisioned drafts in payload", async
   appDb.close();
 });
 
+test("chatgpt scheduler marks new attempts as allocating proxy before worker spawn", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+  (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async (_job: any, attempt: any) => {
+    expect(appDb.getAttempt(attempt.id)?.stage).toBe("allocating_proxy");
+    expect(appDb.getAttempt(attempt.id)?.proxyNode).toBeNull();
+  };
+  const job = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: {} });
+
+  const launched = await (scheduler as any).dispatchAttempt(job);
+
+  expect(launched).toMatchObject({ launched: true, fatal: false });
+  expect(appDb.listAttempts(job.id)[0]?.stage).toBe("allocating_proxy");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt scheduler records broker launch failures as terminal attempts", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {
+    createAttemptDraft: async () => createDraft(1),
+  });
+  (scheduler as any).ensureLoop = () => undefined;
+  (scheduler as any).spawnAttempt = async () => {
+    const error = new Error("Proxy Broker request timed out after 30000ms") as Error & { code?: string };
+    error.code = "proxy_broker_request_timeout";
+    throw error;
+  };
+  const job = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: {} });
+
+  const launched = await (scheduler as any).dispatchAttempt(job);
+  const attempt = appDb.listAttempts(job.id)[0];
+
+  expect(launched).toMatchObject({ launched: true, fatal: false });
+  expect(attempt?.status).toBe("failed");
+  expect(attempt?.stage).toBe("failed");
+  expect(attempt?.errorCode).toBe("proxy_broker_request_timeout");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("chatgpt running reaper syncs worker stage markers into the attempt ledger", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const events: any[] = [];
+  const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), (event) => events.push(event), {
+    createAttemptDraft: async () => createDraft(1),
+  });
+  const job = appDb.createJob({ site: "chatgpt", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1, payloadJson: {} });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "stage@example.test", outputDir: tempDir, stage: "spawned" });
+  await writeFile(path.join(tempDir, "stage.json"), JSON.stringify({ stage: "oauth_authorize_loaded" }), "utf8");
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: { pid: undefined, exitCode: null, signalCode: null, kill: () => true },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    brokerSession: null,
+    stopRequested: null,
+    stopRequestedAtMs: null,
+  } as any);
+
+  (scheduler as any).reapActiveAttempts(job);
+
+  expect(appDb.getAttempt(attempt.id)?.stage).toBe("oauth_authorize_loaded");
+  expect(events.some((event) => event.type === "attempt.updated" && event.payload?.attempt?.stage === "oauth_authorize_loaded")).toBe(true);
+  expect(scheduler["activeAttempts"].has(attempt.id)).toBe(true);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("chatgpt scheduler persists and updates upstream group selection in job payload", async () => {
   const { appDb } = await createTempDb();
   const scheduler = new ChatGptJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined, {

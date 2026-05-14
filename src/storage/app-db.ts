@@ -4368,12 +4368,12 @@ export class AppDatabase {
 
   createAttempt(
     jobId: number,
-    input: { accountId?: number | null; accountEmail?: string | null; outputDir: string },
+    input: { accountId?: number | null; accountEmail?: string | null; outputDir: string; stage?: string | null },
   ): JobAttemptRecord;
   createAttempt(jobId: number, accountId: number | null, outputDir: string): JobAttemptRecord;
   createAttempt(
     jobId: number,
-    inputOrAccountId: { accountId?: number | null; accountEmail?: string | null; outputDir: string } | number | null,
+    inputOrAccountId: { accountId?: number | null; accountEmail?: string | null; outputDir: string; stage?: string | null } | number | null,
     legacyOutputDir?: string,
   ): JobAttemptRecord {
     const input =
@@ -4384,16 +4384,17 @@ export class AppDatabase {
             accountEmail: inputOrAccountId == null ? null : this.getAccount(inputOrAccountId)?.microsoftEmail ?? null,
             outputDir: legacyOutputDir || "",
           };
+    const stage = String(input.stage || "spawned").trim() || "spawned";
     const now = nowIso();
     const row = this.db
       .query(`
         INSERT INTO job_attempts (
           job_id, account_id, account_email, run_id, status, stage, proxy_node, proxy_ip, error_code, error_message, output_dir,
           started_at, completed_at, duration_ms
-        ) VALUES (?, ?, ?, NULL, 'running', 'spawned', NULL, NULL, NULL, NULL, ?, ?, NULL, NULL)
+        ) VALUES (?, ?, ?, NULL, 'running', ?, NULL, NULL, NULL, NULL, ?, ?, NULL, NULL)
         RETURNING *
       `)
-      .get(jobId, input.accountId ?? null, input.accountEmail ?? null, input.outputDir, now) as Record<string, unknown>;
+      .get(jobId, input.accountId ?? null, input.accountEmail ?? null, stage, input.outputDir, now) as Record<string, unknown>;
     const job = this.getJob(jobId);
     if (job) {
       this.updateJobState(jobId, { launchedCount: job.launchedCount + 1 });
