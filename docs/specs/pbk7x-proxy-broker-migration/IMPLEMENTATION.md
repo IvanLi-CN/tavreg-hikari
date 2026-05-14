@@ -20,6 +20,7 @@
 
 - `job_attempts` 增加 `broker_session_id`、`proxy_display_address`、`proxy_node_id`。
 - `proxy_nodes` 与 `proxy_checks` 继续保留，用于展示历史节点/IP/探测诊断，不作为生产代理池调度真相源。
+- `proxy_nodes.node_id` 保存 Broker catalog 的稳定节点标识；显式代理节点选择必须使用 `node_id` 打开 session，并校验 Broker 返回的 `node_id` 与用户选择一致。
 - catalog 快照状态以 `last_probe_ok` 为准；`can_open_session` 不写成健康状态。
 - `PROXY_BROKER_API_KEY` 不进入 SQLite 与前端 payload。
 

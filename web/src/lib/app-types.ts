@@ -665,6 +665,7 @@ export function pickProxySettingsUpdate(settings: ProxySettings): ProxySettingsU
 
 export type ProxyNode = {
   id: number;
+  nodeId: string | null;
   nodeName: string;
   lastStatus: string | null;
   lastLatencyMs: number | null;

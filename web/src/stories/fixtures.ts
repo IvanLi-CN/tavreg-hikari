@@ -997,6 +997,7 @@ export const sampleProxies: ProxyPayload = {
   nodes: [
     {
       id: 1,
+      nodeId: "node-tokyo-01",
       nodeName: "Tokyo-01",
       lastStatus: "ok",
       lastLatencyMs: 184,
@@ -1011,6 +1012,7 @@ export const sampleProxies: ProxyPayload = {
     },
     {
       id: 2,
+      nodeId: "node-seoul-02",
       nodeName: "Seoul-02",
       lastStatus: "fail",
       lastLatencyMs: 531,

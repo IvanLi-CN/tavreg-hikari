@@ -112,6 +112,38 @@ test("proxy broker client opens lists and closes project sessions", async () => 
   ]);
 });
 
+test("proxy broker client opens a session by exact node id", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const rawBody = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body: rawBody });
+    return Response.json({
+      session_id: "sess_node",
+      node_id: "node-o3B3giMFnOrMI5eX",
+      proxy_name: "🇺🇸美国05 | 合适下载使用-0.01倍",
+      selected_ip: "104.18.38.8",
+      display_address: "127.0.0.1:43125",
+    });
+  }) as unknown as typeof fetch;
+
+  const opened = await createClient().openSessionByNode({
+    node_id: "node-o3B3giMFnOrMI5eX",
+  });
+
+  expect(opened.node_id).toBe("node-o3B3giMFnOrMI5eX");
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      url: "https://proxy-broker.example.test/api/v1/projects/Tavily/sessions/open-by-node",
+      body: {
+        node_id: "node-o3B3giMFnOrMI5eX",
+        desired_port: null,
+      },
+    },
+  ]);
+});
+
 test("proxy broker client can override session display host for external local runs", async () => {
   process.env.PROXY_BROKER_DISPLAY_HOST_OVERRIDE = "192.168.31.11";
   const client = createClient();
@@ -842,6 +874,62 @@ test("proxy broker runtime can require an exact preferred ip", async () => {
       excluded_ips: [],
       sort_mode: "lru",
     }));
+  } finally {
+    if (previousApiKey == null) {
+      delete process.env.PROXY_BROKER_API_KEY;
+    } else {
+      process.env.PROXY_BROKER_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("proxy broker runtime opens an exact preferred node without ip selection", async () => {
+  const requests: Array<{ method: string; url: string; body: unknown }> = [];
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    const method = init?.method || "GET";
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+    requests.push({ method, url: String(url), body });
+    if (method === "POST" && String(url).endsWith("/sessions/open-by-node")) {
+      return Response.json({
+        session_id: "sess_node_exact",
+        listen: "127.0.0.1:43124",
+        bind_host: "127.0.0.1",
+        display_host: "127.0.0.1",
+        display_address: "127.0.0.1:43124",
+        port: 43124,
+        selected_ip: "104.18.38.8",
+        proxy_name: "🇺🇸美国05 | 合适下载使用-0.01倍",
+        node_id: "node-o3B3giMFnOrMI5eX",
+      });
+    }
+    throw new Error(`unexpected request: ${method} ${String(url)}`);
+  }) as unknown as typeof fetch;
+
+  const previousApiKey = process.env.PROXY_BROKER_API_KEY;
+  process.env.PROXY_BROKER_API_KEY = "pbk_test_secret";
+  try {
+    const runtime = await openProxyBrokerRuntimeSession({
+      settings: {
+        proxyBrokerBaseUrl: "https://ignored.example.test",
+        proxyBrokerProfileId: "Tavily",
+        timeoutMs: 1000,
+        maxLatencyMs: 500,
+      },
+      preferredNodeId: "node-o3B3giMFnOrMI5eX",
+      preferredIp: "104.18.38.8",
+      fallbackOnPreferredIpFailure: false,
+    });
+    expect(runtime.session.node_id).toBe("node-o3B3giMFnOrMI5eX");
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        url: "https://ignored.example.test/api/v1/projects/Tavily/sessions/open-by-node",
+        body: {
+          node_id: "node-o3B3giMFnOrMI5eX",
+          desired_port: null,
+        },
+      },
+    ]);
   } finally {
     if (previousApiKey == null) {
       delete process.env.PROXY_BROKER_API_KEY;
