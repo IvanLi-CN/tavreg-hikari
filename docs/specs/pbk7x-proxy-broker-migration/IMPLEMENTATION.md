@@ -10,7 +10,10 @@
 - `src/server/proxy-broker-runtime.ts` 提供 `openDomainProbedProxyBrokerRuntimeSession`，先打开 Broker session，再用 `Impit({ proxyUrl: session.proxyUrl })` 经由同一个 listener 探测业务域名。
 - 域名探测按业务站点绑定目标 URL，且不跟随重定向以便直接判定首个响应；HTTP 2xx、3xx、401、403、404 视为可达，其余 HTTP 状态、网络错误、超时与代理连接错误统一视为不可达。
 - 域名不可达时 runtime best-effort 关闭失败 session，把 `selected_ip` 加入本次排除列表并重开 session；默认最多轮换 3 次，耗尽或健康候选提前耗尽后抛出上一轮 `proxy_domain_unreachable`，错误信息携带 site、URL、node、session id、出口 IP 与底层摘要。显式要求固定 preferred IP 且禁止 fallback 的调用方不会轮换到其它出口，固定出口探测失败后直接返回该 session 的 `proxy_domain_unreachable`。
-- Web 调度器在 attempt 启动前 open Broker session，记录 session id、display address、node id、node name 与出口 IP，并在 attempt 完成、失败、停止或 spawn 失败时 best-effort close。
+- Web 调度器在 attempt 启动前 open Broker session；ChatGPT/Grok attempt 先以 `allocating_proxy` 入账，Broker session 与业务域名探测成功后写 `proxy_bound`、session id、display address、node id、node name 与出口 IP，worker 子进程真正 spawn 后才写 `spawned`。
+- Broker open、业务域名 probe、worker spawn 前置失败会把 attempt 直接写成 terminal failed，保留 `proxy_broker_*` 或 `proxy_domain_unreachable` 错误码，避免出现 `running + spawned + proxy=NULL` 的不可解释状态。
+- ChatGPT/Grok scheduler 的 running loop 会同步 worker `stage.json.stage` 到 `job_attempts.stage`，并在 active worker 已退出、DB 行已终止或 force-stop reap 超时后复用同一 finalizer 收割 active entry 与 Broker/端口资源。
+- Web 调度器在 attempt 完成、失败、停止或 spawn 失败时 best-effort close Broker session。
 - Tavily、ChatGPT、Grok scheduler，单账号 Tavily / Microsoft / ChatGPT / Grok flow，以及 Microsoft mailbox OAuth bootstrap 均通过业务域名探测 helper 启动 Broker session。
 - Worker 进程检测 `PROXY_BROKER_PROXY_URL` 后直接使用注入代理控制器，不再启动 Mihomo。
 - 代理页 API 从本地 Mihomo sync/check 改为读取 Broker catalog 与 active sessions；手动检查触发 Broker project refresh，并把 catalog 探测结果写入现有 proxy diagnostics 表供历史查询。
@@ -31,5 +34,6 @@
 - Runtime 单元测试覆盖健康低延迟筛选、全量过期探测自动 refresh、混合 fresh/stale catalog 直接使用健康候选、无健康候选失败、catalog 不可读失败。
 - Runtime 单元测试覆盖业务域名探测成功、失败后关闭并轮换、固定 preferred IP 禁止 fallback、排除 IP 合并、轮换耗尽与健康候选提前耗尽后的 `proxy_domain_unreachable`。
 - 调度与 worker runtime 测试覆盖 Broker env 注入、attempt session 字段记录与 worker 跳过 Mihomo。
+- ChatGPT/Grok scheduler 回归测试覆盖 `allocating_proxy` 初始 stage、Broker 启动失败终止 attempt、running-loop stage sync 与 active attempt reaper。
 - 源码约束测试覆盖 Tavily、Microsoft、ChatGPT、Grok 启动入口传入正确业务站点 probe 配置。
 - 代理页 Storybook 覆盖 catalog loaded、probe states、empty、auth error 与设置保存交互。

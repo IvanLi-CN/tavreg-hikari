@@ -153,6 +153,124 @@ test("grok scheduler state changes do not mutate other site jobs", async () => {
   appDb.close();
 });
 
+test("grok scheduler marks attempts as allocating proxy before broker launch completes", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).spawnAttempt = async (_job: any, attempt: any) => {
+    expect(appDb.getAttempt(attempt.id)?.stage).toBe("allocating_proxy");
+    expect(appDb.getAttempt(attempt.id)?.proxyNode).toBeNull();
+    const error = new Error("Proxy Broker request timed out after 30000ms") as Error & { code?: string };
+    error.code = "proxy_broker_request_timeout";
+    throw error;
+  };
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+
+  await (scheduler as any).runLoop(job.id);
+  const attempt = appDb.listAttempts(job.id)[0];
+
+  expect(attempt?.status).toBe("failed");
+  expect(attempt?.stage).toBe("failed");
+  expect(attempt?.errorCode).toBe("proxy_broker_request_timeout");
+  expect(appDb.getJob(job.id)?.status).toBe("failed");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok running reaper syncs worker stage markers into the attempt ledger", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const events: any[] = [];
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), (event) => events.push(event));
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "stage@example.test", outputDir: tempDir, stage: "spawned" });
+  await writeFile(path.join(tempDir, "stage.json"), JSON.stringify({ stage: "checkout_started" }), "utf8");
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: { pid: undefined, exitCode: null, signalCode: null, kill: () => true },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    brokerSession: null,
+    stopRequested: null,
+    stopRequestedAtMs: null,
+  } as any);
+
+  (scheduler as any).reapActiveAttempts(job);
+
+  expect(appDb.getAttempt(attempt.id)?.stage).toBe("checkout_started");
+  expect(events.some((event) => event.type === "attempt.updated" && event.payload?.attempt?.stage === "checkout_started")).toBe(true);
+  expect(scheduler["activeAttempts"].has(attempt.id)).toBe(true);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok running reaper routes exited error artifacts through the spawn finalizer", async () => {
+  const { appDb, tempDir } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, { accountEmail: "finalizer@example.test", outputDir: tempDir, stage: "spawned" });
+  await writeFile(path.join(tempDir, "error.json"), JSON.stringify({ error: "worker failed after writing artifact" }), "utf8");
+  let finalizerCalls = 0;
+  let resolveFinalizer!: () => void;
+  const finalizerDone = new Promise<void>((resolve) => {
+    resolveFinalizer = resolve;
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: { pid: undefined, exitCode: 1, signalCode: null, kill: () => true },
+    attempt,
+    outputDir: tempDir,
+    reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+    brokerSession: null,
+    stopRequested: null,
+    stopRequestedAtMs: null,
+    finalize: (runner: () => Promise<void> | void) => {
+      finalizerCalls += 1;
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        resolveFinalizer();
+      })();
+    },
+  } as any);
+
+  (scheduler as any).reapActiveAttempts(job);
+  await finalizerDone;
+
+  expect(finalizerCalls).toBe(1);
+  expect(appDb.getAttempt(attempt.id)?.status).toBe("failed");
+  expect(appDb.getJob(job.id)?.failureCount).toBe(1);
+  expect(scheduler["activeAttempts"].has(attempt.id)).toBe(false);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("grok run loop refreshes job state after active attempt reaping before launching", async () => {
+  const { appDb } = await createTempDb();
+  const scheduler = new GrokJobScheduler(appDb, process.cwd(), () => createSchedulerSettings(), () => undefined);
+  const job = appDb.createJob({ site: "grok", runMode: "headless", need: 1, parallel: 1, maxAttempts: 2 });
+  let reaped = false;
+  let spawnCalls = 0;
+
+  (scheduler as any).reapActiveAttempts = () => {
+    if (reaped) return false;
+    reaped = true;
+    appDb.updateJobState(job.id, { successCount: 1, status: "completing" });
+    return true;
+  };
+  (scheduler as any).spawnAttempt = async () => {
+    spawnCalls += 1;
+  };
+
+  await (scheduler as any).runLoop(job.id);
+
+  expect(spawnCalls).toBe(0);
+  expect(appDb.getJob(job.id)?.status).toBe("completed");
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("grok successful attempt writes back upstream when enabled", async () => {
   const { appDb, tempDir } = await createTempDb();
   const calls: Array<{ url: string; body: Record<string, unknown>; authorization: string | null }> = [];

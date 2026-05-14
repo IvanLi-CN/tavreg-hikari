@@ -37,7 +37,9 @@ interface ActiveAttempt {
   reservedPorts: { apiPort: number; mixedPort: number };
   brokerSession: ProxyBrokerRuntimeSession;
   stopRequested: "force_stop" | null;
+  stopRequestedAtMs?: number | null;
   releaseResources?: () => Promise<void>;
+  finalize?: (runner: () => Promise<void> | void) => void;
 }
 
 interface ChatGptAttemptDraft {
@@ -76,6 +78,8 @@ export interface ChatGptStartCooldownState {
 }
 
 const CHATGPT_START_COOLDOWN_MS = 5 * 60_000;
+const FORCE_STOP_SIGKILL_AFTER_MS = 5_000;
+const FORCE_STOP_REAP_AFTER_MS = 30_000;
 const CHATGPT_START_COOLDOWN_ERROR_CODES = new Set([
   "chatgpt_auth_challenge_detected",
   "chatgpt_captcha_manual_required",
@@ -104,6 +108,14 @@ async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
+function readJsonFileSync<T>(filePath: string): T | null {
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
 function isTerminalJobStatus(status: JobRecord["status"]): boolean {
   return status === "completed" || status === "failed" || status === "stopped";
 }
@@ -127,6 +139,12 @@ function signalChildProcess(child: Pick<ChildProcessWithoutNullStreams, "pid" | 
   } catch {
     // ignore shutdown races
   }
+}
+
+function stageMarkerStage(outputDir: string): string | null {
+  const marker = readJsonFileSync<{ stage?: unknown }>(path.join(outputDir, "stage.json"));
+  const stage = String(marker?.stage || "").trim();
+  return stage || null;
 }
 
 function normalizeDraft(input: unknown): ChatGptAttemptDraft | null {
@@ -397,12 +415,14 @@ export class ChatGptJobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current ChatGPT job");
     if (job.status === "stopped" || isStopInProgressStatus(job.status)) {
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused"].includes(job.status)) {
       throw new Error(`current ChatGPT job cannot be stopped from ${job.status}`);
     }
     const next = this.db.updateJobState(job.id, { status: "stopping", pausedAt: null });
+    this.reapActiveAttempts(next);
     const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
     this.emit("job.updated", { site: this.site, job: finalized });
     this.emit("toast", {
@@ -425,6 +445,7 @@ export class ChatGptJobScheduler {
     const job = this.db.getCurrentJob(this.site);
     if (!job) throw new Error("no current ChatGPT job");
     if (job.status === "stopped" || job.status === "force_stopping") {
+      this.reapActiveAttempts(job);
       return this.maybeFinalizeStoppedJob(job.id) || job;
     }
     if (!["running", "paused", "stopping"].includes(job.status)) {
@@ -432,9 +453,9 @@ export class ChatGptJobScheduler {
     }
     const next = this.db.updateJobState(job.id, { status: "force_stopping", pausedAt: null });
     for (const active of this.activeAttempts.values()) {
-      active.stopRequested = "force_stop";
-      signalChildProcess(active.child, "SIGTERM");
+      this.requestForceStop(active);
     }
+    this.reapActiveAttempts(next);
     const finalized = this.maybeFinalizeStoppedJob(next.id) || next;
     this.emit("job.updated", { site: this.site, job: finalized });
     this.emit("toast", {
@@ -491,8 +512,7 @@ export class ChatGptJobScheduler {
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     for (const active of this.activeAttempts.values()) {
-      active.stopRequested = "force_stop";
-      signalChildProcess(active.child, "SIGTERM");
+      this.requestForceStop(active);
     }
     await Promise.allSettled(Array.from(this.activeAttempts.values()).map((active) => active.releaseResources?.()));
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
@@ -518,6 +538,106 @@ export class ChatGptJobScheduler {
 
   private clearJobRuntimeState(jobId: number): void {
     this.draftFailureCounts.delete(jobId);
+  }
+
+  private requestForceStop(active: ActiveAttempt): void {
+    active.stopRequested = "force_stop";
+    active.stopRequestedAtMs ??= Date.now();
+    if (active.child) {
+      signalChildProcess(active.child, "SIGTERM");
+    }
+    const attemptId = this.activeAttemptId(active);
+    setTimeout(() => {
+      const current = attemptId == null ? null : this.activeAttempts.get(attemptId);
+      if (current?.stopRequested === "force_stop" && current.child) {
+        signalChildProcess(current.child, "SIGKILL");
+      }
+    }, FORCE_STOP_SIGKILL_AFTER_MS).unref?.();
+  }
+
+  private activeAttemptId(active: ActiveAttempt): number | null {
+    const id = active.attempt?.id ?? (active as unknown as { attemptId?: unknown }).attemptId;
+    const numericId = Number(id);
+    return Number.isFinite(numericId) && numericId > 0 ? numericId : null;
+  }
+
+  private cleanupActiveAttempt(active: ActiveAttempt): void {
+    const attemptId = this.activeAttemptId(active);
+    if (attemptId != null) {
+      this.activeAttempts.delete(attemptId);
+    }
+    void active.releaseResources?.().catch(() => {});
+  }
+
+  private syncActiveAttemptStage(active: ActiveAttempt): void {
+    const attemptId = this.activeAttemptId(active);
+    if (attemptId == null) return;
+    if (!active.outputDir) return;
+    const markerStage = stageMarkerStage(active.outputDir);
+    if (!markerStage) return;
+    const latest = this.db.getAttempt(attemptId);
+    if (!latest || latest.status !== "running" || latest.stage === markerStage) return;
+    const updated = this.db.updateAttempt(attemptId, { stage: markerStage });
+    active.attempt = updated;
+    this.emit("attempt.updated", { site: this.site, attempt: updated });
+  }
+
+  private reapActiveAttempts(job: JobRecord): boolean {
+    let changed = false;
+    const nowMs = Date.now();
+    for (const active of Array.from(this.activeAttempts.values())) {
+      const attemptId = this.activeAttemptId(active);
+      if (attemptId == null) continue;
+      const latestAttempt = this.db.getAttempt(attemptId);
+      if ((latestAttempt?.jobId ?? active.attempt?.jobId) !== job.id) continue;
+      if (!latestAttempt || latestAttempt.status !== "running") {
+        this.cleanupActiveAttempt(active);
+        changed = true;
+        continue;
+      }
+      this.syncActiveAttemptStage(active);
+
+      const child = active.child as ChildProcessWithoutNullStreams & {
+        exitCode?: number | null;
+        signalCode?: NodeJS.Signals | null;
+      };
+      if (!child) continue;
+      const exited = child.exitCode != null || child.signalCode != null;
+      const stopRequestedAtMs = active.stopRequestedAtMs ?? null;
+      const forceStopTimedOut =
+        (job.status === "force_stopping" || active.stopRequested === "force_stop")
+        && stopRequestedAtMs != null
+        && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
+      if (!exited && !forceStopTimedOut) continue;
+
+      if (active.finalize) {
+        active.finalize(() =>
+          this.handleAttemptExit(job.id, attemptId, active.outputDir, child.exitCode ?? null, child.signalCode ?? null, active),
+        );
+        changed = true;
+        continue;
+      }
+      if (job.status === "force_stopping" || active.stopRequested === "force_stop" || forceStopTimedOut) {
+        const signal = child.signalCode ?? null;
+        this.db.completeAttemptStopped(job.id, attemptId, null, {
+          errorCode: signal ? `force_stop_${String(signal).toLowerCase()}` : "force_stopped",
+          errorMessage:
+            signal ? `terminated by ${signal}` : child.exitCode != null ? `process exited with code ${child.exitCode}` : "stopped by user",
+        });
+        this.cleanupActiveAttempt(active);
+        changed = true;
+        continue;
+      }
+      const signal = child.signalCode ?? null;
+      this.failAttempt(job.id, attemptId, {
+        errorCode: signal ? `signal_${String(signal).toLowerCase()}` : child.exitCode == null ? "process_exit" : `exit_${child.exitCode}`,
+        errorMessage:
+          signal ? `terminated by ${signal}` : child.exitCode == null ? "process exited without code" : `process exited with code ${child.exitCode}`,
+      });
+      this.cleanupActiveAttempt(active);
+      changed = true;
+    }
+    return changed;
   }
 
   private trackSupplementTask(task: Promise<void>): void {
@@ -586,6 +706,7 @@ export class ChatGptJobScheduler {
     const attempt = this.db.createAttempt(job.id, {
       accountEmail: draft.email,
       outputDir,
+      stage: "allocating_proxy",
     });
     try {
       await this.spawnAttempt(launchJob, attempt, draft, outputDir);
@@ -605,6 +726,10 @@ export class ChatGptJobScheduler {
       const job = this.db.getJob(jobId);
       if (!job || job.site !== this.site) return;
       if (isTerminalJobStatus(job.status)) return;
+      if (this.reapActiveAttempts(job)) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        continue;
+      }
 
       if (isStopInProgressStatus(job.status)) {
         const stopped = this.maybeFinalizeStoppedJob(job.id);
@@ -700,6 +825,7 @@ export class ChatGptJobScheduler {
       throw error;
     });
     this.db.updateAttempt(attempt.id, {
+      stage: "proxy_bound",
       proxyNode: brokerSession.session.proxy_name,
       proxyIp: brokerSession.session.selected_ip,
       brokerSessionId: brokerSession.session.session_id,
@@ -778,6 +904,7 @@ export class ChatGptJobScheduler {
       reservedPorts,
       brokerSession,
       stopRequested: null,
+      stopRequestedAtMs: null,
       releaseResources,
     };
     this.activeAttempts.set(attempt.id, active);
@@ -809,8 +936,12 @@ export class ChatGptJobScheduler {
         this.pendingAttemptFinalizers.delete(finalizer);
       }
     };
+    active.finalize = (runner) => {
+      void finalize(runner);
+    };
 
     child.once("spawn", () => {
+      this.db.updateAttempt(attempt.id, { stage: "spawned" });
       void Promise.all([portLeases.apiPort.releaseListener(), portLeases.mixedPort.releaseListener()]);
     });
 

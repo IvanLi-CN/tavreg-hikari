@@ -9,6 +9,9 @@
 - Web 生产路径以 Proxy Broker session 为代理运行时边界。
 - 业务任务启动不再只依赖 Broker session 创建成功；必须先通过同一个 listener session 探测业务域名，失败时关闭并轮换，避免浏览器第一跳才暴露代理不可达。
 - 业务启动前的 Broker refresh 是恢复手段而不是常规门槛；当 catalog 已经有健康候选时，混合存在的少量 stale metadata 不应触发同步 refresh，否则会把 Tavily、ChatGPT 与 Grok 启动共同拖入 Broker API timeout。
+- ChatGPT/Grok 的 attempt stage 以代理绑定生命周期为准：代理未绑定时只能显示 `allocating_proxy`，Broker session 绑定后显示 `proxy_bound`，worker 子进程真正 spawn 后才显示 `spawned`。
+- Broker open 或业务域名 probe 失败属于 attempt 的 terminal setup failure；调度器必须释放已拿到的端口/Broker 资源并保留可诊断错误码，而不是留下未绑定代理的 running attempt。
+- Detached worker 的 running-loop reaper 属于调度器常规维护职责；即使 job 没有进入 stop 状态，也必须同步 worker stage 并收割已退出或已终止的 active attempt。
 - 显式指定代理出口的启动路径保持精确出口语义；该出口业务域名不可达时直接失败并要求轮换，不会静默换用其它出口。
 - 旧 Mihomo 源码暂时保留，降低 CLI 与历史调试路径迁移风险。
 - 前端只展示 Broker profile、catalog、active sessions 与历史诊断快照，不展示或编辑 Broker API key。
