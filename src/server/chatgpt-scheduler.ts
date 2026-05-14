@@ -927,6 +927,7 @@ export class ChatGptJobScheduler {
       brokerSession,
       stopRequested: null,
       stopRequestedAtMs: null,
+      lastProgressAtMs: Date.now(),
       releaseResources,
     };
     this.activeAttempts.set(attempt.id, active);
