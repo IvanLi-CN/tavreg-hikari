@@ -208,6 +208,19 @@ test("manual proxy switch queue writes a pending proxy snapshot before the async
   expect(storageSource).toContain("proxy_country = CASE WHEN ? THEN NULL ELSE proxy_country END");
 });
 
+test("manual proxy switch opens broker sessions by node id and keeps mismatch protection", async () => {
+  const mainSource = await readFile(path.join(repoRoot, "src/server/main.ts"), "utf8");
+  const brokerSource = await readFile(path.join(repoRoot, "src/proxy/broker.ts"), "utf8");
+  const runtimeSource = await readFile(path.join(repoRoot, "src/server/proxy-broker-runtime.ts"), "utf8");
+
+  expect(brokerSource).toContain("/sessions/open-by-node");
+  expect(runtimeSource).toContain("preferredNodeId?: string | null;");
+  expect(mainSource).toContain("await refreshBrokerCatalogSnapshot(input.db, runtimeSettings).catch(() => {});");
+  expect(mainSource).toContain("preferredNodeId: requestedProxyNode ? selectedProxyNode?.nodeId || null : null,");
+  expect(mainSource).toContain("brokerSession.session.node_id !== selectedProxyNode.nodeId");
+  expect(mainSource).toContain('errorCode: "proxy_broker_requested_node_mismatch"');
+});
+
 test("session proxy dialog derives its current account from the latest rows instead of a stale snapshot", async () => {
   const source = await readFile(path.join(repoRoot, "web/src/components/accounts-view.tsx"), "utf8");
 

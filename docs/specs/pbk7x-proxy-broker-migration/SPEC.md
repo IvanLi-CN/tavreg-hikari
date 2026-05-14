@@ -38,6 +38,7 @@
   - `POST /api/v1/projects/{profile_id}/refresh`，用于刷新 project 节点元数据、IP 地理信息与延迟探测。
   - `GET /api/v1/projects/{profile_id}/sessions`
   - `POST /api/v1/projects/{profile_id}/sessions/open`
+  - `POST /api/v1/projects/{profile_id}/sessions/open-by-node`，用于显式账号 session 代理切换；请求体传入 Broker `node_id`，避免多个节点共享同一出口 IP 时按 IP 选择到错误节点。
   - `DELETE /api/v1/projects/{profile_id}/sessions/{session_id}`
 - 节点可用性：
   - `can_open_session` 只表示 Broker 可以尝试打开 listener，不等同于代理节点健康。

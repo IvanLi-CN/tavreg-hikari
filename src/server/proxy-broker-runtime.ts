@@ -200,6 +200,7 @@ function brokerAttemptSummary(ip: string, error: unknown): Record<string, unknow
 
 export async function openProxyBrokerRuntimeSession(input: {
   settings: ProxyBrokerRuntimeSettings;
+  preferredNodeId?: string | null;
   preferredIp?: string | null;
   excludedIps?: string[];
   excludedNodeNamePattern?: RegExp;
@@ -207,6 +208,16 @@ export async function openProxyBrokerRuntimeSession(input: {
   maxOpenAttempts?: number;
 }): Promise<ProxyBrokerRuntimeSession> {
   const client = createProxyBrokerClient(input.settings);
+  const preferredNodeId = input.preferredNodeId?.trim();
+  if (preferredNodeId) {
+    const session = await client.openSessionByNode({
+      node_id: preferredNodeId,
+    });
+    return {
+      session,
+      proxyUrl: client.proxyUrl(session),
+    };
+  }
   const maxLatencyMs = normalizeMaxLatencyMs(input.settings);
   const preferredIp = input.preferredIp?.trim();
   const excludedIps = new Set((input.excludedIps || []).map((item) => item.trim()).filter(Boolean));
@@ -336,6 +347,7 @@ async function probeProxyBrokerBusinessDomains(input: {
 export async function openDomainProbedProxyBrokerRuntimeSession(input: {
   settings: ProxyBrokerRuntimeSettings;
   businessSite: ProxyBrokerBusinessSite;
+  preferredNodeId?: string | null;
   preferredIp?: string | null;
   excludedIps?: string[];
   excludedNodeNamePattern?: RegExp;
@@ -348,13 +360,16 @@ export async function openDomainProbedProxyBrokerRuntimeSession(input: {
   const maxAttempts = maxProbeRotations + 1;
   const excludedIps = new Set((input.excludedIps || []).map((item) => item.trim()).filter(Boolean));
   let lastError: ProxyBrokerDomainProbeError | null = null;
+  const preferredNodeId = input.preferredNodeId?.trim() || null;
   const preferredIp = input.preferredIp?.trim() || null;
+  const requiresPreferredNode = Boolean(preferredNodeId);
   const requiresPreferredIp = Boolean(preferredIp && input.fallbackOnPreferredIpFailure === false);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     let session: ProxyBrokerRuntimeSession;
     try {
       session = await openProxyBrokerRuntimeSession({
         settings: input.settings,
+        preferredNodeId,
         preferredIp: preferredIp && (requiresPreferredIp || !excludedIps.has(preferredIp)) ? preferredIp : null,
         excludedIps: Array.from(excludedIps),
         excludedNodeNamePattern: input.excludedNodeNamePattern,
@@ -392,7 +407,7 @@ export async function openDomainProbedProxyBrokerRuntimeSession(input: {
       lastError = probeError;
       if (session.session.selected_ip) excludedIps.add(session.session.selected_ip);
       await closeProxyBrokerRuntimeSession(input.settings, session.session.session_id).catch(() => {});
-      if (requiresPreferredIp || attempt >= maxAttempts) {
+      if (requiresPreferredNode || requiresPreferredIp || attempt >= maxAttempts) {
         throw probeError;
       }
     }

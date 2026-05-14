@@ -3006,6 +3006,34 @@ describe("proxy aggregation", () => {
     appDb.close();
   });
 
+  test("persists broker node ids on proxy inventory and probe updates", async () => {
+    const { appDb } = await createTempDb();
+    appDb.upsertProxyInventory([
+      { nodeName: "🇭🇰香港02-0.1倍", nodeId: "node-HkcTwsuXbkiBkjgy" },
+      { nodeName: "🇺🇸美国05 | 合适下载使用-0.01倍", nodeId: "node-o3B3giMFnOrMI5eX" },
+    ]);
+    appDb.recordProxyCheck({
+      nodeName: "🇺🇸美国05 | 合适下载使用-0.01倍",
+      nodeId: "node-o3B3giMFnOrMI5eX",
+      status: "ok",
+      latencyMs: 1182,
+      egressIp: "104.18.38.8",
+      country: "United States",
+      region: "California",
+      city: "San Francisco",
+    });
+
+    expect(appDb.getProxyNode("🇭🇰香港02-0.1倍")).toMatchObject({
+      nodeId: "node-HkcTwsuXbkiBkjgy",
+    });
+    expect(appDb.getProxyNode("🇺🇸美国05 | 合适下载使用-0.01倍")).toMatchObject({
+      nodeId: "node-o3B3giMFnOrMI5eX",
+      lastEgressIp: "104.18.38.8",
+    });
+
+    appDb.close();
+  });
+
   test("derives 24h success counts from signup_tasks", async () => {
     const { dbPath, appDb } = await createTempDb();
     appDb.importAccounts([{ email: "proxy@example.test", password: "proxy-pass" }]);

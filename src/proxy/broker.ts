@@ -15,6 +15,11 @@ export interface ProxyBrokerOpenSessionRequest {
   desired_port?: number | null;
 }
 
+export interface ProxyBrokerOpenSessionByNodeRequest {
+  node_id: string;
+  desired_port?: number | null;
+}
+
 export interface ProxyBrokerIpMetadata {
   ip?: string | null;
   last_probe_ok?: boolean | null;
@@ -237,6 +242,13 @@ export class ProxyBrokerClient {
       specified_ips: input.specified_ips || [],
       excluded_ips: input.excluded_ips || [],
       sort_mode: input.sort_mode || "lru",
+      desired_port: input.desired_port ?? null,
+    })) as ProxyBrokerSession;
+  }
+
+  async openSessionByNode(input: ProxyBrokerOpenSessionByNodeRequest): Promise<ProxyBrokerSession> {
+    return (await this.request(`/api/v1/projects/${encodeURIComponent(this.cfg.profileId)}/sessions/open-by-node`, "POST", {
+      node_id: input.node_id,
       desired_port: input.desired_port ?? null,
     })) as ProxyBrokerSession;
   }

@@ -467,6 +467,7 @@ export interface GrokApiKeyRecord {
 
 export interface ProxyNodeRecord {
   id: number;
+  nodeId: string | null;
   nodeName: string;
   lastStatus: string | null;
   lastLatencyMs: number | null;
@@ -1137,6 +1138,7 @@ function mapGrokApiKeyRow(row: Record<string, unknown>): GrokApiKeyRecord {
 function mapProxyNodeRow(row: Record<string, unknown>): ProxyNodeRecord {
   return {
     id: Number(row.id),
+    nodeId: row.node_id == null ? null : String(row.node_id),
     nodeName: String(row.node_name),
     lastStatus: row.last_status == null ? null : String(row.last_status),
     lastLatencyMs: row.last_latency_ms == null ? null : Number(row.last_latency_ms),
@@ -1425,6 +1427,7 @@ export class AppDatabase {
 
       CREATE TABLE IF NOT EXISTS proxy_nodes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id TEXT,
         node_name TEXT NOT NULL UNIQUE,
         is_selected INTEGER NOT NULL DEFAULT 0,
         last_status TEXT,
@@ -1752,6 +1755,9 @@ export class AppDatabase {
     }
     if (!proxyNodeColumns.has("last_leased_at")) {
       this.db.exec("ALTER TABLE proxy_nodes ADD COLUMN last_leased_at TEXT;");
+    }
+    if (!proxyNodeColumns.has("node_id")) {
+      this.db.exec("ALTER TABLE proxy_nodes ADD COLUMN node_id TEXT;");
     }
     const proxyChecksTableInfo = this.db.query("PRAGMA table_info(proxy_checks);").all() as Array<Record<string, unknown>>;
     const proxyChecksColumns = new Set(proxyChecksTableInfo.map((item) => String(item.name || "").toLowerCase()));
@@ -5644,12 +5650,21 @@ export class AppDatabase {
     return rows.map(mapProxyNodeRow);
   }
 
-  upsertProxyInventory(nodes: string[]): void {
-    const normalizedNodes = [...new Set(nodes.map((name) => name.trim()).filter(Boolean))];
+  upsertProxyInventory(nodes: Array<string | { nodeName: string; nodeId?: string | null }>): void {
+    const normalizedByName = new Map<string, string | null>();
+    for (const node of nodes) {
+      const nodeName = typeof node === "string" ? node : node.nodeName;
+      const normalizedName = String(nodeName || "").trim();
+      if (!normalizedName) continue;
+      const nodeId = typeof node === "string" ? null : String(node.nodeId || "").trim() || null;
+      normalizedByName.set(normalizedName, nodeId);
+    }
+    const normalizedNodes = Array.from(normalizedByName.keys());
     const stmt = this.db.query(`
-      INSERT INTO proxy_nodes (node_name)
-      VALUES (?)
-      ON CONFLICT(node_name) DO NOTHING
+      INSERT INTO proxy_nodes (node_name, node_id)
+      VALUES (?, ?)
+      ON CONFLICT(node_name) DO UPDATE SET
+        node_id = COALESCE(excluded.node_id, proxy_nodes.node_id)
     `);
     this.db.exec("BEGIN IMMEDIATE;");
     try {
@@ -5660,7 +5675,7 @@ export class AppDatabase {
         this.db.query("DELETE FROM proxy_nodes").run();
       }
       for (const name of normalizedNodes) {
-        stmt.run(name);
+        stmt.run(name, normalizedByName.get(name) ?? null);
       }
       this.db.exec("COMMIT;");
     } catch (error) {
@@ -5678,6 +5693,7 @@ export class AppDatabase {
     region?: string | null;
     city?: string | null;
     org?: string | null;
+    nodeId?: string | null;
     error?: string | null;
   }): void {
     const now = nowIso();
@@ -5703,9 +5719,10 @@ export class AppDatabase {
       this.db
         .query(`
           INSERT INTO proxy_nodes (
-            node_name, last_status, last_latency_ms, last_egress_ip, last_country, last_region, last_city, last_org, last_checked_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            node_name, node_id, last_status, last_latency_ms, last_egress_ip, last_country, last_region, last_city, last_org, last_checked_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(node_name) DO UPDATE SET
+            node_id = COALESCE(excluded.node_id, proxy_nodes.node_id),
             last_status = excluded.last_status,
             last_latency_ms = excluded.last_latency_ms,
             last_egress_ip = excluded.last_egress_ip,
@@ -5717,6 +5734,7 @@ export class AppDatabase {
         `)
         .run(
           input.nodeName,
+          input.nodeId ?? null,
           input.status,
           input.latencyMs ?? null,
           input.egressIp ?? null,
