@@ -688,6 +688,126 @@ test("reaper ignores paused and completing jobs with live Tavily attempts", asyn
   appDb.close();
 });
 
+test("completing Tavily jobs ignore live error artifacts until the child exits", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "completing-error-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "completing-error-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "error.json"), JSON.stringify({ error: "stage_login_home: stale worker" }), "utf8");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "completing" });
+  let finalized = false;
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: null,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39098, mixedPort: 49098 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now(),
+    finalize: (runner: () => Promise<void> | void) => {
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        finalized = true;
+      })();
+    },
+  } as any);
+
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+
+  const nextJob = appDb.getJob(job.id)!;
+  const nextAttempt = appDb.getAttempt(attempt.id)!;
+
+  expect(finalized).toBe(false);
+  expect(nextAttempt.status).toBe("running");
+  expect(nextJob.status).toBe("completing");
+  expect(scheduler["activeAttempts"].size).toBe(1);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
+test("completing Tavily jobs reap exited attempts with error artifacts and fail when attempts are exhausted", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+  (scheduler as any).ensureLoop = () => undefined;
+  const imported = appDb.importAccounts([{ email: "completing-exit-tavily@example.test", password: "pass-a" }]);
+  const accountId = imported.affectedIds[0]!;
+  const account = appDb.getAccount(accountId)!;
+  const outputDir = path.join(path.dirname(dbPath), "completing-exit-attempt");
+  await mkdir(outputDir, { recursive: true });
+  await writeFile(path.join(outputDir, "error.json"), JSON.stringify({ error: "stage_login_home: stale worker" }), "utf8");
+  const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+  const attempt = appDb.createAttempt(job.id, {
+    accountId,
+    accountEmail: account.microsoftEmail,
+    outputDir,
+  });
+  appDb.updateJobState(job.id, { status: "completing" });
+  let released = false;
+  let resolveFinalizer!: () => void;
+  const finalizerDone = new Promise<void>((resolve) => {
+    resolveFinalizer = resolve;
+  });
+  scheduler["activeAttempts"].set(attempt.id, {
+    child: {
+      pid: undefined,
+      exitCode: 1,
+      signalCode: null,
+      kill: () => true,
+    },
+    attempt,
+    account,
+    outputDir,
+    reservedPorts: { apiPort: 39099, mixedPort: 49099 },
+    tail: [],
+    stopRequested: null,
+    lastProgressAtMs: Date.now(),
+    finalize: (runner: () => Promise<void> | void) => {
+      void (async () => {
+        await runner();
+        scheduler["activeAttempts"].delete(attempt.id);
+        released = true;
+        resolveFinalizer();
+      })();
+    },
+  } as any);
+
+  scheduler["reapActiveAttempts"](appDb.getJob(job.id)!);
+  await finalizerDone;
+  await scheduler["runLoop"](job.id);
+
+  const nextJob = appDb.getJob(job.id)!;
+  const nextAttempt = appDb.getAttempt(attempt.id)!;
+
+  expect(released).toBe(true);
+  expect(nextAttempt.status).toBe("failed");
+  expect(nextAttempt.errorCode).toBe("exit_1");
+  expect(nextAttempt.errorMessage).toContain("stale worker");
+  expect(nextJob.status).toBe("failed");
+  expect(nextJob.lastError).toBe("eligible accounts exhausted or max attempts reached");
+  expect(scheduler["activeAttempts"].size).toBe(0);
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("ledger updates refresh quiet Tavily attempt progress time", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);

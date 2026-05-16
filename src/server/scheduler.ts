@@ -879,8 +879,9 @@ export class JobScheduler {
   }
 
   private reapActiveAttempts(job: JobRecord): void {
-    const canReapRunning = job.status === "running" || job.status === "completing";
-    if (!canReapRunning && !isStopInProgressStatus(job.status)) return;
+    const canReapRunning = job.status === "running";
+    const canReapCompleting = job.status === "completing";
+    if (!canReapRunning && !canReapCompleting && !isStopInProgressStatus(job.status)) return;
 
     const nowMs = Date.now();
     for (const active of Array.from(this.activeAttempts.values())) {
@@ -916,7 +917,7 @@ export class JobScheduler {
         && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
       const lastProgressAtMs = active.lastProgressAtMs ?? parseIsoToMs(latestAttempt.startedAt) ?? null;
       const runningStaleTimedOut =
-        (job.status === "running" || job.status === "completing")
+        job.status === "running"
         && lastProgressAtMs != null
         && nowMs - lastProgressAtMs >= RUNNING_STALE_ATTEMPT_REAP_AFTER_MS;
       const hasTerminalArtifact =
@@ -925,6 +926,7 @@ export class JobScheduler {
       const canReapStopTransition = isStopInProgressStatus(job.status) || active.stopRequested === "force_stop";
 
       if (canReapRunning && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
+      if (canReapCompleting && !exited) continue;
       if (canReapStopTransition && !exited && !forceStopTimedOut) continue;
       if (runningStaleTimedOut && !hasTerminalArtifact && !exited && active.stopRequested !== "force_stop") {
         this.requestForceStop(active);
@@ -1186,6 +1188,22 @@ export class JobScheduler {
       if (isTerminalJobStatus(postReap.status)) {
         return;
       }
+      if (this.activeAttempts.size === 0) {
+        if (postReap.successCount >= postReap.need) {
+          const completed = this.db.completeJob(jobId, true);
+          this.deleteAutoExtractStateIfIdle(jobId);
+          this.emit("job.updated", { job: completed });
+          this.emit("toast", { level: "success", message: `job #${job.id} completed` });
+          return;
+        }
+        if (postReap.launchedCount >= postReap.maxAttempts) {
+          const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
+          this.deleteAutoExtractStateIfIdle(jobId);
+          this.emit("job.updated", { job: failed });
+          this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
+          return;
+        }
+      }
       const eligible = this.db.countEligibleAccounts(jobId);
       const pendingBrowserSessions = this.db.countPendingBrowserSessions(jobId);
       const hasAutoExtractState = this.autoExtractStates.has(jobId);
@@ -1218,14 +1236,7 @@ export class JobScheduler {
         }
       }
       if (this.activeAttempts.size === 0) {
-        if (postReap.successCount >= postReap.need) {
-          const completed = this.db.completeJob(jobId, true);
-          this.deleteAutoExtractStateIfIdle(jobId);
-          this.emit("job.updated", { job: completed });
-          this.emit("toast", { level: "success", message: `job #${job.id} completed` });
-          return;
-        }
-        if ((eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) || postReap.launchedCount >= postReap.maxAttempts) {
+        if (eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) {
           const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
