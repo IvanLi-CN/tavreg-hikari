@@ -41,7 +41,9 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 - For ordinary running jobs, route terminal `result.json` / `error.json` artifacts through the same result finalizer; if a worker stays quiet long enough without terminal artifacts, terminate the worker first and only release ownership after it exits or the force-stop reap window elapses.
 - Treat ledger-visible signup-task updates as progress as well; quiet output alone should not trip the stale timer if the task ledger is still advancing.
 - If a running worker has already written terminal artifacts but has not closed yet, keep ownership until the child exits rather than finalizing early.
-- Keep the reaper scoped to `running` and stop-transition jobs only; paused, completing, and stopped states must not be treated as stale worker states.
+- Keep stale timeout cleanup scoped to `running` jobs and stop-transition jobs only; paused and stopped states must not be treated as stale worker states.
+- Treat `completing` as a drain-only state: do not kill or finalize a live child just because it has written `result.json` or `error.json`, but do allow the normal finalizer to run after the child has already exited or the active entry is otherwise stale in memory.
+- After a completing job drains all active attempts, re-read the job counters and force a terminal transition: success when `success_count >= need`, failure when the launch budget is exhausted and the need is still unmet.
 - Store the active attempt's resource-release callback and force-stop request timestamp with the scheduler-owned active entry, so stale attempts can be reaped without leaking reserved runtime resources.
 - After reaping active attempts, finalize the job with the same terminal `stopped` path used by normal stop completion.
 
@@ -52,7 +54,7 @@ The scheduler tracks active work in memory and only deletes an active attempt fr
 - Do not limit stale cleanup to stop-state branches. Running jobs must also free terminal or timed-out active entries so capacity can reopen.
 - Treat in-memory active attempt entries as an implementation detail. Reapers should tolerate legacy/test shapes that only carry an attempt id, resolve the DB row before acting, and avoid assuming the full runtime object is present.
 - Do not race the child `close` handler with a second ad hoc completion path. Reuse an idempotent finalizer around result parsing, DB completion, resource release, and stopped-job finalization.
-- Release any runtime resources owned by the active attempt when deleting it from the in-memory map, but keep ownership while the worker may still be alive even if it has already written `error.json`.
+- Release any runtime resources owned by the active attempt when deleting it from the in-memory map, but keep ownership while the worker may still be alive even if it has already written `error.json`; for `completing`, terminal artifacts are diagnostic input after exit, not permission to release a live child early.
 - Cover the failure mode with tests that do not launch a browser: create a running attempt, inject an active attempt into the scheduler, write `result.json` / `error.json` or age the active attempt progress timestamp, and assert the active entry is cleared with the correct terminal attempt status.
 
 ## References

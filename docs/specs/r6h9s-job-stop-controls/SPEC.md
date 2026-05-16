@@ -74,7 +74,9 @@
 - 运行态的“新进展”不仅包括 stdout/stderr，也包括 ledger 中 signup task 的可见更新；只要 ledger `updated_at` 在推进，`lastProgressAtMs` 就必须同步刷新。
 - 对于普通 `running`，若 `result.json` / `error.json` 已经写出但 child 仍未 `close`，scheduler 只能保留 active ownership 等待 child 退出，不得提前释放 active entry。
 - 普通 `running` 下被 reaper 收束的成功 attempt 必须沿用正常 result finalizer；成功工件仍写入 `succeeded`，失败工件仍写入 `failed`，不得为了清理僵尸 attempt 而统一改成手动停止语义。
-- reaper 仅能处理 `running` 与 stop 过渡态的 active attempts；`paused`、`completing`、`stopped` 等状态下的 live worker 不能被当成 stale attempt 提前结算。
+- reaper 仅能对普通 `running` job 执行 stale timeout 强停；stop 过渡态按停止语义收束；`paused`、`stopped` 等状态下的 live worker 不能被当成 stale attempt 提前结算。
+- `completing` 是自然收尾状态：仍然活着且尚未退出的 worker 必须继续由 scheduler 持有，即便 attempt 目录已经写出 `result.json` / `error.json`；只有 child 已退出、错过 `close` 事件或已有终态 attempt 行时，reaper 才能复用正常 finalizer 收束 active entry。
+- 当 `completing` job 的 active attempts 清零后，调度循环必须重新读取 job 状态；若成功数已满足 `need` 则进入 `completed`，若已达到 `max_attempts` 仍未满足 `need` 则进入 `failed`，不得永久停留在 `completing`。
 - 当 job 处于 stop 过渡态时，不允许再执行 `update_limits` 或启动新 job。
 
 ## 验收标准（Acceptance Criteria）
