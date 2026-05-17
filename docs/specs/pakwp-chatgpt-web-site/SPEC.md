@@ -46,7 +46,7 @@
 ### MUST
 
 - `/` 与旧 `dashboard` 语义默认进入 Tavily，顶部标签显示 `Tavily / ChatGPT / 微软账号 / 微软邮箱 / API Keys / 代理节点`。
-- ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，并明确说明 attempt 资料由服务端自动生成。
+- ChatGPT 页必须提供 `need / parallel / maxAttempts` 批量控制输入，不暴露 attempt 资料草稿字段；资料生成语义由服务端行为保证，控制区避免重复解释性提示。
 - ChatGPT 必须支持 `runMode=headed|headless` 显式配置；当当前运行环境不支持有头浏览器时，界面不得错误提供 `headed` 选项，后端也必须拒绝显式 `headed` 启动。
 - 微软账号页单账号 launcher 额外支持 `headless | headed | fingerprint` 三态，其中 `headed / fingerprint` 只在当前环境实际可启动相应浏览器时可用，`fingerprint` 在登录成功后保留浏览器供人工接管。
 - ChatGPT 每个 attempt 的邮箱必须由服务端通过 cf-mail provision/ensure 生成，且每个 attempt 都要拿到独立资料。
@@ -63,7 +63,7 @@
 
 ### Core flows
 
-- 用户进入 `/chatgpt` 时，前端展示批量控制与自动生成说明，不暴露单次 attempt 的邮箱 / 密码 / 昵称 / 出生日期输入框。
+- 用户进入 `/chatgpt` 时，前端展示批量控制，不暴露单次 attempt 的邮箱 / 密码 / 昵称 / 出生日期输入框，也不在控制区重复解释每个 attempt 的资料生成细节。
 - 用户点击“启动”后，前端向站点化 job 控制接口发送 `site=chatgpt` 的 start 请求，并携带 `need / parallel / maxAttempts`。
 - 后端按当前请求与环境能力创建 ChatGPT job，并在每个 attempt 实际启动前生成独立的 cf-mail 邮箱、随机密码、随机昵称与 `1990-01-01` 至 `2005-12-31` 之间的生日。
 - 当请求来自微软账号页单账号 launcher 且 auth provider 为 Microsoft 时，worker 先点击 `Continue with Microsoft`，再复用统一 Microsoft 登录状态机；如站点在 SSO 后追加验证码或资料页，则继续使用站点 draft builder 完成补全。
@@ -99,7 +99,7 @@
 
 - Given 用户打开 ChatGPT 页
   When 页面首次加载
-  Then 页面只展示批量控制与自动生成说明，不暴露 attempt 草稿字段。
+  Then 页面只展示批量控制，不暴露 attempt 草稿字段，也不显示重复的自动生成资料说明。
 
 - Given Tavily 已有 current job
   When 用户再启动 ChatGPT job
@@ -165,16 +165,16 @@
   ![App shell navigation](./assets/app-shell-nav.png)
 
 - source_type: `storybook_canvas`
-  story_id_or_title: `views-chatgptview--batch-ready`
-  state: `chatgpt batch ready`
-  evidence_note: 验证 ChatGPT 页新增 `need / parallel / maxAttempts` 批量控制，并在空闲态明确显示 attempt 资料会在启动时自动生成。
-  ![ChatGPT batch ready view](./assets/chatgpt-view-batch-ready.png)
+  story_id_or_title: `views-chatgptview--batch-ready-headless-only`
+  state: `chatgpt batch ready headless only`
+  evidence_note: 验证 ChatGPT 空闲态保留 `need / parallel / maxAttempts` 批量控制，并移除运行模式解释、headless-only 能力说明与 attempt 资料生成解释。
+  ![ChatGPT headless-only ready view](./assets/chatgpt-view-headless-only.png)
 
 - source_type: `storybook_canvas`
-  story_id_or_title: `views-chatgptview--batch-running`
+  story_id_or_title: `views-chatgptview--running`
   state: `chatgpt batch running`
-  evidence_note: 验证 ChatGPT 批量运行态会显示并发 attempt、预算进度、最近错误与默认掩码凭据列表。
-  ![ChatGPT batch running view](./assets/chatgpt-view-batch-running.png)
+  evidence_note: 验证 ChatGPT 批量运行态保留并发 attempt、预算进度与最近错误，同时移除运行模式解释与 attempt 资料复用说明。
+  ![ChatGPT running view](./assets/chatgpt-view-running.png)
 
 - source_type: `storybook_canvas`
   story_id_or_title: `views-dashboardview--running`

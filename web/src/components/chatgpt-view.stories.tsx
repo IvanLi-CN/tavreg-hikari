@@ -270,6 +270,7 @@ export const InteractiveBatchControls: Story = {
     await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
     await userEvent.click(within(document.body).getByRole("option", { name: "headless" }));
     await expect(canvas.getByText("mode: headless")).toBeInTheDocument();
+    await expect(canvas.queryByText(/当前将以/)).toBeNull();
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
     await userEvent.tab();
@@ -323,7 +324,8 @@ export const InteractiveHeadlessOnly: Story = {
     await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
     await expect(within(document.body).queryByRole("option", { name: "headed" })).toBeNull();
     await expect(within(document.body).getByRole("option", { name: "headless" })).toBeInTheDocument();
-    await expect(canvas.getByText(/当前环境仅支持/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/当前环境仅支持/)).toBeNull();
+    await expect(canvas.queryByText(/当前将以/)).toBeNull();
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
   },
 };

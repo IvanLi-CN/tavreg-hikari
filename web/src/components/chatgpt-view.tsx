@@ -217,24 +217,11 @@ export function ChatGptView({
               <Badge variant={effectiveUpstreamGroupName ? "success" : "neutral"}>
                 supplement: {effectiveUpstreamGroupName || "不补号"}
               </Badge>
-              <span>{effectiveRunMode === "headless" ? "当前将以无头浏览器模式批量运行" : "当前将以有头浏览器模式批量运行"}</span>
             </div>
             <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
               {effectiveUpstreamGroupName
                 ? `成功 credential 会自动补到分组 ${effectiveUpstreamGroupName}。`
                 : "当前不会执行自动补号。"}
-            </div>
-            {runModeAvailabilityPending ? (
-              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                正在检测当前环境的浏览器能力，稍后才能开始任务。
-              </div>
-            ) : !runModeAvailability.headed ? (
-              <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-                当前环境仅支持 <span className="font-medium text-slate-200">headless</span>。{runModeAvailability.headedReason || "有头浏览器不可用。"}
-              </div>
-            ) : null}
-            <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3 text-sm text-slate-400">
-              每个 attempt 都会预生成独立邮箱与注册资料；单个 attempt 内若发生页面跳转或登录重试，只会继续复用它自己的那份资料，不会跨 attempt 共享。
             </div>
             {cooldown ? (
               <div className="rounded-2xl border border-amber-300/20 bg-amber-300/[0.06] px-4 py-3 text-sm text-amber-50">
