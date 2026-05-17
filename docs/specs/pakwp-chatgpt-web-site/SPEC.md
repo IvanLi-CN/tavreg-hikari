@@ -168,12 +168,14 @@
   story_id_or_title: `views-chatgptview--batch-ready-headless-only`
   state: `chatgpt batch ready headless only`
   evidence_note: 验证 ChatGPT 空闲态保留 `need / parallel / maxAttempts` 批量控制，并移除运行模式解释、headless-only 能力说明与 attempt 资料生成解释。
+  PR: include
   ![ChatGPT headless-only ready view](./assets/chatgpt-view-headless-only.png)
 
 - source_type: `storybook_canvas`
   story_id_or_title: `views-chatgptview--running`
   state: `chatgpt batch running`
   evidence_note: 验证 ChatGPT 批量运行态保留并发 attempt、预算进度与最近错误，同时移除运行模式解释与 attempt 资料复用说明。
+  PR: include
   ![ChatGPT running view](./assets/chatgpt-view-running.png)
 
 - source_type: `storybook_canvas`
