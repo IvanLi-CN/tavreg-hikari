@@ -93,6 +93,12 @@ const headlessOnlyAvailability: RunModeAvailability = {
   headedReason: "当前环境缺少可用的指纹浏览器，无法启动有头浏览器。",
 };
 
+const pendingRunModeAvailability: RunModeAvailability = {
+  headed: true,
+  headless: true,
+  headedReason: "正在检测当前环境的浏览器能力。",
+};
+
 function buildJob(status: NonNullable<typeof sampleJob.job>["status"]): JobSnapshot {
   return {
     ...sampleJob,
@@ -193,6 +199,18 @@ export const BatchReadyHeadlessOnly: Story = {
       runMode: "headless",
     },
     runModeAvailability: headlessOnlyAvailability,
+  },
+};
+
+export const BatchReadyPendingRunMode: Story = {
+  args: {
+    ...BatchReady.args,
+    runModeAvailability: pendingRunModeAvailability,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "检测中..." })).toBeDisabled();
+    await expect(canvas.queryByText(/正在检测当前环境/)).toBeNull();
   },
 };
 

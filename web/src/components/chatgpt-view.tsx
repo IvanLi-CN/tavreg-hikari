@@ -126,7 +126,9 @@ export function ChatGptView({
     || jobBusy;
   const primaryLabel =
     primaryAction === "start"
-      ? job.job
+      ? runModeAvailabilityPending
+        ? "检测中..."
+        : job.job
         ? "重新开始"
         : "开始"
       : resolvePrimaryJobLabel(currentStatus);
