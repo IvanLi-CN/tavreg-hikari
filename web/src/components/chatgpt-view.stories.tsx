@@ -93,6 +93,12 @@ const headlessOnlyAvailability: RunModeAvailability = {
   headedReason: "当前环境缺少可用的指纹浏览器，无法启动有头浏览器。",
 };
 
+const pendingRunModeAvailability: RunModeAvailability = {
+  headed: true,
+  headless: true,
+  headedReason: "正在检测当前环境的浏览器能力。",
+};
+
 function buildJob(status: NonNullable<typeof sampleJob.job>["status"]): JobSnapshot {
   return {
     ...sampleJob,
@@ -196,6 +202,18 @@ export const BatchReadyHeadlessOnly: Story = {
   },
 };
 
+export const BatchReadyPendingRunMode: Story = {
+  args: {
+    ...BatchReady.args,
+    runModeAvailability: pendingRunModeAvailability,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("button", { name: "检测中..." })).toBeDisabled();
+    await expect(canvas.queryByText(/正在检测当前环境/)).toBeNull();
+  },
+};
+
 export const MailboxCooldown: Story = {
   args: {
     ...BatchReady.args,
@@ -270,6 +288,7 @@ export const InteractiveBatchControls: Story = {
     await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
     await userEvent.click(within(document.body).getByRole("option", { name: "headless" }));
     await expect(canvas.getByText("mode: headless")).toBeInTheDocument();
+    await expect(canvas.queryByText(/当前将以/)).toBeNull();
     await userEvent.clear(canvas.getByLabelText("Need"));
     await userEvent.type(canvas.getByLabelText("Need"), "4");
     await userEvent.tab();
@@ -323,7 +342,8 @@ export const InteractiveHeadlessOnly: Story = {
     await userEvent.click(canvas.getByRole("combobox", { name: /run mode/i }));
     await expect(within(document.body).queryByRole("option", { name: "headed" })).toBeNull();
     await expect(within(document.body).getByRole("option", { name: "headless" })).toBeInTheDocument();
-    await expect(canvas.getByText(/当前环境仅支持/)).toBeInTheDocument();
+    await expect(canvas.queryByText(/当前环境仅支持/)).toBeNull();
+    await expect(canvas.queryByText(/当前将以/)).toBeNull();
     await expect(canvas.getByTestId("chatgpt-job-draft-debug")).toHaveTextContent('"runMode":"headless"');
   },
 };
