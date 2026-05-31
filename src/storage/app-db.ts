@@ -719,7 +719,7 @@ function isReadyBrowserSession(
 function nonRetryableAttemptWhereSql(alias: string): string {
   return `
     (
-      ${alias}.status IN ('running', 'succeeded', 'failed')
+      ${alias}.status IN ('running', 'succeeded', 'failed', 'stopped')
     )
   `;
 }

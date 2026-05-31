@@ -66,6 +66,7 @@ interface ActiveAttempt {
   tail: string[];
   stopRequested: "force_stop" | null;
   stopRequestedAtMs?: number | null;
+  ledgerTerminalStopRequested?: boolean;
   lastProgressAtMs?: number | null;
   releaseResources?: () => Promise<void>;
   finalize?: (runner: () => Promise<void> | void) => void;
@@ -509,6 +510,20 @@ function shouldIgnoreSignupTaskForAttempt(
   return false;
 }
 
+function normalizeSignupTaskStatus(task: Record<string, unknown> | null | undefined): string {
+  return String(task?.status || "").trim().toLowerCase();
+}
+
+function isTerminalSignupTaskStatus(task: Record<string, unknown> | null | undefined): boolean {
+  const status = normalizeSignupTaskStatus(task);
+  return Boolean(status && status !== "running");
+}
+
+function isTerminalSignupTaskFailureStatus(task: Record<string, unknown> | null | undefined): boolean {
+  const status = normalizeSignupTaskStatus(task);
+  return Boolean(status && status !== "running" && status !== "succeeded");
+}
+
 function createProviderAttemptClock(): Record<AccountExtractorProvider, number> {
   return {
     zhanghaoya: 0,
@@ -837,6 +852,19 @@ export class JobScheduler {
     }, FORCE_STOP_SIGKILL_AFTER_MS).unref?.();
   }
 
+  private requestLedgerTerminalStop(active: ActiveAttempt): void {
+    active.ledgerTerminalStopRequested = true;
+    active.stopRequestedAtMs ??= Date.now();
+    signalChildProcess(active.child, "SIGTERM");
+    if (active.child.pid == null) return;
+    setTimeout(() => {
+      const current = this.activeAttempts.get(active.attempt.id);
+      if (current?.ledgerTerminalStopRequested === true && current.stopRequested !== "force_stop") {
+        signalChildProcess(current.child, "SIGKILL");
+      }
+    }, FORCE_STOP_SIGKILL_AFTER_MS).unref?.();
+  }
+
   private cleanupActiveAttempt(active: ActiveAttempt): void {
     this.activeAttempts.delete(active.attempt.id);
     void active.releaseResources?.().catch(() => {});
@@ -911,8 +939,9 @@ export class JobScheduler {
       }>(path.join(active.outputDir, "result.json"));
       const exited = child.exitCode != null || child.signalCode != null;
       const stopRequestedAtMs = active.stopRequestedAtMs ?? null;
+      const ledgerTerminalStopRequested = active.ledgerTerminalStopRequested === true;
       const forceStopTimedOut =
-        (job.status === "force_stopping" || active.stopRequested === "force_stop")
+        (job.status === "force_stopping" || active.stopRequested === "force_stop" || ledgerTerminalStopRequested)
         && stopRequestedAtMs != null
         && nowMs - stopRequestedAtMs >= FORCE_STOP_REAP_AFTER_MS;
       const lastProgressAtMs = active.lastProgressAtMs ?? parseIsoToMs(latestAttempt.startedAt) ?? null;
@@ -923,16 +952,53 @@ export class JobScheduler {
       const hasTerminalArtifact =
         Boolean(errorArtifact?.error?.trim()) ||
         Boolean(typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim());
-      const canReapStopTransition = isStopInProgressStatus(job.status) || active.stopRequested === "force_stop";
+      const signupTask = this.db.getLatestSignupTask(job.id, active.account.id);
+      const hasTerminalSignupTaskFailure =
+        signupTask != null && isTerminalSignupTaskFailureStatus(signupTask) && !shouldIgnoreSignupTaskForAttempt(latestAttempt, signupTask);
+      const canReapStopTransition = isStopInProgressStatus(job.status) || active.stopRequested === "force_stop" || ledgerTerminalStopRequested;
 
-      if (canReapRunning && !exited && !hasTerminalArtifact && !runningStaleTimedOut) continue;
+      if (canReapRunning && hasTerminalSignupTaskFailure && !exited && !hasTerminalArtifact && runningStaleTimedOut && !forceStopTimedOut) {
+        this.requestLedgerTerminalStop(active);
+        continue;
+      }
+
+      if (canReapRunning && !exited && !hasTerminalArtifact && !runningStaleTimedOut && !canReapStopTransition) continue;
       if (canReapCompleting && !exited) continue;
       if (canReapStopTransition && !exited && !forceStopTimedOut) continue;
-      if (runningStaleTimedOut && !hasTerminalArtifact && !exited && active.stopRequested !== "force_stop") {
+      if (runningStaleTimedOut && !hasTerminalArtifact && !exited && active.stopRequested !== "force_stop" && !ledgerTerminalStopRequested) {
         this.requestForceStop(active);
         continue;
       }
       if (canReapRunning && hasTerminalArtifact && !exited) {
+        continue;
+      }
+
+      if (ledgerTerminalStopRequested && forceStopTimedOut && hasTerminalSignupTaskFailure && active.stopRequested !== "force_stop" && job.status !== "force_stopping") {
+        if (active.finalize) {
+          active.finalize(() =>
+            this.handleAttemptExit(
+              job.id,
+              active.attempt.id,
+              active.account.id,
+              active.outputDir,
+              child.exitCode ?? null,
+              child.signalCode ?? null,
+              active,
+            ),
+          );
+        } else {
+          void this.handleAttemptExit(
+            job.id,
+            active.attempt.id,
+            active.account.id,
+            active.outputDir,
+            child.exitCode ?? null,
+            child.signalCode ?? null,
+            active,
+          ).finally(() => {
+            this.cleanupActiveAttempt(active);
+          });
+        }
         continue;
       }
 
@@ -1491,6 +1557,7 @@ export class JobScheduler {
           ? latest.updatedAt
           : null,
     );
+    const latestTerminal = isTerminalSignupTaskStatus(latest);
     if (latestUpdatedAt != null) {
       active.lastProgressAtMs = Math.max(active.lastProgressAtMs ?? 0, latestUpdatedAt);
     }
@@ -1522,7 +1589,9 @@ export class JobScheduler {
 
     const updated = this.db.updateAttempt(active.attempt.id, patch);
     active.attempt = updated;
-    active.lastProgressAtMs = Date.now();
+    if (!latestTerminal) {
+      active.lastProgressAtMs = Date.now();
+    }
     this.emit("attempt.updated", { attempt: updated });
     return updated;
   }

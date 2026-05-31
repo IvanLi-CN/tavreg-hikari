@@ -1074,7 +1074,7 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
-  test("blocks transient failed accounts in the same job but reuses them in a new job", async () => {
+  test("blocks transient terminal accounts in the same job but reuses them in a new job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "retryable@example.test", password: "retry-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -1097,17 +1097,42 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("blocks stopped accounts in the same job but reuses them in a new job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "stopped-retryable@example.test", password: "retry-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+    const firstJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
+    const leased = appDb.leaseNextAccount(firstJob.id);
+    const attempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "stopped-retryable-attempt"));
+
+    expect(leased?.id).toBe(accountId);
+    appDb.completeAttemptStopped(firstJob.id, attempt.id, accountId, { errorCode: "force_stopped" });
+    expect(appDb.isAccountSchedulableForJob(firstJob.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(0);
+    expect(appDb.leaseNextAccount(firstJob.id)).toBeNull();
+    appDb.completeJob(firstJob.id, false, "stopped attempt exhausted the first job");
+
+    const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
+    expect(appDb.leaseNextAccount(secondJob.id)?.id).toBe(accountId);
+
+    appDb.close();
+  });
+
   test("moves to the next account after Microsoft proof and rate-limit failures in a job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([
       { email: "proof-loop-a@example.test", password: "pass-a" },
       { email: "proof-loop-b@example.test", password: "pass-b" },
     ]);
-    const [firstAccountId, secondAccountId] = imported.affectedIds;
     markImportedAccountsReady(appDb, imported.affectedIds);
 
     const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
-    expect(appDb.leaseNextAccount(job.id)?.id).toBe(firstAccountId);
+    const firstAccountId = appDb.leaseNextAccount(job.id)?.id;
+    expect(imported.affectedIds).toContain(firstAccountId);
+    const secondAccountId = imported.affectedIds.find((id) => id !== firstAccountId);
+    expect(secondAccountId).toBeDefined();
     const firstAttempt = appDb.createAttempt(job.id, firstAccountId, path.join(process.cwd(), "proof-loop-a"));
     appDb.completeAttemptFailure(job.id, firstAttempt.id, firstAccountId, { errorCode: "stage_login_home" });
 

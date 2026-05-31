@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-28
-- Last: 2026-04-26
+- Last: 2026-06-01
 
 ## 背景 / 问题陈述
 
@@ -62,7 +62,7 @@
 ### 账号可调度判定
 
 - 同一 job 内：
-  - 已经产生 `running`、`succeeded` 或 `failed` attempt 的账号，不得再次派发；当前 job 必须换下一个候选账号，避免 Microsoft proof / rate-limit 等状态反复消耗同一账号与 attempt 预算。
+  - 已经产生 `running`、`succeeded`、`failed` 或 `stopped` attempt 的账号，不得再次派发；当前 job 必须换下一个候选账号，避免 Microsoft proof / rate-limit、人工停止等状态反复消耗同一账号与 attempt 预算。
   - 已成功产出 API key、仍处于当前租用中、人工停用或被三类硬账号阻断的账号，不得再次派发。
 - 新 job 创建后：
   - `failed` 且 `skip_reason` 为空的账号，允许重新进入候选池。
@@ -100,6 +100,8 @@
 
 - Given 某账号在 job A 因 `network_connection_closed`、代理、浏览器或临时风控失败，When 创建 job B，Then 该账号会重新计入 `eligibleCount` 并可再次被派发。
 - Given 某账号已经在当前 job 里因瞬时错误、Microsoft proof 或 rate-limit 失败过，When 当前 job 继续调度，Then 该账号不会重新计入 `eligibleCount`，且调度器会尝试下一个候选账号。
+- Given 某账号已经在当前 job 里产生 `stopped/force_stopped` attempt，When 当前 job 继续调度，Then 该账号不会重新计入 `eligibleCount`；When 创建新 job，Then 若无硬阻断或 API key，该账号可重新进入候选池。
+- Given signup task ledger 已报告 `runner_interrupted` 等终态失败，When 对应 Tavily attempt 没有新 artifact 且进程已安静，Then 调度器会把 attempt 按 ledger 终态收口，并允许 job 继续推进或进入终态，而不是持续保持 `running`。
 - Given 某账号失败码为 `microsoft_password_incorrect`、`microsoft_account_locked` 或 `microsoft_unknown_recovery_email`，When 创建新 job，Then 该账号不会进入候选池，且账号页会显示明确阻断原因。
 - Given Microsoft OAuth confirm-email proof surface 提供的 masked recovery mailbox 与账号配置不匹配，When 自动化失败落盘，Then 账号写入 `skip_reason=microsoft_unknown_recovery_email` 并从后续 Tavily job 候选池中排除。
 - Given 操作者更新了密码、保存了正确的 Proof 邮箱，或点击“恢复可用”，When 刷新账号列表并创建新 job，Then 对应阻断会被清除，账号重新可调度。
@@ -161,3 +163,4 @@
 - 2026-03-29: 完成 PR 收敛前最终验证与 Spec 状态收口，准备合并并执行后续收尾。
 - 2026-03-29: 修正瞬时失败账号的同 job 复用规则，改为同 job 与新 job 都允许继续重试，仅对成功、租用中、人工停用与硬账号阻断维持不可调度。
 - 2026-04-26: 明确 Tavily OAuth confirm-email proof mailbox mismatch 复用 `microsoft_unknown_recovery_email` 硬阻断，避免账号在后续 job 中反复租用。
+- 2026-06-01: 根据生产批量 job #1127 的 5 并发 / 目标 30 实测，补充 `stopped` attempt 的同 job 禁止复用规则，并要求 terminal signup ledger failure 能收口 quiet attempt，避免 job 长时间卡在 `running`。
