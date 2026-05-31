@@ -1074,7 +1074,7 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
-  test("reuses transient failed accounts in the same job and in a new job", async () => {
+  test("blocks transient failed accounts in the same job but reuses them in a new job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "retryable@example.test", password: "retry-pass" }]);
     const accountId = imported.affectedIds[0];
@@ -1085,16 +1085,40 @@ describe("AppDatabase account import", () => {
 
     expect(leased?.id).toBe(accountId);
     appDb.completeAttemptFailure(firstJob.id, attempt.id, accountId, { errorCode: "network_connection_closed" });
-    expect(appDb.isAccountSchedulableForJob(firstJob.id, accountId)).toBe(true);
-    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(1);
-    expect(appDb.leaseNextAccount(firstJob.id)?.id).toBe(accountId);
-    const retryAttempt = appDb.createAttempt(firstJob.id, accountId, path.join(process.cwd(), "retryable-attempt-2"));
-    appDb.completeAttemptFailure(firstJob.id, retryAttempt.id, accountId, { errorCode: "browser_proxy_ip_mismatch" });
+    expect(appDb.isAccountSchedulableForJob(firstJob.id, accountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(firstJob.id)).toBe(0);
+    expect(appDb.leaseNextAccount(firstJob.id)).toBeNull();
     appDb.completeJob(firstJob.id, false, "transient failure exhausted the first job");
 
     const secondJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
     expect(appDb.countEligibleAccounts(secondJob.id)).toBe(1);
     expect(appDb.leaseNextAccount(secondJob.id)?.id).toBe(accountId);
+
+    appDb.close();
+  });
+
+  test("moves to the next account after Microsoft proof and rate-limit failures in a job", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([
+      { email: "proof-loop-a@example.test", password: "pass-a" },
+      { email: "proof-loop-b@example.test", password: "pass-b" },
+    ]);
+    const [firstAccountId, secondAccountId] = imported.affectedIds;
+    markImportedAccountsReady(appDb, imported.affectedIds);
+
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 3 });
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(firstAccountId);
+    const firstAttempt = appDb.createAttempt(job.id, firstAccountId, path.join(process.cwd(), "proof-loop-a"));
+    appDb.completeAttemptFailure(job.id, firstAttempt.id, firstAccountId, { errorCode: "stage_login_home" });
+
+    expect(appDb.isAccountSchedulableForJob(job.id, firstAccountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+    expect(appDb.leaseNextAccount(job.id)?.id).toBe(secondAccountId);
+    const secondAttempt = appDb.createAttempt(job.id, secondAccountId, path.join(process.cwd(), "proof-loop-b"));
+    appDb.completeAttemptFailure(job.id, secondAttempt.id, secondAccountId, { errorCode: "microsoft_password_rate_limited" });
+
+    expect(appDb.isAccountSchedulableForJob(job.id, secondAccountId)).toBe(false);
+    expect(appDb.countEligibleAccounts(job.id)).toBe(0);
 
     appDb.close();
   });

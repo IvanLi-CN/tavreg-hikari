@@ -62,7 +62,7 @@
 ### 账号可调度判定
 
 - 同一 job 内：
-  - `failed` 且 `skip_reason` 为空的账号，允许继续派发。
+  - 已经产生 `running`、`succeeded` 或 `failed` attempt 的账号，不得再次派发；当前 job 必须换下一个候选账号，避免 Microsoft proof / rate-limit 等状态反复消耗同一账号与 attempt 预算。
   - 已成功产出 API key、仍处于当前租用中、人工停用或被三类硬账号阻断的账号，不得再次派发。
 - 新 job 创建后：
   - `failed` 且 `skip_reason` 为空的账号，允许重新进入候选池。
@@ -99,7 +99,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 某账号在 job A 因 `network_connection_closed`、代理、浏览器或临时风控失败，When 创建 job B，Then 该账号会重新计入 `eligibleCount` 并可再次被派发。
-- Given 某账号已经在当前 job 里因瞬时错误失败过，When 当前 job 继续调度，Then 该账号会重新计入 `eligibleCount` 并允许再次派发。
+- Given 某账号已经在当前 job 里因瞬时错误、Microsoft proof 或 rate-limit 失败过，When 当前 job 继续调度，Then 该账号不会重新计入 `eligibleCount`，且调度器会尝试下一个候选账号。
 - Given 某账号失败码为 `microsoft_password_incorrect`、`microsoft_account_locked` 或 `microsoft_unknown_recovery_email`，When 创建新 job，Then 该账号不会进入候选池，且账号页会显示明确阻断原因。
 - Given Microsoft OAuth confirm-email proof surface 提供的 masked recovery mailbox 与账号配置不匹配，When 自动化失败落盘，Then 账号写入 `skip_reason=microsoft_unknown_recovery_email` 并从后续 Tavily job 候选池中排除。
 - Given 操作者更新了密码、保存了正确的 Proof 邮箱，或点击“恢复可用”，When 刷新账号列表并创建新 job，Then 对应阻断会被清除，账号重新可调度。

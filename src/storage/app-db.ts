@@ -719,15 +719,7 @@ function isReadyBrowserSession(
 function nonRetryableAttemptWhereSql(alias: string): string {
   return `
     (
-      ${alias}.status IN ('running', 'succeeded')
-      OR (
-        ${alias}.status = 'failed'
-        AND (
-          LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_password_incorrect%'
-          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_account_locked%'
-          OR LOWER(TRIM(COALESCE(${alias}.error_code, ''))) LIKE 'microsoft_unknown_recovery_email%'
-        )
-      )
+      ${alias}.status IN ('running', 'succeeded', 'failed')
     )
   `;
 }
