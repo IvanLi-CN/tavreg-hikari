@@ -4979,6 +4979,8 @@ export class AppDatabase {
       runId: signupTask?.run_id ? String(signupTask.run_id) : currentAttempt?.runId || null,
       proxyNode: signupTask?.proxy_node ? String(signupTask.proxy_node) : currentAttempt?.proxyNode || null,
       proxyIp: signupTask?.proxy_ip ? String(signupTask.proxy_ip) : currentAttempt?.proxyIp || null,
+      errorCode: null,
+      errorMessage: null,
     });
     this.touchBrowserSessionUsage(accountId, {
       proxyNode: attempt.proxyNode,
