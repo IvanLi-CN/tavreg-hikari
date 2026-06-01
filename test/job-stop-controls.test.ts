@@ -1382,6 +1382,51 @@ test("runLoop rechecks stop state before launching more attempts", async () => {
   appDb.close();
 });
 
+test("runLoop fills parallel slots while attempt launch setup is pending", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  const imported = appDb.importAccounts([
+    { email: "parallel-launch-1@example.test", password: "pw123456" },
+    { email: "parallel-launch-2@example.test", password: "pw123456" },
+    { email: "parallel-launch-3@example.test", password: "pw123456" },
+    { email: "parallel-launch-4@example.test", password: "pw123456" },
+    { email: "parallel-launch-5@example.test", password: "pw123456" },
+  ]);
+  imported.affectedIds.forEach((accountId) => markBrowserSessionReady(appDb, accountId));
+
+  let spawnCalls = 0;
+  let releaseLaunches!: () => void;
+  const launchGate = new Promise<boolean>((resolve) => {
+    releaseLaunches = () => resolve(true);
+  });
+  scheduler["spawnAttempt"] = async () => {
+    spawnCalls += 1;
+    return await launchGate;
+  };
+
+  const job = await scheduler.startJob({
+    runMode: "headed",
+    need: 5,
+    parallel: 5,
+    maxAttempts: 5,
+  });
+
+  for (let index = 0; index < 40 && spawnCalls < 5; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  expect(spawnCalls).toBe(5);
+  expect(scheduler["pendingAttemptLaunches"].size).toBe(5);
+  expect(appDb.getJob(job.id)?.launchedCount).toBe(5);
+
+  releaseLaunches();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("force stop wins over a last-moment successful worker exit", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
