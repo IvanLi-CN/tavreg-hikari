@@ -404,6 +404,24 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("prefers the configured proof mailbox over hidden login email values", () => {
+    expect(
+      classifyMicrosoftRecoveryChallenge({
+        configuredAddress: "support23@letters.openplus.asia",
+        title: "Sign in to your Microsoft account",
+        bodyText:
+          "If support23@letters.openplus.asia matches the email address on your account, we'll send you a code. Use your password",
+        controlText:
+          "Username marlenegordon4064@outlook.com login_hint marlenegordon4064@outlook.com proof support23@letters.openplus.asia",
+      }),
+    ).toMatchObject({
+      hintedMaskedEmail: "support23@letters.openplus.asia",
+      matchesConfiguredMailbox: true,
+      hasPasswordFallback: true,
+      surfaceKind: "unknown",
+    });
+  });
+
   test("classifies configured proof mailbox mismatches as unknown recovery email", () => {
     const challenge = classifyMicrosoftRecoveryChallenge({
       configuredAddress: "noral18@mail.ivanli.asia",

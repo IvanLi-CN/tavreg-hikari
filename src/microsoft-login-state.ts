@@ -311,6 +311,10 @@ export function classifyMicrosoftRecoveryChallenge(
       hasMask: !!match[2],
       domain: (match[3] || "").toLowerCase(),
     };
+    if (configured && candidate.domain === configured.domain && configured.visibleLocal.startsWith(candidate.visibleLocal)) {
+      hinted = candidate;
+      break;
+    }
     if (!hinted || candidate.hasMask) {
       hinted = candidate;
     }
