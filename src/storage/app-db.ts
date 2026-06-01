@@ -588,6 +588,13 @@ const HARD_ACCOUNT_SKIP_REASONS = new Set<AccountSkipReason>([
   "microsoft_unknown_recovery_email",
 ]);
 
+const TAVILY_SESSION_INVALIDATING_FAILURE_CODES = new Set([
+  "microsoft_proof_code_timeout",
+  "stage_login_home",
+]);
+
+const TAVILY_SESSION_INVALIDATING_FAILURE_THRESHOLD = 3;
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -708,6 +715,14 @@ function resolveFailureSkipReason(input: {
   const derived = deriveAccountSkipReasonFromErrorCode(input.errorCode);
   if (derived) return derived;
   return isHardAccountSkipReason(input.currentSkipReason) ? (input.currentSkipReason as AccountSkipReason) : null;
+}
+
+function normalizeAttemptErrorCode(errorCode: string | null | undefined): string {
+  return String(errorCode || "").trim().split(":", 1)[0] || "";
+}
+
+function isTavilySessionInvalidatingFailure(errorCode: string | null | undefined): boolean {
+  return TAVILY_SESSION_INVALIDATING_FAILURE_CODES.has(normalizeAttemptErrorCode(errorCode));
 }
 
 function isReadyBrowserSession(
@@ -4465,6 +4480,23 @@ export class AppDatabase {
     return row ? mapAttemptRow(row) : null;
   }
 
+  private countTavilySessionInvalidatingFailures(accountId: number): number {
+    const codes = Array.from(TAVILY_SESSION_INVALIDATING_FAILURE_CODES);
+    const placeholders = codes.map(() => "?").join(", ");
+    const row = this.db
+      .query(`
+        SELECT COUNT(*) AS count
+        FROM job_attempts attempts
+        JOIN jobs ON jobs.id = attempts.job_id
+        WHERE attempts.account_id = ?
+          AND jobs.site = 'tavily'
+          AND attempts.status = 'failed'
+          AND attempts.error_code IN (${placeholders})
+      `)
+      .get(accountId, ...(codes as any[])) as { count?: number } | null;
+    return Number(row?.count || 0);
+  }
+
   listAttempts(jobId: number, onlyActive = false): JobAttemptRecord[] {
     const where = onlyActive ? "AND status = 'running'" : "";
     const rows = this.db
@@ -5575,6 +5607,19 @@ export class AppDatabase {
           WHERE id = ?
         `)
         .run(resolveFailureResultStatus({ disabledAt: currentAccount?.disabledAt ?? null, skipReason: nextSkipReason }), nextSkipReason, now, errorCode, now, accountId);
+      if (
+        currentJob.site === "tavily" &&
+        isTavilySessionInvalidatingFailure(errorCode) &&
+        this.countTavilySessionInvalidatingFailures(accountId) >= TAVILY_SESSION_INVALIDATING_FAILURE_THRESHOLD
+      ) {
+        this.markBrowserSessionFailure(accountId, {
+          status: "failed",
+          proxyNode: attempt.proxyNode,
+          proxyIp: attempt.proxyIp,
+          errorCode,
+          errorMessage,
+        });
+      }
     }
     const job = this.updateJobState(jobId, {
       failureCount: currentJob.failureCount + 1,

@@ -1097,6 +1097,33 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("invalidates Tavily browser sessions after repeated proof flow failures across jobs", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "proof-session-invalid@example.test", password: "proof-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+
+    const failureCodes = ["microsoft_proof_code_timeout", "stage_login_home", "microsoft_proof_code_timeout"];
+    for (const [index, errorCode] of failureCodes.entries()) {
+      const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+      expect(appDb.countEligibleAccounts(job.id)).toBe(1);
+      expect(appDb.leaseNextAccount(job.id)?.id).toBe(accountId);
+      const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), `proof-session-invalid-${index}`));
+
+      appDb.completeAttemptFailure(job.id, attempt.id, accountId, { errorCode });
+      expect(appDb.countEligibleAccounts(job.id)).toBe(0);
+      appDb.completeJob(job.id, false, `${errorCode} exhausted job`);
+
+      expect(appDb.getAccount(accountId)?.browserSession?.status).toBe(index < 2 ? "ready" : "failed");
+    }
+
+    const nextJob = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    expect(appDb.countEligibleAccounts(nextJob.id)).toBe(0);
+    expect(appDb.leaseNextAccount(nextJob.id)).toBeNull();
+
+    appDb.close();
+  });
+
   test("blocks stopped accounts in the same job but reuses them in a new job", async () => {
     const { appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "stopped-retryable@example.test", password: "retry-pass" }]);
