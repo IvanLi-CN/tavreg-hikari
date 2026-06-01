@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.18",
+  "base_stable_version": "0.22.17",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T09:56:43Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.18",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "ff31b5c516bbcee2bc687dd1c885f7e2b36fa294",
+  "pr_number": 103,
+  "pr_title": "fix: recover tavily auth callback errors",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.18",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.18",
+  "target_sha": "f4a180106cf8390a8926bda3c7a814db78790c04",
+  "type_label": "type:patch"
+}
