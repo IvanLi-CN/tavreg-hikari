@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.16",
+  "base_stable_version": "0.22.15",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T08:36:35Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.16",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "001848add9a7dcacccce5897ca73dbb74c075228",
+  "pr_number": 101,
+  "pr_title": "fix: refresh expired proof mailboxes",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.16",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.16",
+  "target_sha": "f18fe8a244d0da45c858c627ceee9261cacbac80",
+  "type_label": "type:patch"
+}
