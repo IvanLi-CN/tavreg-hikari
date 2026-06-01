@@ -388,6 +388,22 @@ describe("Microsoft login state", () => {
     });
   });
 
+  test("classifies login.live OAuth enter-your-code surfaces as code-entry without visible input signal", () => {
+    expect(
+      classifyMicrosoftProofSurface({
+        url: "https://login.live.com/oauth20_authorize.srf?client_id=3f026981-b1b0-4305-b12f-e60015126b8c",
+        title: "",
+        bodyText:
+          "Enter your code If no*****@mail.ivanli.asia matches the email address on your account, we'll send you a code. Use your password",
+      }),
+    ).toMatchObject({
+      kind: "code_entry",
+      onProofRoute: false,
+      allowProvision: false,
+      matchedSignals: expect.arrayContaining(["route:oauth-authorize", "copy:confirm", "copy:code"]),
+    });
+  });
+
   test("matches Microsoft recovery challenge against configured proof mailbox", () => {
     expect(
       classifyMicrosoftRecoveryChallenge({
