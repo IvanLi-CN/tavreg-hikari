@@ -325,6 +325,15 @@ function isStopInProgressStatus(status: JobRecord["status"]): boolean {
   return status === "stopping" || status === "force_stopping";
 }
 
+export const ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON = "eligible accounts exhausted or max attempts reached";
+
+export function shouldCompleteEligibleExhaustedJobAsSuccess(
+  job: Pick<JobRecord, "successCount" | "failureCount">,
+  reason: string,
+): boolean {
+  return reason === ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON && job.successCount > 0 && job.failureCount === 0;
+}
+
 function normalizeExtractorSources(sources: AccountExtractorProvider[] | undefined): AccountExtractorProvider[] {
   return Array.from(
     new Set(
@@ -1296,7 +1305,7 @@ export class JobScheduler {
           return;
         }
         if (postReap.launchedCount >= postReap.maxAttempts) {
-          const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
+          const failed = this.db.completeJob(jobId, false, ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
           this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
@@ -1327,19 +1336,32 @@ export class JobScheduler {
           continue;
         }
         if (!this.hasActiveOrPendingAttempts(jobId)) {
-          const failed = this.db.completeJob(jobId, false, extraction.reason);
+          const succeeded = shouldCompleteEligibleExhaustedJobAsSuccess(postReap, extraction.reason);
+          const failed = this.db.completeJob(jobId, succeeded, succeeded ? undefined : extraction.reason);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
-          this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
+          this.emit(
+            "toast",
+            succeeded
+              ? { level: "success", message: `job #${job.id} completed` }
+              : { level: "error", message: `job #${job.id} failed: ${failed.lastError}` },
+          );
           return;
         }
       }
       if (!this.hasActiveOrPendingAttempts(jobId)) {
         if (eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) {
-          const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
+          const reason = ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON;
+          const succeeded = shouldCompleteEligibleExhaustedJobAsSuccess(postReap, reason);
+          const failed = this.db.completeJob(jobId, succeeded, succeeded ? undefined : reason);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
-          this.emit("toast", { level: "error", message: `job #${job.id} failed: ${failed.lastError}` });
+          this.emit(
+            "toast",
+            succeeded
+              ? { level: "success", message: `job #${job.id} completed` }
+              : { level: "error", message: `job #${job.id} failed: ${failed.lastError}` },
+          );
           return;
         }
       }
@@ -2540,7 +2562,7 @@ export class JobScheduler {
       job.autoExtractSources.length === 0
       && (!existingState || (existingState.inFlightCount === 0 && existingState.pendingBootstrapCandidates.size === 0))
     ) {
-      return { status: "unavailable", reason: "eligible accounts exhausted or max attempts reached" };
+      return { status: "unavailable", reason: ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON };
     }
     let state = existingState;
     if (!state) {

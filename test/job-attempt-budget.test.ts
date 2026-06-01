@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
 
+import {
+  ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON,
+  shouldCompleteEligibleExhaustedJobAsSuccess,
+} from "../src/server/scheduler";
 import { normalizeJobMaxAttempts } from "../src/storage/app-db";
 import { jobToDraft, normalizeJobDraft, normalizeMaxAttemptsForNeed } from "../web/src/lib/job-draft";
 
@@ -50,4 +54,11 @@ test("job snapshot drafts preserve the normalized max-attempt budget", () => {
       lastError: null,
     }).maxAttempts,
   ).toBe(3);
+});
+
+test("eligible exhaustion completes successful partial jobs without showing failed", () => {
+  expect(shouldCompleteEligibleExhaustedJobAsSuccess({ successCount: 1, failureCount: 0 }, ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON)).toBe(true);
+  expect(shouldCompleteEligibleExhaustedJobAsSuccess({ successCount: 0, failureCount: 0 }, ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON)).toBe(false);
+  expect(shouldCompleteEligibleExhaustedJobAsSuccess({ successCount: 1, failureCount: 1 }, ELIGIBLE_ACCOUNTS_EXHAUSTED_REASON)).toBe(false);
+  expect(shouldCompleteEligibleExhaustedJobAsSuccess({ successCount: 1, failureCount: 0 }, "extractor key missing")).toBe(false);
 });
