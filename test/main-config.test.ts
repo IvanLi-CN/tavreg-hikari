@@ -651,9 +651,23 @@ test("home stabilization gives Tavily auth APIs extra time after Microsoft retur
   const start = source.indexOf("async function waitHomeStable");
   const end = source.indexOf("async function hasPostSignupConsentPrompt");
   const segment = source.slice(start, end);
-  expect(segment).toContain("const authGraceDeadline = Date.now() + Math.max(stableMs, 15_000);");
+  expect(segment).toContain("const authReloadAt = startedAt + Math.max(stableMs, 15_000);");
+  expect(segment).toContain("const authGraceDeadline = startedAt + Math.max(stableMs, 30_000);");
   expect(segment).toContain("while (Date.now() < authGraceDeadline)");
   expect(segment).toContain("if (Date.now() >= stableDeadline) {");
+  expect(segment).toContain("home stabilization missing auth signal; reloading Tavily home once");
+});
+
+test("stalled Microsoft proof confirmation falls back to password before hard failing", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("async function handleMicrosoftProofConfirmationEmailPrompt");
+  const end = source.indexOf("const activeSelector =", start);
+  const segment = source.slice(start, end);
+  expect(segment).toContain("if (waitElapsedMs >= 8_000) {");
+  expect(segment).toContain("if (await clickMicrosoftPasswordFallbackAction(page)) {");
+  expect(segment).toContain("proofState.passwordFallbackAttempted = true;");
+  expect(segment).toContain("login flow: switched stalled Microsoft proof confirmation to password fallback");
+  expect(segment).toContain("microsoft_proof_submit_failed:confirmation_stalled");
 });
 
 test("microsoft login returns Tavily social-signup continuations instead of re-submitting the provider", async () => {
