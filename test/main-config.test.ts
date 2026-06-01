@@ -555,6 +555,7 @@ test("microsoft oauth invalid request relaunches Tavily login flow", async () =>
   expect(loginSegment).toContain("authorizeInvalidRequestRecoveryCount < 2");
   expect(loginSegment).toContain("if (canRelaunchTavilyAuthFlow && authorizeInvalidRequestRecoveryCount < 2)");
   expect(loginSegment).toContain("safeGoto(page, passkeyRecoveryUrl");
+  expect(loginSegment).toContain("microsoftLoginDeadline = Date.now() + 120_000;");
   expect(loginSegment).toContain("microsoft_oauth_invalid_request:client_id_missing");
   expect(source).toContain('return "microsoft_oauth_invalid_request";');
   expect(source).toContain("microsoft_passkey_cancel_missing|microsoft_oauth_invalid_request|microsoft_proof_add_email_input_missing");

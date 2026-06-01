@@ -6968,6 +6968,7 @@ export async function completeMicrosoftLogin(
             await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
             await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
             await page.waitForTimeout(1_500);
+            microsoftLoginDeadline = Date.now() + 120_000;
             continue;
           }
           throw new Error("microsoft_oauth_invalid_request:client_id_missing");
