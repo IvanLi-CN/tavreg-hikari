@@ -511,6 +511,21 @@ test("microsoft proof confirmation prioritizes configured proof mailboxes over p
   expect(mailboxResolutionIndex).toBeLessThan(passwordFallbackIndex);
 });
 
+test("microsoft login deadline recovers actionable proof surfaces", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("proofSurfaceRecoveryDepth?: number;");
+  const start = source.indexOf("if (Date.now() >= microsoftLoginDeadline)");
+  const end = source.indexOf("throw new Error(`microsoft login flow did not reach home", start);
+  const segment = source.slice(start, end);
+  expect(segment).toContain("const deadlineProofSurface = await collectMicrosoftProofSurfaceClassification(page).catch(() => null);");
+  expect(segment).toContain('deadlineProofSurface.kind !== "none"');
+  expect(segment).toContain('deadlineProofSurface.kind !== "unclassified"');
+  expect(segment).toContain("proofSurfaceRecoveryDepth < 1");
+  expect(segment).toContain("extending Microsoft login after deadline on proof surface");
+  expect(segment).toContain("microsoftLoginDeadline = Date.now() + 120_000");
+  expect(segment).toContain("continue;");
+});
+
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
   const source = await readFile(path.join(repoRoot, "src/microsoft-login-state.ts"), "utf8");
   expect(source).toContain("const onOAuthAuthorizeRoute = /login\\.live\\.com\\/oauth20_authorize\\.srf/i.test(url);");

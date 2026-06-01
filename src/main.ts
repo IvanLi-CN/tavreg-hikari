@@ -6790,6 +6790,7 @@ export interface MicrosoftLoginCompletionOptions {
   completionUrlPatterns?: RegExp[];
   passkeyRecoveryUrl?: string;
   assumeVisitedMicrosoftAccountSurface?: boolean;
+  proofSurfaceRecoveryDepth?: number;
 }
 
 export function isMicrosoftLoginFlowUrl(rawUrl: string): boolean {
@@ -6857,6 +6858,7 @@ export async function completeMicrosoftLogin(
   page.on("dialog", dialogHandler);
   const completionUrlPatterns = Array.isArray(options?.completionUrlPatterns) ? options.completionUrlPatterns : [];
   const passkeyRecoveryUrl = String(options?.passkeyRecoveryUrl || "").trim() || "https://app.tavily.com/home";
+  let proofSurfaceRecoveryDepth = Math.max(0, Math.trunc(options?.proofSurfaceRecoveryDepth ?? 0));
   let visitedMicrosoftAccountSurface =
     Boolean(options?.assumeVisitedMicrosoftAccountSurface) || isMicrosoftLoginFlowUrl(String(page.url?.() || ""));
   const markVisitedMicrosoftAccountSurface = (rawUrl: string): void => {
@@ -6901,8 +6903,27 @@ export async function completeMicrosoftLogin(
     let networkRecoveryCount = 0;
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
-    const microsoftLoginDeadline = Date.now() + 120_000;
-    for (let step = 1; Date.now() < microsoftLoginDeadline; step += 1) {
+    let microsoftLoginDeadline = Date.now() + 120_000;
+    for (let step = 1; ; step += 1) {
+      if (Date.now() >= microsoftLoginDeadline) {
+        const deadlineProofSurface = await collectMicrosoftProofSurfaceClassification(page).catch(() => null);
+        if (
+          deadlineProofSurface &&
+          deadlineProofSurface.kind !== "none" &&
+          deadlineProofSurface.kind !== "unclassified" &&
+          proofSurfaceRecoveryDepth < 1
+        ) {
+          proofSurfaceRecoveryDepth += 1;
+          microsoftLoginDeadline = Date.now() + 120_000;
+          log(
+            `login flow: extending Microsoft login after deadline on proof surface kind=${deadlineProofSurface.kind} signals=${
+              deadlineProofSurface.matchedSignals.join(",") || "none"
+            }`,
+          );
+          continue;
+        }
+        break;
+      }
       const currentUrl = page.url();
       if (currentUrl && currentUrl !== lastFlowSurfaceUrl) {
         lastFlowSurfaceUrl = currentUrl;
