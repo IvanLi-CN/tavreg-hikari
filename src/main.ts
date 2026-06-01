@@ -5058,6 +5058,15 @@ async function collectMicrosoftSurfaceSnapshot(page: any): Promise<{ url: string
     }));
 }
 
+function isMicrosoftOAuthInvalidRequestSurface(surface: { url: string; title?: string; bodyText?: string }): boolean {
+  const combined = `${surface.title || ""} ${surface.bodyText || ""}`.replace(/\s+/g, " ").trim();
+  return (
+    /login\.live\.com\/oauth20_authorize\.srf/i.test(surface.url) &&
+    /invalid_request/i.test(combined) &&
+    /client_id/i.test(combined)
+  );
+}
+
 async function collectMicrosoftProofSurfaceSnapshot(page: any): Promise<{
   url: string;
   title: string;
@@ -6901,6 +6910,7 @@ export async function completeMicrosoftLogin(
     let networkRecoveryCount = 0;
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
+    let authorizeInvalidRequestRecoveryCount = 0;
     let microsoftLoginDeadline = Date.now() + 120_000;
     for (let step = 1; ; step += 1) {
       if (Date.now() >= microsoftLoginDeadline) {
@@ -6945,6 +6955,19 @@ export async function completeMicrosoftLogin(
       if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
         visitedMicrosoftAccountSurface = true;
         const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);
+        if (isMicrosoftOAuthInvalidRequestSurface(microsoftSurface)) {
+          if (authorizeInvalidRequestRecoveryCount < 2) {
+            authorizeInvalidRequestRecoveryCount += 1;
+            log(
+              `login flow: recovering Microsoft OAuth invalid_request by relaunching Tavily flow (${authorizeInvalidRequestRecoveryCount}/2)`,
+            );
+            await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+            await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
+            await page.waitForTimeout(1_500);
+            continue;
+          }
+          throw new Error("microsoft_oauth_invalid_request:client_id_missing");
+        }
         const interrupt = classifyMicrosoftFlowInterrupt(microsoftSurface);
         if (interrupt) {
           throw new Error(`${interrupt.code}:${interrupt.message}`);

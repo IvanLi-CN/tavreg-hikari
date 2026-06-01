@@ -538,6 +538,23 @@ test("microsoft proof mailbox is ensured active before use", async () => {
   expect(segment).toContain("cfg.microsoftProofMailboxAddress?.trim().toLowerCase() !== address");
 });
 
+test("microsoft oauth invalid request relaunches Tavily login flow", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("function isMicrosoftOAuthInvalidRequestSurface");
+  const start = source.indexOf("function isMicrosoftOAuthInvalidRequestSurface");
+  const end = source.indexOf("async function collectMicrosoftProofSurfaceSnapshot", start);
+  const classifier = source.slice(start, end);
+  expect(classifier).toContain("login\\.live\\.com\\/oauth20_authorize\\.srf");
+  expect(classifier).toContain("invalid_request");
+  expect(classifier).toContain("client_id");
+  const loginStart = source.indexOf("export async function completeMicrosoftLogin");
+  const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
+  const loginSegment = source.slice(loginStart, loginEnd);
+  expect(loginSegment).toContain("authorizeInvalidRequestRecoveryCount < 2");
+  expect(loginSegment).toContain("safeGoto(page, passkeyRecoveryUrl");
+  expect(loginSegment).toContain("microsoft_oauth_invalid_request:client_id_missing");
+});
+
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
   const source = await readFile(path.join(repoRoot, "src/microsoft-login-state.ts"), "utf8");
   expect(source).toContain("const onOAuthAuthorizeRoute = /login\\.live\\.com\\/oauth20_authorize\\.srf/i.test(url);");
