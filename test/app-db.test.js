@@ -1342,6 +1342,30 @@ describe("AppDatabase account import", () => {
     appDb.close();
   });
 
+  test("clears stale attempt errors when an attempt later succeeds", async () => {
+    const { appDb } = await createTempDb();
+    const imported = appDb.importAccounts([{ email: "stale-error-success@example.test", password: "success-pass" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+    const job = appDb.createJob({ runMode: "headed", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, path.join(process.cwd(), "stale-error-success-attempt"));
+    appDb.updateAttempt(attempt.id, {
+      errorCode: "stage_api_key",
+      errorMessage: "default api key missing from app responses",
+    });
+
+    appDb.completeAttemptSuccess(job.id, attempt.id, accountId, "tvly-stale-error-success");
+
+    expect(appDb.getAttempt(attempt.id)).toMatchObject({
+      status: "succeeded",
+      stage: "completed",
+      errorCode: null,
+      errorMessage: null,
+    });
+
+    appDb.close();
+  });
+
   test("normalizes legacy hard-blocked failed accounts to disabled on reopen", async () => {
     const { dbPath, appDb } = await createTempDb();
     const imported = appDb.importAccounts([{ email: "legacy-locked@example.test", password: "legacy-pass" }]);
