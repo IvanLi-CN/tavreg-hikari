@@ -561,6 +561,26 @@ test("microsoft oauth invalid request relaunches Tavily login flow", async () =>
   expect(source).toContain("microsoft_passkey_cancel_missing|microsoft_oauth_invalid_request|microsoft_proof_add_email_input_missing");
 });
 
+test("tavily auth callback error relaunches Tavily login flow", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("function isTavilyAuthCallbackErrorSurface");
+  const start = source.indexOf("function isTavilyAuthCallbackErrorSurface");
+  const end = source.indexOf("async function collectMicrosoftProofSurfaceSnapshot", start);
+  const classifier = source.slice(start, end);
+  expect(classifier).toContain("auth\\.tavily\\.com\\/login\\/callback");
+  expect(classifier).toContain("oops!?,?\\s*something went wrong");
+  const loginStart = source.indexOf("export async function completeMicrosoftLogin");
+  const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
+  const loginSegment = source.slice(loginStart, loginEnd);
+  expect(loginSegment).toContain("let tavilyAuthCallbackRecoveryCount = 0;");
+  expect(loginSegment).toContain("isTavilyAuthCallbackErrorSurface(tavilyCallbackSurface)");
+  expect(loginSegment).toContain("tavilyAuthCallbackRecoveryCount < 2");
+  expect(loginSegment).toContain("safeGoto(page, passkeyRecoveryUrl");
+  expect(loginSegment).toContain("microsoftLoginDeadline = Date.now() + 120_000;");
+  expect(loginSegment).toContain("tavily_auth_callback_error");
+  expect(source).toContain('return "tavily_auth_callback_error";');
+});
+
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
   const source = await readFile(path.join(repoRoot, "src/microsoft-login-state.ts"), "utf8");
   expect(source).toContain("const onOAuthAuthorizeRoute = /login\\.live\\.com\\/oauth20_authorize\\.srf/i.test(url);");
