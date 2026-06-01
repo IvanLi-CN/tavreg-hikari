@@ -18,3 +18,4 @@
 - 既有 `proxy_nodes` / `proxy_checks` 作为历史诊断表继续存在，不再作为生产调度池的真相源。
 - Broker active session 不再只依赖 worker close 事件清理；scheduler stale reaper、启动 dry-run reconciliation 与显式 `broker:sessions:reconcile -- --apply` 共同构成泄漏兜底。
 - Tavily 批量任务把 worker spawn 前的 `proxy_broker_*` 视为基础设施 setup failure：回滚 pending attempt、释放账号 lease，并以明确 job error 收口，避免 Proxy Broker 慢查询或超时把可用 Microsoft 账号标成业务失败。
+- Tavily worker 已经写出终态 artifact 时，scheduler 不再无限等待 detached worker 自然退出；artifact 稳定后按结果完成 attempt 并清理子进程，避免成功 API key 因浏览器或 Broker close 收尾挂起而让 job 停在 running。

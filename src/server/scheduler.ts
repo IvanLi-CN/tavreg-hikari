@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { mkdir, readFile } from "node:fs/promises";
 import {
@@ -443,6 +443,15 @@ function parseIsoToMs(value: string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function fileMtimeMs(filePath: string): number | null {
+  try {
+    const mtimeMs = statSync(filePath).mtimeMs;
+    return Number.isFinite(mtimeMs) ? mtimeMs : null;
+  } catch {
+    return null;
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -580,6 +589,7 @@ function readJsonFileSync<T>(filePath: string): T | null {
 const FORCE_STOP_SIGKILL_AFTER_MS = 5_000;
 const FORCE_STOP_REAP_AFTER_MS = 30_000;
 const RUNNING_STALE_ATTEMPT_REAP_AFTER_MS = 10 * 60_000;
+const TERMINAL_ARTIFACT_REAP_AFTER_MS = 30_000;
 
 export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
@@ -946,7 +956,9 @@ export class JobScheduler {
         exitCode?: number | null;
         signalCode?: NodeJS.Signals | null;
       };
-      const errorArtifact = readJsonFileSync<{ error?: string }>(path.join(active.outputDir, "error.json"));
+      const errorArtifactPath = path.join(active.outputDir, "error.json");
+      const resultArtifactPath = path.join(active.outputDir, "result.json");
+      const errorArtifact = readJsonFileSync<{ error?: string }>(errorArtifactPath);
       const resultArtifact = readJsonFileSync<{
         apiKey?: string | null;
         serviceAccess?: {
@@ -958,7 +970,7 @@ export class JobScheduler {
             apiKeyPrefix?: string | null;
           };
         };
-      }>(path.join(active.outputDir, "result.json"));
+      }>(resultArtifactPath);
       const exited = child.exitCode != null || child.signalCode != null;
       const stopRequestedAtMs = active.stopRequestedAtMs ?? null;
       const ledgerTerminalStopRequested = active.ledgerTerminalStopRequested === true;
@@ -974,6 +986,9 @@ export class JobScheduler {
       const hasTerminalArtifact =
         Boolean(errorArtifact?.error?.trim()) ||
         Boolean(typeof resultArtifact?.apiKey === "string" && resultArtifact.apiKey.trim());
+      const terminalArtifactMtimeMs = Math.max(fileMtimeMs(errorArtifactPath) ?? 0, fileMtimeMs(resultArtifactPath) ?? 0);
+      const terminalArtifactReadyToReap =
+        hasTerminalArtifact && terminalArtifactMtimeMs > 0 && nowMs - terminalArtifactMtimeMs >= TERMINAL_ARTIFACT_REAP_AFTER_MS;
       const signupTask = this.db.getLatestSignupTask(job.id, active.account.id);
       const hasTerminalSignupTaskFailure =
         signupTask != null && isTerminalSignupTaskFailureStatus(signupTask) && !shouldIgnoreSignupTaskForAttempt(latestAttempt, signupTask);
@@ -991,7 +1006,7 @@ export class JobScheduler {
         this.requestForceStop(active);
         continue;
       }
-      if (canReapRunning && hasTerminalArtifact && !exited) {
+      if (canReapRunning && hasTerminalArtifact && !exited && !terminalArtifactReadyToReap) {
         continue;
       }
 
@@ -1077,6 +1092,9 @@ export class JobScheduler {
       }
 
       if (active.finalize) {
+        if (hasTerminalArtifact && !exited) {
+          signalChildProcess(active.child, "SIGTERM");
+        }
         active.finalize(() =>
           this.handleAttemptExit(
             job.id,
@@ -1092,6 +1110,9 @@ export class JobScheduler {
       }
 
       if (hasTerminalArtifact || exited) {
+        if (hasTerminalArtifact && !exited) {
+          signalChildProcess(active.child, "SIGTERM");
+        }
         void this.handleAttemptExit(
           job.id,
           active.attempt.id,
