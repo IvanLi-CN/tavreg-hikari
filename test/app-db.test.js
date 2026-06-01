@@ -2981,6 +2981,78 @@ describe("scheduler helpers", () => {
     }
   });
 
+  test("reaps successful terminal artifacts when the worker process is still running", async () => {
+    const { appDb, dbPath } = await createTempDb();
+    const outputDir = path.join(path.dirname(dbPath), "terminal-artifact-attempt");
+    await mkdir(outputDir, { recursive: true });
+    await writeFile(
+      path.join(outputDir, "result.json"),
+      JSON.stringify({ apiKey: "tvly-terminal-artifact-001", email: "artifact@example.test" }),
+    );
+    Date.now = () => originalDateNow() + 31_000;
+
+    const scheduler = new JobScheduler(
+      appDb,
+      "tavily",
+      process.cwd(),
+      dbPath,
+      () => createSchedulerSettings(),
+      () => undefined,
+    );
+    const imported = appDb.importAccounts([{ email: "artifact@example.test", password: "pw123456" }]);
+    const accountId = imported.affectedIds[0];
+    markBrowserSessionReady(appDb, accountId);
+    const account = appDb.getAccount(accountId);
+    const job = appDb.createJob({ runMode: "headless", need: 1, parallel: 1, maxAttempts: 1 });
+    const attempt = appDb.createAttempt(job.id, accountId, outputDir);
+    let killedWith = null;
+    let finalizer = Promise.resolve();
+
+    try {
+      const active = {
+        child: {
+          pid: null,
+          exitCode: null,
+          signalCode: null,
+          kill(signal) {
+            killedWith = signal;
+          },
+          once() {},
+        },
+        attempt,
+        account,
+        outputDir,
+        reservedPorts: { apiPort: 39090, mixedPort: 49090 },
+        tail: [],
+        stopRequested: null,
+        lastProgressAtMs: originalDateNow(),
+      };
+      active.finalize = (runner) => {
+        finalizer = Promise.resolve()
+          .then(runner)
+          .finally(() => scheduler.activeAttempts.delete(attempt.id));
+      };
+      scheduler.activeAttempts.set(attempt.id, active);
+
+      scheduler["reapActiveAttempts"](job);
+      await finalizer;
+
+      expect(killedWith).toBe("SIGTERM");
+      expect(appDb.getAttempt(attempt.id)).toMatchObject({
+        status: "succeeded",
+        stage: "completed",
+      });
+      expect(appDb.getJob(job.id)).toMatchObject({
+        successCount: 1,
+      });
+      expect(scheduler.activeAttempts.has(attempt.id)).toBe(false);
+    } finally {
+      scheduler.activeAttempts.clear();
+      await scheduler.shutdown();
+      appDb.close();
+    }
+  });
+
   test("ignores stale signup task rows before a retried attempt writes its own run id", async () => {
     const { appDb, dbPath } = await createTempDb();
     const scheduler = new JobScheduler(
