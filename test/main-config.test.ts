@@ -497,7 +497,8 @@ test("microsoft proof confirmation prioritizes configured proof mailboxes over p
   expect(segment).toContain("confirmationState = await collectMicrosoftRecoveryChallengeState(page, proofMailbox.address);");
   expect(segment).toContain("const shouldUsePasswordFallback =\n    !proofMailbox &&\n    !configuredProofAddress &&");
   expect(segment).toContain("waitForStableInputValue(page, activeSelector, proofMailbox.address");
-  expect(segment).toContain('button[data-testid="primaryButton"]');
+  expect(segment).toContain("clickMicrosoftProofPrimaryAction(page, submitPatterns)");
+  expect(source).toContain('button[data-testid="primaryButton"]');
   const initialChallengeIndex = segment.indexOf("let confirmationState = await collectMicrosoftRecoveryChallengeState");
   const mailboxResolutionIndex = segment.indexOf("proofMailbox = await resolveMicrosoftProofMailboxSession");
   const passwordFallbackIndex = segment.indexOf("const shouldUsePasswordFallback =");

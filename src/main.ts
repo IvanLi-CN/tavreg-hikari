@@ -4278,6 +4278,40 @@ async function clickMatchingActionDirectly(
   }
 }
 
+async function clickMicrosoftProofPrimaryAction(page: any, patterns: RegExp[]): Promise<boolean> {
+  return await page
+    .evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
+      const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const normalize = (value: string): string =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim();
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && !el.hasAttribute("disabled");
+      };
+      const buttons = Array.from(document.querySelectorAll('button[data-testid="primaryButton"]')).filter(isVisible);
+      for (const button of buttons) {
+        const text = normalize(
+          [
+            button.textContent || "",
+            button.getAttribute("aria-label") || "",
+            button.getAttribute("title") || "",
+            button instanceof HTMLButtonElement ? button.value || "" : "",
+          ].join(" "),
+        );
+        if (!matchers.some((matcher) => matcher.test(text))) continue;
+        button.click();
+        return true;
+      }
+      return false;
+    }, patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags })))
+    .catch(() => false);
+}
+
 async function clickMicrosoftPasswordFallbackAction(page: any): Promise<boolean> {
   const patterns = [
     /^use your password$/i,
@@ -6469,27 +6503,23 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       preparedProofMailbox,
     )} expected_hash=${computeSecretSha256(proofMailbox.address)} matches_expected=${preparedProofMailbox === proofMailbox.address}`,
   );
+  const submitPatterns = [
+    /^send code$/i,
+    /^next$/i,
+    /^continue$/i,
+    /^verify$/i,
+    /^发送代码$/i,
+    /^下一步$/i,
+    /^继续$/i,
+    /^验证$/i,
+    /^コードの送信$/i,
+  ];
   const submitted =
-    (await page
-      .locator('button[data-testid="primaryButton"]')
-      .first()
-      .click({ timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false)) ||
+    (await clickMicrosoftProofPrimaryAction(page, submitPatterns)) ||
     (await clickMatchingAction(
       page,
-      [
-        /^send code$/i,
-        /^next$/i,
-        /^continue$/i,
-        /^verify$/i,
-        /^发送代码$/i,
-        /^下一步$/i,
-        /^继续$/i,
-        /^验证$/i,
-        /^コードの送信$/i,
-      ],
-      'button[data-testid="primaryButton"], input[type="submit"], button[type="submit"], button',
+      submitPatterns,
+      'input[type="submit"], button[type="submit"], button',
     )) ||
     (await submitContainingFormDirectly(page, activeSelector)) ||
     false;
