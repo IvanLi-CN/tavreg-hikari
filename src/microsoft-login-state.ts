@@ -167,6 +167,7 @@ const MICROSOFT_PROOF_VERIFY_COPY = [
 const MICROSOFT_PROOF_CODE_COPY = [
   /security code/i,
   /verification code/i,
+  /enter (the|your) code/i,
   /enter code/i,
   /one-time code/i,
   /验证码/i,
@@ -426,6 +427,11 @@ export function classifyMicrosoftProofSurface(
     (onProofRoute &&
       hasCodeCopy &&
       !onAddRoute &&
+      !hasAddCopy &&
+      !input.hasAddEmailInput &&
+      !input.hasConfirmationEmailInput) ||
+    (onOAuthAuthorizeRoute &&
+      hasCodeCopy &&
       !hasAddCopy &&
       !input.hasAddEmailInput &&
       !input.hasConfirmationEmailInput)
