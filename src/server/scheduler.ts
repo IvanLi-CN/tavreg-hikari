@@ -575,6 +575,7 @@ const RUNNING_STALE_ATTEMPT_REAP_AFTER_MS = 10 * 60_000;
 export class JobScheduler {
   private readonly activeAttempts = new Map<number, ActiveAttempt>();
   private readonly pendingAttemptLaunches = new Map<number, PendingAttemptLaunch>();
+  private readonly pendingAttemptLaunchTasks = new Set<Promise<void>>();
   private readonly autoExtractStates = new Map<number, AutoExtractState>();
   private readonly pendingBrowserSessionWaits = new Map<number, PendingBrowserSessionWaitState>();
   private readonly pendingAttemptFinalizers = new Set<Promise<void>>();
@@ -886,10 +887,22 @@ export class JobScheduler {
   }
 
   private hasPendingAttemptLaunch(jobId: number): boolean {
+    return this.countPendingAttemptLaunches(jobId) > 0;
+  }
+
+  private countPendingAttemptLaunches(jobId: number): number {
+    let count = 0;
     for (const pending of this.pendingAttemptLaunches.values()) {
-      if (pending.jobId === jobId) return true;
+      if (pending.jobId === jobId) count += 1;
     }
-    return false;
+    return count;
+  }
+
+  private hasActiveOrPendingAttempts(jobId: number): boolean {
+    for (const active of this.activeAttempts.values()) {
+      if (active.attempt.jobId === jobId) return true;
+    }
+    return this.hasPendingAttemptLaunch(jobId);
   }
 
   private maybeFinalizeStoppedJob(jobId: number): JobRecord | null {
@@ -1115,6 +1128,10 @@ export class JobScheduler {
       );
     }
     await Promise.allSettled(waits);
+    for (const pending of this.pendingAttemptLaunches.values()) {
+      pending.stopRequested = "force_stop";
+    }
+    await Promise.allSettled(Array.from(this.pendingAttemptLaunchTasks));
     await Promise.allSettled(Array.from(this.pendingAttemptFinalizers));
     const job = this.db.getCurrentJob(this.site);
     if (job && isStopInProgressStatus(job.status)) {
@@ -1168,6 +1185,7 @@ export class JobScheduler {
       }
 
       const activeCount = this.activeAttempts.size;
+      const activeOrPendingCount = activeCount + this.countPendingAttemptLaunches(jobId);
 
       if (job.status === "paused") {
         await delay(100);
@@ -1175,11 +1193,11 @@ export class JobScheduler {
       }
 
       if (job.successCount >= job.need) {
-        if (job.status !== "completing" && activeCount > 0) {
+        if (job.status !== "completing" && activeOrPendingCount > 0) {
           const next = this.db.updateJobState(jobId, { status: "completing" });
           this.emit("job.updated", { job: next });
         }
-        if (activeCount === 0) {
+        if (activeOrPendingCount === 0) {
           const completed = this.db.completeJob(jobId, true);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: completed });
@@ -1190,7 +1208,7 @@ export class JobScheduler {
         continue;
       }
 
-      const capacity = computeLaunchCapacity(job, activeCount);
+      const capacity = computeLaunchCapacity(job, activeOrPendingCount);
       for (let i = 0; i < capacity; i += 1) {
         const dispatchJob = this.db.getJob(jobId);
         if (!dispatchJob || dispatchJob.status !== "running") {
@@ -1211,22 +1229,7 @@ export class JobScheduler {
           stopRequested: null,
         };
         this.pendingAttemptLaunches.set(attempt.id, pendingLaunch);
-        try {
-          const started = await this.spawnAttempt(dispatchJob, account, attempt, attemptOutputDir, pendingLaunch);
-          if (!started) {
-            continue;
-          }
-          this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
-          this.emit("account.updated", { account: this.db.getAccount(account.id) });
-          this.emit("job.updated", { job: this.db.getJob(dispatchJob.id) });
-        } catch (error) {
-          this.failAttempt(dispatchJob.id, attempt.id, account.id, {
-            errorCode: getLaunchSetupErrorCode(error),
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-        } finally {
-          this.pendingAttemptLaunches.delete(attempt.id);
-        }
+        this.startPendingAttemptLaunch(dispatchJob, account, attempt, attemptOutputDir, pendingLaunch);
       }
 
       const refreshed = this.db.getJob(jobId);
@@ -1254,7 +1257,7 @@ export class JobScheduler {
       if (isTerminalJobStatus(postReap.status)) {
         return;
       }
-      if (this.activeAttempts.size === 0) {
+      if (!this.hasActiveOrPendingAttempts(jobId)) {
         if (postReap.successCount >= postReap.need) {
           const completed = this.db.completeJob(jobId, true);
           this.deleteAutoExtractStateIfIdle(jobId);
@@ -1293,7 +1296,7 @@ export class JobScheduler {
           await delay(100);
           continue;
         }
-        if (this.activeAttempts.size === 0) {
+        if (!this.hasActiveOrPendingAttempts(jobId)) {
           const failed = this.db.completeJob(jobId, false, extraction.reason);
           this.deleteAutoExtractStateIfIdle(jobId);
           this.emit("job.updated", { job: failed });
@@ -1301,7 +1304,7 @@ export class JobScheduler {
           return;
         }
       }
-      if (this.activeAttempts.size === 0) {
+      if (!this.hasActiveOrPendingAttempts(jobId)) {
         if (eligible === 0 && pendingBrowserSessions === 0 && !hasAutoExtractState) {
           const failed = this.db.completeJob(jobId, false, "eligible accounts exhausted or max attempts reached");
           this.deleteAutoExtractStateIfIdle(jobId);
@@ -1313,6 +1316,37 @@ export class JobScheduler {
 
       await delay(100);
     }
+  }
+
+  private startPendingAttemptLaunch(
+    job: JobRecord,
+    account: MicrosoftAccountRecord,
+    attempt: JobAttemptRecord,
+    outputDir: string,
+    pendingLaunch: PendingAttemptLaunch,
+  ): void {
+    let launchTask!: Promise<void>;
+    launchTask = (async () => {
+      try {
+        const started = await this.spawnAttempt(job, account, attempt, outputDir, pendingLaunch);
+        if (!started) {
+          return;
+        }
+        this.emit("attempt.updated", { attempt: this.db.getAttempt(attempt.id) });
+        this.emit("account.updated", { account: this.db.getAccount(account.id) });
+        this.emit("job.updated", { job: this.db.getJob(job.id) });
+      } catch (error) {
+        this.failAttempt(job.id, attempt.id, account.id, {
+          errorCode: getLaunchSetupErrorCode(error),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        this.pendingAttemptLaunches.delete(attempt.id);
+        this.pendingAttemptLaunchTasks.delete(launchTask);
+        this.ensureLoop(job.id);
+      }
+    })();
+    this.pendingAttemptLaunchTasks.add(launchTask);
   }
 
   private async spawnAttempt(

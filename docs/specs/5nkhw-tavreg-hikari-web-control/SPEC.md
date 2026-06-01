@@ -218,6 +218,7 @@
 - 完成条件：成功提取到 API key 的账号数达到 `need`
 - 软暂停：停止新派发，已启动账号继续完成
 - 动态调参：仅影响未派发部分
+- 并发派发必须把正在准备中的 attempt launch 计入占用 slot，并允许端口租约、代理探测、broker session 打开等启动准备并发进行；不得因为单个 attempt 的慢启动把 `parallel` 退化成串行派发。
 - 主流程页的所有内容必须被 shell 最大宽度约束住；超长日志、表格与状态文本只能在组件内部滚动、换行或截断，不得把页面整体撑出横向溢出
 
 ### 代理页
@@ -236,6 +237,7 @@
 - Given 用户点击账号页“最近使用”列头，When 在升序与降序之间切换，Then 排序作用于当前筛选后的全量结果集，且 `last_used_at=null` 分别在顶部或底部。
 - Given 主流程正在运行，When 用户点击暂停，Then 不再派发新账号，已运行账号继续完成。
 - Given 主流程正在运行，When 用户修改 `parallel` / `need` / `maxAttempts`，Then 修改立即作用于后续派发，不中断当前账号。
+- Given 主流程以 `parallel=5` 启动且多个账号可用，When 代理/broker 启动准备仍在 pending，Then 调度器继续填充剩余 launch slot，直到 active + pending 达到并发上限或预算/账号耗尽。
 - Given 主流程页包含长 JSON 日志、长邮箱或较窄视口，When 页面渲染完成，Then 内容仍保持在 shell 宽度内，且只允许卡片或表格自身出现内部滚动。
 - Given 任务成功完成 Microsoft 登录与 Tavily Home 流程，When 成功提取 API key，Then 账号状态、API key 记录、job attempt 与 `signup_tasks` 都正确关联更新。
 - Given 用户打开代理页并执行节点检查，When 检查完成，Then 界面显示节点延迟、出口 IP、地理信息和检查结果。
@@ -347,3 +349,4 @@
 - 2026-03-19: 扩展账号页导入预解析弹窗、账号分组、跨分页勾选、批量分组/删除与更宽松的账号密码分隔格式解析。
 - 2026-04-04: 账号页 proof 邮箱链路切换到 CF Mail，补齐绑定弹窗 Storybook 场景与视觉证据。
 - 2026-04-16: 微软账号导入兼容微软消费者邮箱常见的 `email----password----uuid----M...$$` 多段格式，前后端预解析统一只取前两段，并覆盖多级消费者域名后缀，同时收紧启发式以避免误截普通 dashed 密码。
+- 2026-06-01: Tavily job scheduler 将 pending launch 计入并发 slot，并发执行端口/代理/broker 启动准备，避免 `parallel` 被慢启动退化成串行派发。
