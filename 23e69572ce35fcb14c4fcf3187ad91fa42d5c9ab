@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.20",
+  "base_stable_version": "0.22.19",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T10:47:22Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.20",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "6566bd3a460c7b4fb8764c78c38567dcfae193cd",
+  "pr_number": 105,
+  "pr_title": "fix: fill tavily launch parallelism",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.20",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.20",
+  "target_sha": "23e69572ce35fcb14c4fcf3187ad91fa42d5c9ab",
+  "type_label": "type:patch"
+}
