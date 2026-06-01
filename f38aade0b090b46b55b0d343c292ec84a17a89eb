@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.27",
+  "base_stable_version": "0.22.26",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T14:17:02Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.27",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "c2a0bce64df6a93ddbe2e8b9f67b76a7692f50ef",
+  "pr_number": 112,
+  "pr_title": "fix: complete exhausted successful jobs",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.27",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.27",
+  "target_sha": "f38aade0b090b46b55b0d343c292ec84a17a89eb",
+  "type_label": "type:patch"
+}
