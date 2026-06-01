@@ -80,6 +80,7 @@
 - confirm-email handler 提交确认邮箱后，必须用不包含 OAuth query 参数的稳定 surface key 判定是否仍卡在同一确认页；若同一确认页长时间未进入 code surface，必须抛出显式 `microsoft_proof_submit_failed:confirmation_stalled`，不能退化为笼统 `stage_login_home`。
 - confirm-email handler 在点击 `Send code` 前必须确认输入值稳定保持为账号 proof mailbox，并优先点击 Microsoft Fluent UI 的 `primaryButton`，避免受控输入框或按钮文案匹配失败导致页面空转。
 - Microsoft 登录 deadline 到点时，若当前页已经是可处理的 proof surface，状态机必须继续进入一次 proof recovery，而不是直接抛出 `stage_login_home`。
+- 使用已保存的 CFMail proof mailbox 前必须先 ensure 该 mailbox 可收信并刷新 TTL；已过期 mailbox 不得直接用于 Microsoft `Send code`，否则会稳定落入 `microsoft_proof_code_timeout`。
 - confirm-email handler 在页面 masked recovery mailbox 与账号配置不匹配时抛出 `microsoft_unknown_recovery_email:<masked>`，由账号级硬阻断逻辑落库并阻止后续 job 继续租用该账号。
 - 进入 code surface 后仍沿用现有 proof code 拉取与提交逻辑。
 
@@ -110,6 +111,7 @@ None
 - Given Tavily OAuth 在 `login.live.com/oauth20_authorize.srf` 呈现 confirm-email proof surface，When 页面要求确认已配置的 recovery mailbox，Then 登录状态机先执行 confirm-email handler 并等待 code，而不是先点击 `Use your password`。
 - Given Tavily OAuth confirm-email 页面显示 `proof-confirmation-email-input` 与 `Send code` primary button，When 账号记录中已有 proof mailbox，Then handler 会填入完整 proof mailbox、确认输入值稳定、点击 primary button，并在仍停留同一确认页时输出显式 stalled 错误。
 - Given Tavily OAuth confirm-email 页面在 Microsoft 登录 deadline 尾部才稳定出现，When deadline 到点前未完成 home 回跳，Then 状态机额外执行一次 proof recovery，不得直接输出 `stage_login_home`。
+- Given 账号记录里的 CFMail proof mailbox 已过期，When Microsoft proof 流程准备使用该 mailbox，Then 先通过 CFMail ensure 刷新为可收信状态，再提交 `Send code`。
 - Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
 - Given confirm-email 页面同时包含隐藏登录邮箱值与可见 proof mailbox 文案，When handler 提取 recovery challenge，Then 必须优先匹配已配置 proof mailbox，不得把隐藏登录邮箱误判为 unknown recovery。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
@@ -185,6 +187,7 @@ None
 - 2026-06-01: 修正 confirm-email challenge 提取优先级，避免隐藏登录邮箱抢占可见 proof mailbox，导致已配置辅助邮箱的账号被误标为 `microsoft_unknown_recovery_email`。
 - 2026-06-01: 加固 OAuth confirm-email 提交流程，先解析账号 proof mailbox 再考虑 password fallback，提交前验证输入值稳定，优先点击 Microsoft primary button，并用稳定 surface key 检测同页卡住。
 - 2026-06-01: 补齐 Microsoft 登录 deadline 边缘 recovery，当前页已稳定为 proof surface 时继续处理，而不是落入笼统 `stage_login_home`。
+- 2026-06-01: 修复已保存 CFMail proof mailbox 过期后仍被直接用于 Microsoft 验证的问题，使用前统一 ensure 并刷新 TTL。
 
 ## 参考（References）
 

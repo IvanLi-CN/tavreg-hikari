@@ -427,6 +427,7 @@ const DEFAULT_OUTPUT_PATH = fileURLToPath(new URL("../output/", import.meta.url)
 const OUTPUT_PATH = path.resolve(process.env.OUTPUT_ROOT_DIR || DEFAULT_OUTPUT_PATH);
 const OUTPUT_DIR = pathToFileURL(`${OUTPUT_PATH}${pathSep}`);
 const PROXY_NODE_USAGE_PATH = new URL("proxy/node-usage.json", OUTPUT_DIR);
+const MICROSOFT_PROOF_MAILBOX_TTL_MINUTES = 24 * 60;
 const AUTH_CHALLENGE_RESOURCE_RE =
   /(?:challenges\.cloudflare\.com|arkoselabs\.com|funcaptcha|hcaptcha\.com|recaptcha(?:\.net|\.com)|friendly-challenge|cdn\.auth0\.com\/ulp)/i;
 
@@ -2903,28 +2904,25 @@ async function resolveMicrosoftProofMailboxSession(
     address = provisioned.address;
   }
   let mailboxId = cfg.microsoftProofMailboxId?.trim() || "";
+  const ensured = await ensureCfMailMailbox({
+    baseUrl: cfg.cfmailBaseUrl,
+    apiKey: cfg.cfmailApiKey,
+    address,
+    httpJson,
+    proxyUrl,
+    expiresInMinutes: MICROSOFT_PROOF_MAILBOX_TTL_MINUTES,
+  });
+  mailboxId = ensured.id;
+  address = ensured.address;
   if (!mailboxId) {
-    const resolved = await resolveCfMailMailbox({
-      baseUrl: cfg.cfmailBaseUrl,
-      apiKey: cfg.cfmailApiKey,
-      address,
-      httpJson,
-      proxyUrl,
-    });
-    const ensured =
-      resolved ||
-      (await ensureCfMailMailbox({
-        baseUrl: cfg.cfmailBaseUrl,
-        apiKey: cfg.cfmailApiKey,
-        address,
-        httpJson,
-        proxyUrl,
-      }));
-    mailboxId = ensured.id;
-    address = ensured.address;
-    if (!mailboxId) {
-      throw new Error(`cfmail_mailbox_not_found:${address}`);
-    }
+    throw new Error(`cfmail_mailbox_not_found:${address}`);
+  }
+  if (
+    cfg.microsoftProofMailboxId?.trim() !== mailboxId ||
+    cfg.microsoftProofMailboxAddress?.trim().toLowerCase() !== address ||
+    cfg.microsoftProofMailboxProvider !== "cfmail"
+  ) {
+    log(`login flow: ensured active Microsoft proof mailbox ${address}`);
     cfg.microsoftProofMailboxId = mailboxId;
     cfg.microsoftProofMailboxProvider = "cfmail";
     cfg.microsoftProofMailboxAddress = address;
