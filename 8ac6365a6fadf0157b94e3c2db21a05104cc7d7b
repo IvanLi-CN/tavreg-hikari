@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.23",
+  "base_stable_version": "0.22.22",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T12:26:37Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.23",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "689da729cb152385066a100af9dd54515ea9cbdd",
+  "pr_number": 108,
+  "pr_title": "fix: reap Tavily terminal artifacts",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.23",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.23",
+  "target_sha": "8ac6365a6fadf0157b94e3c2db21a05104cc7d7b",
+  "type_label": "type:patch"
+}
