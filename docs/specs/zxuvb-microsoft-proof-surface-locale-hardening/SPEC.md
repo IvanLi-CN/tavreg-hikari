@@ -84,6 +84,8 @@
 - Microsoft OAuth authorize 页若返回缺失 `client_id` 的 `invalid_request`，状态机必须把它视为可恢复的失效 OAuth surface，回到 Tavily home 重新发起登录流，而不是等待 deadline 后退化为 `stage_login_home`。
 - Tavily Auth0 `login/callback` 若在 Microsoft 回跳后呈现 `Oops!, something went wrong`，状态机必须把它视为可恢复的失效 Auth0 callback surface，回到 Tavily home 重新发起登录流，而不是等待 deadline 后退化为 `stage_login_home`。
 - Microsoft 登录期间若 Chromium interstitial 报 `ERR_EMPTY_RESPONSE`，状态机必须把它纳入 transient network recovery，而不是等到 deadline 后退化为 `stage_login_home`。
+- Microsoft 回跳到 `https://app.tavily.com/home` 但 Tavily auth API 尚未稳定返回用户/账号/key 信号时，home stabilization 必须给 auth API 更长落地窗口，并在无鉴权信号时 reload 一次，不得只因 URL 已在 `/home` 却 DOM 过薄而直接退化成 `stage_login_home`。
+- confirm-email handler 提交确认邮箱后若仍停留同一 confirm-email surface，必须先尝试页面提供的 password fallback，再把它归类为 `microsoft_proof_submit_failed:confirmation_stalled`。
 - confirm-email handler 在页面 masked recovery mailbox 与账号配置不匹配时抛出 `microsoft_unknown_recovery_email:<masked>`，由账号级硬阻断逻辑落库并阻止后续 job 继续租用该账号。
 - 进入 code surface 后仍沿用现有 proof code 拉取与提交逻辑。
 
@@ -118,6 +120,8 @@ None
 - Given Microsoft OAuth authorize 页面返回缺失 `client_id` 的 `invalid_request`，When Tavily 登录流程仍在进行，Then 状态机会重新打开 Tavily home 以刷新 OAuth state，不得把该页消耗到 generic `stage_login_home`。
 - Given Tavily Auth0 `login/callback` 页面在 Microsoft 回跳后显示 `Oops!, something went wrong`，When Tavily 登录流程仍在进行，Then 状态机会重新打开 Tavily home 以刷新 Auth0 state，不得把该页消耗到 generic `stage_login_home`。
 - Given Microsoft 登录期间 Chromium 显示 `ERR_EMPTY_RESPONSE` interstitial，When Tavily 登录流程仍在进行，Then 状态机会执行一次 transient network recovery，不得把该页消耗到 generic `stage_login_home`。
+- Given Microsoft OAuth 已回跳到 Tavily `/home` 但鉴权接口暂时无稳定信号，When home stabilization 仍在 grace window 内，Then 状态机会继续等待并 reload home 一次，而不是立即失败。
+- Given Microsoft confirm-email proof 已提交但 8 秒后仍停在同一确认页，When 页面存在 password fallback，Then 状态机会切换到 password fallback 并继续登录，而不是直接硬失败。
 - Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
 - Given confirm-email 页面同时包含隐藏登录邮箱值与可见 proof mailbox 文案，When handler 提取 recovery challenge，Then 必须优先匹配已配置 proof mailbox，不得把隐藏登录邮箱误判为 unknown recovery。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
@@ -197,6 +201,7 @@ None
 - 2026-06-01: 修复 Microsoft OAuth authorize 缺失 `client_id` 的 `invalid_request` 页面未恢复、最终退化为 `stage_login_home` 的问题。
 - 2026-06-01: 修复 Tavily Auth0 callback 400 `Oops!, something went wrong` 未恢复、最终退化为 `stage_login_home` 的问题。
 - 2026-06-01: 补齐 Auth0 callback deadline 边缘 recovery 与 Chromium `ERR_EMPTY_RESPONSE` transient network recovery。
+- 2026-06-01: Tavily `/home` auth signal 等待增加 reload 兜底，Microsoft proof confirmation stalled 先尝试 password fallback，减少可恢复账号被 `stage_login_home` / `microsoft_proof_submit_failed` 排除。
 
 ## 参考（References）
 

@@ -4060,8 +4060,11 @@ async function openAuthFlowEntry(
 async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
   const step = 800;
   const stableDeadline = Date.now() + Math.max(step, stableMs);
-  const authGraceDeadline = Date.now() + Math.max(stableMs, 15_000);
+  const startedAt = Date.now();
+  const authReloadAt = startedAt + Math.max(stableMs, 15_000);
+  const authGraceDeadline = startedAt + Math.max(stableMs, 30_000);
   let sawAuthenticatedSignal = false;
+  let reloadedForMissingAuth = false;
   while (Date.now() < authGraceDeadline) {
     const url = page.url();
     if (!/app\.tavily\.com\/home/i.test(url) || /auth\.tavily\.com/i.test(url)) {
@@ -4072,6 +4075,12 @@ async function waitHomeStable(page: any, stableMs = 6000): Promise<boolean> {
       if (Date.now() >= stableDeadline) {
         return true;
       }
+    }
+    if (!sawAuthenticatedSignal && !reloadedForMissingAuth && Date.now() >= authReloadAt) {
+      reloadedForMissingAuth = true;
+      log("home stabilization missing auth signal; reloading Tavily home once");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 }).catch(() => {});
+      await page.waitForTimeout(1_200);
     }
     await page.waitForTimeout(step);
   }
@@ -6512,6 +6521,13 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       throw new Error(`microsoft_proof_submit_failed:${formErrors.join(" | ")}`);
     }
     if (waitElapsedMs >= 8_000) {
+      if (await clickMicrosoftPasswordFallbackAction(page)) {
+        proofState.passwordFallbackAttempted = true;
+        proofState.passwordFallbackReturnUrl = page.url();
+        await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+        log("login flow: switched stalled Microsoft proof confirmation to password fallback");
+        return true;
+      }
       throw new Error(`microsoft_proof_submit_failed:confirmation_stalled:${confirmationSurfaceKey}`);
     }
     await page.waitForTimeout(1_000);
