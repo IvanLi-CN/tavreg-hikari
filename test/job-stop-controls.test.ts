@@ -1427,6 +1427,48 @@ test("runLoop fills parallel slots while attempt launch setup is pending", async
   appDb.close();
 });
 
+test("proxy broker setup failures fail the job without consuming accounts", async () => {
+  const { appDb, dbPath } = await createTempDb();
+  const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
+
+  const imported = appDb.importAccounts([{ email: "broker-timeout@example.test", password: "pw123456" }]);
+  const accountId = imported.affectedIds[0]!;
+  markBrowserSessionReady(appDb, accountId);
+
+  scheduler["spawnAttempt"] = async () => {
+    const error = new Error("Proxy Broker request timed out after 30000ms") as Error & { code?: string };
+    error.code = "proxy_broker_request_timeout";
+    throw error;
+  };
+
+  const job = await scheduler.startJob({
+    runMode: "headed",
+    need: 1,
+    parallel: 1,
+    maxAttempts: 1,
+  });
+
+  for (let index = 0; index < 40 && appDb.getJob(job.id)?.status !== "failed"; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  expect(appDb.getJob(job.id)).toMatchObject({
+    status: "failed",
+    launchedCount: 0,
+    failureCount: 0,
+    lastError: "launch setup unavailable (proxy_broker_request_timeout): Proxy Broker request timed out after 30000ms",
+  });
+  expect(appDb.listAttempts(job.id, false)).toHaveLength(0);
+  expect(appDb.getAccount(accountId)).toMatchObject({
+    lastResultStatus: "ready",
+    lastErrorCode: null,
+    leaseJobId: null,
+  });
+
+  await scheduler.shutdown();
+  appDb.close();
+});
+
 test("force stop wins over a last-moment successful worker exit", async () => {
   const { appDb, dbPath } = await createTempDb();
   const scheduler = new JobScheduler(appDb, "tavily", process.cwd(), dbPath, () => createSchedulerSettings(), () => undefined);
