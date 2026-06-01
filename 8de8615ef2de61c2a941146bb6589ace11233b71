@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.26",
+  "base_stable_version": "0.22.25",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T13:49:01Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.26",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "a1dc3cfa66165270bc7a0703dd1f6180e944a00e",
+  "pr_number": 111,
+  "pr_title": "fix: exit timed out tavily task workers",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.26",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.26",
+  "target_sha": "8de8615ef2de61c2a941146bb6589ace11233b71",
+  "type_label": "type:patch"
+}
