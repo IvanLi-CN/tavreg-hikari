@@ -12491,11 +12491,40 @@ async function runSingleMode(
       }, 15_000);
       taskTimeout = setTimeout(() => {
         taskTimedOut = true;
+        const timeoutMessage = `task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`;
         log(`[${mode}] task attempt timeout after ${cfg.taskAttemptTimeoutMs}ms at stage=${failureStage}`);
-        browserLaunchAbortController.abort(new Error(`task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`));
-        void closeBrowserSession();
-        if (!existingMihomoController) {
-          void mihomoController.stop().catch(() => {});
+        browserLaunchAbortController.abort(new Error(timeoutMessage));
+        ledgerRecord.status = "failed";
+        ledgerRecord.completedAt = new Date().toISOString();
+        ledgerRecord.durationMs = Date.parse(ledgerRecord.completedAt) - Date.parse(ledgerRecord.startedAt);
+        ledgerRecord.failureStage = failureStage;
+        ledgerRecord.errorCode = "task_attempt_timeout";
+        ledgerRecord.errorMessage = timeoutMessage;
+        ledgerRecord.notesJson = safeJsonStringify(notes);
+        persistLedgerRecord("task-timeout");
+
+        const cleanupTimedOutTask = async (): Promise<void> => {
+          await writeJson(new URL(`error.json`, diagOutputDir), {
+            failedAt: new Date().toISOString(),
+            error: timeoutMessage,
+          }).catch(() => {});
+          await closeBrowserSession();
+          if (!existingMihomoController) {
+            await mihomoController.stop().catch(() => {});
+          }
+        };
+
+        if (taskScopedAttempt) {
+          const hardExit = setTimeout(() => {
+            log(`[${mode}] force exiting timed-out task attempt after cleanup grace`);
+            process.exit(124);
+          }, 15_000);
+          hardExit.unref?.();
+          void cleanupTimedOutTask().finally(() => {
+            process.exit(124);
+          });
+        } else {
+          void cleanupTimedOutTask();
         }
       }, cfg.taskAttemptTimeoutMs);
     };
