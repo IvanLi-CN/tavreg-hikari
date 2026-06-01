@@ -6325,7 +6325,7 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
   let proofMailbox = proofState.mailbox;
   let proofMailboxError: Error | null = null;
   const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
-  const confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  let confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
   if (confirmationState.matchesConfiguredMailbox === false) {
     const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
     throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
@@ -6351,6 +6351,13 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       proofState.mailbox = proofMailbox;
     } catch (error) {
       proofMailboxError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (proofMailbox && !configuredProofAddress) {
+    confirmationState = await collectMicrosoftRecoveryChallengeState(page, proofMailbox.address);
+    if (confirmationState.matchesConfiguredMailbox === false) {
+      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
+      throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
     }
   }
   const shouldUsePasswordFallback =

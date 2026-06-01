@@ -494,6 +494,7 @@ test("microsoft proof confirmation prioritizes configured proof mailboxes over p
   expect(source).toContain("function buildMicrosoftProofConfirmationSurfaceKey(surface: MicrosoftProofSurfacePageState)");
   expect(segment).toContain("const confirmationSurfaceKey = buildMicrosoftProofConfirmationSurfaceKey(proofSurface);");
   expect(segment).toContain("proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);");
+  expect(segment).toContain("confirmationState = await collectMicrosoftRecoveryChallengeState(page, proofMailbox.address);");
   expect(segment).toContain("const shouldUsePasswordFallback =\n    !proofMailbox &&\n    !configuredProofAddress &&");
   expect(segment).toContain("waitForStableInputValue(page, activeSelector, proofMailbox.address");
   expect(segment).toContain('button[data-testid="primaryButton"]');
