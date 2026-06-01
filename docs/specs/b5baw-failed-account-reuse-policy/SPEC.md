@@ -66,6 +66,7 @@
   - 已成功产出 API key、仍处于当前租用中、人工停用或被三类硬账号阻断的账号，不得再次派发。
 - 新 job 创建后：
   - `failed` 且 `skip_reason` 为空的账号，允许重新进入候选池。
+  - Tavily 中 `microsoft_proof_code_timeout` / `stage_login_home` 这类 proof/login-home 失败连续跨 job 累计达到保护阈值后，必须将对应 `account_browser_sessions.status` 降级为 `failed`，从后续候选池排除，直到操作者重新 bootstrap 或修复 proof/mailbox 配置。
   - `skip_reason` 为三类硬账号阻断之一的账号，不得进入候选池，且最近状态显示为 `disabled`。
   - `has_api_key` 与人工停用账号继续保持不可调度。
 
@@ -74,6 +75,7 @@
 - 自动化运行失败时：
   - 若错误码属于硬账号阻断，则写入 `skip_reason`，并把 `last_result_status` 收敛为 `disabled`。
   - 若 Microsoft proof confirmation handler 抛出 `microsoft_unknown_recovery_email:<masked>`，则按 `microsoft_unknown_recovery_email` 写入 `skip_reason`，并保留 masked mailbox 作为排障上下文。
+  - 若 Tavily proof/login-home 类失败反复出现，达到阈值时不得继续保持 browser session `ready`，必须将 session 标记为 `failed` 并记录最近错误，避免坏账号在新 job 中无限消耗 attempt 预算。
   - 若错误码属于瞬时失败，例如 `network_connection_closed`、代理故障、浏览器异常、`microsoft_auth_try_again_later`、`microsoft_password_rate_limited`，则保留 `skip_reason = null`。
 - 人工停用状态优先级高于自动化失败写入；自动化失败不得清空或改写既有 `disabled_*`。
 
@@ -99,6 +101,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 某账号在 job A 因 `network_connection_closed`、代理、浏览器或临时风控失败，When 创建 job B，Then 该账号会重新计入 `eligibleCount` 并可再次被派发。
+- Given 某账号在 Tavily 中多次因 `microsoft_proof_code_timeout` 或 `stage_login_home` 失败，When 失败次数达到保护阈值，Then 该账号的 browser session 会变为 `failed`，新 job 不再把它计入 `eligibleCount`。
 - Given 某账号已经在当前 job 里因瞬时错误、Microsoft proof 或 rate-limit 失败过，When 当前 job 继续调度，Then 该账号不会重新计入 `eligibleCount`，且调度器会尝试下一个候选账号。
 - Given 某账号已经在当前 job 里产生 `stopped/force_stopped` attempt，When 当前 job 继续调度，Then 该账号不会重新计入 `eligibleCount`；When 创建新 job，Then 若无硬阻断或 API key，该账号可重新进入候选池。
 - Given signup task ledger 已报告 `runner_interrupted` 等终态失败，When 对应 Tavily attempt 没有新 artifact 且进程已安静，Then 调度器会把 attempt 按 ledger 终态收口，并允许 job 继续推进或进入终态，而不是持续保持 `running`。
@@ -164,3 +167,4 @@
 - 2026-03-29: 修正瞬时失败账号的同 job 复用规则，改为同 job 与新 job 都允许继续重试，仅对成功、租用中、人工停用与硬账号阻断维持不可调度。
 - 2026-04-26: 明确 Tavily OAuth confirm-email proof mailbox mismatch 复用 `microsoft_unknown_recovery_email` 硬阻断，避免账号在后续 job 中反复租用。
 - 2026-06-01: 根据生产批量 job #1127 的 5 并发 / 目标 30 实测，补充 `stopped` attempt 的同 job 禁止复用规则，并要求 terminal signup ledger failure 能收口 quiet attempt，避免 job 长时间卡在 `running`。
+- 2026-06-01: 根据生产 drain job #1129-#1131 实测，补充 Tavily proof/login-home 反复失败后降级 browser session 的规则，避免历史坏账号在新 job 中无限重试。
