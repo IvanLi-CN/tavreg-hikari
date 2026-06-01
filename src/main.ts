@@ -5118,6 +5118,19 @@ function buildMicrosoftProofSurfaceStabilityKey(surface: {
   return [surface.url, surface.matchedSignals.join(",")].join("|");
 }
 
+function buildMicrosoftProofConfirmationSurfaceKey(surface: MicrosoftProofSurfacePageState): string {
+  let routeKey = surface.url;
+  try {
+    const parsedUrl = new URL(surface.url);
+    routeKey = `${parsedUrl.origin.toLowerCase()}${parsedUrl.pathname.toLowerCase()}`;
+  } catch {
+    routeKey = surface.url.replace(/[?#].*$/, "");
+  }
+  const title = surface.title.replace(/\s+/g, " ").trim().slice(0, 120);
+  const body = surface.bodyText.replace(/\s+/g, " ").trim().slice(0, 180);
+  return [routeKey, "confirm_email", surface.matchedSignals.join(","), title, body].join("|");
+}
+
 async function classifyMicrosoftFlowInterruptFromPage(page: any) {
   const payload = await collectMicrosoftSurfaceSnapshot(page);
   return classifyMicrosoftFlowInterrupt(payload);
@@ -6310,7 +6323,7 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     'input[type="email"]',
   ];
   const confirmationSelector = confirmationSelectors.join(", ");
-  const confirmationSurfaceKey = page.url();
+  const confirmationSurfaceKey = buildMicrosoftProofConfirmationSurfaceKey(proofSurface);
   let proofMailbox = proofState.mailbox;
   let proofMailboxError: Error | null = null;
   const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
@@ -6319,7 +6332,31 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
     throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
   }
+  const selector =
+    (await firstVisibleSelector(page, confirmationSelectors)) ||
+    (await markBestVisibleControl(
+      page,
+      confirmationSelector,
+      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i],
+      "microsoft-proof-confirm-email",
+    )) ||
+    null;
+  if (!selector) {
+    return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
+  }
+  if (!proofMailbox) {
+    try {
+      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
+      proofState.mailbox = proofMailbox;
+    } catch (error) {
+      proofMailboxError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
   const shouldUsePasswordFallback =
+    !proofMailbox &&
     !configuredProofAddress &&
     shouldAttemptMicrosoftProofPasswordFallback({
       hasConfiguredMailbox: false,
@@ -6340,6 +6377,14 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       return true;
     }
   }
+  if (!proofMailbox) {
+    log(
+      `login flow: proof confirmation prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
+        proofSurface.bodyText.slice(0, 160) || "(empty)"
+      }`,
+    );
+    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
+  }
   if (
     shouldClassifyMicrosoftUnknownRecoveryEmail({
       surfaceKind: confirmationState.surfaceKind,
@@ -6358,40 +6403,6 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     throw new Error(
       `${getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind)}:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`,
     );
-  }
-  const selector =
-    (await firstVisibleSelector(page, confirmationSelectors)) ||
-    (await markBestVisibleControl(
-      page,
-      confirmationSelector,
-      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i],
-      "microsoft-proof-confirm-email",
-    )) ||
-    null;
-  if (!selector && !proofMailboxError) {
-    return false;
-  }
-  if (!proofState.startedAt) {
-    proofState.startedAt = Date.now();
-  }
-  if (!proofMailbox) {
-    try {
-      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
-      proofState.mailbox = proofMailbox;
-    } catch (error) {
-      proofMailboxError = error instanceof Error ? error : new Error(String(error));
-    }
-  }
-  if (!selector) {
-    throw proofMailboxError || new Error("microsoft_proof_add_email_input_missing");
-  }
-  if (!proofMailbox) {
-    log(
-      `login flow: proof confirmation prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
-        proofSurface.bodyText.slice(0, 160) || "(empty)"
-      }`,
-    );
-    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
   if (
     proofState.confirmationSubmissionKey === confirmationSurfaceKey &&
@@ -6443,6 +6454,10 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     )) || selector;
   await clearAuthFieldValidationState(page, activeSelector);
   await ensureInputValue(page, activeSelector, proofMailbox.address, "microsoft_proof_confirmation_mailbox");
+  const stableProofMailbox = await waitForStableInputValue(page, activeSelector, proofMailbox.address, 350, 3_500);
+  if (!stableProofMailbox) {
+    throw new Error("microsoft_proof_confirmation_mailbox_input_not_persisted");
+  }
   const preparedProofMailbox = await page.locator(activeSelector).first().inputValue().catch(() => "");
   log(
     `login flow: prepared Microsoft proof confirmation mailbox selector=${activeSelector} len=${preparedProofMailbox.length} hash=${computeSecretSha256(
@@ -6450,6 +6465,12 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     )} expected_hash=${computeSecretSha256(proofMailbox.address)} matches_expected=${preparedProofMailbox === proofMailbox.address}`,
   );
   const submitted =
+    (await page
+      .locator('button[data-testid="primaryButton"]')
+      .first()
+      .click({ timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false)) ||
     (await clickMatchingAction(
       page,
       [

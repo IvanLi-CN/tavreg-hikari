@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-04-17
-- Last: 2026-05-07
+- Last: 2026-06-01
 
 ## 背景 / 问题陈述
 
@@ -76,6 +76,9 @@
 - `login.live.com/oauth20_authorize.srf` 上只要存在确认邮箱文案，也归类为 `confirm_email`；旧版确认邮箱 selector 缺失时仍继续 confirm-email handler。
 - confirm-email handler 在页面 masked recovery mailbox 与 `microsoft_accounts.proof_mailbox_address` 匹配时继续既有 code request / wait 流程；匹配判定以页面可见 local-part 前缀、mask 和 domain 为准。
 - confirm-email handler 在账号已有 proof mailbox 配置时不使用 password fallback；只有没有 proof mailbox 映射的账号才允许尝试 `Use your password`。
+- confirm-email handler 必须在存在可见邮箱确认输入框时先解析当前账号绑定的 proof mailbox，再决定是否允许 password fallback；账号记录中已有 proof mailbox 时，不得因为运行时 env 尚未带出地址而提前点击 `Use your password`。
+- confirm-email handler 提交确认邮箱后，必须用不包含 OAuth query 参数的稳定 surface key 判定是否仍卡在同一确认页；若同一确认页长时间未进入 code surface，必须抛出显式 `microsoft_proof_submit_failed:confirmation_stalled`，不能退化为笼统 `stage_login_home`。
+- confirm-email handler 在点击 `Send code` 前必须确认输入值稳定保持为账号 proof mailbox，并优先点击 Microsoft Fluent UI 的 `primaryButton`，避免受控输入框或按钮文案匹配失败导致页面空转。
 - confirm-email handler 在页面 masked recovery mailbox 与账号配置不匹配时抛出 `microsoft_unknown_recovery_email:<masked>`，由账号级硬阻断逻辑落库并阻止后续 job 继续租用该账号。
 - 进入 code surface 后仍沿用现有 proof code 拉取与提交逻辑。
 
@@ -104,6 +107,7 @@ None
 - Given verify / confirmation / code surface，When classifier 运行，Then 继续走既有 handler，不会因为放宽 add 判定而误建邮箱。
 - Given proof route 出现新的未知语言 / 布局，When classifier 无法归类，Then worker log / result.json 落下 `microsoft_proof_surface_unclassified`，且包含 URL、selector 命中与标题 / 正文摘要。
 - Given Tavily OAuth 在 `login.live.com/oauth20_authorize.srf` 呈现 confirm-email proof surface，When 页面要求确认已配置的 recovery mailbox，Then 登录状态机先执行 confirm-email handler 并等待 code，而不是先点击 `Use your password`。
+- Given Tavily OAuth confirm-email 页面显示 `proof-confirmation-email-input` 与 `Send code` primary button，When 账号记录中已有 proof mailbox，Then handler 会填入完整 proof mailbox、确认输入值稳定、点击 primary button，并在仍停留同一确认页时输出显式 stalled 错误。
 - Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
 - Given confirm-email 页面同时包含隐藏登录邮箱值与可见 proof mailbox 文案，When handler 提取 recovery challenge，Then 必须优先匹配已配置 proof mailbox，不得把隐藏登录邮箱误判为 unknown recovery。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
@@ -175,8 +179,9 @@ None
 - 2026-04-17: 完成 classifier / handler / 诊断改动，并通过 `bun run typecheck`、`bun test` 与两轮本地 review 收敛。
 - 2026-04-18: 完成 101 热修上线与目标账号 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归，worker log 确认 `provisioned Microsoft proof mailbox ...`，数据库 proof mailbox 与 session 状态回到可用态。
 - 2026-04-26: 将 `login.live.com/oauth20_authorize.srf` 上的 Tavily OAuth confirm-email proof surface 纳入 confirm-email handler，确保 masked mailbox mismatch 写入 `microsoft_unknown_recovery_email:<masked>`，匹配场景继续等待 proof code。
-- 2026-06-01: 修正 confirm-email challenge 提取优先级，避免隐藏登录邮箱抢占可见 proof mailbox，导致已配置辅助邮箱的账号被误标为 `microsoft_unknown_recovery_email`。
 - 2026-05-07: 补齐线上 OAuth confirm-email 变体，允许没有旧版确认邮箱 selector 的 `Verify your email / We'll send a code to ...` 页面进入 confirm-email handler，并在已有 proof mailbox 配置时阻止 password fallback 抢先接管。
+- 2026-06-01: 修正 confirm-email challenge 提取优先级，避免隐藏登录邮箱抢占可见 proof mailbox，导致已配置辅助邮箱的账号被误标为 `microsoft_unknown_recovery_email`。
+- 2026-06-01: 加固 OAuth confirm-email 提交流程，先解析账号 proof mailbox 再考虑 password fallback，提交前验证输入值稳定，优先点击 Microsoft primary button，并用稳定 surface key 检测同页卡住。
 
 ## 参考（References）
 
