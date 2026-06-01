@@ -5126,9 +5126,7 @@ function buildMicrosoftProofConfirmationSurfaceKey(surface: MicrosoftProofSurfac
   } catch {
     routeKey = surface.url.replace(/[?#].*$/, "");
   }
-  const title = surface.title.replace(/\s+/g, " ").trim().slice(0, 120);
-  const body = surface.bodyText.replace(/\s+/g, " ").trim().slice(0, 180);
-  return [routeKey, "confirm_email", surface.matchedSignals.join(","), title, body].join("|");
+  return [routeKey, "confirm_email"].join("|");
 }
 
 async function classifyMicrosoftFlowInterruptFromPage(page: any) {
