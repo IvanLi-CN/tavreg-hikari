@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.21",
+  "base_stable_version": "0.22.20",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T11:11:06Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.21",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "cc121cb47b39b9f3aa6576cd858d77cdbe529488",
+  "pr_number": 106,
+  "pr_title": "fix: recover tavily home and proof stalls",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.21",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.21",
+  "target_sha": "a5c01ce1447385d361e483bf12c2bd9a7afd8094",
+  "type_label": "type:patch"
+}
