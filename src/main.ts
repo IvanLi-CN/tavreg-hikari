@@ -6374,6 +6374,25 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     )) ||
     null;
   if (!selector) {
+    const shouldUsePasswordFallbackWithoutSelector =
+      !configuredProofAddress &&
+      shouldAttemptMicrosoftProofPasswordFallback({
+        hasConfiguredMailbox: false,
+        configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
+        passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+        passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+      });
+    if (shouldUsePasswordFallbackWithoutSelector && (await clickMicrosoftPasswordFallbackAction(page))) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log(
+        `login flow: switched selector-less Microsoft proof confirmation to password fallback${
+          confirmationState.hintedMaskedEmail ? ` (hint=${confirmationState.hintedMaskedEmail})` : ""
+        }`,
+      );
+      return true;
+    }
     return false;
   }
   if (!proofState.startedAt) {
