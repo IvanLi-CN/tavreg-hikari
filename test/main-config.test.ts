@@ -491,10 +491,24 @@ test("microsoft proof confirmation prioritizes configured proof mailboxes over p
   const segment = source.slice(start, end);
   expect(segment).toContain('input[name*="proof" i]');
   expect(segment).toContain('input[autocomplete="email"]');
-  expect(segment).toContain("const shouldUsePasswordFallback =\n    !configuredProofAddress &&");
-  expect(segment.indexOf("const confirmationState = await collectMicrosoftRecoveryChallengeState")).toBeLessThan(
-    segment.indexOf("const shouldUsePasswordFallback ="),
-  );
+  expect(source).toContain("function buildMicrosoftProofConfirmationSurfaceKey(surface: MicrosoftProofSurfacePageState)");
+  expect(segment).toContain("const confirmationSurfaceKey = buildMicrosoftProofConfirmationSurfaceKey(proofSurface);");
+  expect(segment).toContain("proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);");
+  expect(segment).toContain("confirmationState = await collectMicrosoftRecoveryChallengeState(page, proofMailbox.address);");
+  expect(segment).toContain("const shouldUsePasswordFallbackWithoutSelector =");
+  expect(segment).toContain("switched selector-less Microsoft proof confirmation to password fallback");
+  expect(segment).toContain("const shouldUsePasswordFallback =\n    !proofMailbox &&\n    !configuredProofAddress &&");
+  expect(segment).toContain("waitForStableInputValue(page, activeSelector, proofMailbox.address");
+  expect(segment).toContain("clickMicrosoftProofPrimaryAction(page, submitPatterns)");
+  expect(source).toContain('button[data-testid="primaryButton"]');
+  const initialChallengeIndex = segment.indexOf("let confirmationState = await collectMicrosoftRecoveryChallengeState");
+  const mailboxResolutionIndex = segment.indexOf("proofMailbox = await resolveMicrosoftProofMailboxSession");
+  const passwordFallbackIndex = segment.indexOf("const shouldUsePasswordFallback =");
+  expect(initialChallengeIndex).toBeGreaterThanOrEqual(0);
+  expect(mailboxResolutionIndex).toBeGreaterThanOrEqual(0);
+  expect(passwordFallbackIndex).toBeGreaterThanOrEqual(0);
+  expect(initialChallengeIndex).toBeLessThan(mailboxResolutionIndex);
+  expect(mailboxResolutionIndex).toBeLessThan(passwordFallbackIndex);
 });
 
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {

@@ -4278,6 +4278,40 @@ async function clickMatchingActionDirectly(
   }
 }
 
+async function clickMicrosoftProofPrimaryAction(page: any, patterns: RegExp[]): Promise<boolean> {
+  return await page
+    .evaluate((compiledPatterns: Array<{ source: string; flags: string }>) => {
+      const matchers = compiledPatterns.map((item) => new RegExp(item.source, item.flags));
+      const normalize = (value: string): string =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim();
+      const isVisible = (el: Element): el is HTMLElement => {
+        if (!(el instanceof HTMLElement)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && !el.hasAttribute("disabled");
+      };
+      const buttons = Array.from(document.querySelectorAll('button[data-testid="primaryButton"]')).filter(isVisible);
+      for (const button of buttons) {
+        const text = normalize(
+          [
+            button.textContent || "",
+            button.getAttribute("aria-label") || "",
+            button.getAttribute("title") || "",
+            button instanceof HTMLButtonElement ? button.value || "" : "",
+          ].join(" "),
+        );
+        if (!matchers.some((matcher) => matcher.test(text))) continue;
+        button.click();
+        return true;
+      }
+      return false;
+    }, patterns.map((pattern) => ({ source: pattern.source, flags: pattern.flags })))
+    .catch(() => false);
+}
+
 async function clickMicrosoftPasswordFallbackAction(page: any): Promise<boolean> {
   const patterns = [
     /^use your password$/i,
@@ -5116,6 +5150,17 @@ function buildMicrosoftProofSurfaceStabilityKey(surface: {
   matchedSignals: string[];
 }): string {
   return [surface.url, surface.matchedSignals.join(",")].join("|");
+}
+
+function buildMicrosoftProofConfirmationSurfaceKey(surface: MicrosoftProofSurfacePageState): string {
+  let routeKey = surface.url;
+  try {
+    const parsedUrl = new URL(surface.url);
+    routeKey = `${parsedUrl.origin.toLowerCase()}${parsedUrl.pathname.toLowerCase()}`;
+  } catch {
+    routeKey = surface.url.replace(/[?#].*$/, "");
+  }
+  return [routeKey, "confirm_email"].join("|");
 }
 
 async function classifyMicrosoftFlowInterruptFromPage(page: any) {
@@ -6310,16 +6355,66 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     'input[type="email"]',
   ];
   const confirmationSelector = confirmationSelectors.join(", ");
-  const confirmationSurfaceKey = page.url();
+  const confirmationSurfaceKey = buildMicrosoftProofConfirmationSurfaceKey(proofSurface);
   let proofMailbox = proofState.mailbox;
   let proofMailboxError: Error | null = null;
   const configuredProofAddress = proofMailbox?.address || cfg.microsoftProofMailboxAddress?.trim() || null;
-  const confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
+  let confirmationState = await collectMicrosoftRecoveryChallengeState(page, configuredProofAddress);
   if (confirmationState.matchesConfiguredMailbox === false) {
     const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
     throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
   }
+  const selector =
+    (await firstVisibleSelector(page, confirmationSelectors)) ||
+    (await markBestVisibleControl(
+      page,
+      confirmationSelector,
+      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i],
+      "microsoft-proof-confirm-email",
+    )) ||
+    null;
+  if (!selector) {
+    const shouldUsePasswordFallbackWithoutSelector =
+      !configuredProofAddress &&
+      shouldAttemptMicrosoftProofPasswordFallback({
+        hasConfiguredMailbox: false,
+        configuredMailboxMatchesChallenge: confirmationState.matchesConfiguredMailbox ?? null,
+        passwordFallbackAttempted: proofState.passwordFallbackAttempted,
+        passwordFallbackBlocked: proofState.passwordFallbackBlocked,
+      });
+    if (shouldUsePasswordFallbackWithoutSelector && (await clickMicrosoftPasswordFallbackAction(page))) {
+      proofState.passwordFallbackAttempted = true;
+      proofState.passwordFallbackReturnUrl = page.url();
+      await submitMicrosoftPasswordIfVisible(page, password, passwordState);
+      log(
+        `login flow: switched selector-less Microsoft proof confirmation to password fallback${
+          confirmationState.hintedMaskedEmail ? ` (hint=${confirmationState.hintedMaskedEmail})` : ""
+        }`,
+      );
+      return true;
+    }
+    return false;
+  }
+  if (!proofState.startedAt) {
+    proofState.startedAt = Date.now();
+  }
+  if (!proofMailbox) {
+    try {
+      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
+      proofState.mailbox = proofMailbox;
+    } catch (error) {
+      proofMailboxError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (proofMailbox && !configuredProofAddress) {
+    confirmationState = await collectMicrosoftRecoveryChallengeState(page, proofMailbox.address);
+    if (confirmationState.matchesConfiguredMailbox === false) {
+      const terminalCode = getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind);
+      throw new Error(`${terminalCode}:${confirmationState.hintedMaskedEmail || "challenge_mismatch"}`);
+    }
+  }
   const shouldUsePasswordFallback =
+    !proofMailbox &&
     !configuredProofAddress &&
     shouldAttemptMicrosoftProofPasswordFallback({
       hasConfiguredMailbox: false,
@@ -6340,6 +6435,14 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
       return true;
     }
   }
+  if (!proofMailbox) {
+    log(
+      `login flow: proof confirmation prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
+        proofSurface.bodyText.slice(0, 160) || "(empty)"
+      }`,
+    );
+    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
+  }
   if (
     shouldClassifyMicrosoftUnknownRecoveryEmail({
       surfaceKind: confirmationState.surfaceKind,
@@ -6358,40 +6461,6 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     throw new Error(
       `${getMicrosoftRecoveryTerminalErrorCode(confirmationState.surfaceKind)}:${confirmationState.hintedMaskedEmail || "unknown_recovery_email"}`,
     );
-  }
-  const selector =
-    (await firstVisibleSelector(page, confirmationSelectors)) ||
-    (await markBestVisibleControl(
-      page,
-      confirmationSelector,
-      [/email/i, /proof/i, /验证码/i, /驗證碼/i, /电子邮件/i, /電子郵件/i],
-      "microsoft-proof-confirm-email",
-    )) ||
-    null;
-  if (!selector && !proofMailboxError) {
-    return false;
-  }
-  if (!proofState.startedAt) {
-    proofState.startedAt = Date.now();
-  }
-  if (!proofMailbox) {
-    try {
-      proofMailbox = await resolveMicrosoftProofMailboxSession(cfg, proxyUrl);
-      proofState.mailbox = proofMailbox;
-    } catch (error) {
-      proofMailboxError = error instanceof Error ? error : new Error(String(error));
-    }
-  }
-  if (!selector) {
-    throw proofMailboxError || new Error("microsoft_proof_add_email_input_missing");
-  }
-  if (!proofMailbox) {
-    log(
-      `login flow: proof confirmation prompt missing configured mailbox on surface title=${proofSurface.title || "(empty)"} body=${
-        proofSurface.bodyText.slice(0, 160) || "(empty)"
-      }`,
-    );
-    throw proofMailboxError || new Error("microsoft_proof_mailbox_missing");
   }
   if (
     proofState.confirmationSubmissionKey === confirmationSurfaceKey &&
@@ -6443,27 +6512,33 @@ async function handleMicrosoftProofConfirmationEmailPrompt(
     )) || selector;
   await clearAuthFieldValidationState(page, activeSelector);
   await ensureInputValue(page, activeSelector, proofMailbox.address, "microsoft_proof_confirmation_mailbox");
+  const stableProofMailbox = await waitForStableInputValue(page, activeSelector, proofMailbox.address, 350, 3_500);
+  if (!stableProofMailbox) {
+    throw new Error("microsoft_proof_confirmation_mailbox_input_not_persisted");
+  }
   const preparedProofMailbox = await page.locator(activeSelector).first().inputValue().catch(() => "");
   log(
     `login flow: prepared Microsoft proof confirmation mailbox selector=${activeSelector} len=${preparedProofMailbox.length} hash=${computeSecretSha256(
       preparedProofMailbox,
     )} expected_hash=${computeSecretSha256(proofMailbox.address)} matches_expected=${preparedProofMailbox === proofMailbox.address}`,
   );
+  const submitPatterns = [
+    /^send code$/i,
+    /^next$/i,
+    /^continue$/i,
+    /^verify$/i,
+    /^发送代码$/i,
+    /^下一步$/i,
+    /^继续$/i,
+    /^验证$/i,
+    /^コードの送信$/i,
+  ];
   const submitted =
+    (await clickMicrosoftProofPrimaryAction(page, submitPatterns)) ||
     (await clickMatchingAction(
       page,
-      [
-        /^send code$/i,
-        /^next$/i,
-        /^continue$/i,
-        /^verify$/i,
-        /^发送代码$/i,
-        /^下一步$/i,
-        /^继续$/i,
-        /^验证$/i,
-        /^コードの送信$/i,
-      ],
-      'button[data-testid="primaryButton"], input[type="submit"], button[type="submit"], button',
+      submitPatterns,
+      'input[type="submit"], button[type="submit"], button',
     )) ||
     (await submitContainingFormDirectly(page, activeSelector)) ||
     false;
