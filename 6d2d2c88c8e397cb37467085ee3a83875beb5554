@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.24",
+  "base_stable_version": "0.22.23",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T12:41:10Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.24",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "579a6287a01e76f0a58bb4c79a3174727d30a087",
+  "pr_number": 109,
+  "pr_title": "fix: clear attempt errors on Tavily success",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.24",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.24",
+  "target_sha": "6d2d2c88c8e397cb37467085ee3a83875beb5554",
+  "type_label": "type:patch"
+}
