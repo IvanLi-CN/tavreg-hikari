@@ -381,9 +381,23 @@ test("worktree bootstrap provisions repo-local fingerprint browser paths via the
 test("task timeout aborts native CDP launch instead of waiting for the full CDP attach timeout", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const browserLaunchAbortController = new AbortController();");
-  expect(source).toContain("browserLaunchAbortController.abort(new Error(`task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`));");
+  expect(source).toContain("browserLaunchAbortController.abort(new Error(timeoutMessage));");
   expect(source).toContain("await raceWithAbort(delay(1800), signal, \"native chrome launch aborted during startup\");");
   expect(source).toContain("const wsEndpoint = await waitForChromeWsEndpoint(debugPort, profileDir, 40_000, signal, child.pid);");
+});
+
+test("task-scoped timeout writes terminal ledger state and exits the worker", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const start = source.indexOf("const startTaskWatchers = (): void => {");
+  const end = source.indexOf("startTaskWatchers();", start);
+  const segment = source.slice(start, end);
+  expect(segment).toContain('const timeoutMessage = `task_attempt_timeout:${failureStage}:${cfg.taskAttemptTimeoutMs}`;');
+  expect(segment).toContain('ledgerRecord.status = "failed";');
+  expect(segment).toContain('ledgerRecord.errorCode = "task_attempt_timeout";');
+  expect(segment).toContain('persistLedgerRecord("task-timeout");');
+  expect(segment).toContain("await writeJson(new URL(`error.json`, diagOutputDir)");
+  expect(segment).toContain("if (taskScopedAttempt) {");
+  expect(segment).toContain("process.exit(124);");
 });
 
 test("running task ledger snapshots carry the live stage for active attempts", async () => {
