@@ -3792,7 +3792,7 @@ async function detectChromiumNetErrorCode(page: any): Promise<string | null> {
         !!document.querySelector("#main-frame-error, .neterror, .error-code");
       if (!hasInterstitial) return null;
       if (
-        /(this site can.t be reached|can.t reach this page|无法访问此网站|意外终止了连接|took too long to respond)/i.test(
+        /(this site can.t be reached|can.t reach this page|无法访问此网站|意外终止了连接|unexpectedly closed the connection|didn.t send any data|empty response|took too long to respond)/i.test(
           `${title} ${bodyText}`,
         )
       ) {
@@ -6923,6 +6923,24 @@ export async function completeMicrosoftLogin(
     let authorizeInvalidRequestRecoveryCount = 0;
     let tavilyAuthCallbackRecoveryCount = 0;
     let microsoftLoginDeadline = Date.now() + 120_000;
+    const recoverTavilyAuthCallbackError = async (reason: string): Promise<boolean> => {
+      const currentCallbackUrl = page.url();
+      if (!/auth\.tavily\.com\/login\/callback/i.test(currentCallbackUrl)) return false;
+      const tavilyCallbackSurface = await collectMicrosoftSurfaceSnapshot(page);
+      if (!isTavilyAuthCallbackErrorSurface(tavilyCallbackSurface)) return false;
+      if (canRelaunchTavilyAuthFlow && tavilyAuthCallbackRecoveryCount < 2) {
+        tavilyAuthCallbackRecoveryCount += 1;
+        log(
+          `login flow: recovering Tavily Auth0 callback error by relaunching Tavily flow (${tavilyAuthCallbackRecoveryCount}/2, ${reason})`,
+        );
+        await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+        await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
+        await page.waitForTimeout(1_500);
+        microsoftLoginDeadline = Date.now() + 120_000;
+        return true;
+      }
+      throw new Error("tavily_auth_callback_error");
+    };
     for (let step = 1; ; step += 1) {
       if (Date.now() >= microsoftLoginDeadline) {
         const deadlineProofSurface = await collectMicrosoftProofSurfaceClassification(page).catch(() => null);
@@ -6941,6 +6959,7 @@ export async function completeMicrosoftLogin(
           );
           continue;
         }
+        if (await recoverTavilyAuthCallbackError("deadline")) continue;
         break;
       }
       const currentUrl = page.url();
@@ -6952,7 +6971,7 @@ export async function completeMicrosoftLogin(
       if (chromiumNetErrorCode) {
         const canRecoverNetwork =
           networkRecoveryCount < 1 &&
-          /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED|ERR_TIMED_OUT/i.test(chromiumNetErrorCode) &&
+          /ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED|ERR_TIMED_OUT|ERR_EMPTY_RESPONSE/i.test(chromiumNetErrorCode) &&
           (/^chrome-error:\/\//i.test(currentUrl) || /login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl));
         if (canRecoverNetwork) {
           networkRecoveryCount += 1;
@@ -6963,23 +6982,7 @@ export async function completeMicrosoftLogin(
         }
         throw new Error(`chromium_net_error:${chromiumNetErrorCode}:url=${currentUrl}`);
       }
-      if (/auth\.tavily\.com\/login\/callback/i.test(currentUrl)) {
-        const tavilyCallbackSurface = await collectMicrosoftSurfaceSnapshot(page);
-        if (isTavilyAuthCallbackErrorSurface(tavilyCallbackSurface)) {
-          if (canRelaunchTavilyAuthFlow && tavilyAuthCallbackRecoveryCount < 2) {
-            tavilyAuthCallbackRecoveryCount += 1;
-            log(
-              `login flow: recovering Tavily Auth0 callback error by relaunching Tavily flow (${tavilyAuthCallbackRecoveryCount}/2)`,
-            );
-            await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
-            await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
-            await page.waitForTimeout(1_500);
-            microsoftLoginDeadline = Date.now() + 120_000;
-            continue;
-          }
-          throw new Error("tavily_auth_callback_error");
-        }
-      }
+      if (await recoverTavilyAuthCallbackError("loop")) continue;
       if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
         visitedMicrosoftAccountSurface = true;
         const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);

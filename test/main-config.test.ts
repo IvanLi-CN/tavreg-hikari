@@ -573,12 +573,29 @@ test("tavily auth callback error relaunches Tavily login flow", async () => {
   const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
   const loginSegment = source.slice(loginStart, loginEnd);
   expect(loginSegment).toContain("let tavilyAuthCallbackRecoveryCount = 0;");
+  expect(loginSegment).toContain("const recoverTavilyAuthCallbackError = async");
   expect(loginSegment).toContain("isTavilyAuthCallbackErrorSurface(tavilyCallbackSurface)");
   expect(loginSegment).toContain("tavilyAuthCallbackRecoveryCount < 2");
+  expect(loginSegment).toContain('recoverTavilyAuthCallbackError("deadline")');
+  expect(loginSegment).toContain('recoverTavilyAuthCallbackError("loop")');
   expect(loginSegment).toContain("safeGoto(page, passkeyRecoveryUrl");
   expect(loginSegment).toContain("microsoftLoginDeadline = Date.now() + 120_000;");
   expect(loginSegment).toContain("tavily_auth_callback_error");
   expect(source).toContain('return "tavily_auth_callback_error";');
+});
+
+test("microsoft login recovers empty response chrome error interstitials", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const detectorStart = source.indexOf("async function detectChromiumNetErrorCode");
+  const detectorEnd = source.indexOf("function buildAuthLoginSurfaceKey", detectorStart);
+  const detector = source.slice(detectorStart, detectorEnd);
+  expect(detector).toContain("unexpectedly closed the connection");
+  expect(detector).toContain("didn.t send any data");
+  expect(detector).toContain("empty response");
+  const loginStart = source.indexOf("export async function completeMicrosoftLogin");
+  const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
+  const loginSegment = source.slice(loginStart, loginEnd);
+  expect(loginSegment).toContain("ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_ABORTED|ERR_TIMED_OUT|ERR_EMPTY_RESPONSE");
 });
 
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
