@@ -105,6 +105,7 @@ None
 - Given proof route 出现新的未知语言 / 布局，When classifier 无法归类，Then worker log / result.json 落下 `microsoft_proof_surface_unclassified`，且包含 URL、selector 命中与标题 / 正文摘要。
 - Given Tavily OAuth 在 `login.live.com/oauth20_authorize.srf` 呈现 confirm-email proof surface，When 页面要求确认已配置的 recovery mailbox，Then 登录状态机先执行 confirm-email handler 并等待 code，而不是先点击 `Use your password`。
 - Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
+- Given confirm-email 页面同时包含隐藏登录邮箱值与可见 proof mailbox 文案，When handler 提取 recovery challenge，Then 必须优先匹配已配置 proof mailbox，不得把隐藏登录邮箱误判为 unknown recovery。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
 - Given 101 上 `home-lab-tavreg-hikari` 更新到包含本修复的镜像，When 重新触发 `raidendaniella9161@hotmail.com` 的 mailbox bootstrap，Then worker log 出现 `provisioned Microsoft proof mailbox ...`，数据库 `proof_mailbox_provider/address/id` 不再为空。
 
@@ -174,6 +175,7 @@ None
 - 2026-04-17: 完成 classifier / handler / 诊断改动，并通过 `bun run typecheck`、`bun test` 与两轮本地 review 收敛。
 - 2026-04-18: 完成 101 热修上线与目标账号 `raidendaniella9161@hotmail.com` 的 proof mailbox 回归，worker log 确认 `provisioned Microsoft proof mailbox ...`，数据库 proof mailbox 与 session 状态回到可用态。
 - 2026-04-26: 将 `login.live.com/oauth20_authorize.srf` 上的 Tavily OAuth confirm-email proof surface 纳入 confirm-email handler，确保 masked mailbox mismatch 写入 `microsoft_unknown_recovery_email:<masked>`，匹配场景继续等待 proof code。
+- 2026-06-01: 修正 confirm-email challenge 提取优先级，避免隐藏登录邮箱抢占可见 proof mailbox，导致已配置辅助邮箱的账号被误标为 `microsoft_unknown_recovery_email`。
 - 2026-05-07: 补齐线上 OAuth confirm-email 变体，允许没有旧版确认邮箱 selector 的 `Verify your email / We'll send a code to ...` 页面进入 confirm-email handler，并在已有 proof mailbox 配置时阻止 password fallback 抢先接管。
 
 ## 参考（References）
