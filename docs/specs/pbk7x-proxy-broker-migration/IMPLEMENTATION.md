@@ -11,7 +11,7 @@
 - 域名探测按业务站点绑定目标 URL，且不跟随重定向以便直接判定首个响应；HTTP 2xx、3xx、401、403、404 视为可达，其余 HTTP 状态、网络错误、超时与代理连接错误统一视为不可达。
 - 域名不可达时 runtime best-effort 关闭失败 session，把 `selected_ip` 加入本次排除列表并重开 session；默认最多轮换 3 次，耗尽或健康候选提前耗尽后抛出上一轮 `proxy_domain_unreachable`，错误信息携带 site、URL、node、session id、出口 IP 与底层摘要。显式要求固定 preferred IP 且禁止 fallback 的调用方不会轮换到其它出口，固定出口探测失败后直接返回该 session 的 `proxy_domain_unreachable`。
 - Web 调度器在 attempt 启动前 open Broker session；ChatGPT/Grok attempt 先以 `allocating_proxy` 入账，Broker session 与业务域名探测成功后写 `proxy_bound`、session id、display address、node id、node name 与出口 IP，worker 子进程真正 spawn 后才写 `spawned`。
-- Broker open、业务域名 probe、worker spawn 前置失败会把 attempt 直接写成 terminal failed，保留 `proxy_broker_*` 或 `proxy_domain_unreachable` 错误码，避免出现 `running + spawned + proxy=NULL` 的不可解释状态。
+- Broker open、业务域名 probe、worker spawn 前置失败会被显式收敛，避免出现 `running + spawned + proxy=NULL` 的不可解释状态。Tavily 批量任务在 worker spawn 前遇到 `proxy_broker_*` 基础设施错误时，会回滚 pending attempt、释放 Microsoft 账号 lease，并把 job 失败为 `launch setup unavailable (...)`；该账号保持 ready，不被代理分配故障消耗。已提交为业务 attempt 的 proxy/domain 失败仍保留原始 `proxy_broker_*` 或 `proxy_domain_unreachable` 错误码。
 - ChatGPT/Grok scheduler 的 running loop 会同步 worker `stage.json.stage` 到 `job_attempts.stage`，并在 active worker 已退出、DB 行已终止或 force-stop reap 超时后复用同一 finalizer 收割 active entry 与 Broker/端口资源。
 - Web 调度器在 attempt 完成、失败、停止或 spawn 失败时 best-effort close Broker session。
 - Tavily、Grok、ChatGPT 调度器都会对 stale running / completing attempt 执行两阶段收敛：先 `SIGTERM`，超过 reap 窗口后终态化 attempt 并释放 Broker session 与端口 lease。ChatGPT/Grok 在 worker 注册为 active 时重置 progress timer，避免把慢 launch/probe 时间误算成 worker stale 时间。Broker close 失败不再静默吞掉，会写入 warning，后续 reconciliation 可补偿。
@@ -39,6 +39,6 @@
 - Reconciler 单元测试覆盖 referenced session 保留、orphan session dry-run 不关闭、apply 仅关闭 orphan、close 前重新读取引用、浏览器 bootstrap guard 与 scheduler launch guard 阻断 apply 关闭、CLI 默认 DB 路径 legacy 兼容，以及 DB active reference 过滤终态 job。
 - 调度器回归测试覆盖 Tavily completing stale attempt、Grok stale attempt 与 ChatGPT stale attempt 的两阶段 force-stop / releaseResources 收敛；Grok 静默但 heartbeat 新鲜的 attempt 不会被 stale reaper 误杀；ChatGPT/Grok 慢 launch 后刚注册的 worker 不会因为旧 attempt `started_at` 被立即误杀。
 - 调度与 worker runtime 测试覆盖 Broker env 注入、attempt session 字段记录与 worker 跳过 Mihomo。
-- ChatGPT/Grok scheduler 回归测试覆盖 `allocating_proxy` 初始 stage、Broker 启动失败终止 attempt、running-loop stage sync 与 active attempt reaper。
+- ChatGPT/Grok scheduler 回归测试覆盖 `allocating_proxy` 初始 stage、Broker 启动失败终止 attempt、running-loop stage sync 与 active attempt reaper；Tavily scheduler 回归测试覆盖 worker spawn 前的 Broker setup failure 会回滚 pending attempt 且不消耗账号。
 - 源码约束测试覆盖 Tavily、Microsoft、ChatGPT、Grok 启动入口传入正确业务站点 probe 配置。
 - 代理页 Storybook 覆盖 catalog loaded、probe states、empty、auth error 与设置保存交互。

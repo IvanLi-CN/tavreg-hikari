@@ -17,3 +17,4 @@
 - 前端只展示 Broker profile、catalog、active sessions 与历史诊断快照，不展示或编辑 Broker API key。
 - 既有 `proxy_nodes` / `proxy_checks` 作为历史诊断表继续存在，不再作为生产调度池的真相源。
 - Broker active session 不再只依赖 worker close 事件清理；scheduler stale reaper、启动 dry-run reconciliation 与显式 `broker:sessions:reconcile -- --apply` 共同构成泄漏兜底。
+- Tavily 批量任务把 worker spawn 前的 `proxy_broker_*` 视为基础设施 setup failure：回滚 pending attempt、释放账号 lease，并以明确 job error 收口，避免 Proxy Broker 慢查询或超时把可用 Microsoft 账号标成业务失败。

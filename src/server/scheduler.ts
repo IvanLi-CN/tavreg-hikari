@@ -480,6 +480,15 @@ function getLaunchSetupErrorCode(error: unknown): string {
   return "launch_setup_failed";
 }
 
+function shouldRollbackLaunchSetupFailure(errorCode: string): boolean {
+  return errorCode.startsWith("proxy_broker_");
+}
+
+function launchSetupFailureMessage(errorCode: string, errorMessage: string): string {
+  const suffix = errorMessage.trim() ? `: ${errorMessage.trim()}` : "";
+  return `launch setup unavailable (${errorCode})${suffix}`;
+}
+
 function parseMillis(value: unknown): number | null {
   if (typeof value !== "string" || !value.trim()) return null;
   const parsed = Date.parse(value);
@@ -1336,10 +1345,24 @@ export class JobScheduler {
         this.emit("account.updated", { account: this.db.getAccount(account.id) });
         this.emit("job.updated", { job: this.db.getJob(job.id) });
       } catch (error) {
-        this.failAttempt(job.id, attempt.id, account.id, {
-          errorCode: getLaunchSetupErrorCode(error),
-          errorMessage: error instanceof Error ? error.message : String(error),
-        });
+        const errorCode = getLaunchSetupErrorCode(error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (shouldRollbackLaunchSetupFailure(errorCode)) {
+          const { job: releasedJob, account: releasedAccount } = this.db.rollbackAttemptBeforeLaunch(job.id, attempt.id, account.id);
+          this.emit("account.updated", { account: releasedAccount });
+          this.emit("job.updated", { job: releasedJob, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+          const latestJob = this.db.getJob(job.id);
+          if (latestJob && !isTerminalJobStatus(latestJob.status)) {
+            const failed = this.db.completeJob(job.id, false, launchSetupFailureMessage(errorCode, errorMessage));
+            this.emit("job.updated", { job: failed, autoExtractState: this.getAutoExtractSnapshot(job.id) });
+            this.emit("toast", { level: "error", message: `job #${job.id} failed before launch: ${failed.lastError}` });
+          }
+        } else {
+          this.failAttempt(job.id, attempt.id, account.id, {
+            errorCode,
+            errorMessage,
+          });
+        }
       } finally {
         this.pendingAttemptLaunches.delete(attempt.id);
         this.pendingAttemptLaunchTasks.delete(launchTask);
