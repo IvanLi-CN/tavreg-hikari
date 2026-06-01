@@ -1505,6 +1505,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
   if (/cfmail_api_key_missing/i.test(message)) return "cfmail_api_key_missing";
   if (/cfmail_mailbox_not_found/i.test(message)) return "cfmail_mailbox_not_found";
+  if (/microsoft_oauth_invalid_request/i.test(message)) return "microsoft_oauth_invalid_request";
   if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_password_fallback_unavailable/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_account_locked/i.test(message)) return "microsoft_account_locked";
@@ -6901,6 +6902,9 @@ export async function completeMicrosoftLogin(
   page.on("requestfailed", microsoftFlowObservers.requestfailed);
   const hasCompleted = (url: string): boolean =>
     completionUrlPatterns.some((pattern) => pattern.test(url)) && visitedMicrosoftAccountSurface;
+  const canRelaunchTavilyAuthFlow =
+    /app\.tavily\.com|auth\.tavily\.com/i.test(passkeyRecoveryUrl) &&
+    completionUrlPatterns.length === 0;
 
   try {
     const authProviderSurfacePattern = /auth\.tavily\.com\/u\/(?:login|signup)\/identifier/i;
@@ -6956,7 +6960,7 @@ export async function completeMicrosoftLogin(
         visitedMicrosoftAccountSurface = true;
         const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);
         if (isMicrosoftOAuthInvalidRequestSurface(microsoftSurface)) {
-          if (authorizeInvalidRequestRecoveryCount < 2) {
+          if (canRelaunchTavilyAuthFlow && authorizeInvalidRequestRecoveryCount < 2) {
             authorizeInvalidRequestRecoveryCount += 1;
             log(
               `login flow: recovering Microsoft OAuth invalid_request by relaunching Tavily flow (${authorizeInvalidRequestRecoveryCount}/2)`,
@@ -10042,7 +10046,7 @@ function shouldRetryModeFailure(message: string): boolean {
 }
 
 function shouldRetryTaskFailure(message: string): boolean {
-  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submission_limit|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_surface_unclassified|microsoft_proof_mailbox_missing|cfmail_api_key_missing|cfmail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
+  return !/browser_proxy_ip_missing|browser_proxy_same_as_local_ip|browser_proxy_ip_mismatch|risk_control_suspicious_activity|risk_control_ip_rate_limit|too_many_signups_same_ip|auth0_extensibility_error|mailbox_rate_limited|mailbox_domain_blocked|proxy_ip_quota_exceeded|proxy_node_inventory_empty|proxy_all_nodes_busy|proxy_distinct_ip_capacity_exhausted|mihomo_subscription_failed|mihomo_subscription_empty|microsoft_password_rate_limited|microsoft_password_incorrect|microsoft_password_submission_limit|microsoft_password_submit_stalled|microsoft_provider_submit_stalled|microsoft_consent_accept_missing|microsoft_passkey_cancel_missing|microsoft_oauth_invalid_request|microsoft_proof_add_email_input_missing|microsoft_proof_add_submit_missing|microsoft_proof_surface_unclassified|microsoft_proof_mailbox_missing|cfmail_api_key_missing|cfmail_mailbox_not_found|microsoft_proof_code_timeout|microsoft_proof_submit_failed|microsoft_unknown_recovery_email|microsoft_account_locked|microsoft_account_credentials_missing|unsupported_microsoft_proof_mailbox_provider|microsoft_auth_try_again_later|stage_login_home|login flow did not reach home|microsoft login flow did not reach home|referenceerror:\s*__name is not defined|__name is not defined/i.test(
     message,
   );
 }

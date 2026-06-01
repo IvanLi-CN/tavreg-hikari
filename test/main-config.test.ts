@@ -550,9 +550,14 @@ test("microsoft oauth invalid request relaunches Tavily login flow", async () =>
   const loginStart = source.indexOf("export async function completeMicrosoftLogin");
   const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
   const loginSegment = source.slice(loginStart, loginEnd);
+  expect(loginSegment).toContain("const canRelaunchTavilyAuthFlow =");
+  expect(loginSegment).toContain("completionUrlPatterns.length === 0");
   expect(loginSegment).toContain("authorizeInvalidRequestRecoveryCount < 2");
+  expect(loginSegment).toContain("if (canRelaunchTavilyAuthFlow && authorizeInvalidRequestRecoveryCount < 2)");
   expect(loginSegment).toContain("safeGoto(page, passkeyRecoveryUrl");
   expect(loginSegment).toContain("microsoft_oauth_invalid_request:client_id_missing");
+  expect(source).toContain('return "microsoft_oauth_invalid_request";');
+  expect(source).toContain("microsoft_passkey_cancel_missing|microsoft_oauth_invalid_request|microsoft_proof_add_email_input_missing");
 });
 
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
