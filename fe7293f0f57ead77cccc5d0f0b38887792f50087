@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.25",
+  "base_stable_version": "0.22.24",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T13:16:53Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.25",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "ca1d070f016eca4ec4b4b5954373f2eb14254df7",
+  "pr_number": 110,
+  "pr_title": "fix: recover tavily microsoft home bounce",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.25",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.25",
+  "target_sha": "fe7293f0f57ead77cccc5d0f0b38887792f50087",
+  "type_label": "type:patch"
+}
