@@ -498,12 +498,14 @@ test("microsoft proof confirmation prioritizes configured proof mailboxes over p
   expect(segment).toContain("const shouldUsePasswordFallback =\n    !proofMailbox &&\n    !configuredProofAddress &&");
   expect(segment).toContain("waitForStableInputValue(page, activeSelector, proofMailbox.address");
   expect(segment).toContain('button[data-testid="primaryButton"]');
-  expect(segment.indexOf("const confirmationState = await collectMicrosoftRecoveryChallengeState")).toBeLessThan(
-    segment.indexOf("proofMailbox = await resolveMicrosoftProofMailboxSession"),
-  );
-  expect(segment.indexOf("proofMailbox = await resolveMicrosoftProofMailboxSession")).toBeLessThan(
-    segment.indexOf("const shouldUsePasswordFallback ="),
-  );
+  const initialChallengeIndex = segment.indexOf("let confirmationState = await collectMicrosoftRecoveryChallengeState");
+  const mailboxResolutionIndex = segment.indexOf("proofMailbox = await resolveMicrosoftProofMailboxSession");
+  const passwordFallbackIndex = segment.indexOf("const shouldUsePasswordFallback =");
+  expect(initialChallengeIndex).toBeGreaterThanOrEqual(0);
+  expect(mailboxResolutionIndex).toBeGreaterThanOrEqual(0);
+  expect(passwordFallbackIndex).toBeGreaterThanOrEqual(0);
+  expect(initialChallengeIndex).toBeLessThan(mailboxResolutionIndex);
+  expect(mailboxResolutionIndex).toBeLessThan(passwordFallbackIndex);
 });
 
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
