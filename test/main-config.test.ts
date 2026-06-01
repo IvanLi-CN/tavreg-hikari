@@ -526,6 +526,18 @@ test("microsoft login deadline recovers actionable proof surfaces", async () => 
   expect(segment).toContain("continue;");
 });
 
+test("microsoft proof mailbox is ensured active before use", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  expect(source).toContain("const MICROSOFT_PROOF_MAILBOX_TTL_MINUTES = 24 * 60;");
+  const start = source.indexOf("async function resolveMicrosoftProofMailboxSession");
+  const end = source.indexOf("async function waitForMicrosoftProofCode", start);
+  const segment = source.slice(start, end);
+  expect(segment).toContain("const ensured = await ensureCfMailMailbox");
+  expect(segment).toContain("expiresInMinutes: MICROSOFT_PROOF_MAILBOX_TTL_MINUTES");
+  expect(segment).toContain("cfg.microsoftProofMailboxId?.trim() !== mailboxId");
+  expect(segment).toContain("cfg.microsoftProofMailboxAddress?.trim().toLowerCase() !== address");
+});
+
 test("microsoft proof classifier treats login.live OAuth verify-email copy as proof confirmation", async () => {
   const source = await readFile(path.join(repoRoot, "src/microsoft-login-state.ts"), "utf8");
   expect(source).toContain("const onOAuthAuthorizeRoute = /login\\.live\\.com\\/oauth20_authorize\\.srf/i.test(url);");
