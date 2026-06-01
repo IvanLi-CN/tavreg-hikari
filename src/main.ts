@@ -6938,7 +6938,29 @@ export async function completeMicrosoftLogin(
     let authorizeShellRecoveryCount = 0;
     let authorizeInvalidRequestRecoveryCount = 0;
     let tavilyAuthCallbackRecoveryCount = 0;
+    let tavilyUnauthenticatedHomeBounceCount = 0;
     let microsoftLoginDeadline = Date.now() + 120_000;
+    const recoverUnauthenticatedTavilyHomeBounce = async (reason: string): Promise<boolean> => {
+      const currentHomeUrl = page.url();
+      if (!/app\.tavily\.com\/home/i.test(currentHomeUrl) || /auth\.tavily\.com/i.test(currentHomeUrl)) return false;
+      if (visitedMicrosoftAccountSurface || (await hasAuthenticatedHomeSignal(page))) {
+        return false;
+      }
+      if (canRelaunchTavilyAuthFlow && tavilyUnauthenticatedHomeBounceCount < 2) {
+        tavilyUnauthenticatedHomeBounceCount += 1;
+        log(
+          `login flow: recovering unauthenticated Tavily home bounce by relaunching auth (${tavilyUnauthenticatedHomeBounceCount}/2, ${reason})`,
+        );
+        await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+        await openAuthFlowEntry(page, "login").catch(async () => {
+          await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
+        });
+        await page.waitForTimeout(1_500);
+        microsoftLoginDeadline = Date.now() + 120_000;
+        return true;
+      }
+      throw new Error("tavily_home_without_authenticated_session");
+    };
     const recoverTavilyAuthCallbackError = async (reason: string): Promise<boolean> => {
       const currentCallbackUrl = page.url();
       if (!/auth\.tavily\.com\/login\/callback/i.test(currentCallbackUrl)) return false;
@@ -6999,6 +7021,7 @@ export async function completeMicrosoftLogin(
         throw new Error(`chromium_net_error:${chromiumNetErrorCode}:url=${currentUrl}`);
       }
       if (await recoverTavilyAuthCallbackError("loop")) continue;
+      if (await recoverUnauthenticatedTavilyHomeBounce("loop")) continue;
       if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
         visitedMicrosoftAccountSurface = true;
         const microsoftSurface = await collectMicrosoftSurfaceSnapshot(page);
@@ -7066,7 +7089,12 @@ export async function completeMicrosoftLogin(
         providerState.submittedCount = 0;
         providerState.challengeRecoveryKey = null;
       }
-      if (!completionUrlPatterns.length && /app\.tavily\.com\/home/i.test(currentUrl) && !/auth\.tavily\.com/i.test(currentUrl)) {
+      if (
+        !completionUrlPatterns.length &&
+        /app\.tavily\.com\/home/i.test(currentUrl) &&
+        !/auth\.tavily\.com/i.test(currentUrl) &&
+        (visitedMicrosoftAccountSurface || (await hasAuthenticatedHomeSignal(page)))
+      ) {
         return page;
       }
       if (hasCompleted(currentUrl)) {
@@ -7104,15 +7132,6 @@ export async function completeMicrosoftLogin(
             12_000,
           );
           if (providerReady === "wait") {
-            microsoftProviderClicked = await clickMicrosoftProviderEntry(page);
-            if (microsoftProviderClicked) {
-              providerState.submissionKey = authSurfaceKey;
-              providerState.submittedAt = Date.now();
-              providerState.submittedCount += 1;
-              providerState.challengeRecoveryKey = null;
-              log("login flow: attempted direct Microsoft provider submit before managed challenge readiness");
-              continue;
-            }
             const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, formKind);
             if (
               tokenOutcome.status === "rejected" &&

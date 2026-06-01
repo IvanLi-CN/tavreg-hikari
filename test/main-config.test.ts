@@ -443,6 +443,19 @@ test("microsoft provider flow keeps the login surface and only waits on signup c
   expect(source).not.toContain('log("login flow: switched to Tavily signup surface before Microsoft provider submit");');
 });
 
+test("microsoft provider waits for managed challenge before provider submit", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const loginStart = source.indexOf("export async function completeMicrosoftLogin");
+  const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
+  const loginSegment = source.slice(loginStart, loginEnd);
+  const waitStart = loginSegment.indexOf('if (providerReady === "wait") {');
+  const waitEnd = loginSegment.indexOf("providerState.challengeRecoveryKey = null;", waitStart);
+  const waitSegment = loginSegment.slice(waitStart, waitEnd);
+  expect(waitSegment).toContain("const tokenOutcome = await ensureManagedChallengeTokenBeforeSubmit(page, formKind);");
+  expect(waitSegment).not.toContain("clickMicrosoftProviderEntry(page)");
+  expect(waitSegment).not.toContain("attempted direct Microsoft provider submit before managed challenge readiness");
+});
+
 test("native chrome rebuild keeps auth submit patching installed", async () => {
   const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
   expect(source).toContain("const AUTH_REQUEST_ROUTE_BOUND_CONTEXTS = new WeakSet<object>();");
@@ -582,6 +595,20 @@ test("tavily auth callback error relaunches Tavily login flow", async () => {
   expect(loginSegment).toContain("microsoftLoginDeadline = Date.now() + 120_000;");
   expect(loginSegment).toContain("tavily_auth_callback_error");
   expect(source).toContain('return "tavily_auth_callback_error";');
+});
+
+test("microsoft login relaunches auth on unauthenticated Tavily home bounce", async () => {
+  const source = await readFile(path.join(repoRoot, "src/main.ts"), "utf8");
+  const loginStart = source.indexOf("export async function completeMicrosoftLogin");
+  const loginEnd = source.indexOf("async function getProcessedCaptchaPng", loginStart);
+  const loginSegment = source.slice(loginStart, loginEnd);
+  expect(loginSegment).toContain("let tavilyUnauthenticatedHomeBounceCount = 0;");
+  expect(loginSegment).toContain("const recoverUnauthenticatedTavilyHomeBounce = async");
+  expect(loginSegment).toContain("visitedMicrosoftAccountSurface || (await hasAuthenticatedHomeSignal(page))");
+  expect(loginSegment).toContain("tavilyUnauthenticatedHomeBounceCount < 2");
+  expect(loginSegment).toContain('await openAuthFlowEntry(page, "login").catch(async () => {');
+  expect(loginSegment).toContain('recoverUnauthenticatedTavilyHomeBounce("loop")');
+  expect(loginSegment).toContain("tavily_home_without_authenticated_session");
 });
 
 test("microsoft login recovers empty response chrome error interstitials", async () => {
