@@ -1505,6 +1505,7 @@ function deriveErrorCode(message: string, stage: string, risk: RiskSignalSummary
   if (/microsoft_proof_mailbox_missing/i.test(message)) return "microsoft_proof_mailbox_missing";
   if (/cfmail_api_key_missing/i.test(message)) return "cfmail_api_key_missing";
   if (/cfmail_mailbox_not_found/i.test(message)) return "cfmail_mailbox_not_found";
+  if (/tavily_auth_callback_error/i.test(message)) return "tavily_auth_callback_error";
   if (/microsoft_oauth_invalid_request/i.test(message)) return "microsoft_oauth_invalid_request";
   if (/microsoft_unknown_recovery_email/i.test(message)) return "microsoft_unknown_recovery_email";
   if (/microsoft_password_fallback_unavailable/i.test(message)) return "microsoft_unknown_recovery_email";
@@ -5068,6 +5069,11 @@ function isMicrosoftOAuthInvalidRequestSurface(surface: { url: string; title?: s
   );
 }
 
+function isTavilyAuthCallbackErrorSurface(surface: { url: string; title?: string; bodyText?: string }): boolean {
+  const combined = `${surface.title || ""} ${surface.bodyText || ""}`.replace(/\s+/g, " ").trim();
+  return /auth\.tavily\.com\/login\/callback/i.test(surface.url) && /oops!?,?\s*something went wrong/i.test(combined);
+}
+
 async function collectMicrosoftProofSurfaceSnapshot(page: any): Promise<{
   url: string;
   title: string;
@@ -6915,6 +6921,7 @@ export async function completeMicrosoftLogin(
     let authorizeShellRecoveryKey: string | null = null;
     let authorizeShellRecoveryCount = 0;
     let authorizeInvalidRequestRecoveryCount = 0;
+    let tavilyAuthCallbackRecoveryCount = 0;
     let microsoftLoginDeadline = Date.now() + 120_000;
     for (let step = 1; ; step += 1) {
       if (Date.now() >= microsoftLoginDeadline) {
@@ -6955,6 +6962,23 @@ export async function completeMicrosoftLogin(
           continue;
         }
         throw new Error(`chromium_net_error:${chromiumNetErrorCode}:url=${currentUrl}`);
+      }
+      if (/auth\.tavily\.com\/login\/callback/i.test(currentUrl)) {
+        const tavilyCallbackSurface = await collectMicrosoftSurfaceSnapshot(page);
+        if (isTavilyAuthCallbackErrorSurface(tavilyCallbackSurface)) {
+          if (canRelaunchTavilyAuthFlow && tavilyAuthCallbackRecoveryCount < 2) {
+            tavilyAuthCallbackRecoveryCount += 1;
+            log(
+              `login flow: recovering Tavily Auth0 callback error by relaunching Tavily flow (${tavilyAuthCallbackRecoveryCount}/2)`,
+            );
+            await page.goto("about:blank", { waitUntil: "load", timeout: 10_000 }).catch(() => {});
+            await safeGoto(page, passkeyRecoveryUrl, 120_000).catch(() => {});
+            await page.waitForTimeout(1_500);
+            microsoftLoginDeadline = Date.now() + 120_000;
+            continue;
+          }
+          throw new Error("tavily_auth_callback_error");
+        }
       }
       if (/login\.live\.com|account\.live\.com|login\.microsoft\.com/i.test(currentUrl)) {
         visitedMicrosoftAccountSurface = true;

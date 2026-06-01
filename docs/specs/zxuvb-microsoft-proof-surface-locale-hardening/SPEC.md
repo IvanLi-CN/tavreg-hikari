@@ -82,6 +82,7 @@
 - Microsoft 登录 deadline 到点时，若当前页已经是可处理的 proof surface，状态机必须继续进入一次 proof recovery，而不是直接抛出 `stage_login_home`。
 - 使用已保存的 CFMail proof mailbox 前必须先 ensure 该 mailbox 可收信并刷新 TTL；已过期 mailbox 不得直接用于 Microsoft `Send code`，否则会稳定落入 `microsoft_proof_code_timeout`。
 - Microsoft OAuth authorize 页若返回缺失 `client_id` 的 `invalid_request`，状态机必须把它视为可恢复的失效 OAuth surface，回到 Tavily home 重新发起登录流，而不是等待 deadline 后退化为 `stage_login_home`。
+- Tavily Auth0 `login/callback` 若在 Microsoft 回跳后呈现 `Oops!, something went wrong`，状态机必须把它视为可恢复的失效 Auth0 callback surface，回到 Tavily home 重新发起登录流，而不是等待 deadline 后退化为 `stage_login_home`。
 - confirm-email handler 在页面 masked recovery mailbox 与账号配置不匹配时抛出 `microsoft_unknown_recovery_email:<masked>`，由账号级硬阻断逻辑落库并阻止后续 job 继续租用该账号。
 - 进入 code surface 后仍沿用现有 proof code 拉取与提交逻辑。
 
@@ -114,6 +115,7 @@ None
 - Given Tavily OAuth confirm-email 页面在 Microsoft 登录 deadline 尾部才稳定出现，When deadline 到点前未完成 home 回跳，Then 状态机额外执行一次 proof recovery，不得直接输出 `stage_login_home`。
 - Given 账号记录里的 CFMail proof mailbox 已过期，When Microsoft proof 流程准备使用该 mailbox，Then 先通过 CFMail ensure 刷新为可收信状态，再提交 `Send code`。
 - Given Microsoft OAuth authorize 页面返回缺失 `client_id` 的 `invalid_request`，When Tavily 登录流程仍在进行，Then 状态机会重新打开 Tavily home 以刷新 OAuth state，不得把该页消耗到 generic `stage_login_home`。
+- Given Tavily Auth0 `login/callback` 页面在 Microsoft 回跳后显示 `Oops!, something went wrong`，When Tavily 登录流程仍在进行，Then 状态机会重新打开 Tavily home 以刷新 Auth0 state，不得把该页消耗到 generic `stage_login_home`。
 - Given Tavily OAuth confirm-email 页面要求的 masked mailbox 与账号配置不匹配，When handler 处理该页面，Then 失败结果为 `microsoft_unknown_recovery_email:<masked>`，不是 `stage_login_home`。
 - Given confirm-email 页面同时包含隐藏登录邮箱值与可见 proof mailbox 文案，When handler 提取 recovery challenge，Then 必须优先匹配已配置 proof mailbox，不得把隐藏登录邮箱误判为 unknown recovery。
 - Given 本次实现完成，When 执行 `bun run typecheck` 与 `bun test`，Then 检查通过。
@@ -191,6 +193,7 @@ None
 - 2026-06-01: 补齐 Microsoft 登录 deadline 边缘 recovery，当前页已稳定为 proof surface 时继续处理，而不是落入笼统 `stage_login_home`。
 - 2026-06-01: 修复已保存 CFMail proof mailbox 过期后仍被直接用于 Microsoft 验证的问题，使用前统一 ensure 并刷新 TTL。
 - 2026-06-01: 修复 Microsoft OAuth authorize 缺失 `client_id` 的 `invalid_request` 页面未恢复、最终退化为 `stage_login_home` 的问题。
+- 2026-06-01: 修复 Tavily Auth0 callback 400 `Oops!, something went wrong` 未恢复、最终退化为 `stage_login_home` 的问题。
 
 ## 参考（References）
 
