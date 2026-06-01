@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.15",
+  "base_stable_version": "0.22.14",
+  "channel_label": "channel:stable",
+  "created_at": "2026-06-01T07:36:11Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.15",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "c726d093deb0d5f3678032afb18cbde21e30a915",
+  "pr_number": 100,
+  "pr_title": "fix: recover Microsoft proof surface at deadline",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.15",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.15",
+  "target_sha": "e1c0ae80f68bc7f56625db1f2b4b828c32be4c3b",
+  "type_label": "type:patch"
+}
