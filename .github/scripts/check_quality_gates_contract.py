@@ -263,7 +263,9 @@ def validate_ci_pr(workflow: dict[str, Any]) -> None:
     typecheck = job_by_name(workflow, "Typecheck & Quality Gates", "ci-pr.yml")
     require_run_contains(step_named(typecheck, "Run typecheck", "ci-pr.yml.jobs.typecheck-quality-gates"), "bun run typecheck", "ci-pr.yml Typecheck step")
     require_run_contains(step_named(typecheck, "Check quality-gates scripts", "ci-pr.yml.jobs.typecheck-quality-gates"), "py_compile", "ci-pr.yml Check quality-gates scripts")
+    require_run_contains(step_named(typecheck, "Check quality-gates scripts", "ci-pr.yml.jobs.typecheck-quality-gates"), "check_notify_release_failure_contract.py", "ci-pr.yml Check quality-gates scripts")
     require_run_contains(step_named(typecheck, "Quality-gates contract check", "ci-pr.yml.jobs.typecheck-quality-gates"), "check_quality_gates_contract.py", "ci-pr.yml Quality-gates contract check")
+    require_run_contains(step_named(typecheck, "Quality-gates contract check", "ci-pr.yml.jobs.typecheck-quality-gates"), "check_notify_release_failure_contract.py", "ci-pr.yml Quality-gates contract check")
     require_run_contains(step_named(typecheck, "Quality-gates live rules check", "ci-pr.yml.jobs.typecheck-quality-gates"), "check_live_quality_gates.py", "ci-pr.yml Quality-gates live rules check")
 
     tests = job_by_name(workflow, "Bun Tests", "ci-pr.yml")
@@ -323,6 +325,9 @@ def validate_ci_main(workflow: dict[str, Any]) -> None:
         },
         "ci-main.yml: named jobs drifted",
     )
+    typecheck = job_by_name(workflow, "Typecheck & Quality Gates", "ci-main.yml")
+    require_run_contains(step_named(typecheck, "Check quality-gates scripts", "ci-main.yml.jobs.typecheck-quality-gates"), "check_notify_release_failure_contract.py", "ci-main.yml Check quality-gates scripts")
+    require_run_contains(step_named(typecheck, "Quality-gates contract check", "ci-main.yml.jobs.typecheck-quality-gates"), "check_notify_release_failure_contract.py", "ci-main.yml Quality-gates contract check")
     macos_install = job_by_name(workflow, "Fingerprint Browser Install (macOS)", "ci-main.yml")
     require_run_contains(
         step_named(macos_install, "Install fingerprint browser", "ci-main.yml.jobs.fingerprint-browser-install-macos"),

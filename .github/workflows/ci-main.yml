@@ -45,6 +45,7 @@ jobs:
             .github/scripts/metadata_gate.py \
             .github/scripts/check_live_quality_gates.py \
             .github/scripts/check_quality_gates_contract.py \
+            .github/scripts/check_notify_release_failure_contract.py \
             .github/scripts/release_snapshot.py
 
       - name: Run typecheck
@@ -56,6 +57,8 @@ jobs:
             --repo-root "$PWD" \
             --declaration .github/quality-gates.json \
             --metadata-script .github/scripts/metadata_gate.py
+          python3 .github/scripts/check_notify_release_failure_contract.py \
+            --repo-root "$PWD"
 
       - name: Quality-gates live rules check
         env:
