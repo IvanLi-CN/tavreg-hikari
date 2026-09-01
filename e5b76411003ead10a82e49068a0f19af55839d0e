@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.28",
+  "base_stable_version": "0.22.27",
+  "channel_label": "channel:stable",
+  "created_at": "2026-09-01T11:35:17Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.28",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "abe5000c9b0c45eba3bef5f6868c2f1f0b3465cf",
+  "pr_number": 113,
+  "pr_title": "ci: migrate release alerts to Oidrune",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.28",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.28",
+  "target_sha": "e5b76411003ead10a82e49068a0f19af55839d0e",
+  "type_label": "type:patch"
+}
