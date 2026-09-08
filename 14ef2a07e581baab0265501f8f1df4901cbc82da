@@ -1,0 +1,23 @@
+{
+  "app_effective_version": "0.22.29",
+  "base_stable_version": "0.22.28",
+  "channel_label": "channel:stable",
+  "created_at": "2026-09-08T08:56:20Z",
+  "image_name_lower": "ivanli-cn/tavreg-hikari",
+  "next_stable_version": "0.22.29",
+  "notes_ref": "refs/notes/release-snapshots",
+  "pr_head_sha": "0c17a0d6413a5fe21747f977d3c004bea232a754",
+  "pr_number": 114,
+  "pr_title": "ci: stop commenting release versions on source PRs",
+  "registry": "ghcr.io",
+  "release_bump": "patch",
+  "release_channel": "stable",
+  "release_enabled": true,
+  "release_prerelease": false,
+  "release_tag": "v0.22.29",
+  "schema_version": 1,
+  "snapshot_source": "ci-main",
+  "tags_csv": "ghcr.io/ivanli-cn/tavreg-hikari:v0.22.29",
+  "target_sha": "14ef2a07e581baab0265501f8f1df4901cbc82da",
+  "type_label": "type:patch"
+}
