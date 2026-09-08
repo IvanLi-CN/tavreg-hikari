@@ -153,6 +153,31 @@ def require_script_contains(step: dict[str, Any], needle: str, where: str) -> No
     require(needle in script, f"{where}.with.script must contain {needle!r}")
 
 
+def require_job_scripts_exclude(job: dict[str, Any], needles: set[str], where: str) -> None:
+    steps = job.get("steps")
+    require(isinstance(steps, list), f"{where}.steps must be a list")
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        with_cfg = step.get("with")
+        if not isinstance(with_cfg, dict):
+            continue
+        script = with_cfg.get("script")
+        if not isinstance(script, str):
+            continue
+        for needle in needles:
+            require(needle not in script, f"{where}.steps[{index}].with.script must not contain {needle!r}")
+
+
+def require_step_absent(job: dict[str, Any], step_name: str, where: str) -> None:
+    steps = job.get("steps")
+    require(isinstance(steps, list), f"{where}.steps must be a list")
+    require(
+        not any(isinstance(step, dict) and step.get("name") == step_name for step in steps),
+        f"{where}: obsolete step {step_name!r} must be absent",
+    )
+
+
 def event_config(workflow: dict[str, Any], event_name: str, where: str) -> dict[str, Any]:
     on_section = require_mapping(mapping_get(workflow, "on"), f"{where}.on")
     config = mapping_get(on_section, event_name)
@@ -402,7 +427,19 @@ def validate_release(workflow: dict[str, Any]) -> None:
         "release.yml Verify published tags expose linux/amd64 metadata anonymously retry budget",
     )
     require_script_contains(step_named(publish, "Create GitHub Release", "release.yml.jobs.release-publish"), "github.rest.repos.createRelease", "release.yml Create GitHub Release")
-    require_script_contains(step_named(publish, "Upsert PR release version comment", "release.yml.jobs.release-publish"), "tavreg-hikari-release-version-comment", "release.yml PR release version comment")
+    permissions = require_mapping(publish.get("permissions"), "release.yml.jobs.release-publish.permissions")
+    require(set(permissions) == {"actions", "contents", "packages"}, "release.yml: Release Publish permissions must not include PR comment access")
+    require_step_absent(publish, "Upsert PR release version comment", "release.yml.jobs.release-publish")
+    require_job_scripts_exclude(
+        publish,
+        {
+            "tavreg-hikari-release-version-comment",
+            "github.rest.issues.listComments",
+            "github.rest.issues.updateComment",
+            "github.rest.issues.createComment",
+        },
+        "release.yml.jobs.release-publish",
+    )
 
 
 def main() -> int:
