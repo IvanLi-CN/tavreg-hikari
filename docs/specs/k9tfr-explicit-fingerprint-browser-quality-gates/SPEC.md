@@ -11,7 +11,7 @@
 - 当前 Docker / Linux 运行时在没有显式浏览器路径时，会继续尝试扫描或隐式回退，导致 worker 进入 `browser_launch` 前后的状态不稳定，线上出现“attempt 运行中但没有出口 IP”的假象。
 - 现有系统允许保存代理设置时顺手把整份 `AppSettings` 回写到后端，导致 `defaultRunMode` 之类无关字段被污染，线上保存订阅地址后会把默认运行模式改坏。
 - 代理订阅在并发 worker 场景下会重复拉取，同一时间命中上游过多请求，容易触发 403 / 滥用风控。
-- 仓库当前缺少与 `codex-vibe-monitor` 同级别的 PR 标签、Review Policy、CI PR、CI Main、Release 以及发布后 PR 评论闭环，也缺少与之对应的 live branch rules。
+- 仓库当前缺少与 `codex-vibe-monitor` 同级别的 PR 标签、Review Policy、CI PR、CI Main、Release 以及与之对应的 live branch rules。
 
 ## 目标 / 非目标
 
@@ -21,7 +21,7 @@
 - 在 attempt 进入真正浏览器启动前完成浏览器 preflight，路径缺失 / 不可执行 / 非允许浏览器时直接失败，避免把错误伪装成“运行中”。
 - `/api/proxies/settings` 只允许代理字段落库，保存订阅地址不再污染 `defaultRunMode` 等无关设置。
 - 为 Mihomo 订阅增加跨 worker 共享缓存与锁，减少并发重复拉取，避免对上游造成多客户端同时拉订阅的滥用特征。
-- 引入与 `codex-vibe-monitor` 同构的质量门禁：Label Gate、Review Policy、CI PR、CI Main、Release、release snapshot、PR release comment。
+- 引入与 `codex-vibe-monitor` 同构的质量门禁：Label Gate、Review Policy、CI PR、CI Main、Release、release snapshot。
 - 提供 repo-tracked 的 fingerprint-chromium manifest 与跨平台安装脚本，明确浏览器来源、版本与校验规则。
 - Docker 运行镜像内置 Linux 指纹浏览器到固定路径 `/opt/fingerprint-browser/chrome`，部署时不再依赖宿主机挂载浏览器目录。
 
@@ -74,7 +74,7 @@
 - `Review Policy Gate` 作为 required check 承担条件化审批规则：默认 1 个有效 approval，但仓库 owner / `admin` / `maintain` 作者可豁免。
 - `CI PR` 必须提供：`Typecheck & Quality Gates`、`Bun Tests`、`Web Build`、`Storybook Build`、`Docker Smoke`。
 - `CI Main` 在上述检查全部通过后，额外生成 immutable release snapshot。
-- `Release` 读取 release snapshot，发布 GHCR 镜像、git tag、GitHub Release，并在对应 PR 上 upsert 单条 marker 评论：`<!-- tavreg-hikari-release-version-comment -->`。
+- `Release` 读取 release snapshot，发布 GHCR 镜像、git tag、GitHub Release；不向对应源 PR 写入 release version comment。
 - 公开发布到 GHCR 的稳定 tag（`v*` 与 `latest`）必须发布为 image index / manifest list，即使当前只包含单个平台镜像，也必须对外暴露 `manifests[].platform`。
 - 当前仓库 Docker 产物仍保持 amd64-only；公开 tag 至少要暴露 `linux/amd64` 平台描述符，但本次不引入真实多架构镜像。
 - `Release` 必须在发布后以匿名读取方式校验 GHCR 公开 tag：未登录也能 raw inspect 到 index/list 顶层 media type 与 `linux/amd64` 描述符；若返回 `403`、私有包或缺失平台元数据，则 fail closed。
@@ -91,7 +91,7 @@
 - Given 前端在代理页点击“保存并同步”，When 请求到达 `/api/proxies/settings`，Then 只有代理字段被持久化，`defaultRunMode` 等其它字段不会被覆盖。
 - Given 多个 worker 并发读取相同 Mihomo 订阅，When 第一个 worker 正在刷新缓存，Then 其他 worker 会等待或复用共享缓存，不会全部直连上游重拉订阅。
 - Given 仓库创建指向 `main` 的 PR，When 没有设置正确的 `type:*` 与 `channel:*` labels，Then `Validate PR labels` 会 fail closed。
-- Given `main` 上有通过 CI Main 的提交，When Release 运行，Then 会生成 Git tag、GitHub Release、GHCR 镜像，并在对应 PR 上维护单条 release version comment。
+- Given `main` 上有通过 CI Main 的提交，When Release 运行，Then 会生成 Git tag、GitHub Release、GHCR 镜像，且不会向对应源 PR 写入 release version comment。
 - Given 稳定 release 发布完成，When 未登录 GHCR 对公开 tag 执行 raw inspect，Then 返回结果的顶层 media type 必须是 image index / manifest list，且 `manifests[].platform` 至少包含 `linux/amd64`。
 - Given Docker 镜像构建完成，When 运行容器内 browser smoke，Then `/opt/fingerprint-browser/chrome` 可执行且 `playwright-core` 能成功打开最小页面。
 - Given 未合并 PR 手动运行 `PR Preview` workflow，When Docker smoke 通过，Then GHCR 出现 `pr-<pr_number>-<short_sha>` 与 `pr-<pr_number>-latest`，且 PR 评论包含 tag 和 digest。

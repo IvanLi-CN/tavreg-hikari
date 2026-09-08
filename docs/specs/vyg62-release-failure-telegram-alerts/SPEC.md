@@ -8,7 +8,7 @@
 
 ## 背景 / 问题陈述
 
-- `Release` 工作流已经具备 candidate build、发布与 PR release comment 闭环，但失败时需要通过 repo-local workflow 将告警交给 Oidrune。
+- `Release` 工作流已经具备 candidate build 与发布闭环，但失败时需要通过 repo-local workflow 将告警交给 Oidrune。
 - Release 失败上下文里真正需要告警的目标 SHA 可能不是 `workflow_run.head_sha`，若只依赖 workflow payload，手动 backfill 或 pending release 场景会把告警指向错误提交。
 - 当前仓库使用 Oidrune 的固定 SHA reusable workflow；本次迁移只调整调用契约、摘要生成和 contract coverage，不重写发布或 resolver 逻辑。
 
@@ -22,7 +22,7 @@
 
 ### Non-goals
 
-- 不修改既有 Release artifact、candidate image、GitHub Release 或 PR release comment 的发布语义。
+- 不修改既有 Release artifact、candidate image 或 GitHub Release 的发布语义。
 - 不把 Telegram 告警扩展到 `CI PR`、`CI Main` 或其他 workflow。
 - 不引入新的外部通知提供商或 repo 外状态存储。
 
